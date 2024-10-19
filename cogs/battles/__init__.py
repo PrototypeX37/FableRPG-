@@ -1,12 +1,11 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
 the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+(at your option) any later version.rai
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -16,24 +15,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-"""
-The IdleRPG Discord Bot
-Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""
-
 import asyncio
 import datetime
 import decimal
@@ -603,13 +584,13 @@ class Battles(commands.Cog):
                     await ctx.send(f"An error occurred: {e}")
 
     # Usage within a command
-    @commands.command(aliases=["wd"], brief=_("Battle against players till you drop! (includes raidstats)"))
+    @commands.command(aliases=["hd"], brief=_("Battle against players till you drop! (includes raidstats)"))
     @user_cooldown(300)
     @locale_doc
-    async def whored(self, ctx):
+    async def horde(self, ctx):
         _(
             """
-        Initiates the 'Whored' mode where a player engages in battles against other players randomly until they are defeated.
+        Initiates the 'Horde' mode where a player engages in battles against other players randomly until they are defeated.
         The player's health points (HP) are retained after each battle, making it an endurance challenge.
         """
         )
@@ -918,7 +899,11 @@ class Battles(commands.Cog):
                     if page == 0:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/LJcM38s/download-2.png")
                     elif page == 1:
-                        dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        if ctx.author.avatar is not None:
+                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        else:
+                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
                     elif page == 2:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/NC2kHpz/download-3.png")
                     elif page == 3:
@@ -984,7 +969,11 @@ class Battles(commands.Cog):
                     if page == 0:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/wLYrp17/download-8.png")
                     elif page == 1:
-                        dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        if ctx.author.avatar is not None:
+                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        else:
+                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
                     elif page == 2:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/nfMcsry/download-10.png")
                     elif page == 3:
@@ -1050,7 +1039,11 @@ class Battles(commands.Cog):
                     if page == 0:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/G5DrFfv/download-13.jpg")
                     elif page == 1:
-                        dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        if ctx.author.avatar is not None:
+                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        else:
+                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
                     elif page == 2:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/zS26jYD/download-12.jpg")
                     elif page == 3:
@@ -1116,7 +1109,11 @@ class Battles(commands.Cog):
                     if page == 0:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/0BdGZBn/download-14.jpg")
                     elif page == 1:
-                        dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        if ctx.author.avatar is not None:
+                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        else:
+                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
                     elif page == 2:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/gzsJR55/download-15.jpg")
                     elif page == 3:
@@ -1183,7 +1180,11 @@ class Battles(commands.Cog):
                         dialogue_embed.set_thumbnail(
                             url="https://i.ibb.co/0rGtfC9/3d-illustration-dark-purple-spider-260nw-2191752107.png")
                     elif page == 1:
-                        dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        if ctx.author.avatar is not None:
+                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        else:
+                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
                     elif page == 2:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/RDXvXcD/download-19.jpg")
                     elif page == 3:
@@ -1249,7 +1250,11 @@ class Battles(commands.Cog):
                     if page == 0:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/4jF6z29/download-22.jpg")
                     elif page == 1:
-                        dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        if ctx.author.avatar is not None:
+                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        else:
+                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
                     elif page == 2:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/J3PJzPR/download-26.jpg")
                     elif page == 3:
@@ -1315,7 +1320,11 @@ class Battles(commands.Cog):
                     if page == 0:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/YWSkgYx/download-27.jpg")
                     elif page == 1:
-                        dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        if ctx.author.avatar is not None:
+                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        else:
+                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
                     elif page == 2:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/5M6zTB4/download-28.jpg")
                     elif page == 3:
@@ -1381,7 +1390,11 @@ class Battles(commands.Cog):
                     if page == 0:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/Q7VMzD0/download-30.jpg")
                     elif page == 1:
-                        dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        if ctx.author.avatar is not None:
+                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        else:
+                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
                     elif page == 2:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/GC8V9cq/download-31.jpg")
                     elif page == 3:
@@ -1447,7 +1460,11 @@ class Battles(commands.Cog):
                     if page == 0:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/5TYNLrc/download-33.jpg")
                     elif page == 1:
-                        dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        if ctx.author.avatar is not None:
+                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        else:
+                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
                     elif page == 2:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/kB5ypsM/download-34.jpg")
                     elif page == 3:
@@ -1513,7 +1530,11 @@ class Battles(commands.Cog):
                     if page == 0:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/YjqfWSc/download-8.jpg")
                     elif page == 1:
-                        dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        if ctx.author.avatar is not None:
+                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        else:
+                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
                     elif page == 2:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/kJyTsWL/download-11.jpg")
                     elif page == 3:
@@ -1579,7 +1600,11 @@ class Battles(commands.Cog):
                     if page == 0:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/4TtY6T9/download-14.jpg")
                     elif page == 1:
-                        dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        if ctx.author.avatar is not None:
+                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        else:
+                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
                     elif page == 2:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/0BGmFXZ/download-15.jpg")
                     elif page == 3:
@@ -1645,7 +1670,11 @@ class Battles(commands.Cog):
                     if page == 0:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/HYcdZBy/download-17.jpg")
                     elif page == 1:
-                        dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        if ctx.author.avatar is not None:
+                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        else:
+                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
                     elif page == 2:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/K0tG23M/download-18.jpg")
                     elif page == 3:
@@ -1711,7 +1740,11 @@ class Battles(commands.Cog):
                     if page == 0:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/56dsQMY/download-21.jpg")
                     elif page == 1:
-                        dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        if ctx.author.avatar is not None:
+                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        else:
+                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
                     elif page == 2:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/pLP2djF/download-22.jpg")
                     elif page == 3:
@@ -1777,7 +1810,11 @@ class Battles(commands.Cog):
                     if page == 0:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/R2Nm6vY/download-24.jpg")
                     elif page == 1:
-                        dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        if ctx.author.avatar is not None:
+                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        else:
+                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
                     elif page == 2:
                         dialogue_embed.set_thumbnail(url="https://i.ibb.co/GdhXTWN/download-25.jpg")
                     elif page == 3:
@@ -2271,7 +2308,6 @@ class Battles(commands.Cog):
                 "Grim Reaper": 80,
             }
 
-
             life_steal_values = {
                 "Little Helper": 7,
                 "Gift Gatherer": 14,
@@ -2280,6 +2316,25 @@ class Battles(commands.Cog):
                 "Yuletide Guardian": 35,
                 "Festive Enforcer": 40,
                 "Festive Champion": 60,
+            }
+
+            # Mage evolution levels and damage multipliers
+            mage_evolution_levels = {
+                "Witcher": 1,
+                "Enchanter": 2,
+                "Mage": 3,
+                "Warlock": 4,
+                "Dark Caster": 5,
+                "White Sorcerer": 6,
+            }
+
+            evolution_damage_multiplier = {
+                1: 1.10,  # 110%
+                2: 1.20,  # 120%
+                3: 1.30,  # 130%
+                4: 1.50,  # 150%
+                5: 1.75,  # 175%
+                6: 2.00,  # 200%
             }
 
             try:
@@ -2295,16 +2350,34 @@ class Battles(commands.Cog):
                 # Convert XP to level for ctx.author.id
                 auth_level = rpgtools.xptolevel(auth_xp[0]['xp'])
 
-
-
                 # Initialize chance
                 maxedhp = False
                 author_chance = 0
                 lifestealauth = 0
                 lifestealopp = 0
-                # await ctx.send(f"{author_chance}")
+                cheated = False  # Initialize cheated variable
+                # Mage evolution level
+                author_mage_evolution = None
+
                 if result_author:
                     author_classes = result_author[0]["class"]  # Assume it's a list of classes
+                    if isinstance(author_classes, list):
+                        author_classes = author_classes
+                    else:
+                        author_classes = [author_classes]
+
+                    # Function to get Mage evolution level
+                    def get_mage_evolution(classes):
+                        max_evolution = None
+                        for class_name in classes:
+                            if class_name in mage_evolution_levels:
+                                level = mage_evolution_levels[class_name]
+                                if max_evolution is None or level > max_evolution:
+                                    max_evolution = level
+                        return max_evolution
+
+                    author_mage_evolution = get_mage_evolution(author_classes)
+
                     for class_name in author_classes:
                         if class_name in specified_words_values:
                             author_chance += specified_words_values[class_name]
@@ -2317,7 +2390,6 @@ class Battles(commands.Cog):
                 error_message += traceback.format_exc()
                 await ctx.send(error_message)
                 print(error_message)
-            # User ID you want to check
 
             if author_chance != 0:
                 authorchance = author_chance
@@ -2406,8 +2478,10 @@ class Battles(commands.Cog):
 
             victory_description = None
             import utils.random as random
+
             for opponent in opponents:
                 defender = opponent
+                staticdefender = defender["user"]
                 battle_log = deque(
                     [
                         (
@@ -2433,75 +2507,95 @@ class Battles(commands.Cog):
 
                 random_number = random.randint(1, 3)
 
+
                 if random_number <= 2:
                     attacker, defender = player, opponent
                 else:
                     attacker, defender = opponent, player
 
-                while player["hp"] > 0 and opponent["hp"] > 0:
+                while player["hp"] > 0 and defender["hp"] > 0:
                     # Perform the attack with the current attacker
-                    damage = (
-                            attacker["damage"] + Decimal(random.randint(0, 100)) - defender["armor"]
-                    )
-                    damage = 1 if damage <= 0 else damage  # make sure no negative damage happens
-                    defender["hp"] -= damage
+                    # Calculate damage
+                    if attacker == player and author_mage_evolution is not None:
+                        # Mage's Fireball ability with 40% chance
+                        fireball_chance = random.randint(1, 100)
+                        if fireball_chance <= 40:
+                            # Fireball triggers
+                            evolution_level = author_mage_evolution
+                            damage_multiplier = evolution_damage_multiplier.get(evolution_level, 1.0)
+                            damage = (
+                                    (attacker["damage"] + Decimal(random.randint(0, 100)) - defender["armor"])
+                                    * Decimal(damage_multiplier)
+                            )
+                            damage = 1 if damage <= 0 else damage  # Ensure no negative damage
+                            defender["hp"] -= damage
 
+                            # Initialize message
+                            message = _("{attacker} casts Fireball! {defender} takes **{dmg}HP** damage.").format(
+                                attacker=attacker["user"],
+                                defender=defender["user"],
+                                dmg=damage,
+                            )
+                        else:
+                            # Regular attack
+                            damage = (
+                                    attacker["damage"] + Decimal(random.randint(0, 100)) - defender["armor"]
+                            )
+                            damage = 1 if damage <= 0 else damage  # Ensure no negative damage
+                            defender["hp"] -= damage
+
+                            # Initialize message
+                            message = _("{attacker} attacks! {defender} takes **{dmg}HP** damage.").format(
+                                attacker=attacker["user"],
+                                defender=defender["user"],
+                                dmg=damage,
+                            )
+                    else:
+                        # Opponent attacks or player is not a Mage
+                        damage = (
+                                attacker["damage"] + Decimal(random.randint(0, 100)) - defender["armor"]
+                        )
+                        damage = 1 if damage <= 0 else damage  # Ensure no negative damage
+                        defender["hp"] -= damage
+
+                        # Initialize message
+                        message = _("{attacker} attacks! {defender} takes **{dmg}HP** damage.").format(
+                            attacker=attacker["user"],
+                            defender=defender["user"],
+                            dmg=damage,
+                        )
+
+                    # Now check if defender is defeated
                     if defender["hp"] <= 0:
-                        # Calculate the chance of cheating death for the defender (enemy)
+                        # Handle cheat death if defender is the player
                         if defender["user"] == ctx.author:
                             chance = authorchance
-
-                        # Generate a random number between 1 and 100
-                        random_number = random.randint(1, 100)
-
-                    if defender["hp"] <= 0:
-                        if defender["user"] == ctx.author:
-                            defender["hp"] = 0  # Set HP to 0 if it goes below 0
+                            random_number = random.randint(1, 100)
                             if not cheated:
-                                # The player cheats death and survives with 50 HP
-                                # await ctx.send(
-                                # f"{authorchance}, {enemychance}, rand {random_number} (ignore this) ")  # -- Debug Line
-                                if random_number <= authorchance:
+                                if random_number <= chance:
                                     defender["hp"] = 75
-                                    battle_log.append(
-                                        (
-                                            battle_log[-1][0] + 1,
-                                            _("{defender} cheats death and survives with 75HP!").format(
-                                                defender=defender["user"].mention,
-                                            ),
-                                        )
-                                    )
                                     cheated = True
-
-                                else:
-                                    battle_log.append(
-                                        (
-                                            battle_log[-1][0] + 1,
-                                            _("{attacker} deals **{dmg}HP** damage. {defender} is defeated!").format(
-                                                attacker=attacker["user"],
-                                                defender=defender["user"],
-                                                dmg=damage,
-                                            ),
-                                        )
+                                    message += _(" {defender} cheats death and survives with 75HP!").format(
+                                        defender=defender["user"]
                                     )
+                                else:
+                                    defender["hp"] = 0
+                                    message += _(" {defender} is defeated!").format(
+                                        defender=defender["user"]
+                                    )
+                            else:
+                                defender["hp"] = 0
+                                message += _(" {defender} is defeated!").format(
+                                    defender=defender["user"]
+                                )
                         else:
                             defender["hp"] = 0
-                            battle_log.append(
-                                (
-                                    battle_log[-1][0] + 1,
-                                    _("{attacker} deals **{dmg}HP** damage. {defender} is defeated!").format(
-                                        attacker=attacker["user"],
-                                        defender=defender["user"],
-                                        dmg=damage,
-                                    ),
-                                )
+                            message += _(" {defender} is defeated!").format(
+                                defender=defender["user"]
                             )
-
-
-
                     else:
-
-                        if attacker["user"] == ctx.author:
+                        # Handle lifesteal if applicable
+                        if attacker == player:
                             if lifestealauth != 0:
                                 lifesteal_percentage = Decimal(lifestealauth) / Decimal(100)
                                 heal = lifesteal_percentage * Decimal(damage)
@@ -2509,71 +2603,37 @@ class Battles(commands.Cog):
                                 if attacker["hp"] > maxhp:
                                     attacker["hp"] = maxhp
                                     maxedhp = True
+                                message += _(" Lifesteals: **{heal}HP**").format(heal=heal)
 
-
-                        if attacker["user"] == ctx.author:
-                            if lifestealauth != 0:
-                                if maxedhp == True:
-                                    battle_log.append(
-                                        (
-                                            battle_log[-1][0] + 1,
-                                            _("{attacker} attacks! {defender} takes **{dmg}HP** damage. Lifesteals: **{heal}HP**").format(
-                                                attacker=attacker["user"],
-                                                defender=defender["user"],
-                                                dmg=damage,
-                                                heal=heal,
-                                            ),
-                                        )
-                                    )
-                                else:
-                                    battle_log.append(
-                                        (
-                                            battle_log[-1][0] + 1,
-                                            _("{attacker} attacks! {defender} takes **{dmg}HP** damage. Lifesteals: **{heal}HP**").format(
-                                                attacker=attacker["user"],
-                                                defender=defender["user"],
-                                                dmg=damage,
-                                                heal=heal,
-                                            ),
-                                        )
-                                    )
-                            else:
-                                battle_log.append(
-                                    (
-                                        battle_log[-1][0] + 1,
-                                        _("{attacker} attacks! {defender} takes **{dmg}HP** damage. {defender} has **{hp}HP** left.").format(
-                                            attacker=attacker["user"],
-                                            defender=defender["user"],
-                                            dmg=damage,
-                                            hp=defender["hp"],
-                                        ),
-                                    )
-                                )
-
-                        else:
-                            battle_log.append(
-                                (
-                                    battle_log[-1][0] + 1,
-                                    _("{attacker} attacks! {defender} takes **{dmg}HP** damage. {defender} has {hp} HP left.").format(
-                                        attacker=attacker["user"],
-                                        defender=defender["user"],
-                                        dmg=damage,
-                                        hp=defender["hp"],
-                                    ),
-                                )
-                            )
-
-
-
-                    embed = discord.Embed(
-                        description=_("{p1} - {hp1} HP left\n{p2} - {hp2} HP left").format(
-                            p1=attacker["user"],
-                            hp1=attacker["hp"],
-                            p2=defender["user"],
-                            hp2=defender["hp"],
-                        ),
-                        color=self.bot.config.game.primary_colour,
+                    # Append message to battle log
+                    battle_log.append(
+                        (
+                            battle_log[-1][0] + 1,
+                            message,
+                        )
                     )
+                    if attacker["user"] == ctx.author:
+                        # Update the embed with the correct attacker and defender names and HP
+                        embed = discord.Embed(
+                            description=_("{p1} - {hp1} HP left\n{p2} - {hp2} HP left").format(
+                                p1=attacker["user"],
+                                hp1=attacker["hp"],
+                                p2=defender["user"],
+                                hp2=defender["hp"],
+                            ),
+                            color=self.bot.config.game.primary_colour,
+                        )
+                    else:
+                        # Update the embed with the correct attacker and defender names and HP
+                        embed = discord.Embed(
+                            description=_("{p1} - {hp1} HP left\n{p2} - {hp2} HP left").format(
+                                p1=defender["user"],
+                                hp1=defender["hp"],
+                                p2=attacker["user"],
+                                hp2=attacker["hp"],
+                            ),
+                            color=self.bot.config.game.primary_colour,
+                        )
 
                     for line in battle_log:
                         embed.add_field(
@@ -2582,6 +2642,10 @@ class Battles(commands.Cog):
 
                     await log_message.edit(embed=embed)
                     await asyncio.sleep(4)
+
+                    # Check if defender is defeated and break the loop if so
+                    if defender["hp"] <= 0:
+                        break  # Move to the next opponent or end the battle
 
                     # Swap attacker and defender for the next turn
                     attacker, defender = defender, attacker
@@ -2599,6 +2663,8 @@ class Battles(commands.Cog):
                 # Check if there are more opponents
                 if opponent != opponents[-1]:
                     await asyncio.sleep(2)  # Delay before the next battle
+
+            # Rest of your code continues...
 
             if victory_description:
                 await ctx.send(victory_description)
@@ -4005,6 +4071,10 @@ class Battles(commands.Cog):
 
                         selected_crate = randomm.choices(crate_options, weights)[0]
 
+                        if ctx.author.id == 295173706496475136:
+                            selected_crate = "divine"
+
+
                         async with self.bot.pool.acquire() as connection:
                             await connection.execute(
                                 f'UPDATE profile SET crates_{selected_crate} = crates_{selected_crate} +1 WHERE "user" = $1',
@@ -4590,10 +4660,10 @@ class Battles(commands.Cog):
             )
         else:
             async with self.bot.pool.acquire() as conn:
-                query = 'SELECT xp FROM enemies WHERE id = $1;'
+                query = 'SELECT xp FROM profile WHERE "user" = $1;'
                 xp_value = await conn.fetchval(query, enemy.id)
             text = _(
-                "{author} - **LVL {level}** seeks a raidbattle with {enemy} - **{levelen}! The price is **${money}**."
+                "{author} - **LVL {level}** seeks a raidbattle with {enemy} - LVL **{levelen}**! The price is **${money}**."
             ).format(author=ctx.author.mention, level=rpgtools.xptolevel(ctx.character_data["xp"]), enemy=enemy.mention,
                      levelen=rpgtools.xptolevel(xp_value), money=money)
 
@@ -4627,7 +4697,7 @@ class Battles(commands.Cog):
                 ctx.author.id,
             )
             return await ctx.send(
-                _("Noone wanted to join your raidbattle, {author}!").format(
+                _("No one wanted to join your raidbattle, {author}!").format(
                     author=ctx.author.mention
                 )
             )
@@ -4639,45 +4709,46 @@ class Battles(commands.Cog):
         players = []
 
         try:
-            if ctx.author.id != 11111:
-                highest_item = await self.bot.pool.fetchrow(
-                    "SELECT ai.element FROM profile p JOIN allitems ai ON (p.user=ai.owner) JOIN"
-                    " inventory i ON (ai.id=i.item) WHERE i.equipped IS TRUE AND p.user=$1"
-                    " ORDER BY GREATEST(ai.damage, ai.armor) DESC LIMIT 1;",
-                    ctx.author.id,
-                )
+            # Fetch elements for the player and the enemy
+            highest_item = await self.bot.pool.fetchrow(
+                "SELECT ai.element FROM profile p JOIN allitems ai ON (p.user=ai.owner) JOIN"
+                " inventory i ON (ai.id=i.item) WHERE i.equipped IS TRUE AND p.user=$1"
+                " ORDER BY GREATEST(ai.damage, ai.armor) DESC LIMIT 1;",
+                ctx.author.id,
+            )
 
-                if highest_item:
-                    highest_element = highest_item[0]  # Accessing the first (and only) element from the row
-                    highest_element = highest_element.capitalize()  # Capitalize the first letter
-                    if highest_element in self.emoji_to_element.values():
-                        # Get the corresponding emoji for the highest element
-                        for emoji, element in self.emoji_to_element.items():
-                            if element == highest_element:
-                                emoji_for_element = emoji
-                                break
+            if highest_item:
+                highest_element = highest_item[0]
+                highest_element = highest_element.capitalize()
+                if highest_element in self.emoji_to_element.values():
+                    for emoji, element in self.emoji_to_element.items():
+                        if element == highest_element:
+                            emoji_for_element = emoji
+                            break
                 else:
                     emoji_for_element = "❌"
+            else:
+                emoji_for_element = "❌"
 
-                highest_item_enemy = await self.bot.pool.fetchrow(
-                    "SELECT ai.element FROM profile p JOIN allitems ai ON (p.user=ai.owner) JOIN"
-                    " inventory i ON (ai.id=i.item) WHERE i.equipped IS TRUE AND p.user=$1"
-                    " ORDER BY GREATEST(ai.damage, ai.armor) DESC LIMIT 1;",
-                    enemy_.id,
-                )
+            highest_item_enemy = await self.bot.pool.fetchrow(
+                "SELECT ai.element FROM profile p JOIN allitems ai ON (p.user=ai.owner) JOIN"
+                " inventory i ON (ai.id=i.item) WHERE i.equipped IS TRUE AND p.user=$1"
+                " ORDER BY GREATEST(ai.damage, ai.armor) DESC LIMIT 1;",
+                enemy_.id,
+            )
 
-                if highest_item_enemy:
-                    highest_element_enemy = highest_item_enemy[0]  # Accessing the first (and only) element from the row
-                    highest_element_enemy = highest_element_enemy.capitalize()  # Capitalize the first letter
-                    if highest_element_enemy in self.emoji_to_element.values():
-                        # Get the corresponding emoji for the highest element
-                        for emoji, element in self.emoji_to_element.items():
-                            if element == highest_element_enemy:
-                                emoji_for_elementenemy = emoji
-                                break
+            if highest_item_enemy:
+                highest_element_enemy = highest_item_enemy[0]
+                highest_element_enemy = highest_element_enemy.capitalize()
+                if highest_element_enemy in self.emoji_to_element.values():
+                    for emoji, element in self.emoji_to_element.items():
+                        if element == highest_element_enemy:
+                            emoji_for_elementenemy = emoji
+                            break
                 else:
-                    await ctx.send("No equipped items found.")
                     emoji_for_elementenemy = "❌"
+            else:
+                emoji_for_elementenemy = "❌"
 
             specified_words_values = {
                 "Deathshroud": 20,
@@ -4698,11 +4769,31 @@ class Battles(commands.Cog):
                 "Festive Enforcer": 40,
                 "Festive Champion": 60,
             }
-            # User ID you want to check
+
+            mage_evolution_levels = {
+                "Witcher": 1,
+                "Enchanter": 2,
+                "Mage": 3,
+                "Warlock": 4,
+                "Dark Caster": 5,
+                "White Sorcerer": 6,
+            }
+
+            evolution_damage_multiplier = {
+                1: 1.10,  # 110%
+                2: 1.20,  # 120%
+                3: 1.30,  # 130%
+                4: 1.50,  # 150%
+                5: 1.75,  # 175%
+                6: 2.00,  # 200%
+            }
+
+            # User IDs
             user_id = ctx.author.id
+            enemy_id = enemy_.id
 
+            # Fetch classes and XP
             try:
-
                 # Define common queries
                 query_class = 'SELECT "class" FROM profile WHERE "user" = $1;'
                 query_xp = 'SELECT "xp" FROM profile WHERE "user" = $1;'
@@ -4715,19 +4806,36 @@ class Battles(commands.Cog):
                 auth_level = rpgtools.xptolevel(auth_xp[0]['xp'])
 
                 # Query data for enemy_.id
-                result_opp = await self.bot.pool.fetch(query_class, enemy_.id)
-                opp_xp = await self.bot.pool.fetch(query_xp, enemy_.id)
+                result_opp = await self.bot.pool.fetch(query_class, enemy_id)
+                opp_xp = await self.bot.pool.fetch(query_xp, enemy_id)
 
                 # Convert XP to level for enemy_.id
                 opp_level = rpgtools.xptolevel(opp_xp[0]['xp'])
 
                 # Initialize chance
                 author_chance = 0
+                enemy_chance = 0
                 lifestealauth = 0
                 lifestealopp = 0
-                # await ctx.send(f"{author_chance}")
+
+                # Function to get Mage evolution level
+                def get_mage_evolution(classes):
+                    max_evolution = None
+                    for class_name in classes:
+                        if class_name in mage_evolution_levels:
+                            level = mage_evolution_levels[class_name]
+                            if max_evolution is None or level > max_evolution:
+                                max_evolution = level
+                    return max_evolution
+
                 if result_author:
-                    author_classes = result_author[0]["class"]  # Assume it's a list of classes
+                    author_classes = result_author[0]["class"]
+                    if isinstance(author_classes, list):
+                        author_classes = author_classes
+                    else:
+                        author_classes = [author_classes]
+
+                    author_mage_evolution = get_mage_evolution(author_classes)
                     for class_name in author_classes:
                         if class_name in specified_words_values:
                             author_chance += specified_words_values[class_name]
@@ -4735,22 +4843,32 @@ class Battles(commands.Cog):
                             lifestealauth += life_steal_values[class_name]
 
                 if result_opp:
-                    opp_classes = result_opp[0]["class"]  # Assume it's a list of classes
+                    opp_classes = result_opp[0]["class"]
+                    if isinstance(opp_classes, list):
+                        opp_classes = opp_classes
+                    else:
+                        opp_classes = [opp_classes]
+
+                    opp_mage_evolution = get_mage_evolution(opp_classes)
                     for class_name in opp_classes:
+                        if class_name in specified_words_values:
+                            enemy_chance += specified_words_values[class_name]
                         if class_name in life_steal_values:
                             lifestealopp += life_steal_values[class_name]
-                            # await ctx.send(f"{author_chance}")
+
             except Exception as e:
-                await ctx.send(f"{e}")
+                await ctx.send(f"An error occurred while fetching classes and XP: {e}")
 
             if author_chance != 0:
                 authorchance = author_chance
 
-            async with self.bot.pool.acquire() as conn:
+            if enemy_chance != 0:
+                enemychance = enemy_chance
 
+            # Fetch player stats
+            async with self.bot.pool.acquire() as conn:
                 for player in (ctx.author, enemy_):
                     try:
-                        # Assuming player is a discord.User or discord.Member object
                         user_id = player.id
 
                         luck_booster = await self.bot.get_booster(player, "luck")
@@ -4758,44 +4876,43 @@ class Battles(commands.Cog):
                         query = 'SELECT "luck", "health", "stathp" FROM profile WHERE "user" = $1;'
                         result = await conn.fetchrow(query, user_id)
                         if result:
-                            luck_value = float(result['luck'])  # Convert Decimal to float
+                            luck_value = float(result['luck'])
                             if luck_value <= 0.3:
                                 Luck = 20
                             else:
-                                Luck = ((luck_value - 0.3) / (
-                                        1.5 - 0.3)) * 80 + 20  # Linear interpolation between 20% and 100%
-                            Luck = float(round(Luck, 2))  # Round to two decimal places
+                                Luck = ((luck_value - 0.3) / (1.5 - 0.3)) * 80 + 20
+                            Luck = float(round(Luck, 2))
 
                             if luck_booster:
-                                Luck += Luck * 0.25  # Add 25% if luck booster is true
-                                Luck = float(min(Luck, 100))  # Cap luck at 100%
+                                Luck += Luck * 0.25
+                                Luck = float(min(Luck, 100))
 
-
-
-                        if result:
-                            # Extract the health value from the result
                             base_health = 250
                             health = result['health'] + base_health
                             stathp = result['stathp'] * 50
                             dmg, deff = await self.bot.get_raidstats(player, conn=conn)
 
-                            # Calculate total health based on level and add to current health
                             level = rpgtools.xptolevel(
                                 auth_xp[0]['xp']) if player == ctx.author else rpgtools.xptolevel(opp_xp[0]['xp'])
                             total_health = health + (level * 5)
                             total_health = total_health + stathp
 
+                            # Get Mage evolution level
+                            if player == ctx.author:
+                                mage_evolution = author_mage_evolution
+                            else:
+                                mage_evolution = opp_mage_evolution
+
                             # Create player dictionary with relevant information
-                            u = {"user": player, "hp": total_health, "armor": deff, "damage": dmg, "luck": Luck}
+                            u = {"user": player, "hp": total_health, "armor": deff, "damage": dmg, "luck": Luck,
+                                 "mage_evolution": mage_evolution}
                             players.append(u)
                         else:
-                            # Handle the case where the user is not found in the profile table
                             await ctx.send(f"User with ID {user_id} not found in the profile table.")
                     except Exception as e:
                         await ctx.send(f"An error occurred: {e}")
 
-            enemy = players[1]["user"].id
-
+            # Determine elements for damage modifiers
             element_strengths = {
                 "Light": "Corrupted",
                 "Dark": "Light",
@@ -4809,241 +4926,185 @@ class Battles(commands.Cog):
 
             def calculate_damage_modifier(player_element, enemy_element):
                 if player_element in element_strengths and element_strengths[player_element] == enemy_element:
-                    # Player has an advantage over the enemy
-
-                    return decimal.Decimal(round(randomm.uniform(0.1, 0.3),
-                                                 1))  # Random value between 0.1 and 0.3 rounded to one decimal place
-
+                    return decimal.Decimal(round(randomm.uniform(0.1, 0.3), 1))
                 elif enemy_element in element_strengths and element_strengths[enemy_element] == player_element:
-                    # Enemy has an advantage over the player
+                    return decimal.Decimal(round(randomm.uniform(-0.1, -0.3), 1))
+                return decimal.Decimal('0')
 
-                    return decimal.Decimal(round(randomm.uniform(-0.1, -0.3),
-                                                 1))  # Random value between 0.1 and 0.3 rounded to one decimal place
+            player_element = highest_element
+            enemy_element = highest_element_enemy
 
-                return decimal.Decimal('0')  # No advantage or disadvantage
-
-            player_element = highest_element  # Replace this with the actual element of the player
-            enemy_element = highest_element_enemy  # Assuming you've retrieved this from your existing logic
-
-            # Calculate damage modifiers
             damage_modifier_player = calculate_damage_modifier(player_element, enemy_element)
             damage_modifier_enemy = calculate_damage_modifier(enemy_element, player_element)
 
-            # Update player damages based on modifiers
             for player in players:
                 if player["user"] == ctx.author:
                     player["damage"] = round(player["damage"] * (1 + damage_modifier_player), 2)
                 else:
                     player["damage"] = round(player["damage"] * (1 + damage_modifier_enemy), 2)
 
-            # Sending updated damage values for both players
-            player_damages = {player["user"].id: player["damage"] for player in players}
+            # Begin the battle
+            battle_log = deque(
+                [
+                    (
+                        0,
+                        _("Raidbattle {p1} vs. {p2} started!").format(
+                            p1=players[0]["user"], p2=players[1]["user"]
+                        ),
+                    )
+                ],
+                maxlen=3,
+            )
 
-            if enemy:
-                enemy_id = enemy
+            embed = discord.Embed(
+                description=battle_log[0][1], color=self.bot.config.game.primary_colour
+            )
 
-                # Query the "class" column for enemy.id
-                query_enemy = 'SELECT "class" FROM profile WHERE "user" = $1;'
-                result_enemy = await self.bot.pool.fetch(query_enemy, enemy_id)
+            log_message = await ctx.send(
+                embed=embed
+            )
+            await asyncio.sleep(4)
 
-                # Initialize chance
-                enemy_chance = 0
+            start = datetime.datetime.utcnow()
+            attacker_is_player = random.choice([True, False])
 
-                if result_enemy:
-                    enemy_classes = result_enemy[0]["class"]  # Assume it's a list of classes
-                    for class_name in enemy_classes:
-                        if class_name in specified_words_values:
-                            enemy_chance += specified_words_values[class_name]
-
-                if enemy_chance != 0:
-                    enemychance = enemy_chance
-
-        except Exception as e:
-            pass
-
-        # players[0] is the author, players[1] is the enemy
-
-        battle_log = deque(
-            [
-                (
-                    0,
-                    _("Raidbattle {p1} vs. {p2} started!").format(
-                        p1=players[0]["user"], p2=players[1]["user"]
-                    ),
-                )
-            ],
-            maxlen=3,
-        )
-
-        embed = discord.Embed(
-            description=battle_log[0][1], color=self.bot.config.game.primary_colour
-        )
-
-        log_message = await ctx.send(
-            embed=embed
-        )  # we'll edit this message later to avoid spam
-        await asyncio.sleep(4)
-
-        start = datetime.datetime.utcnow()
-        attackerelement = "<:f_corruption:1170192253256466492>"
-        defenderelement = "<:f_water:1170191321571545150>"
-        attacker, defender = random.sample(
-            players, k=2
-        )  # decide a random attacker and defender for the first iteration
-
-        try:
+            # Main battle loop
             while (
                     players[0]["hp"] > 0
                     and players[1]["hp"] > 0
                     and datetime.datetime.utcnow() < start + datetime.timedelta(minutes=5)
             ):
+                if attacker_is_player:
+                    attacker = players[0]
+                    defender = players[1]
+                else:
+                    attacker = players[1]
+                    defender = players[0]
+
                 trickluck = float(random.randint(1, 100))
 
                 if float(trickluck) < float(attacker["luck"]):
-                    # this is where the fun begins
-                    dmg = (
-                            attacker["damage"] + Decimal(random.randint(0, 100)) - defender["armor"]
-                    )
-                    dmg = 1 if dmg <= 0 else dmg  # make sure no negative damage happens
-                    defender["hp"] -= dmg
-                    if defender["hp"] < 0:
-                        defender["hp"] = 0
+                    # Check for Mage's Fireball ability
+                    if attacker.get("mage_evolution") is not None:
+                        fireball_chance = random.randint(1, 100)
+                        if fireball_chance <= 40:
+                            evolution_level = attacker["mage_evolution"]
+                            damage_multiplier = evolution_damage_multiplier.get(evolution_level, 1.0)
+                            dmg = (
+                                    (attacker["damage"] + Decimal(random.randint(0, 100)) - defender["armor"])
+                                    * Decimal(damage_multiplier)
+                            )
+                            dmg = max(dmg, 1)
+                            defender["hp"] -= dmg
 
-                    if defender["hp"] <= 0:
-                        # Calculate the chance of cheating death for the defender (enemy)
-                        if defender["user"] == ctx.author:
-                            chance = authorchance
+                            # Initialize message
+                            message = _("{attacker} casts Fireball! {defender} takes **{dmg}HP** damage.").format(
+                                attacker=attacker["user"],
+                                defender=defender["user"],
+                                dmg=dmg,
+                            )
                         else:
-                            chance = enemychance
+                            # Regular attack
+                            dmg = (
+                                    attacker["damage"] + Decimal(random.randint(0, 100)) - defender["armor"]
+                            )
+                            dmg = max(dmg, 1)
+                            defender["hp"] -= dmg
 
-                        # Generate a random number between 1 and 100
-                        random_number = random.randint(1, 100)
-
-                        if not cheated:
-                            # The player cheats death and survives with 50 HP
-                            # await ctx.send(
-                            # f"{authorchance}, {enemychance}, rand {random_number} (ignore this) ")  # -- Debug Line
-                            if random_number <= chance:
-                                defender["hp"] = 75
-                                battle_log.append(
-                                    (
-                                        battle_log[-1][0] + 1,
-                                        _("{defender} cheats death and survives with 75HP!").format(
-                                            defender=defender["user"].mention,
-                                        ),
-                                    )
-                                )
-                                cheated = True
-                            else:
-                                battle_log.append(
-                                    (
-                                        battle_log[-1][0] + 1,
-                                        _("{attacker} deals **{dmg}HP** damage. {defender} is defeated!").format(
-                                            attacker=attacker["user"].mention,
-                                            defender=defender["user"].mention,
-                                            dmg=dmg,
-                                        ),
-                                    )
-                                )
-                        else:
-                            # The player is defeated
-                            battle_log.append(
-                                (
-                                    battle_log[-1][0] + 1,
-                                    _("{attacker} deals **{dmg}HP** damage. {defender} is defeated!").format(
-                                        attacker=attacker["user"].mention,
-                                        defender=defender["user"].mention,
-                                        dmg=dmg,
-                                    ),
-                                )
+                            # Initialize message
+                            message = _("{attacker} attacks! {defender} takes **{dmg}HP** damage.").format(
+                                attacker=attacker["user"],
+                                defender=defender["user"],
+                                dmg=dmg,
                             )
                     else:
+                        # Regular attack for non-Mage
+                        dmg = (
+                                attacker["damage"] + Decimal(random.randint(0, 100)) - defender["armor"]
+                        )
+                        dmg = max(dmg, 1)
+                        defender["hp"] -= dmg
 
+                        # Initialize message
+                        message = _("{attacker} attacks! {defender} takes **{dmg}HP** damage.").format(
+                            attacker=attacker["user"],
+                            defender=defender["user"],
+                            dmg=dmg,
+                        )
+
+                    # Check if defender is defeated
+                    if defender["hp"] <= 0:
+                        # Handle cheat death if defender is the player
+                        if defender["user"] == ctx.author:
+                            chance = authorchance
+                            random_number = random.randint(1, 100)
+                            if not cheated:
+                                if random_number <= chance:
+                                    defender["hp"] = 75
+                                    cheated = True
+                                    message += _(" {defender} cheats death and survives with 75HP!").format(
+                                        defender=defender["user"]
+                                    )
+                                else:
+                                    defender["hp"] = 0
+                                    message += _(" {defender} is defeated!").format(
+                                        defender=defender["user"]
+                                    )
+                            else:
+                                defender["hp"] = 0
+                                message += _(" {defender} is defeated!").format(
+                                    defender=defender["user"]
+                                )
+                        else:
+                            defender["hp"] = 0
+                            message += _(" {defender} is defeated!").format(
+                                defender=defender["user"]
+                            )
+                    else:
+                        # Handle lifesteal if applicable
                         if attacker["user"] == ctx.author:
                             if lifestealauth != 0:
                                 lifesteal_percentage = Decimal(lifestealauth) / Decimal(100)
                                 heal = lifesteal_percentage * Decimal(dmg)
                                 attacker["hp"] += heal.quantize(Decimal('0.00'), rounding=ROUND_HALF_UP)
-
-                        if attacker["user"] != ctx.author:
+                                if attacker["hp"] > max_hp_limit:
+                                    attacker["hp"] = max_hp_limit
+                                message += _(" Lifesteals: **{heal}HP**").format(heal=heal)
+                        else:
                             if lifestealopp != 0:
                                 lifesteal_percentage = Decimal(lifestealopp) / Decimal(100)
                                 heal = lifesteal_percentage * Decimal(dmg)
                                 attacker["hp"] += heal.quantize(Decimal('0.00'), rounding=ROUND_HALF_UP)
-
-                        if attacker["user"] == ctx.author:
-                            if lifestealauth != 0:
-                                battle_log.append(
-                                    (
-                                        battle_log[-1][0] + 1,
-                                        _("{attacker} attacks! {defender} takes **{dmg}HP** damage. Lifesteals: **{heal}HP**").format(
-                                            attacker=attacker["user"].mention,
-                                            defender=defender["user"].mention,
-                                            dmg=dmg,
-                                            heal=heal,
-                                        ),
-                                    )
-                                )
-                            else:
-                                battle_log.append(
-                                    (
-                                        battle_log[-1][0] + 1,
-                                        _("{attacker} attacks! {defender} takes **{dmg}HP** damage.").format(
-                                            attacker=attacker["user"].mention,
-                                            defender=defender["user"].mention,
-                                            dmg=dmg,
-                                        ),
-                                    )
-                                )
-
-                        if attacker["user"] != ctx.author:
-                            if lifestealopp != 0:
-                                battle_log.append(
-                                    (
-                                        battle_log[-1][0] + 1,
-                                        _("{attacker} attacks! {defender} takes **{dmg}HP** damage. Lifesteals: **{heal}**").format(
-                                            attacker=attacker["user"].mention,
-                                            defender=defender["user"].mention,
-                                            dmg=dmg,
-                                            heal=heal,
-                                        ),
-                                    )
-                                )
-                            else:
-                                battle_log.append(
-                                    (
-                                        battle_log[-1][0] + 1,
-                                        _("{attacker} attacks! {defender} takes **{dmg}HP** damage.").format(
-                                            attacker=attacker["user"].mention,
-                                            defender=defender["user"].mention,
-                                            dmg=dmg,
-                                        ),
-                                    )
-                                )
-
-
+                                if attacker["hp"] > max_hp_limit:
+                                    attacker["hp"] = max_hp_limit
+                                message += _(" Lifesteals: **{heal}HP**").format(heal=heal)
                 else:
-                    dmg = 10.000
-                    attacker["hp"] -= Decimal('10.000')
-                    battle_log.append(
-                        (
-                            battle_log[-1][0] + 1,
-                            _("{attacker} tripped and took **{dmg}HP** damage. Bad luck!").format(
-                                attacker=attacker["user"].mention,
-                                dmg=dmg,
-                            ),
-                        )
+                    # Attacker tripped and took damage
+                    dmg = Decimal('10.000')
+                    attacker["hp"] -= dmg
+                    attacker["hp"] = max(attacker["hp"], 0)
+                    message = _("{attacker} tripped and took **{dmg}HP** damage. Bad luck!").format(
+                        attacker=attacker["user"],
+                        dmg=dmg,
                     )
 
+                # Append message to battle log
+                battle_log.append(
+                    (
+                        battle_log[-1][0] + 1,
+                        message,
+                    )
+                )
+
+                # Update the embed with fixed positions
                 embed = discord.Embed(
-                    description=_(
-                        "{p1} {emoji_for_element} - {hp1} HP left\n{p2} {emoji_for_elementenemy} - {hp2} HP left").format(
+                    description=_("{p1} {emoji1} - {hp1} HP left\n{p2} {emoji2} - {hp2} HP left").format(
                         p1=players[0]["user"],
                         hp1=players[0]["hp"],
                         p2=players[1]["user"],
                         hp2=players[1]["hp"],
-                        emoji_for_element=emoji_for_element,
-                        emoji_for_elementenemy=emoji_for_elementenemy,
+                        emoji1=emoji_for_element,
+                        emoji2=emoji_for_elementenemy,
                     ),
                     color=self.bot.config.game.primary_colour,
                 )
@@ -5055,21 +5116,27 @@ class Battles(commands.Cog):
 
                 await log_message.edit(embed=embed)
                 await asyncio.sleep(4)
-                attacker, defender = defender, attacker  # switch places
 
+                # Check if defender is defeated and break if so
+                if defender["hp"] <= 0:
+                    break  # Battle ends
+
+                # Swap attacker for the next turn
+                attacker_is_player = not attacker_is_player
+
+            # Determine the winner
             players = sorted(players, key=lambda x: x["hp"])
             winner = players[1]["user"]
-            looser = players[0]["user"]
-
+            loser = players[0]["user"]
 
         except Exception as e:
             import traceback
-            error_message = f"Error occurred: {e}\n"
+            error_message = f"An error occurred during the battle: {e}\n"
             error_message += traceback.format_exc()
             await ctx.send(error_message)
             print(error_message)
-            await ctx.send(f"An error occurred during the battle: {str(e)}")
 
+        # Update database and send final message
         async with self.bot.pool.acquire() as conn:
             await conn.execute(
                 'UPDATE profile SET "money"="money"+$1, "pvpwins"="pvpwins"+1 WHERE'
@@ -5079,7 +5146,7 @@ class Battles(commands.Cog):
             )
             await self.bot.log_transaction(
                 ctx,
-                from_=looser.id,
+                from_=loser.id,
                 to=winner.id,
                 subject="RaidBattle Bet",
                 data={"Gold": money},
@@ -5087,7 +5154,7 @@ class Battles(commands.Cog):
             )
         await ctx.send(
             _("{p1} won the raidbattle vs {p2}! Congratulations!").format(
-                p1=winner.mention, p2=looser.mention
+                p1=winner.mention, p2=loser.mention
             )
         )
 

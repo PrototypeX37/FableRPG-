@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2024 Lunar (discord itslunar.))
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,24 +16,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-"""
-The IdleRPG Discord Bot
-Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""
-
 from collections import Counter, namedtuple
 
 import discord
@@ -73,6 +55,7 @@ from utils.i18n import _, locale_doc
 class Crates(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.crate = 0
         self.emotes = namedtuple(
             "CrateEmotes", "common uncommon rare magic legendary item mystery fortune divine"
         )(
@@ -99,7 +82,7 @@ class Crates(commands.Cog):
             Rare crates contain items ranging from stats 20 to 40
             Magic crates contain items ranging from stats 30 to 45
             Legendary crates contain items ranging from stats 41 to 55
-            Divine crates contain items ranging from stats 47 to 60
+            Divine crates contain items ranging from stats 51 to 100
             Mystery crates contain a random crate
             Fortune Crates contain either XP or money.
 
@@ -170,15 +153,17 @@ class Crates(commands.Cog):
                         "rare": 0,
                         "magic": 0,
                         "legendary": 0,
+                        "fortune": 0,
                         "divine": 0,
                     }
 
                     for _i in range(amount):
                         rng = random.randint(0, 10000)
-
                         if rng < 5:
                             new_rarity = "divine"
-                        elif rng < 20:
+                        elif rng < 15:
+                            new_rarity = "fortune"
+                        elif rng < 30:
                             new_rarity = "legendary"
                         elif rng < 200:
                             new_rarity = "magic"
@@ -195,12 +180,13 @@ class Crates(commands.Cog):
                         crates[new_rarity] += 1
 
                     await conn.execute(
-                        'UPDATE profile SET "crates_common"="crates_common"+$1, "crates_uncommon"="crates_uncommon"+$2, "crates_rare"="crates_rare"+$3, "crates_magic"="crates_magic"+$4, "crates_legendary"="crates_legendary"+$5, "crates_divine"="crates_divine"+$6 WHERE "user"=$7;',
+                        'UPDATE profile SET "crates_common"="crates_common"+$1, "crates_uncommon"="crates_uncommon"+$2, "crates_rare"="crates_rare"+$3, "crates_magic"="crates_magic"+$4, "crates_legendary"="crates_legendary"+$5, "crates_fortune"="crates_fortune"+$6, "crates_divine"="crates_divine"+$7 WHERE "user"=$8;',
                         crates["common"],
                         crates["uncommon"],
                         crates["rare"],
                         crates["magic"],
                         crates["legendary"],
+                        crates["fortune"],
                         crates["divine"],
                         ctx.author.id,
                     )
@@ -223,6 +209,7 @@ class Crates(commands.Cog):
                         "- {rare_amount} {rare_emoji}\n"
                         "- {magic_amount} {magic_emoji}\n"
                         "- {legendary_amount} {legendary_emoji}\n"
+                        "- {fortune_amount} {fortune_emoji}\n"
                         "- {divine_amount} {divine_emoji}\n"
                     ).format(
                         mystery_amount=amount,
@@ -237,6 +224,8 @@ class Crates(commands.Cog):
                         magic_emoji=self.emotes.magic,
                         legendary_amount=crates["legendary"],
                         legendary_emoji=self.emotes.legendary,
+                        fortune_amount=crates["fortune"],
+                        fortune_emoji=self.emotes.fortune,
                         divine_amount=crates["divine"],
                         divine_emoji=self.emotes.divine,
                     )
@@ -347,20 +336,20 @@ class Crates(commands.Cog):
                                 minstat, maxstat = (30, 34)
                         elif rarity == "legendary":  # no else because why
                             if rand < 2:  # 20% 49-50
-                                minstat, maxstat = (49, 55)
+                                minstat, maxstat = (49, 65)
                             elif rand < 5:  # 30% 46-48
                                 minstat, maxstat = (46, 48)
                             else:  # 50% 41-45
                                 minstat, maxstat = (41, 45)
                         elif rarity == "divine":
-                            rand = random.randint(0, 30)
-                            if rand < 2:  # 20% 49-50
-                                minstat, maxstat = (60, 100)
-                            elif rand < 10:  # 20% 49-50
-                                minstat, maxstat = (57, 75)
-                            elif rand < 15:  # 30% 46-48
+                            rand = random.randint(1, 100)  # Using a range of 1 to 100 for clearer percentages
+                            if rand <= 10:
+                                minstat, maxstat = (77, 100)
+                            elif rand <= 60:
+                                minstat, maxstat = (57, 76)
+                            elif rand <= 80:
                                 minstat, maxstat = (52, 56)
-                            else:  # 50% 41-45
+                            else:
                                 minstat, maxstat = (47, 51)
 
                         item = await self.bot.create_random_item(
@@ -661,12 +650,11 @@ class Crates(commands.Cog):
             await ctx.send(
                 _(f"{gift_user.mention} has received a gift by {ctx.author.mention}. It is a {emotes[rarity1]} {rarity1}!")
             )
+
+
         except Exception as e:
             await self.bot.reset_cooldown(ctx)
             await ctx.send(f"Gifting timed out.")
-
-
-
 
     @has_char()
     @user_cooldown(43200)
