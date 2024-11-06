@@ -441,6 +441,18 @@ class ChooseShop(NormalPaginator):
 
         await self.update()
 
+class AchPaginator(NormalPaginator):
+    def __init__(
+        self,
+        ids: list[int],
+        *args,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.ids = ids
+
+
+
 
 class ShopPaginator:
     def __init__(
@@ -453,6 +465,20 @@ class ShopPaginator:
         embeds = [i[0] for i in self.entries]
         ids = [i[1] for i in self.entries]
         view = ChooseShop(ids, ctx, embeds, timeout=90)
+
+        await view.start(location or ctx)
+
+class AchievmentPaginator:
+    def __init__(
+        self,
+        entries: list[tuple[discord.Embed, int]] = [],
+    ):
+        self.entries = entries
+
+    async def paginate(self, ctx, location=None, user=None) -> None:
+        embeds = [i[0] for i in self.entries]
+        ids = [i[1] for i in self.entries]
+        view = AchPaginator(ids, ctx, embeds, timeout=90)
 
         await view.start(location or ctx)
 

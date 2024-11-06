@@ -1,7 +1,6 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,8 +15,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-
 import asyncio
 import datetime
 import logging
@@ -156,6 +153,7 @@ class Bot(commands.AutoShardedBot):
         await self.session.close()
         await self.trusted_session.close()
         await self.pool.close()
+        await self.second_pool.close()
         await self.redis.close()
 
     async def setup_hook(self):
@@ -180,6 +178,17 @@ class Bot(commands.AutoShardedBot):
         }
         self.pool = await asyncpg.create_pool(
             **database_creds, min_size=10, max_size=20, command_timeout=60.0
+        )
+
+        second_database_creds = {
+            "database": self.config.second_database.postgres_name,
+            "user": self.config.second_database.postgres_user,
+            "password": self.config.second_database.postgres_password,
+            "host": self.config.second_database.postgres_host,
+            "port": self.config.second_database.postgres_port,
+        }
+        self.second_pool = await asyncpg.create_pool(
+            **second_database_creds, min_size=10, max_size=20, command_timeout=60.0
         )
 
         for extension in self.config.bot.initial_extensions:
@@ -882,6 +891,9 @@ class Bot(commands.AutoShardedBot):
             armor += 4
         elif race == "Jikill":
             damage += 4
+        elif race == "Djinn":
+            damage += 5
+            armor += -1
         elif race == "Shadeborn":
             damage += -1
             armor += 5

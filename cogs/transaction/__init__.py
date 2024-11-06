@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,8 +16,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-
 import asyncio
 
 from collections import defaultdict
@@ -440,26 +438,27 @@ class Transaction(commands.Cog):
         _(
             """`<itemid>` - The ID of the item to add
 
-            Add an item to the trading session. The item needs to be in your inevntory.
+            Add an item to the trading session. The item needs to be in your inventory.
             To remove an item, consider `{prefix}trade remove item`.
 
             You need to have an open trading session to use this command."""
         )
-
+        # Check if the user already has 15 items in the transaction
         if len(ctx.transaction["items"]) >= 15:
             return await ctx.send(_("You can only add up to 15 items to the trade."))
-            
+
         if itemid in [x["id"] for x in ctx.transaction["items"]]:
             return await ctx.send(_("You already added this item!"))
-            
+
         if item := await self.bot.pool.fetchrow(
-            'SELECT ai.* FROM allitems ai JOIN inventory i ON (ai."id"=i."item") WHERE'
-            ' ai."id"=$1 AND ai."owner"=$2;',
-            itemid,
-            ctx.author.id,
+                'SELECT ai.* FROM allitems ai JOIN inventory i ON (ai."id"=i."item") WHERE'
+                ' ai."id"=$1 AND ai."owner"=$2;',
+                itemid,
+                ctx.author.id,
         ):
             if item["original_name"] or item["original_type"]:
                 return await ctx.send(_("You may not sell modified items."))
+
             ctx.transaction["items"].append(item)
             await ctx.message.add_reaction(":blackcheck:441826948919066625")
         else:

@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,8 +16,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-
 import asyncio
 import datetime
 import firebase_admin
@@ -296,6 +294,8 @@ class Patreon(commands.Cog):
             )
         )
 
+
+
     @has_char()
     @commands.command()
     async def tokens(self, ctx):
@@ -542,7 +542,7 @@ class Patreon(commands.Cog):
 
         import validators
 
-        allowed_whitelist = ["https://cdn.discordapp.com", "https://i.ibb.co", "https://media.discordapp.net",
+        allowed_whitelist = ["https://cdn.discordapp.com", "https://i.postimg.cc", "https://i.ibb.co", "https://media.discordapp.net",
                              "https://idlerpg.xyz", "https://gcdnb.pbrd.co", "https://storage.googleapis.com"]
 
         if not any(url.startswith(whitelisted) for whitelisted in allowed_whitelist):

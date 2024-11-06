@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,24 +16,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-"""
-The IdleRPG Discord Bot
-Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""
-
 import asyncio
 import copy
 import io
@@ -49,6 +31,7 @@ from discord.ext import commands
 
 from classes.bot import Bot
 from classes.context import Context
+from classes.converters import MemberWithCharacter
 from utils import misc as rpgtools
 from utils.i18n import _, locale_doc
 from utils.markdown import escape_markdown
@@ -59,7 +42,17 @@ class Custom(commands.Cog):
         self.bot = bot
         self._last_result = None
 
-    @commands.command(brief=_("Show the top 10 in whored"))
+    @commands.command(breif=_("Gift a crate"))
+    @locale_doc
+    async def givedivine(self, ctx, amount: int, other: MemberWithCharacter):
+        if ctx.author.id == 294016545254801409:
+            await ctx.send(
+                _("Successfully gave {amount} divine crate(s) to {other}.").format(
+                    amount=amount, other=other.mention
+                )
+            )
+
+    @commands.command(brief=_("Show the top 10 in horde"))
     @locale_doc
     async def hottest(self, ctx: Context) -> None:
         try:

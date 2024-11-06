@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -79,6 +79,8 @@ class Profile(commands.Cog):
 
             # Send the embed message
             await ctx.send(embed=embed)
+
+
 
             # Send an additional message asking for the character's name
             name_msg = await ctx.send(_("Please reply with your character's name within 60 seconds."))
@@ -322,424 +324,430 @@ class Profile(commands.Cog):
             View someone's profile. This will send an image.`"""
         )
 
-        if person is None:
-            person = str(ctx.author.id)
 
-        id_pattern = re.compile(r'^\d{17,19}$')
-        mention_pattern = re.compile(r'<@!?(\d{17,19})>')
-        match = mention_pattern.match(person)
+        try:
+            if person is None:
+                person = str(ctx.author.id)
 
-        if match:
-            person = int(match.group(1))
-            person = await self.bot.fetch_user(int(person))
+            id_pattern = re.compile(r'^\d{17,19}$')
+            mention_pattern = re.compile(r'<@!?(\d{17,19})>')
+            match = mention_pattern.match(person)
 
-        elif id_pattern.match(person):
-            person = await self.bot.fetch_user(int(person))
-        else:
-            async with self.bot.pool.acquire() as conn:
-                query = 'SELECT "user" FROM profile WHERE discordtag = $1'
-                user_id = await conn.fetchval(query, person)
-            person = await self.bot.fetch_user(int(user_id))
+            if match:
+                person = int(match.group(1))
+                person = await self.bot.fetch_user(int(person))
 
-        targetid = person.id
-        discordtag = person.display_name
+            elif id_pattern.match(person):
+                person = await self.bot.fetch_user(int(person))
+            else:
+                async with self.bot.pool.acquire() as conn:
+                    query = 'SELECT "user" FROM profile WHERE discordtag = $1'
+                    user_id = await conn.fetchval(query, person)
+                person = await self.bot.fetch_user(int(user_id))
 
-        async with self.bot.pool.acquire() as conn:
-            # Fetch the profilestyle column for the given user by either discordtag or userid
-            profilestyle_query = '''
-                SELECT profilestyle FROM profile 
-                WHERE "user" = $1 OR discordtag = $2
-            '''
-            profilestyle_result = await conn.fetchval(profilestyle_query, targetid, discordtag)
-
-            # Convert the result to a boolean (assuming profilestyle is a boolean column)
-            profilestyle = bool(profilestyle_result) if profilestyle_result is not None else False
-
-        if not profilestyle:
-            person = person or ctx.author
             targetid = person.id
+            discordtag = person.display_name
 
             async with self.bot.pool.acquire() as conn:
-                profile = await conn.fetchrow(
-                    'SELECT p.*, g.name AS guild_name FROM profile p LEFT JOIN guild g ON (g."id"=p."guild") WHERE "user"=$1;',
-                    targetid,
-                )
+                # Fetch the profilestyle column for the given user by either discordtag or userid
+                profilestyle_query = '''
+                    SELECT profilestyle FROM profile 
+                    WHERE "user" = $1 OR discordtag = $2
+                '''
+                profilestyle_result = await conn.fetchval(profilestyle_query, targetid, discordtag)
 
-                if not profile:
-                    return await ctx.send(
-                        _("**{person}** does not have a character.").format(person=person)
+                # Convert the result to a boolean (assuming profilestyle is a boolean column)
+                profilestyle = bool(profilestyle_result) if profilestyle_result is not None else False
+
+            if not profilestyle:
+                person = person or ctx.author
+                targetid = person.id
+
+                async with self.bot.pool.acquire() as conn:
+                    profile = await conn.fetchrow(
+                        'SELECT p.*, g.name AS guild_name FROM profile p LEFT JOIN guild g ON (g."id"=p."guild") WHERE "user"=$1;',
+                        targetid,
                     )
 
-                items = await self.bot.get_equipped_items_for(targetid, conn=conn)
-                mission = await self.bot.get_adventure(targetid)
+                    if not profile:
+                        return await ctx.send(
+                            _("**{person}** does not have a character.").format(person=person)
+                        )
 
-            right_hand = None
-            left_hand = None
+                    items = await self.bot.get_equipped_items_for(targetid, conn=conn)
+                    mission = await self.bot.get_adventure(targetid)
 
-            any_count = sum(1 for i in items if i["hand"] == "any")
-            if len(items) == 2 and any_count == 1 and items[0]["hand"] == "any":
-                items = [items[1], items[0]]
+                right_hand = None
+                left_hand = None
 
-            for i in items:
-                stat = f"{int(i['damage'] + i['armor'])}"
-                if i["hand"] == "both":
-                    right_hand = (i["type"], i["name"], stat)
-                elif i["hand"] == "left":
-                    left_hand = (i["type"], i["name"], stat)
-                elif i["hand"] == "right":
-                    right_hand = (i["type"], i["name"], stat)
-                elif i["hand"] == "any":
-                    if right_hand is None:
+                any_count = sum(1 for i in items if i["hand"] == "any")
+                if len(items) == 2 and any_count == 1 and items[0]["hand"] == "any":
+                    items = [items[1], items[0]]
+
+                for i in items:
+                    stat = f"{int(i['damage'] + i['armor'])}"
+                    if i["hand"] == "both":
                         right_hand = (i["type"], i["name"], stat)
-                    else:
+                    elif i["hand"] == "left":
                         left_hand = (i["type"], i["name"], stat)
+                    elif i["hand"] == "right":
+                        right_hand = (i["type"], i["name"], stat)
+                    elif i["hand"] == "any":
+                        if right_hand is None:
+                            right_hand = (i["type"], i["name"], stat)
+                        else:
+                            left_hand = (i["type"], i["name"], stat)
 
-            color = profile["colour"]
-            color = [color["red"], color["green"], color["blue"], color["alpha"]]
-            embed_color = discord.Colour.from_rgb(color[0], color[1], color[2])
-            classes = [class_from_string(c) for c in profile["class"]]
-            icons = [c.get_class_line_name().lower() if c else "none" for c in classes]
+                color = profile["colour"]
+                color = [color["red"], color["green"], color["blue"], color["alpha"]]
+                embed_color = discord.Colour.from_rgb(color[0], color[1], color[2])
+                classes = [class_from_string(c) for c in profile["class"]]
+                icons = [c.get_class_line_name().lower() if c else "none" for c in classes]
 
-            guild_rank = None if not profile["guild"] else profile["guildrank"]
+                guild_rank = None if not profile["guild"] else profile["guildrank"]
 
-            marriage = (
-                await rpgtools.lookup(self.bot, profile["marriage"], return_none=True)
-                if profile["marriage"]
-                else None
-            )
+                marriage = (
+                    await rpgtools.lookup(self.bot, profile["marriage"], return_none=True)
+                    if profile["marriage"]
+                    else None
+                )
 
-            if mission:
-                adventure_name = ADVENTURE_NAMES[mission[0]]
-                adventure_time = f"{mission[1]}" if not mission[2] else _("Finished")
-            else:
-                adventure_name = None
-                adventure_time = None
+                if mission:
+                    adventure_name = ADVENTURE_NAMES[mission[0]]
+                    adventure_time = f"{mission[1]}" if not mission[2] else _("Finished")
+                else:
+                    adventure_name = None
+                    adventure_time = None
 
-            badge_val = Badge.from_db(profile["badges"])
-            if badge_val:
-                badges = badge_val.to_items_lowercase()
-            else:
-                badges = []
+                badge_val = Badge.from_db(profile["badges"])
+                if badge_val:
+                    badges = badge_val.to_items_lowercase()
+                else:
+                    badges = []
 
-            if targetid == 295173706496475136:
+                if targetid == 295173706496475131:
 
-                async with self.bot.trusted_session.post(
-                        f"{self.bot.config.external.okapi_url}/api/genprofile",
-                        json={
-                            "name": profile["name"],
-                            "color": color,
-                            "image": profile["background"],
-                            "race": profile["race"],
-                            "classes": profile["class"],
-                            "profession": "Novice Planter",
-                            "class_icons": icons,
-                            "left_hand_item": left_hand,
-                            "right_hand_item": right_hand,
-                            "level": f"{rpgtools.xptolevel(profile['xp'])}",
-                            "guild_rank": guild_rank,
-                            "guild_name": profile["guild_name"],
-                            "money": f"{profile['money']}",
-                            "pvp_wins": f"{profile['pvpwins']}",
-                            "marriage": marriage,
-                            "god": profile["god"] or _("No God"),
-                            "adventure_name": adventure_name,
-                            "adventure_time": adventure_time,
-                            "badges": badges,
-                        },
-                        headers={"Authorization": self.bot.config.external.okapi_token},
-                ) as req:
-                    if req.status == 200:
+                    async with self.bot.trusted_session.post(
+                            f"{self.bot.config.external.okapi_url}/api/genprofile",
+                            json={
+                                "name": profile["name"],
+                                "color": color,
+                                "image": profile["background"],
+                                "race": profile["race"],
+                                "classes": profile["class"],
+                                "profession": "Novice Planter",
+                                "class_icons": icons,
+                                "left_hand_item": left_hand,
+                                "right_hand_item": right_hand,
+                                "level": f"{rpgtools.xptolevel(profile['xp'])}",
+                                "guild_rank": guild_rank,
+                                "guild_name": profile["guild_name"],
+                                "money": f"{profile['money']}",
+                                "pvp_wins": f"{profile['pvpwins']}",
+                                "marriage": marriage,
+                                "god": profile["god"] or _("No God"),
+                                "adventure_name": adventure_name,
+                                "adventure_time": adventure_time,
+                                "badges": badges,
+                            },
+                            headers={"Authorization": self.bot.config.external.okapi_token},
+                    ) as req:
+                        if req.status == 200:
 
-                        img = await req.text()
+                            img = await req.text()
 
 
 
-                    else:
-                        # Error, means try reading the response JSON error
-                        try:
-                            error_json = await req.json()
-                            async with self.bot.pool.acquire() as conn:
-                                # Update the background column in the profile table for the target user
-                                update_query = 'UPDATE profile SET background = 0 WHERE "user" = $1'
-                                await conn.execute(update_query, targetid)
+                        else:
+                            # Error, means try reading the response JSON error
+                            try:
+                                error_json = await req.json()
+                                async with self.bot.pool.acquire() as conn:
+                                    # Update the background column in the profile table for the target user
+                                    update_query = 'UPDATE profile SET background = 0 WHERE "user" = $1'
+                                    await conn.execute(update_query, targetid)
 
-                            return await ctx.send(
-                                _(
-                                    "There was an error processing your image. Reason: {reason} ({detail}). (Due to this, the profile image has been reset)"
-                                ).format(
-                                    reason=error_json["reason"], detail=error_json["detail"]
+                                return await ctx.send(
+                                    _(
+                                        "There was an error processing your image. Reason: {reason} ({detail}). (Due to this, the profile image has been reset)"
+                                    ).format(
+                                        reason=error_json["reason"], detail=error_json["detail"]
+                                    )
                                 )
-                            )
-                        except ContentTypeError:
-                            return await ctx.send(
-                                _("Unexpected internal error when generating image.")
-                            )
-                        except Exception:
-                            return await ctx.send(_("Unexpected error when generating image."))
+                            except ContentTypeError:
+                                return await ctx.send(
+                                    _("Unexpected internal error when generating image.")
+                                )
+                            except Exception:
+                                return await ctx.send(_("Unexpected error when generating image."))
 
-                    async with self.bot.trusted_session.get(img) as resp:
-                        bytebuffer = await resp.read()
-                        if resp.status != 200:
-                            return await ctx.send("Error failed to fetch image")
+                        async with self.bot.trusted_session.get(img) as resp:
+                            bytebuffer = await resp.read()
+                            if resp.status != 200:
+                                return await ctx.send("Error failed to fetch image")
 
+                else:
+                    async with self.bot.trusted_session.post(
+                            f"{self.bot.config.external.okapi_url}/api/genprofile",
+                            json={
+                                "name": profile["name"],
+                                "color": color,
+                                "image": profile["background"],
+                                "race": profile["race"],
+                                "classes": profile["class"],
+                                "profession": "None",
+                                "class_icons": icons,
+                                "left_hand_item": left_hand,
+                                "right_hand_item": right_hand,
+                                "level": f"{rpgtools.xptolevel(profile['xp'])}",
+                                "guild_rank": guild_rank,
+                                "guild_name": profile["guild_name"],
+                                "money": f"{profile['money']}",
+                                "pvp_wins": f"{profile['pvpwins']}",
+                                "marriage": marriage,
+                                "god": profile["god"] or _("No God"),
+                                "adventure_name": adventure_name,
+                                "adventure_time": adventure_time,
+                                "badges": badges,
+                            },
+                            headers={"Authorization": self.bot.config.external.okapi_token},
+                    ) as req:
+                        if req.status == 200:
+
+                            img = await req.text()
+
+
+
+                        else:
+                            # Error, means try reading the response JSON error
+                            try:
+                                error_json = await req.json()
+                                async with self.bot.pool.acquire() as conn:
+                                    # Update the background column in the profile table for the target user
+                                    update_query = 'UPDATE profile SET background = 0 WHERE "user" = $1'
+                                    await conn.execute(update_query, targetid)
+
+                                return await ctx.send(
+                                    _(
+                                        "There was an error processing your image. Reason: {reason} ({detail}). (Due to this, the profile image has been reset)"
+                                    ).format(
+                                        reason=error_json["reason"], detail=error_json["detail"]
+                                    )
+                                )
+                            except ContentTypeError:
+                                return await ctx.send(
+                                    _("Unexpected internal error when generating image.")
+                                )
+                            except Exception:
+                                return await ctx.send(_("Unexpected error when generating image."))
+
+                        async with self.bot.trusted_session.get(img) as resp:
+                            bytebuffer = await resp.read()
+                            if resp.status != 200:
+                                return await ctx.send("Error failed to fetch image")
+
+                await ctx.send(
+                    _("Your Profile:"),
+                    file=discord.File(fp=io.BytesIO(bytebuffer), filename="image.png"),
+                )
             else:
+                person = person or ctx.author
+                targetid = person.id
+
+                async with self.bot.pool.acquire() as conn:
+                    query = """
+                        SELECT g.name
+                        FROM profile p
+                        JOIN guild g ON p.guild = g.ID
+                        WHERE p.user = $1
+                    """
+                    guild_name = await conn.fetchval(query, targetid)
+
+                ret = await self.bot.pool.fetch(
+                    "SELECT ai.*, i.equipped FROM profile p JOIN allitems ai ON"
+                    " (p.user=ai.owner) JOIN inventory i ON (ai.id=i.item) WHERE"
+                    ' p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3) OR'
+                    ' i."equipped") ORDER BY i."equipped" DESC, ai."damage"+ai."armor"'
+                    " DESC;",
+                    targetid,
+                    0,
+                    160,
+                )
+
+                # Assuming you have 'name', 'damage', 'armor', and 'type' columns in 'allitems' table
+                equipped_items = [row for row in ret if row['equipped']]
+
+                # Separate variables for up to two equipped items
+                item1 = equipped_items[0] if len(equipped_items) >= 1 else {"name": "None Equipped", "damage": 0,
+                                                                            "armor": 0,
+                                                                            "type": "None"}
+                item2 = equipped_items[1] if len(equipped_items) >= 2 else {"name": "None Equipped", "damage": 0,
+                                                                            "armor": 0,
+                                                                            "type": "None"}
+
+                async with self.bot.pool.acquire() as conn:
+                    profile = await conn.fetchrow(
+                        'SELECT p.*, g.name AS guild_name FROM profile p LEFT JOIN guild g ON (g."id"=p."guild") WHERE "user"=$1;',
+                        targetid,
+                    )
+
+                    if not profile:
+                        return await ctx.send(
+                            _("**{person}** does not have a character.").format(person=person)
+                        )
+
+                    items = await self.bot.get_equipped_items_for(targetid, conn=conn)
+                    mission = await self.bot.get_adventure(targetid)
+
+                # Apply race bonuses
+                race = profile["race"].lower()  # Assuming the race is stored in lowercase in the database
+
+                damage_total = item1["damage"] + item2["damage"]
+                armor_total = item1["armor"] + item2["armor"]
+                item1_name = item1["name"]
+                item2_name = item2["name"]
+                item1_type = item1["type"]
+                item2_type = item2["type"]
+
+                classes = [class_from_string(c) for c in profile["class"]]
+                icons = [c.get_class_line_name().lower() if c else "none" for c in classes]
+
+                # Assuming you have classes with specific weapon type bonuses
+                classes = {
+                    "raider": {"Axe": 5},
+                    "mage": {"Wand": 5},
+                    "warrior": {"Sword": 5},
+                    "ranger": {"Bow": 10},
+                    "reaper": {"Scythe": 10},
+                    "paladin": {"Hammer": 5},
+                    "thief": {"Knife": 5, "Dagger": 5},
+                    "paragon": {"Spear": 5}
+                }
+
+                # Initialize bonus
+                class_bonus = 0
+
+                # Check if the user has classes and apply the corresponding bonuses
+                for class_name in icons:
+                    class_info = classes.get(class_name.lower(), {})
+                    for item in [item1_type, item2_type]:
+                        item_bonus = class_info.get(item, 0)
+                        class_bonus += item_bonus
+
+                # Apply the class bonus to the damage total
+                damage_total += class_bonus
+
+                if race == "human":
+                    armor_total += 2
+                    damage_total += 2
+                elif race == "orc":
+                    armor_total += 4
+                elif race == "dwarf":
+                    armor_total += 3
+                    damage_total += 1
+                elif race == "jikill":
+                    damage_total += 4
+                elif race == "elf":
+                    armor_total += 1
+                    damage_total += 3
+                elif race == "elf":
+                    armor_total += 1
+                    damage_total -= 3
+                elif race == "djinn":
+                    armor_total -= 1
+                    damage_total += 5
+                elif race == "shadeborn":
+                    armor_total += 5
+                    damage_total -= 1
+
+                right_hand = None
+                left_hand = None
+
+                async with self.bot.pool.acquire() as conn:
+                    # Check if the user exists in the battletower table
+                    level_query = "SELECT level FROM battletower WHERE id = $1"
+                    level_result = await conn.fetchval(level_query, targetid)
+
+                    # If the user doesn't exist, set the level to 0
+                    level = level_result if level_result is not None else 0
+
+                any_count = sum(1 for i in items if i["hand"] == "any")
+                if len(items) == 2 and any_count == 1 and items[0]["hand"] == "any":
+                    items = [items[1], items[0]]
+
+                for i in items:
+                    stat = f"{int(i['damage'] + i['armor'])}"
+                    if i["hand"] == "both":
+                        right_hand = (i["type"], i["name"], stat)
+                    elif i["hand"] == "left":
+                        left_hand = (i["type"], i["name"], stat)
+                    elif i["hand"] == "right":
+                        right_hand = (i["type"], i["name"], stat)
+                    elif i["hand"] == "any":
+                        if right_hand is None:
+                            right_hand = (i["type"], i["name"], stat)
+                        else:
+                            left_hand = (i["type"], i["name"], stat)
+
+                color = profile["colour"]
+                color = [color["red"], color["green"], color["blue"], color["alpha"]]
+                embed_color = discord.Colour.from_rgb(color[0], color[1], color[2])
+
+                guild_rank = None if not profile["guild"] else profile["guildrank"]
+
+                marriage = (
+                    await rpgtools.lookup(self.bot, profile["marriage"], return_none=True)
+                    if profile["marriage"]
+                    else None
+                )
+
+                if mission:
+                    adventure_name = ADVENTURE_NAMES[mission[0]]
+                    adventure_time = f"{mission[1]}" if not mission[2] else _("Finished")
+                else:
+                    adventure_name = None
+                    adventure_time = None
+
+                badge_val = Badge.from_db(profile["badges"])
+                if badge_val:
+                    badges = badge_val.to_items_lowercase()
+                else:
+                    badges = []
+
+
                 async with self.bot.trusted_session.post(
-                        f"{self.bot.config.external.okapi_url}/api/genprofile",
+                        f"ttp://127.0.0.1:3010/api/genprofile",
                         json={
-                            "name": profile["name"],
+                            "name": profile['name'],
                             "color": color,
                             "image": profile["background"],
-                            "race": profile["race"],
-                            "classes": profile["class"],
+                            "race": profile['race'],
+                            "classes": profile['class'],
                             "profession": "None",
-                            "class_icons": icons,
-                            "left_hand_item": left_hand,
-                            "right_hand_item": right_hand,
+                            "damage": f"{damage_total}",
+                            "defense": f"{armor_total}",
+                            "swordName": f"{item1_name}",
+                            "shieldName": f"{item2_name}",
                             "level": f"{rpgtools.xptolevel(profile['xp'])}",
                             "guild_rank": guild_rank,
-                            "guild_name": profile["guild_name"],
-                            "money": f"{profile['money']}",
-                            "pvp_wins": f"{profile['pvpwins']}",
-                            "marriage": marriage,
+                            "guild": guild_name,
+                            "money": profile['money'],
+                            "pvpWins": f"{profile['pvpwins']}",
+                            "marriage": marriage or _("None"),
                             "god": profile["god"] or _("No God"),
-                            "adventure_name": adventure_name,
+                            "adventure": adventure_name or _("No Mission"),
                             "adventure_time": adventure_time,
-                            "badges": badges,
+                            "icons": icons,
+                            "BT": f"{level}"
+
                         },
                         headers={"Authorization": self.bot.config.external.okapi_token},
                 ) as req:
-                    if req.status == 200:
-
-                        img = await req.text()
-
-
-
-                    else:
-                        # Error, means try reading the response JSON error
-                        try:
-                            error_json = await req.json()
-                            async with self.bot.pool.acquire() as conn:
-                                # Update the background column in the profile table for the target user
-                                update_query = 'UPDATE profile SET background = 0 WHERE "user" = $1'
-                                await conn.execute(update_query, targetid)
-
-                            return await ctx.send(
-                                _(
-                                    "There was an error processing your image. Reason: {reason} ({detail}). (Due to this, the profile image has been reset)"
-                                ).format(
-                                    reason=error_json["reason"], detail=error_json["detail"]
-                                )
-                            )
-                        except ContentTypeError:
-                            return await ctx.send(
-                                _("Unexpected internal error when generating image.")
-                            )
-                        except Exception:
-                            return await ctx.send(_("Unexpected error when generating image."))
-
-                    async with self.bot.trusted_session.get(img) as resp:
-                        bytebuffer = await resp.read()
-                        if resp.status != 200:
-                            return await ctx.send("Error failed to fetch image")
-
-            await ctx.send(
-                _("Your Profile:"),
-                file=discord.File(fp=io.BytesIO(bytebuffer), filename="image.png"),
-            )
-        else:
-            person = person or ctx.author
-            targetid = person.id
-
-            async with self.bot.pool.acquire() as conn:
-                query = """
-                    SELECT g.name
-                    FROM profile p
-                    JOIN guild g ON p.guild = g.ID
-                    WHERE p.user = $1
-                """
-                guild_name = await conn.fetchval(query, targetid)
-
-            ret = await self.bot.pool.fetch(
-                "SELECT ai.*, i.equipped FROM profile p JOIN allitems ai ON"
-                " (p.user=ai.owner) JOIN inventory i ON (ai.id=i.item) WHERE"
-                ' p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3) OR'
-                ' i."equipped") ORDER BY i."equipped" DESC, ai."damage"+ai."armor"'
-                " DESC;",
-                targetid,
-                0,
-                160,
-            )
-
-            # Assuming you have 'name', 'damage', 'armor', and 'type' columns in 'allitems' table
-            equipped_items = [row for row in ret if row['equipped']]
-
-            # Separate variables for up to two equipped items
-            item1 = equipped_items[0] if len(equipped_items) >= 1 else {"name": "None Equipped", "damage": 0,
-                                                                        "armor": 0,
-                                                                        "type": "None"}
-            item2 = equipped_items[1] if len(equipped_items) >= 2 else {"name": "None Equipped", "damage": 0,
-                                                                        "armor": 0,
-                                                                        "type": "None"}
-
-            async with self.bot.pool.acquire() as conn:
-                profile = await conn.fetchrow(
-                    'SELECT p.*, g.name AS guild_name FROM profile p LEFT JOIN guild g ON (g."id"=p."guild") WHERE "user"=$1;',
-                    targetid,
-                )
-
-                if not profile:
-                    return await ctx.send(
-                        _("**{person}** does not have a character.").format(person=person)
-                    )
-
-                items = await self.bot.get_equipped_items_for(targetid, conn=conn)
-                mission = await self.bot.get_adventure(targetid)
-
-            # Apply race bonuses
-            race = profile["race"].lower()  # Assuming the race is stored in lowercase in the database
-
-            damage_total = item1["damage"] + item2["damage"]
-            armor_total = item1["armor"] + item2["armor"]
-            item1_name = item1["name"]
-            item2_name = item2["name"]
-            item1_type = item1["type"]
-            item2_type = item2["type"]
-
-            classes = [class_from_string(c) for c in profile["class"]]
-            icons = [c.get_class_line_name().lower() if c else "none" for c in classes]
-
-            # Assuming you have classes with specific weapon type bonuses
-            classes = {
-                "raider": {"Axe": 5},
-                "mage": {"Wand": 5},
-                "warrior": {"Sword": 5},
-                "ranger": {"Bow": 10},
-                "reaper": {"Scythe": 10},
-                "paladin": {"Hammer": 5},
-                "thief": {"Knife": 5, "Dagger": 5},
-                "paragon": {"Spear": 5}
-            }
-
-            # Initialize bonus
-            class_bonus = 0
-
-            # Check if the user has classes and apply the corresponding bonuses
-            for class_name in icons:
-                class_info = classes.get(class_name.lower(), {})
-                for item in [item1_type, item2_type]:
-                    item_bonus = class_info.get(item, 0)
-                    class_bonus += item_bonus
-
-            # Apply the class bonus to the damage total
-            damage_total += class_bonus
-
-            if race == "human":
-                armor_total += 2
-                damage_total += 2
-            elif race == "orc":
-                armor_total += 4
-            elif race == "dwarf":
-                armor_total += 3
-                damage_total += 1
-            elif race == "jikill":
-                damage_total += 4
-            elif race == "elf":
-                armor_total += 1
-                damage_total += 3
-            elif race == "elf":
-                armor_total += 1
-                damage_total -= 3
-            elif race == "shadeborn":
-                armor_total += 5
-                damage_total -= 1
-
-            right_hand = None
-            left_hand = None
-
-            async with self.bot.pool.acquire() as conn:
-                # Check if the user exists in the battletower table
-                level_query = "SELECT level FROM battletower WHERE id = $1"
-                level_result = await conn.fetchval(level_query, targetid)
-
-                # If the user doesn't exist, set the level to 0
-                level = level_result if level_result is not None else 0
-
-            any_count = sum(1 for i in items if i["hand"] == "any")
-            if len(items) == 2 and any_count == 1 and items[0]["hand"] == "any":
-                items = [items[1], items[0]]
-
-            for i in items:
-                stat = f"{int(i['damage'] + i['armor'])}"
-                if i["hand"] == "both":
-                    right_hand = (i["type"], i["name"], stat)
-                elif i["hand"] == "left":
-                    left_hand = (i["type"], i["name"], stat)
-                elif i["hand"] == "right":
-                    right_hand = (i["type"], i["name"], stat)
-                elif i["hand"] == "any":
-                    if right_hand is None:
-                        right_hand = (i["type"], i["name"], stat)
-                    else:
-                        left_hand = (i["type"], i["name"], stat)
-
-            color = profile["colour"]
-            color = [color["red"], color["green"], color["blue"], color["alpha"]]
-            embed_color = discord.Colour.from_rgb(color[0], color[1], color[2])
-
-            guild_rank = None if not profile["guild"] else profile["guildrank"]
-
-            marriage = (
-                await rpgtools.lookup(self.bot, profile["marriage"], return_none=True)
-                if profile["marriage"]
-                else None
-            )
-
-            if mission:
-                adventure_name = ADVENTURE_NAMES[mission[0]]
-                adventure_time = f"{mission[1]}" if not mission[2] else _("Finished")
-            else:
-                adventure_name = None
-                adventure_time = None
-
-            badge_val = Badge.from_db(profile["badges"])
-            if badge_val:
-                badges = badge_val.to_items_lowercase()
-            else:
-                badges = []
-
-
-            async with self.bot.trusted_session.post(
-                    f"ttp://127.0.0.1:3010/api/genprofile",
-                    json={
-                        "name": profile['name'],
-                        "color": color,
-                        "image": profile["background"],
-                        "race": profile['race'],
-                        "classes": profile['class'],
-                        "profession": "None",
-                        "damage": f"{damage_total}",
-                        "defense": f"{armor_total}",
-                        "swordName": f"{item1_name}",
-                        "shieldName": f"{item2_name}",
-                        "level": f"{rpgtools.xptolevel(profile['xp'])}",
-                        "guild_rank": guild_rank,
-                        "guild": guild_name,
-                        "money": profile['money'],
-                        "pvpWins": f"{profile['pvpwins']}",
-                        "marriage": marriage or _("None"),
-                        "god": profile["god"] or _("No God"),
-                        "adventure": adventure_name or _("No Mission"),
-                        "adventure_time": adventure_time,
-                        "icons": icons,
-                        "BT": f"{level}"
-
-                    },
-                    headers={"Authorization": self.bot.config.external.okapi_token},
-            ) as req:
-                img = BytesIO(await req.read())
-                # await ctx.send(f"{profile['class']}")
-                await ctx.send(file=discord.File(fp=img, filename="Profile.png"))
-
+                    img = BytesIO(await req.read())
+                    # await ctx.send(f"{profile['class']}")
+                    await ctx.send(file=discord.File(fp=img, filename="Profile.png"))
+        except Exception as e:
+            await ctx.send(e)
     @user_cooldown(86400)
     @commands.command(aliases=["drink"], brief=_("View someone's profile"))
     @locale_doc
@@ -837,7 +845,7 @@ class Profile(commands.Cog):
                 target = target.split()[0]
 
             if target is None:
-                target = str(ctx.author)
+                target = str(ctx.author.id)
 
             id_pattern = re.compile(r'^\d{17,19}$')
             mention_pattern = re.compile(r'<@!?(\d{17,19})>')
@@ -1248,6 +1256,10 @@ class Profile(commands.Cog):
                 eq = _("(**Equipped**)")
             else:
                 eq = ""
+
+            # Check if the weapon is locked and add "(locked)" if true
+            locked_status = " (locked)" if weapon.get('locked', False) else ""
+
             statstr = (
                 _("Damage: `{damage}`").format(damage=weapon["damage"])
                 if weapon["type"] != "Shield"
@@ -1258,8 +1270,9 @@ class Profile(commands.Cog):
                 if (y := weapon["signature"])
                 else ""
             )
+
             result.add_field(
-                name=f"{weapon['name']} {eq}",
+                name=f"{weapon['name']}{locked_status} {eq}",  # Append (locked) if the item is locked
                 value=_(
                     "ID: `{id}`, Element: `{element}` Type: `{type_}` (uses {hand} hand(s)) with {statstr}."
                     " Value is **${value}**{signature}"
@@ -1274,6 +1287,7 @@ class Profile(commands.Cog):
                 ),
                 inline=False,
             )
+
         result.set_footer(
             text=_("Page {page} of {maxpages}").format(
                 page=currentpage + 1, maxpages=maxpage + 1
@@ -1469,8 +1483,8 @@ class Profile(commands.Cog):
             self,
             ctx,
             itemtype: str | None = "All",
-            lowest: IntFromTo(0, 101) = 0,
-            highest: IntFromTo(0, 101) = 160,
+            lowest: IntFromTo(0, 201) = 0,
+            highest: IntFromTo(0, 201) = 201,
     ):
         _(
             """`[itemtype]` - The type of item to show; defaults to all items
@@ -1484,37 +1498,67 @@ class Profile(commands.Cog):
 
             To sell unused items for their value, use `{prefix}merch`. To put them up on the global player market, use `{prefix}sell`."""
         )
-        itemtype = itemtype.title()
+
 
         if highest < lowest:
             return await ctx.send(
                 _("Make sure that the `highest` value is greater than `lowest`.")
             )
-        itemtype_cls = ItemType.from_string(itemtype)
-        if itemtype != "All" and itemtype_cls is None:
-            return await ctx.send(
-                _(
-                    "Please select a valid item type or `all`. Available types:"
-                    " `{all_types}`"
-                ).format(all_types=", ".join([t.name for t in ALL_ITEM_TYPES]))
-            )
+
+        if itemtype != "2h":
+            if itemtype != "1h":
+                itemtype = itemtype.title()
+                itemtype_cls = ItemType.from_string(itemtype)
+                if itemtype != "All" and itemtype_cls is None:
+                    return await ctx.send(
+                        _(
+                            "Please select a valid item type or `all`, `1h`, `2h`. Available types:"
+                            " `{all_types}`"
+                        ).format(all_types=", ".join([t.name for t in ALL_ITEM_TYPES]))
+                    )
         if itemtype == "All":
             ret = await self.bot.pool.fetch(
-                "SELECT ai.*, i.equipped FROM profile p JOIN allitems ai ON"
+                "SELECT ai.*, i.equipped, i.locked FROM profile p JOIN allitems ai ON"
                 " (p.user=ai.owner) JOIN inventory i ON (ai.id=i.item) WHERE"
                 ' p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3) OR'
-                ' i."equipped") ORDER BY i."equipped" DESC, ai."damage"+ai."armor"'
+                ' i."equipped") ORDER BY i."equipped" DESC, i.locked DESC, ai."damage"+ai."armor"'
                 " DESC;",
                 ctx.author.id,
                 lowest,
                 highest,
             )
-        else:
+        elif itemtype == "2h":
+            twohand = "both"
             ret = await self.bot.pool.fetch(
-                "SELECT ai.*, i.equipped FROM profile p JOIN allitems ai ON"
+                "SELECT ai.*, i.equipped, i.locked FROM profile p JOIN allitems ai ON"
                 " (p.user=ai.owner) JOIN inventory i ON (ai.id=i.item) WHERE"
                 ' p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3 AND'
-                ' ai."type"=$4)  OR i."equipped") ORDER BY i."equipped" DESC,'
+                ' ai."hand"=$4)  OR i."equipped") ORDER BY i."equipped" DESC, i.locked DESC,'
+                ' ai."damage"+ai."armor" DESC;',
+                ctx.author.id,
+                lowest,
+                highest,
+                twohand,
+            )
+        elif itemtype == "1h":
+            twohand = "both"
+            ret = await self.bot.pool.fetch(
+                "SELECT ai.*, i.equipped, i.locked FROM profile p JOIN allitems ai ON"
+                " (p.user=ai.owner) JOIN inventory i ON (ai.id=i.item) WHERE"
+                ' p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3 AND'
+                ' ai."hand"!=$4)  OR i."equipped") ORDER BY i."equipped" DESC, i.locked DESC,'
+                ' ai."damage"+ai."armor" DESC;',
+                ctx.author.id,
+                lowest,
+                highest,
+                twohand,
+            )
+        else:
+            ret = await self.bot.pool.fetch(
+                "SELECT ai.*, i.equipped, i.locked FROM profile p JOIN allitems ai ON"
+                " (p.user=ai.owner) JOIN inventory i ON (ai.id=i.item) WHERE"
+                ' p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3 AND'
+                ' ai."type"=$4)  OR i."equipped") ORDER BY i."equipped" DESC, i.locked DESC,'
                 ' ai."damage"+ai."armor" DESC;',
                 ctx.author.id,
                 lowest,
@@ -1698,11 +1742,13 @@ class Profile(commands.Cog):
                 itemid,
             )
             if not item:
+                await self.bot.reset_cooldown(ctx)
                 return await ctx.send(
                     _("You don't own an item with the ID `{itemid}`.").format(
                         itemid=itemid
                     )
                 )
+
             olditems = await conn.fetch(
                 "SELECT ai.* FROM profile p JOIN allitems ai ON (p.user=ai.owner) JOIN"
                 " inventory i ON (ai.id=i.item) WHERE i.equipped IS TRUE AND"
@@ -1993,6 +2039,7 @@ class Profile(commands.Cog):
 
             Gift money! It will be removed from you and added to the other person."""
         )
+
         if ctx.author.id == 823030177025753100 and other.id == 295173706496475136:
             return await ctx.send(_("Nice try bish!"))
         if other == ctx.author:

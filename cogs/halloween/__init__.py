@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,7 +16,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
 
 from contextlib import suppress
 from datetime import datetime
@@ -128,25 +127,29 @@ class Halloween(commands.Cog):
         Dive into the spectral realm with our limited-time Spooky Season Shop.
         Unearth rare treasures using bones you've collected from various eerie events.
         """
-        if ctx.invoked_subcommand is None:
-            qualtity_shop = await self.bot.pool.fetchrow(
-                '''
-                SELECT ssuncommon, sstot, sstoken, ssmagic, ssrare, sslegendary, ssclass, ssbg 
-                FROM profile WHERE "user"=$1;
-                ''',
-                ctx.author.id
-            )
 
-            ssuncommon_value = qualtity_shop['ssuncommon']
-            sstot_value = qualtity_shop['sstot']
-            sstoken_value = qualtity_shop['sstoken']
-            ssmagic_value = qualtity_shop['ssmagic']
-            ssrare_value = qualtity_shop['ssrare']
-            sslegendary_value = qualtity_shop['sslegendary']
-            ssclass_value = qualtity_shop['ssclass']
-            ssbg_value = qualtity_shop['ssbg']
+        try:
+            if ctx.invoked_subcommand is None:
+                qualtity_shop = await self.bot.pool.fetchrow(
+                    '''
+                    SELECT ssuncommon, sstot, sstoken, ssmagic, ssrare, sslegendary, ssclass, ssbg, ssfortune, ssdivine 
+                    FROM profile WHERE "user"=$1;
+                    ''',
+                    ctx.author.id
+                )
 
-            try:
+                ssuncommon_value = qualtity_shop['ssuncommon']
+                sstot_value = qualtity_shop['sstot']
+                sstoken_value = qualtity_shop['sstoken']
+                ssmagic_value = qualtity_shop['ssmagic']
+                ssrare_value = qualtity_shop['ssrare']
+                sslegendary_value = qualtity_shop['sslegendary']
+                ssfortune_value = qualtity_shop['ssfortune']
+                ssdivine_value = qualtity_shop['ssdivine']
+                ssclass_value = qualtity_shop['ssclass']
+                ssbg_value = qualtity_shop['ssbg']
+
+
                 # Fetch the user's bone count
                 bone_count = await self.get_bone_count(ctx.author.id)
 
@@ -154,13 +157,15 @@ class Halloween(commands.Cog):
                 embed = Embed(title=_("👻 Halloween Shop 👻"), color=0xff4500)  # Dark orange color
 
                 embed.set_thumbnail(url="https://i.ibb.co/sqWxZ6F/shop.jpg")
-                embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.avatar.url)
+                embed.set_author(name=ctx.author.display_name)
 
                 items = [
-                    ("<:F_uncommon:1139514875828252702> Uncommon Crate", 40, ssuncommon_value),
-                    ("<:F_rare:1139514880517484666> Rare Crate", 100, ssrare_value),
-                    ("<:F_Magic:1139514865174720532> Magic Crate", 500, ssmagic_value),
-                    ("<:F_Legendary:1139514868400132116> Legendary Crate", 3000, sslegendary_value),
+                    ("<:F_uncommon:1139514875828252702> Uncommon Crate", 30, ssuncommon_value),
+                    ("<:F_rare:1139514880517484666> Rare Crate", 60, ssrare_value),
+                    ("<:F_Magic:1139514865174720532> Magic Crate", 250, ssmagic_value),
+                    ("<:F_Legendary:1139514868400132116> Legendary Crate", 1300, sslegendary_value),
+                    ("<:f_money:1146593710516224090> Fortune Crate", 1750, ssfortune_value),
+                    ("<:f_divine:1169412814612471869> Divine Crate", 2900, ssdivine_value),
                     ("🖼️ Seasonal Background", 650, ssbg_value),
                     ("🧙 Seasonal Class", 1000, ssclass_value),
                     ("🟡 Weapon Type Token", 200, sstoken_value),
@@ -168,7 +173,7 @@ class Halloween(commands.Cog):
                 ]
 
                 for idx, (name, cost, quantity) in enumerate(items, 1):
-                    if ctx.author.id == 708435868842459169:
+                    if ctx.author.id == 7084358645919:
                         embed.add_field(name=f"{idx}:  {name}",
                                         value=_("Cost: {} Boners - {} available").format(cost, quantity), inline=False)
 
@@ -184,11 +189,11 @@ class Halloween(commands.Cog):
 
                 await ctx.send(embed=embed)
 
-            except Exception as e:
-                error_embed = Embed(title=_("🚫 An error occurred!"), description=_(
-                    f"Oh no! Something spooky happened. Try again later or contact our wizard for help. {e}"),
-                                    color=0xff0000)  # Red color for errors
-                await ctx.send(embed=error_embed)
+        except Exception as e:
+            error_embed = Embed(title=_("🚫 An error occurred!"), description=_(
+                f"Oh no! Something spooky happened. Try again later or contact our wizard for help. {e}"),
+                                color=0xff0000)  # Red color for errors
+            await ctx.send(embed=error_embed)
 
     @spookyshop.command(name="buy")
     @user_cooldown(30)
@@ -200,7 +205,7 @@ class Halloween(commands.Cog):
         :param quantity: The quantity of the item the user wants to buy. Defaults to 1.
         """)
 
-        if item < 0 and item > 8:
+        if item < 0 and item > 10:
             await ctx.send("Invalid choice")
             return
 
@@ -214,7 +219,7 @@ class Halloween(commands.Cog):
             bones_count = 0
 
         if item == 1:
-            if bones_count < 40:
+            if bones_count < 30:
                 await ctx.send("You cannot afford this")
                 return
             item1 = await self.bot.pool.fetchrow(
@@ -232,7 +237,7 @@ class Halloween(commands.Cog):
             )
 
             await self.bot.pool.execute(
-                'UPDATE profile SET bones = bones - 40 WHERE "user"=$1;',
+                'UPDATE profile SET bones = bones - 30 WHERE "user"=$1;',
                 ctx.author.id
             )
 
@@ -240,10 +245,10 @@ class Halloween(commands.Cog):
                 'UPDATE profile SET crates_uncommon = crates_uncommon + 1 WHERE "user"=$1;',
                 ctx.author.id
             )
-            await ctx.send("You have successfully purchased a <:F_uncommon:1139514875828252702> for 40 Bones!")
+            await ctx.send("You have successfully purchased a <:F_uncommon:1139514875828252702> for 30 Bones!")
 
         if item == 2:
-            if bones_count < 100:
+            if bones_count < 50:
                 await ctx.send("You cannot afford this")
                 return
             item1 = await self.bot.pool.fetchrow(
@@ -261,7 +266,7 @@ class Halloween(commands.Cog):
             )
 
             await self.bot.pool.execute(
-                'UPDATE profile SET bones = bones - 100 WHERE "user"=$1;',
+                'UPDATE profile SET bones = bones - 50 WHERE "user"=$1;',
                 ctx.author.id
             )
 
@@ -269,10 +274,10 @@ class Halloween(commands.Cog):
                 'UPDATE profile SET crates_rare = crates_rare + 1 WHERE "user"=$1;',
                 ctx.author.id
             )
-            await ctx.send("You have successfully purchased a <:F_rare:1139514880517484666> for 100 Bones!")
+            await ctx.send("You have successfully purchased a <:F_rare:1139514880517484666> for 50 Bones!")
 
         if item == 3:
-            if bones_count < 500:
+            if bones_count < 250:
                 await ctx.send("You cannot afford this")
                 return
             item1 = await self.bot.pool.fetchrow(
@@ -290,7 +295,7 @@ class Halloween(commands.Cog):
             )
 
             await self.bot.pool.execute(
-                'UPDATE profile SET bones = bones - 500 WHERE "user"=$1;',
+                'UPDATE profile SET bones = bones - 250 WHERE "user"=$1;',
                 ctx.author.id
             )
 
@@ -301,7 +306,7 @@ class Halloween(commands.Cog):
             await ctx.send("You have successfully purchased a <:F_Magic:1139514865174720532> for 500 Bones!")
 
         if item == 4:
-            if bones_count < 3000:
+            if bones_count < 1300:
                 await ctx.send("You cannot afford this")
                 return
             item1 = await self.bot.pool.fetchrow(
@@ -319,7 +324,7 @@ class Halloween(commands.Cog):
             )
 
             await self.bot.pool.execute(
-                'UPDATE profile SET bones = bones - 3000 WHERE "user"=$1;',
+                'UPDATE profile SET bones = bones - 1300 WHERE "user"=$1;',
                 ctx.author.id
             )
 
@@ -327,9 +332,74 @@ class Halloween(commands.Cog):
                 'UPDATE profile SET crates_legendary = crates_legendary + 1 WHERE "user"=$1;',
                 ctx.author.id
             )
-            await ctx.send("You have successfully purchased a <:F_Legendary:1139514868400132116> for 3000 Bones!")
+            await ctx.send("You have successfully purchased a <:F_Legendary:1139514868400132116> for 1300 Bones!")
+
+
+
 
         if item == 5:
+            if bones_count < 1750:
+                await ctx.send("You cannot afford this")
+                return
+            item1 = await self.bot.pool.fetchrow(
+                'SELECT ssfortune FROM profile WHERE "user"=$1;',
+                ctx.author.id
+            )
+            quantity = item1['ssfortune']
+            if quantity <= 0:
+                await ctx.send("You cannot purchase this: Sold Out!")
+                return
+
+            await self.bot.pool.execute(
+                'UPDATE profile SET ssfortune = ssfortune - 1 WHERE "user"=$1;',
+                ctx.author.id
+            )
+
+            await self.bot.pool.execute(
+                'UPDATE profile SET bones = bones - 1750 WHERE "user"=$1;',
+                ctx.author.id
+            )
+
+            await self.bot.pool.execute(
+                'UPDATE profile SET crates_fortune = crates_fortune + 1 WHERE "user"=$1;',
+                ctx.author.id
+            )
+            await ctx.send("You have successfully purchased a <:f_money:1146593710516224090> for 1750 Bones!")
+
+
+
+
+        if item == 6:
+            if bones_count < 2900:
+                await ctx.send("You cannot afford this")
+                return
+            item1 = await self.bot.pool.fetchrow(
+                'SELECT ssdivine FROM profile WHERE "user"=$1;',
+                ctx.author.id
+            )
+            quantity = item1['ssdivine']
+            if quantity <= 0:
+                await ctx.send("You cannot purchase this: Sold Out!")
+                return
+
+            await self.bot.pool.execute(
+                'UPDATE profile SET ssdivine = ssdivine - 1 WHERE "user"=$1;',
+                ctx.author.id
+            )
+
+            await self.bot.pool.execute(
+                'UPDATE profile SET bones = bones - 2900 WHERE "user"=$1;',
+                ctx.author.id
+            )
+
+            await self.bot.pool.execute(
+                'UPDATE profile SET crates_divine= crates_divine + 1 WHERE "user"=$1;',
+                ctx.author.id
+            )
+            await ctx.send("You have successfully purchased a <:f_divine:1169412814612471869>for 2900 Bones!")
+
+
+        if item == 7:
             if bones_count < 650:
                 await ctx.send("You cannot afford this")
                 return
@@ -375,7 +445,7 @@ class Halloween(commands.Cog):
             await ctx.send("You have successfully purchased a Seasonal Background for 650 Bones!")
             await ctx.send("You can find it in $eventbackgrounds")
 
-        if item == 6:
+        if item == 8:
             if bones_count < 1000:
                 await ctx.send("You cannot afford this")
                 return
@@ -405,7 +475,7 @@ class Halloween(commands.Cog):
             await ctx.send("You have successfully purchased the Seasonal Class for 1000 Bones!")
             await ctx.send("You can find it in $class")
 
-        if item == 7:
+        if item == 9:
             if bones_count < 200:
                 await ctx.send("You cannot afford this")
                 return
@@ -434,7 +504,7 @@ class Halloween(commands.Cog):
             )
             await ctx.send("You have successfully purchased a Weapon Type token for 200 Bones!")
 
-        if item == 8:
+        if item == 10:
             if bones_count < 200:
                 await ctx.send("You cannot afford this")
                 return
@@ -506,15 +576,15 @@ class Halloween(commands.Cog):
             )
         mytry = random.randint(1, 100)
         if mytry == 1:
-            minstat, maxstat = 42, 50
+            minstat, maxstat = 55, 75
         elif mytry < 10:
-            minstat, maxstat = 30, 41
+            minstat, maxstat = 42, 55
         elif mytry < 30:
-            minstat, maxstat = 20, 29
+            minstat, maxstat = 38, 42
         elif mytry < 50:
-            minstat, maxstat = 10, 19
+            minstat, maxstat = 25, 38
         else:
-            minstat, maxstat = 1, 9
+            minstat, maxstat = 10, 25
         item = await self.bot.create_random_item(
             minstat=minstat,
             maxstat=maxstat,
@@ -592,7 +662,6 @@ class Halloween(commands.Cog):
             description=_("You found a new item when opening a trick-or-treat bag!"),
             color=self.bot.config.game.primary_colour,
         )
-        embed.set_thumbnail(url=ctx.author.display_avatar.url)
         embed.add_field(name=_("Name"), value=item["name"], inline=False)
         embed.add_field(name=_("Element"), value=item["element"], inline=False)
         embed.add_field(name=_("Type"), value=item["type_"], inline=False)

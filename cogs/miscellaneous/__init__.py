@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,13 +16,16 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-
 import asyncio
 import datetime
 import json
 import requests
 from io import BytesIO
+
+from discord.ext.commands import CommandError
+
+from classes.classes import from_string as class_from_string
+
 from moviepy.editor import AudioFileClip, ImageClip
 import pytesseract
 import os
@@ -96,6 +99,130 @@ class Miscellaneous(commands.Cog):
                 raise ImgurUploadError()
         return short_url
 
+    async def generate_and_send_speech(self, interaction, text, voice):
+        url = "https://api.openai.com/v1/audio/speech"
+        OPENAI_KEY = self.bot.config.external.openai
+
+        headers = {
+            "Authorization": f"Bearer {OPENAI_KEY}",
+            "Content-Type": "application/json"
+        }
+        data = {
+            "model": "tts-1-hd",
+            "input": text,
+            "voice": voice.lower()
+        }
+
+        response = requests.post(url, headers=headers, json=data)
+        if response.status_code == 200:
+            audio_bytes = BytesIO(response.content)
+            audio_file_path = 'output_audio.mp3'
+            with open(audio_file_path, 'wb') as f:
+                f.write(audio_bytes.getbuffer())
+
+            audio_clip = AudioFileClip(audio_file_path)
+            image_clip = ImageClip('black_image.png', duration=audio_clip.duration)
+            video = image_clip.set_audio(audio_clip)
+            video_file_path = 'output_video.mp4'
+            video.write_videofile(video_file_path, codec="libx264", fps=24)
+
+            await interaction.followup.send(file=discord.File(video_file_path))
+        else:
+            await interaction.followup.send(f"Error: {response.status_code} - {response.text}")
+
+
+    @has_char()
+    @user_cooldown(1)
+    @locale_doc
+    @commands.command()
+    async def all(self, ctx):
+        _(
+            """Automatically invokes several daily commands for you.
+
+        This command will attempt to run several of your daily or periodic commands such as `vote`, `daily`, `donatordaily`, `steal`, `date`, `pray`, and `familyevent` in one go, if they are not on cooldown.
+
+        Usage:
+          `$all`
+
+        Note:
+        - Commands that are on cooldown will be skipped, and you'll be notified when you can use them again.
+        - If you are a Thief class, it will attempt to use `steal` as well.
+        - This command itself has a cooldown of 1 second."""
+        )
+
+        try:
+            # Define the commands and their respective cooldowns (in seconds)
+            cooldowns = {
+                'vote': 12 * 3600,  # 12 hours
+                'daily': self.time_until_midnight(),  # Daily reset
+                'donatordaily': self.time_until_midnight(),  # Daily reset
+                'steal': 60 * 60,  # 1 hour
+                'date': 12 * 3600,  # 12 hours
+                'pray': self.time_until_midnight(),  # Daily reset
+                'familyevent': 30 * 60,  # 30 minutes
+            }
+
+            character_data = await ctx.bot.pool.fetchrow(
+                'SELECT * FROM profile WHERE "user"=$1;', ctx.author.id
+            )
+
+            if character_data["tier"] < 1:
+                await ctx.send("You do not have access to this command.")
+                return
+
+            tasks = []  # To gather tasks for concurrent execution
+
+            for command_name, cooldown_duration in cooldowns.items():
+                command = self.bot.get_command(command_name)
+
+                if command is not None:
+                    command_ttl = await ctx.bot.redis.execute_command(
+                        "TTL", f"cd:{ctx.author.id}:{command.qualified_name}"
+                    )
+
+                    if command_ttl == -2:  # No cooldown exists
+                        if command_name == 'steal':
+                            # Check if the user is a Thief
+                            user_classes = [class_from_string(c) for c in character_data["class"]]
+                            if any(type(c).__name__ == 'Thief' for c in user_classes):
+                                tasks.append(ctx.invoke(command))
+                                await ctx.bot.redis.execute_command(
+                                    "SET", f"cd:{ctx.author.id}:{command.qualified_name}",
+                                    command.qualified_name,
+                                    "EX", cooldown_duration
+                                )
+                            else:
+                                await ctx.send(_("You need to be a Thief to use the steal command."))
+                        else:
+                            # Invoke the command and set the new cooldown
+                            tasks.append(ctx.invoke(command))
+                            await ctx.bot.redis.execute_command(
+                                "SET", f"cd:{ctx.author.id}:{command.qualified_name}",
+                                command.qualified_name,
+                                "EX", cooldown_duration
+                            )
+                    else:
+                        # Inform the user that the command is on cooldown
+                        await ctx.send(
+                            f"{command_name} is on cooldown. Try again in {self.format_time(command_ttl)}."
+                        )
+
+            # Execute all the tasks concurrently
+            if tasks:  # Only gather if there are tasks
+                await asyncio.gather(*tasks)
+
+        except Exception as e:
+            await ctx.send(str(e))
+
+    def format_time(self, seconds):
+        """Convert seconds to HH:MM:SS format."""
+        hours, remainder = divmod(seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
+
+    def time_until_midnight(self):
+        """Calculate the number of seconds until the next midnight UTC."""
+        return int(86400 - (time.time() % 86400))
 
     @has_char()
     @next_day_cooldown()
@@ -144,93 +271,656 @@ class Miscellaneous(commands.Cog):
 
             (This command has a cooldown until 12am UTC.)"""
         )
-        streak = await self.bot.redis.execute_command(
-            "INCR", f"idle:daily:{ctx.author.id}"
-        )
-        await self.bot.redis.execute_command(
-            "EXPIRE", f"idle:daily:{ctx.author.id}", 48 * 60 * 60
-        )  # 48h: after 2 days, they missed it
-        money = 2 ** ((streak + 9) % 10) * 50
-        # Either money or crates
-        if random.randint(0, 2) > 0:
+
+        try:
+            streak = await self.bot.redis.execute_command(
+                "INCR", f"idle:daily:{ctx.author.id}"
+            )
+            await self.bot.redis.execute_command(
+                "EXPIRE", f"idle:daily:{ctx.author.id}", 48 * 60 * 60
+            )  # 48h: after 2 days, they missed it
             money = 2 ** ((streak + 9) % 10) * 50
-            # Silver = 1.5x
-            if await user_is_patron(self.bot, ctx.author, "silver"):
-                money = round(money * 1.5)
+            # Either money or crates
+            if random.randint(0, 2) > 0:
+                money = 2 ** ((streak + 9) % 10) * 50
+                # Silver = 1.5x
+                if await user_is_patron(self.bot, ctx.author, "silver"):
+                    money = round(money * 1.5)
 
-            result = await self.bot.pool.fetchval('SELECT tier FROM profile WHERE "user" = $1;', ctx.author.id)
+                result = await self.bot.pool.fetchval('SELECT tier FROM profile WHERE "user" = $1;', ctx.author.id)
 
-            if result >= 3:
-                money = round(money * 3)
+                if result >= 3:
+                    money = round(money * 3)
 
-            async with self.bot.pool.acquire() as conn:
-                await conn.execute(
-                    'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
-                    money,
-                    ctx.author.id,
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                        money,
+                        ctx.author.id,
+                    )
+
+                    await self.bot.log_transaction(
+                        ctx,
+                        from_=1,
+                        to=ctx.author.id,
+                        subject="daily",
+                        data={"Gold": money},
+                        conn=conn,
+                    )
+                txt = f"**${money}**"
+            else:
+                num = round(((streak + 9) % 10 + 1) / 2)
+                amt = random.randint(1, 6 - num)
+                types = [
+                    "common",
+                    "uncommon",
+                    "rare",
+                    "magic",
+                    "legendary",
+                    "common",
+                    "common",
+                    "common",
+                ]  # Trick for -1
+                type_ = random.choice(
+                    [types[num - 3]] * 80 + [types[num - 2]] * 19 + [types[num - 1]] * 1
                 )
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        f'UPDATE profile SET "crates_{type_}"="crates_{type_}"+$1 WHERE'
+                        ' "user"=$2;',
+                        amt,
+                        ctx.author.id,
+                    )
+                    await self.bot.log_transaction(
+                        ctx,
+                        from_=1,
+                        to=ctx.author.id,
+                        subject="crates",
+                        data={"Rarity": type_, "Amount": amt},
+                        conn=conn,
+                    )
+                txt = f"**{amt}** {getattr(self.bot.cogs['Crates'].emotes, type_)}"
 
-                await self.bot.log_transaction(
-                    ctx,
-                    from_=1,
-                    to=ctx.author.id,
-                    subject="daily",
-                    data={"Gold": money},
-                    conn=conn,
-                )
-            txt = f"**${money}**"
-        else:
-            num = round(((streak + 9) % 10 + 1) / 2)
-            amt = random.randint(1, 6 - num)
-            types = [
-                "common",
-                "uncommon",
-                "rare",
-                "magic",
-                "legendary",
-                "common",
-                "common",
-                "common",
-            ]  # Trick for -1
-            type_ = random.choice(
-                [types[num - 3]] * 80 + [types[num - 2]] * 19 + [types[num - 1]] * 1
+            if ctx.guild == 969741725931298857:
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        'UPDATE profile SET "freeimage"=$1 WHERE "user"=$2;',
+                        3,
+                        ctx.author.id,
+                    )
+
+            await ctx.send(
+                _(
+                    "You received your daily {txt}!\nYou are on a streak of **{streak}**"
+                    " days!\n*Tip: `{prefix}vote` every 12 hours to get an up to legendary"
+                    " crate with possibly rare items!*"
+                ).format(txt=txt, money=money, streak=streak, prefix=ctx.clean_prefix)
             )
-            async with self.bot.pool.acquire() as conn:
-                await conn.execute(
-                    f'UPDATE profile SET "crates_{type_}"="crates_{type_}"+$1 WHERE'
-                    ' "user"=$2;',
-                    amt,
-                    ctx.author.id,
-                )
-                await self.bot.log_transaction(
-                    ctx,
-                    from_=1,
-                    to=ctx.author.id,
-                    subject="crates",
-                    data={"Rarity": type_, "Amount": amt},
-                    conn=conn,
-                )
-            txt = f"**{amt}** {getattr(self.bot.cogs['Crates'].emotes, type_)}"
+        except Exception as e:
+            import traceback
+            error_message = f"Error occurred: {e}\n"
+            error_message += traceback.format_exc()
+            await ctx.send(error_message)
+            print(error_message)
 
-        async with self.bot.pool.acquire() as conn:
-            await conn.execute(
-                'UPDATE profile SET "freeimage"=$1 WHERE "user"=$2;',
-                3,
-                ctx.author.id,
-            )
+    def read_challenges_from_file(self, filename):
+        with open(filename, 'r') as file:
+            challenges = file.readlines()
+        return [challenge.strip() for challenge in challenges]  # Strip newline characters
 
-        await ctx.send(
-            _(
-                "You received your daily {txt} and 3 free images!\nYou are on a streak of **{streak}**"
-                " days!\n*Tip: `{prefix}vote` every 12 hours to get an up to legendary"
-                " crate with possibly rare items!*"
-            ).format(txt=txt, money=money, streak=streak, prefix=ctx.clean_prefix)
+
+    @is_gm()
+    @commands.command(hidden=True, name="challenges")
+    async def send_challenges(self, ctx):
+        try:
+            challenges = self.read_challenges_from_file("challenges.txt")  # Read challenges from file
+            selected_challenges = random.sample(challenges, 6)  # Select 6 random challenges
+            response = "\n".join(selected_challenges)
+
+            await ctx.author.send(f"Here are 6 random challenges for you:\n{response}")
+        except Exception as e:
+            await ctx.send(e)
+
+    @user_cooldown(5)
+    @locale_doc
+    @commands.command(brief="Hug someone with a cute GIF!")
+    async def hug(self, ctx, user: discord.Member):
+        _(
+            """`<user>` - The member to hug.
+
+        Send a virtual hug to another member! This command fetches a random hug GIF and displays it along with a message mentioning both you and the user.
+
+        Usage:
+          `$hug @username`
+
+        Note:
+        - You cannot hug yourself.
+        - This command has a cooldown of 5 seconds."""
         )
+
+        try:
+
+            if user == ctx.author:
+                await ctx.send("That's.. uh.. that's pretty sad.")
+                return
+
+            async with aiohttp.ClientSession() as session:
+                # Replace 'YOUR_GIPHY_API_KEY' with your Giphy API key
+                async with session.get(
+                        f"https://api.giphy.com/v1/gifs/search?api_key=VYSGSDAzA8X0PPWf252QMdG5wvvDyJG2&q=hug&limit=20&rating=pg") as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        gif_url = random.choice(data['data'])['images']['original']['url']
+                    else:
+                        gif_url = None
+
+            if gif_url:
+                embed = discord.Embed(description=f"{ctx.author.mention} hugs {user.mention} 🤗")
+                embed.set_image(url=gif_url)
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("Couldn't fetch a hug GIF at the moment!")
+        except Exception as e:
+            await ctx.send(e)
+
+    @user_cooldown(5)
+    @commands.command(brief="Kiss someone with a cute GIF!")
+    @locale_doc
+    async def kiss(self, ctx, user: discord.Member):
+        _(
+            """`<user>` - The member to kiss.
+
+        Give someone a virtual kiss! This command fetches a random kiss GIF and displays it along with a message mentioning both you and the user.
+
+        Usage:
+          `$kiss @username`
+
+        Note:
+        - You cannot kiss yourself.
+        - This command has a cooldown of 5 seconds."""
+        )
+
+        try:
+            if user == ctx.author:
+                await ctx.send("Kissing yourself? That's interesting...")
+                return
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                        f"https://api.giphy.com/v1/gifs/search?api_key=VYSGSDAzA8X0PPWf252QMdG5wvvDyJG2&q=kiss&limit=20&rating=pg") as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        gif_url = random.choice(data['data'])['images']['original']['url']
+                    else:
+                        gif_url = None
+
+            if gif_url:
+                embed = discord.Embed(description=f"{ctx.author.mention} kisses {user.mention} 😘")
+                embed.set_image(url=gif_url)
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("Couldn't fetch a kiss GIF at the moment!")
+        except Exception as e:
+            await ctx.send(e)
+
+    @user_cooldown(5)
+    @commands.command(brief="Pat someone with a cute GIF!")
+    @locale_doc
+    async def pat(self, ctx, user: discord.Member):
+        _(
+            """`<user>` - The member to pat.
+
+        Pat someone on the head virtually! This command fetches a random pat GIF and displays it along with a message mentioning both you and the user.
+
+        Usage:
+          `$pat @username`
+
+        Note:
+        - You cannot pat yourself.
+        - This command has a cooldown of 5 seconds."""
+        )
+
+        try:
+            if user == ctx.author:
+                await ctx.send("Self-pats are good for self-care!")
+                return
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                        f"https://api.giphy.com/v1/gifs/search?api_key=VYSGSDAzA8X0PPWf252QMdG5wvvDyJG2&q=pat&limit=20&rating=pg") as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        gif_url = random.choice(data['data'])['images']['original']['url']
+                    else:
+                        gif_url = None
+
+            if gif_url:
+                embed = discord.Embed(description=f"{ctx.author.mention} pats {user.mention} 😊")
+                embed.set_image(url=gif_url)
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("Couldn't fetch a pat GIF at the moment!")
+        except Exception as e:
+            await ctx.send(e)
+
+    @user_cooldown(5)
+    @commands.command(brief="Slap someone with a GIF!")
+    @locale_doc
+    async def slap(self, ctx, user: discord.Member):
+        _(
+            """`<user>` - The member to slap.
+
+        Slap another member virtually! This command fetches a random slap GIF and displays it along with a message mentioning both you and the user.
+
+        Usage:
+          `$slap @username`
+
+        Note:
+        - You cannot slap yourself.
+        - This command has a cooldown of 5 seconds."""
+        )
+
+        try:
+            if user == ctx.author:
+                await ctx.send("Slapping yourself? That doesn't seem healthy!")
+                return
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                        f"https://api.giphy.com/v1/gifs/search?api_key=VYSGSDAzA8X0PPWf252QMdG5wvvDyJG2&q=slap&limit=20&rating=pg") as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        gif_url = random.choice(data['data'])['images']['original']['url']
+                    else:
+                        gif_url = None
+
+            if gif_url:
+                embed = discord.Embed(description=f"{ctx.author.mention} slaps {user.mention} 😡")
+                embed.set_image(url=gif_url)
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("Couldn't fetch a slap GIF at the moment!")
+        except Exception as e:
+            await ctx.send(e)
+
+    @user_cooldown(5)
+    @commands.command(brief="Give someone a high five!")
+    @locale_doc
+    async def highfive(self, ctx, user: discord.Member):
+        _(
+            """`<user>` - The member to high-five.
+
+        Give a virtual high-five to another member! This command fetches a random high-five GIF and displays it along with a message mentioning both you and the user.
+
+        Usage:
+          `$highfive @username`
+
+        Note:
+        - You cannot high-five yourself.
+        - This command has a cooldown of 5 seconds."""
+        )
+
+        try:
+            if user == ctx.author:
+                await ctx.send("You can't high-five yourself... or can you?")
+                return
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                        f"https://api.giphy.com/v1/gifs/search?api_key=VYSGSDAzA8X0PPWf252QMdG5wvvDyJG2&q=highfive&limit=20&rating=pg") as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        gif_url = random.choice(data['data'])['images']['original']['url']
+                    else:
+                        gif_url = None
+
+            if gif_url:
+                embed = discord.Embed(description=f"{ctx.author.mention} gives {user.mention} a high five! 🙌")
+                embed.set_image(url=gif_url)
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("Couldn't fetch a high five GIF at the moment!")
+        except Exception as e:
+            await ctx.send(e)
+
+    @user_cooldown(5)
+    @commands.command(brief="Wave at someone with a GIF!")
+    @locale_doc
+    async def wave(self, ctx, user: discord.Member):
+        _(
+            """`<user>` - The member to wave at.
+
+        Wave at someone with a friendly GIF! This command fetches a random wave GIF and displays it along with a message mentioning both you and the user.
+
+        Usage:
+          `$wave @username`
+
+        Note:
+        - You cannot wave at yourself.
+        - This command has a cooldown of 5 seconds."""
+        )
+
+        try:
+            if user == ctx.author:
+                await ctx.send("Waving at yourself? That's a bit awkward...")
+                return
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                        f"https://api.giphy.com/v1/gifs/search?api_key=VYSGSDAzA8X0PPWf252QMdG5wvvDyJG2&q=wave&limit=20&rating=pg") as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        gif_url = random.choice(data['data'])['images']['original']['url']
+                    else:
+                        gif_url = None
+
+            if gif_url:
+                embed = discord.Embed(description=f"{ctx.author.mention} waves at {user.mention} 👋")
+                embed.set_image(url=gif_url)
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("Couldn't fetch a wave GIF at the moment!")
+        except Exception as e:
+            await ctx.send(e)
+
+    @user_cooldown(5)
+    @commands.command(brief="Cuddle someone with a cute GIF!")
+    @locale_doc
+    async def cuddle(self, ctx, user: discord.Member):
+        _(
+            """`<user>` - The member to cuddle.
+
+        Give someone a warm virtual cuddle! This command fetches a random cuddle GIF and displays it along with a message mentioning both you and the user.
+
+        Usage:
+          `$cuddle @username`
+
+        Note:
+        - You cannot cuddle yourself.
+        - This command has a cooldown of 5 seconds."""
+        )
+
+        try:
+            if user == ctx.author:
+                await ctx.send("Cuddling yourself? A warm blanket works too!")
+                return
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                        f"https://api.giphy.com/v1/gifs/search?api_key=VYSGSDAzA8X0PPWf252QMdG5wvvDyJG2&q=cuddle&limit=20&rating=pg") as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        gif_url = random.choice(data['data'])['images']['original']['url']
+                    else:
+                        gif_url = None
+
+            if gif_url:
+                embed = discord.Embed(description=f"{ctx.author.mention} cuddles {user.mention} 🤗")
+                embed.set_image(url=gif_url)
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("Couldn't fetch a cuddle GIF at the moment!")
+        except Exception as e:
+            await ctx.send(e)
+
+    @user_cooldown(5)
+    @commands.command(brief="Poke someone gently with a cute GIF!")
+    @locale_doc
+    async def poke(self, ctx, user: discord.Member):
+        _(
+            """`<user>` - The member to poke.
+
+        Gently poke another member! This command fetches a random poke GIF and displays it along with a message mentioning both you and the user.
+
+        Usage:
+          `$poke @username`
+
+        Note:
+        - You cannot poke yourself.
+        - This command has a cooldown of 5 seconds."""
+        )
+
+        try:
+            if user == ctx.author:
+                await ctx.send("Poking yourself? That’s odd!")
+                return
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                        f"https://api.giphy.com/v1/gifs/search?api_key=VYSGSDAzA8X0PPWf252QMdG5wvvDyJG2&q=poke&limit=20&rating=pg") as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        gif_url = random.choice(data['data'])['images']['original']['url']
+                    else:
+                        gif_url = None
+
+            if gif_url:
+                embed = discord.Embed(description=f"{ctx.author.mention} pokes {user.mention} 👈")
+                embed.set_image(url=gif_url)
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("Couldn't fetch a poke GIF at the moment!")
+        except Exception as e:
+            await ctx.send(e)
+
+    @user_cooldown(5)
+    @commands.command(brief="Bite someone gently with a playful GIF!")
+    @locale_doc
+    async def bite(self, ctx, user: discord.Member):
+        _(
+            """`<user>` - The member to bite playfully.
+
+        Playfully bite someone! This command fetches a random bite GIF and displays it along with a message mentioning both you and the user.
+
+        Usage:
+          `$bite @username`
+
+        Note:
+        - You cannot bite yourself.
+        - This command has a cooldown of 5 seconds."""
+        )
+
+        try:
+            if user == ctx.author:
+                await ctx.send("Biting yourself? Ouch!")
+                return
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                        f"https://api.giphy.com/v1/gifs/search?api_key=VYSGSDAzA8X0PPWf252QMdG5wvvDyJG2&q=bite&limit=20&rating=pg") as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        gif_url = random.choice(data['data'])['images']['original']['url']
+                    else:
+                        gif_url = None
+
+            if gif_url:
+                embed = discord.Embed(description=f"{ctx.author.mention} bites {user.mention} playfully 😋")
+                embed.set_image(url=gif_url)
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("Couldn't fetch a bite GIF at the moment!")
+        except Exception as e:
+            await ctx.send(e)
+
+    @user_cooldown(5)
+    @commands.command(brief="Tickle someone with a GIF!")
+    @locale_doc
+    async def tickle(self, ctx, user: discord.Member):
+        _(
+            """`<user>` - The member to tickle.
+
+        Tickle someone and make them laugh! This command fetches a random tickle GIF and displays it along with a message mentioning both you and the user.
+
+        Usage:
+          `$tickle @username`
+
+        Note:
+        - You cannot tickle yourself.
+        - This command has a cooldown of 5 seconds."""
+        )
+
+        try:
+            if user == ctx.author:
+                await ctx.send("Tickling yourself? Doesn't quite work!")
+                return
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                        f"https://api.giphy.com/v1/gifs/search?api_key=VYSGSDAzA8X0PPWf252QMdG5wvvDyJG2&q=tickle&limit=20&rating=pg") as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        gif_url = random.choice(data['data'])['images']['original']['url']
+                    else:
+                        gif_url = None
+
+            if gif_url:
+                embed = discord.Embed(description=f"{ctx.author.mention} tickles {user.mention} 😂")
+                embed.set_image(url=gif_url)
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("Couldn't fetch a tickle GIF at the moment!")
+        except Exception as e:
+            await ctx.send(e)
+
+    @user_cooldown(5)
+    @commands.command(brief="Nuzzle someone affectionately!")
+    @locale_doc
+    async def nuzzle(self, ctx, user: discord.Member):
+        _(
+            """`<user>` - The member to nuzzle.
+
+        Affectionately nuzzle someone! This command fetches a random nuzzle GIF and displays it along with a message mentioning both you and the user.
+
+        Usage:
+          `$nuzzle @username`
+
+        Note:
+        - You cannot nuzzle yourself.
+        - This command has a cooldown of 5 seconds."""
+        )
+
+        try:
+            if user == ctx.author:
+                await ctx.send("Nuzzling yourself? That's an interesting form of self-love!")
+                return
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                        f"https://api.giphy.com/v1/gifs/search?api_key=VYSGSDAzA8X0PPWf252QMdG5wvvDyJG2&q=nuzzle&limit=20&rating=pg") as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        gif_url = random.choice(data['data'])['images']['original']['url']
+                    else:
+                        gif_url = None
+
+            if gif_url:
+                embed = discord.Embed(description=f"{ctx.author.mention} nuzzles {user.mention} 😽")
+                embed.set_image(url=gif_url)
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("Couldn't fetch a nuzzle GIF at the moment!")
+        except Exception as e:
+            await ctx.send(e)
+
+
+    @user_cooldown(5)
+    @commands.command(brief="Lick someone!")
+    @locale_doc
+    async def lick(self, ctx, user: discord.Member):
+        _(
+            """`<user>` - The member to lick.
+
+        Lick someone playfully! This command fetches a random lick GIF and displays it along with a message mentioning both you and the user.
+
+        Usage:
+          `$lick @username`
+
+        Note:
+        - You cannot lick yourself.
+        - This command has a cooldown of 5 seconds."""
+        )
+
+        try:
+            if user == ctx.author:
+                await ctx.send("Licking yourself? Weirdo.")
+                return
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                        f"https://api.giphy.com/v1/gifs/search?api_key=VYSGSDAzA8X0PPWf252QMdG5wvvDyJG2&q=lick-face&limit=20&rating=pg") as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        gif_url = random.choice(data['data'])['images']['original']['url']
+                    else:
+                        gif_url = None
+
+            if gif_url:
+                embed = discord.Embed(description=f"{ctx.author.mention} licks {user.mention} ewww.")
+                embed.set_image(url=gif_url)
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("Couldn't fetch a lick GIF at the moment!")
+        except Exception as e:
+            await ctx.send(e)
+
+
+    @user_cooldown(5)
+    @commands.command(brief="Punch someone with a GIF!")
+    @locale_doc
+    async def punch(self, ctx, user: discord.Member):
+        _(
+            """`<user>` - The member to punch.
+
+        Deliver a virtual punch to someone! This command fetches a random punch GIF and displays it along with a message mentioning both you and the user.
+
+        Usage:
+          `$punch @username`
+
+        Note:
+        - You cannot punch yourself.
+        - This command has a cooldown of 5 seconds."""
+        )
+
+        try:
+            if user == ctx.author:
+                await ctx.send("Punching yourself? That's not a good idea!")
+                return
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                        f"https://api.giphy.com/v1/gifs/search?api_key=VYSGSDAzA8X0PPWf252QMdG5wvvDyJG2&q=punch&limit=20&rating=pg") as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        gif_url = random.choice(data['data'])['images']['original']['url']
+                    else:
+                        gif_url = None
+
+            if gif_url:
+                embed = discord.Embed(description=f"{ctx.author.mention} punches {user.mention}! 👊")
+                embed.set_image(url=gif_url)
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("Couldn't fetch a punch GIF at the moment!")
+        except Exception as e:
+            await ctx.send(e)
 
     @has_char()
     @commands.command(brief=_("Roll"))
     @locale_doc
     async def roll(self, ctx):
+        _(
+            """Send a rolling bread (🥖) emoji.
+
+        Use this command to get a random roll (of bread)!
+
+        Usage:
+          `$roll`
+
+        Note:
+        - This is a fun command with no cooldown."""
+        )
+
         await ctx.send("🥖")
 
     @has_char()
@@ -255,29 +945,6 @@ class Miscellaneous(commands.Cog):
                 streak=streak.decode()
             )
         )
-
-    @commands.command(aliases=["shorten"], brief=_("Shorten an image URL."))
-    @locale_doc
-    async def imgur(self, ctx, given_url: ImageUrl(ImageFormat.all) = None):
-        _(
-            """`[given_url]` - The URL to shorten; if not given, this command will look for image attachments
-
-            Get a short URL from a long one or an image attachment.
-
-            If both a URL and an attachment is given, the attachment is preferred. GIFs are not supported, only JPG and PNG.
-            In case this command fails, you can [manually upload your image to Imgur](https://imgur.com/upload)."""
-        )
-        if not given_url and not ctx.message.attachments:
-            return await ctx.send(_("Please supply a URL or an image attachment"))
-        if ctx.message.attachments:
-            if len(ctx.message.attachments) > 1:
-                return await ctx.send(_("Please only use one image at a time."))
-            given_url = await ImageUrl(ImageFormat.all).convert(
-                ctx, ctx.message.attachments[0].url
-            )
-
-        link = await self.get_imgur_url(given_url)
-        await ctx.send(_("Here's your short image URL: <{link}>").format(link=link))
 
     @commands.command(aliases=["donate"], brief=_("Support the bot financially"))
     @locale_doc
@@ -319,7 +986,7 @@ Even $1 can help us.
         )
         await ctx.send("IdleRPG - AGPLv3+\nhttps://git.travitia.xyz/Kenvyra/IdleRPG")
 
-        await ctx.send("Fable - AGPLv3+\nhttps://github.com/PrototypeX37/FableRPG/")
+        await ctx.send("Fable - AGPLv3+\nhttps://github.com/prototypeX37/FableRPG-")
 
     @commands.command(brief=_("Invite the bot to your server."))
     @locale_doc
@@ -338,43 +1005,64 @@ Even $1 can help us.
             ).format(version=self.bot.version)
         )
 
+
+    def is_gm_predicate(self):
+        """Utility function to identify the is_gm check."""
+
+        async def predicate(ctx):
+            raise CommandError("is_gm check")
+
+        return predicate
+
     @commands.command()
+    @locale_doc
     async def allcommands(self, ctx):
-        """Displays all available commands."""
-        # Assuming static prefix '!'
+        _("""Displays all available commands categorized by their cogs, excluding commands with the @is_gm() decorator.""")
+        # Assuming static prefix '$'
         prefix = '$'
         try:
-            # Collect all commands and format them
-            all_commands = [f"{prefix}{cmd.name}" for cmd in self.bot.commands if not cmd.hidden]
-            all_commands_text = "\n".join(all_commands)
+            await ctx.send("Please wait while I gather that information for you..")
+            # Initialize a dictionary to store commands by cog
+            cog_commands = {}
+
+            # Iterate over all commands in the bot
+            for cmd in self.bot.commands:
+                if not cmd.hidden and all(
+                        pred.__name__ != "is_gm" for pred in cmd.checks):  # Exclude commands with is_gm check
+                    # Get the cog name or categorize as 'No Category' if not in a cog
+                    cog_name = cmd.cog_name or "No Category"
+                    if cog_name == "GameMaster":
+                        continue
+
+                    if cog_name not in cog_commands:
+                        cog_commands[cog_name] = []
+
+                    # Add the command to the appropriate cog category
+                    cog_commands[cog_name].append(f"{prefix}{cmd.name}")
 
             # Define the maximum length of a message accounting for markdown characters
             max_length = 2000 - len("```\n```")  # Deduct the length of markdown characters used for formatting
 
-            # Initialize an empty string for the message chunk
-            chunk = ""
+            # Iterate over each cog and its commands, and send them in chunks
+            for cog, commands in cog_commands.items():
+                chunk = f"**{cog}**\n"  # Start with the cog name
 
-            # Iterate over each command and construct message chunks
-            for command in all_commands:
-                # Check if adding this command will exceed the max length
-                if len(chunk) + len(command) + 1 > max_length:  # +1 accounts for newline character
-                    # Send the current chunk and reset it
+                for command in commands:
+                    # Check if adding this command will exceed the max length
+                    if len(chunk) + len(command) + 1 > max_length:  # +1 for newline character
+                        # Send the current chunk and reset it
+                        await ctx.send(f"```\n{chunk}\n```")
+                        chunk = f"**{cog}**\n"  # Reset with the cog name
+
+                    # Add the command to the chunk
+                    chunk += f"{command}\n"
+
+                # Send any remaining commands in the last chunk
+                if chunk.strip():
                     await ctx.send(f"```\n{chunk}\n```")
-                    chunk = ""
-
-                # Add the command to the chunk
-                chunk += f"{command}\n"
-
-            # Send any remaining commands in the last chunk
-            if chunk:
-                await ctx.send(f"```\n{chunk}\n```")
 
         except Exception as e:
-            # Send any exceptions that occur
-            await ctx.send(str(e))
-
-
-
+            await ctx.send(f"An error occurred: {str(e)}")
 
     @commands.command(brief=_("Shows statistics about the bot"))
     @locale_doc
@@ -495,9 +1183,20 @@ Average hours of work: **{hours}**"""
 
     @commands.command()
     @has_char()
+    @locale_doc
     async def credits(self, ctx):
-        if ctx.guild.id != 969741725931298857:
-            return
+        _(
+            """Check your remaining image generation credits.
+
+        This command shows how many free images you have left and your current balance of image credits.
+
+        Usage:
+          `$credits`
+
+        Note:
+        - Image credits are used for generating images with certain commands."""
+        )
+
         creditss = ctx.character_data["imagecredits"]
         freecredits = ctx.character_data["freeimage"]
 
@@ -507,11 +1206,27 @@ Average hours of work: **{hours}**"""
     @commands.command()
     @has_char()
     @user_cooldown(60)
+    @locale_doc
     async def imagine(self, ctx, *, prompt):
+        _(
+            """`<prompt>` - The text prompt describing the image you want to generate.
 
+        Generate an image based on your text prompt using AI.
 
-        if ctx.guild.id != 969741725931298857:
-            return
+        Usage:
+          `$imagine a sunset over the mountains`
+
+        Note:
+        - This command uses image credits. You have a limited number of free images per day, after which generating images will cost in-game currency.
+        - The prompt should not exceed 120 characters.
+        - This command has a cooldown of 60 seconds."""
+        )
+
+        if ctx.author.id != 295173706496475136:
+            if ctx.author.id != 698612238549778493:
+
+                if ctx.guild.id != 969741725931298857:
+                    return
         creditss = ctx.character_data["imagecredits"]
         freecredits = ctx.character_data["freeimage"]
         # await ctx.send(f"{credits}")
@@ -573,9 +1288,23 @@ Average hours of work: **{hours}**"""
     @commands.command()
     @user_cooldown(80)
     @has_char()
+    @locale_doc
     async def imaginebig(self, ctx, *, prompt):
-        if ctx.guild.id != 969741725931298857:
-            return
+        _(
+            """`<prompt>` - The text prompt describing the high-resolution image you want to generate.
+
+        Generate a high-definition image based on your text prompt using AI.
+
+        Usage:
+          `$imaginebig a detailed cityscape at night`
+
+        Note:
+        - This command costs more image credits than the standard `imagine` command.
+        - You must have enough image credits to use this command.
+        - The prompt should not exceed 120 characters.
+        - This command has a cooldown of 80 seconds."""
+        )
+
         creditss = ctx.character_data["imagecredits"]
         freecredits = ctx.character_data["freeimage"]
         # await ctx.send(f"{credits}")
@@ -591,11 +1320,11 @@ Average hours of work: **{hours}**"""
 
         try:
             if ctx.author.id != 295173706496475136:
-                if ctx.author.id != 598004694060892183:
+                if ctx.author.id != 698612238549778493:
                     if len(prompt) > 120:
                         return await ctx.send("The prompt cannot exceed 120 characters.")
             await ctx.send("Generating HD image, please wait. (This can take up to 2 minutes.)")
-            client = AsyncOpenAI(api_key="redacted")
+            client = AsyncOpenAI(api_key="")
             response = await client.images.generate(
                 model="dall-e-3",
                 prompt=prompt,
@@ -621,11 +1350,33 @@ Average hours of work: **{hours}**"""
             await ctx.send(f"An error has occurred")
 
     @commands.command(name='talk', help='Ask ChatGPT a question!')
+    @locale_doc
     async def talk(self, ctx, *, question):
+        _(
+            """`<question>` - The message or question you want to ask.
+
+        Chat with the AI assistant. This command allows you to have a conversation with the bot.
+
+        Usage:
+          `$talk How are you today?`
+
+        Note:
+        - Your conversation history is maintained during the session.
+        - Use `$wipe` to clear your conversation history.
+        - Please adhere to the community guidelines when using this command."""
+        )
+
         # Check if the command is invoked in one of the allowed channels
 
-        if ctx.guild.id != 969741725931298857:
-            return
+        if ctx.author.id != 295173706496475136:
+            if ctx.author.id != 698612238549778493:
+                if ctx.guild:
+                    if ctx.guild.id not in [969741725931298857, 1285448244859764839]:
+                        return
+                else:
+                    if ctx.author.id != 500713532111716365:
+                        return
+
         user_id = ctx.author.id
 
         # Add the user's new message to their conversation history
@@ -651,23 +1402,59 @@ Average hours of work: **{hours}**"""
         for chunk in self.split_message(response):
             await ctx.send(chunk)
 
-    from discord.ext import commands
 
 
     @commands.command()
+    @locale_doc
     async def cookie(self, ctx, target_member: discord.Member):
+        _(
+            """`<user>` - The member to give a cookie to.
+
+        Give a virtual cookie to another member!
+
+        Usage:
+          `$cookie @username`
+
+        Note:
+        - This is a fun command to share some sweetness."""
+        )
+
         await ctx.send(
             f"**{target_member.display_name}**, you've been given a cookie by **{ctx.author.display_name}**. 🍪")
 
+    @locale_doc
     @commands.command()
     async def ice(self, ctx, target_member: discord.Member):
+        _(
+            """`<user>` - The member to give ice cream to.
+
+        Share some virtual ice cream with someone!
+
+        Usage:
+          `$ice @username`
+
+        Note:
+        - This is a fun command to share some treats."""
+        )
+
         await ctx.send(
             f"{target_member.mention}, here is your ice: 🍨!")
 
+    @locale_doc
     @commands.command(name='wipe', help='Clear your conversation history with the bot.')
     async def clear_memory(self, ctx):
-        if ctx.guild.id != 969741725931298857:
-            return
+        _(
+            """Clear your conversation history with the AI assistant.
+
+        Use this command to reset your conversation with the bot.
+
+        Usage:
+          `$wipe`
+
+        Note:
+        - This will delete your current conversation history with the `talk` command."""
+        )
+
         user_id = ctx.author.id
         if user_id in self.conversations:
             del self.conversations[user_id]
@@ -691,11 +1478,11 @@ Average hours of work: **{hours}**"""
     async def get_gpt_response_async(self, conversation_history):
         url = "https://api.openai.com/v1/chat/completions"
         headers = {
-            "Authorization": f"Bearer redacted",
+            "Authorization": f"Bearer ",
             "Content-Type": "application/json"
         }
         data = {
-            "model": "gpt-4o",
+            "model": "gpt-4-turbo",
             "messages": conversation_history
         }
 
@@ -707,7 +1494,29 @@ Average hours of work: **{hours}**"""
         except aiohttp.ClientError as e:
             return f"Error connecting to OpenAI: {str(e)}"
         except Exception as e:
-            return f"Unexpected error! Is the pipeline server running?"
+            return f"Unexpected error! Is the pipeline server running? {e}"
+
+    async def get_gpt_response_async2(self, conversation_history):
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer ",
+            "Content-Type": "application/json"
+        }
+        data = {
+            "model": "o1-preview",
+            "messages": conversation_history
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=data) as response:
+                    response_data = await response.json()
+                    return response_data['choices'][0]['message']['content'].strip()
+        except aiohttp.ClientError as e:
+            return f"Error connecting to OpenAI: {str(e)}"
+        except Exception as e:
+            return f"Unexpected error! Is the pipeline server running? {e}"
+
 
     @commands.command(
         aliases=["pages", "about"], brief=_("Info about the bot and related sites")

@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,7 +16,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
 import asyncio
 import datetime
 import decimal
@@ -48,7 +47,7 @@ class Lottery(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command()
+    @commands.command(hidden=True)
     @is_gm()
     async def gmlotto(self, ctx, amount: int, tickets: int):
         # Update the database with the new lottery settings
@@ -100,7 +99,7 @@ class Lottery(commands.Cog):
             await ctx.send(f"Error: {e}")
 
     @commands.command(
-        aliases=["lt"], brief=_("Shows who owns how many tickets")
+        hidden=True, aliases=["lt"], brief=_("Shows who owns how many tickets")
     )
     @is_gm()
     async def lottotickets(self, ctx):
@@ -123,7 +122,7 @@ class Lottery(commands.Cog):
         await ctx.send('\n'.join(results))
 
 
-    @commands.command()
+    @commands.command(hidden=True)
     @has_char()
     @is_gm()
     @has_char()
@@ -221,7 +220,37 @@ class Lottery(commands.Cog):
 
     @commands.command()
     @has_char()
+    @locale_doc
     async def lotto(self, ctx, subcommand=None, num_tickets: int = None):
+        _(
+            """Participate in the lottery by buying tickets or viewing lottery information.
+
+        **Usage:**
+        - `$lotto`: View current lottery settings and your tickets.
+        - `$lotto buy <num_tickets>`: Purchase lottery tickets.
+
+        **Parameters:**
+        - `[subcommand]`: Optional subcommand. Currently, only `'buy'` is supported.
+        - `[num_tickets]`: Number of tickets to buy when using the `'buy'` subcommand. Must be a positive integer.
+
+        **Details:**
+        - **Buying Tickets:**
+          - Use `$lotto buy <num_tickets>` to purchase lottery tickets.
+          - Each ticket costs a set amount defined in the current lottery settings.
+          - There is a maximum number of tickets you can purchase per player.
+          - The total cost is calculated as `num_tickets * ticket_cost`.
+          - You will be prompted for confirmation before the purchase is completed.
+          - If you do not have enough money, the purchase will be canceled.
+
+        - **Viewing Lottery Information:**
+          - Simply use `$lotto` to view the current lottery settings, your ticket count, total tickets sold, and the current prize pool.
+
+        **Notes:**
+        - If no lottery is currently running, you will be informed.
+        - **Game Masters** can start a new lottery using the `$gmlotto` command.
+        """
+        )
+
         try:
             if subcommand == 'buy':
                 # Check if there is existing lottery data
@@ -352,7 +381,7 @@ class Lottery(commands.Cog):
 
 
 
-    @commands.command()
+    @commands.command(hidden=True)
     @is_gm()
     async def gmdraw(self, ctx):
         # Fetch the current lottery settings from the database

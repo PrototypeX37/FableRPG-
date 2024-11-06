@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,7 +16,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
 import asyncio
 import datetime
 import decimal
@@ -52,8 +51,20 @@ class Shotgunroulette(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    @locale_doc
     @commands.command(aliases=['srhelp'], help='Displays how to play Shotgun Roulette')
     async def shotgunroulettehelp(self, ctx):
+        _(
+            """Display instructions on how to play Shotgun Roulette.
+
+        This command provides detailed information and rules about the Shotgun Roulette game, including explanations of the gameplay, ammunition types, items, round mechanics, and item descriptions.
+
+        Usage:
+          `$shotgunroulettehelp`
+
+        Note:
+        - Use this command if you're new to the game or need a refresher on how to play."""
+        )
 
         embed = discord.Embed(title="How to Play Shotgun Roulette",
                               description="A high-stakes game of chance and strategy for 2 players.",
@@ -562,7 +573,33 @@ class Shotgunroulette(commands.Cog):
         aliases=["sr"], hidden=True, brief=_("Shotgun Roulette")
     )
     @has_char()
+    @locale_doc
     async def shotgunroulette(self, ctx, money: IntGreaterThan(-1) = 0, enemy: discord.Member = None):
+        _(
+            """`[money]` - The amount of money to bet; must be 0 or greater.
+        `[enemy]` - The member to challenge; optional.
+
+        Start a game of Shotgun Roulette with another player.
+
+        Usage:
+          `$shotgunroulette 5000 @username`
+
+        In Shotgun Roulette, two players take turns with a shotgun, choosing to shoot themselves or their opponent. Each player starts with a random amount of HP and a set of random items that can be used strategically.
+
+        **Objective:**
+        - Reduce your opponent's HP to zero while keeping yours above zero.
+
+        **Game Mechanics:**
+        - Players take turns performing actions such as shooting or using items.
+        - Ammunition types include Blue (blanks) and Red (live) shells.
+        - Players have items like Bloodbag, Cuffs, Magnifying Glass, Beer, and Sawn Off to influence the game.
+
+        **Notes:**
+        - If no enemy is specified, an open challenge is issued.
+        - Both players must have enough money to cover the bet.
+        - You cannot challenge yourself.
+        - This command requires you to have a character."""
+        )
 
         future = None
         hptracker = {}

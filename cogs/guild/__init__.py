@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,8 +16,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-
 import asyncio
 
 from contextlib import suppress
@@ -291,7 +289,7 @@ class Guild(commands.Cog):
                 _("No image URL found in your message, using image attachment...")
             )
             icon_url = await self.bot.cogs["Miscellaneous"].get_imgur_url(file_url)
-        elif urllength > 60:
+        elif urllength > 200:
             url = await ImageUrl(ImageFormat.all_static).convert(ctx, url)
             await ctx.send(_("Image URL too long, shortening..."))
             icon_url = await self.bot.cogs["Miscellaneous"].get_imgur_url(url)
@@ -701,7 +699,7 @@ class Guild(commands.Cog):
                 _("No image URL found in your message, using image attachment...")
             )
             icon_url = await self.bot.cogs["Miscellaneous"].get_imgur_url(file_url)
-        elif urllength > 60:
+        elif urllength > 200:
             await ctx.send(_("Image URL too long, shortening..."))
             icon_url = await self.bot.cogs["Miscellaneous"].get_imgur_url(url)
         else:

@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,8 +16,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-
 import asyncio
 import os
 from collections import Counter
@@ -718,8 +716,20 @@ class Gambling(commands.Cog):
         }
         self.cards = os.listdir("assets/cards")
 
+    @locale_doc
     @commands.command(name='8ball')
     async def eight_ball(self, ctx, *, question):
+        _(
+            """`<question>` - Your question to the Magic 8-Ball.
+
+        Ask the Magic 8-Ball a question, and receive a random, playful answer. This command simulates the classic Magic 8-Ball toy, providing responses like "It is certain" or "Ask again later".
+
+        Usage:
+          `$8ball Will I pass my exam?`
+
+        This command can be used for fun or to make light-hearted decisions based on the 8-Ball's response."""
+        )
+
         try:
             responses = [
                 "It is certain.",
@@ -1057,8 +1067,19 @@ class Gambling(commands.Cog):
 
     @has_char()
     @commands.cooldown(1, 5, commands.BucketType.user)
+    @locale_doc
     @commands.command(aliases=["fc"], brief=_("Draw 5 cards."))
     async def fivecarddraw(self,ctx):
+        _(
+            """Draw five random cards from a standard 52-card deck.
+
+        Use this command to receive five random playing cards. The cards are displayed with their corresponding images. This can be used for casual games or just for fun.
+
+        Aliases:
+          - fc
+
+        This command has a cooldown of 5 seconds."""
+        )
 
         try:
             selected_cards_1 = random.sample(list(self.pokercards), 5)
@@ -1079,367 +1100,6 @@ class Gambling(commands.Cog):
             await ctx.send(error_message)
             print(error_message)
 
-    @is_gm()
-    @has_char()
-    @commands.cooldown(1, 15, commands.BucketType.user)
-    @commands.command(aliases=["betadraw"], brief=_("Draw a card. - BETA GM Only for now"))
-    @locale_doc
-    async def bdraw(
-            self, ctx, enemy: MemberWithCharacter = None, money: IntGreaterThan(-1) = 0
-    ):
-        _(
-            """`[enemy]` - A user who has a profile; defaults to None
-            `[money]` - The bet money. A whole number that can be 0 or greater; defaults to 0
-
-            Draws a random card from the 52 French playing cards. Playing Draw with someone for money is also available if the enemy is mentioned. The player with higher value of the drawn cards will win the bet money.
-
-            This command has no effect on your balance if done with no enemy mentioned.
-            (This command has a cooldown of 15 seconds.)
-            BETA DRAW - GM ONLY FOR TESTING"""
-        )
-        if enemy == ctx.me and money > 150000:
-            return await ctx.send(_("Max bet against bot is **$150000**"))
-
-        if not enemy:
-            return await ctx.send(
-                content=f"{ctx.author.mention} you drew:",
-                file=discord.File(f"assets/cards/{random.choice(self.cards)}"),
-            )
-        else:
-            if enemy == ctx.author:
-                return await ctx.send(_("Please choose someone else."))
-            # if enemy == ctx.me:
-            # return await ctx.send(_("You should choose a human to play with you."))
-
-            if ctx.character_data["money"] < money:
-                return await ctx.send(_("You are too poor."))
-
-            await self.bot.pool.execute(
-                'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
-                money,
-                ctx.author.id,
-            )
-
-            async def money_back():
-                await self.bot.pool.execute(
-                    'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
-                    money,
-                    ctx.author.id,
-                )
-                return await self.bot.reset_cooldown(ctx)
-
-            try:
-                if enemy == ctx.me:
-                    # Simulate bot confirming
-                    confirmed = True
-                else:
-                    confirmed = await ctx.confirm(
-                        _(
-                            "{author} challenges {enemy} to a game of Draw for"
-                            " **${money}**. Do you accept?"
-                        ).format(
-                            author=ctx.author.mention,
-                            enemy=enemy.mention,
-                            money=money,
-                        ),
-                        user=enemy,
-                        timeout=15,
-                    )
-
-                if not confirmed:
-                    await money_back()
-                    return await ctx.send(
-                        _(
-                            "They declined. They don't want to play a game of Draw with"
-                            " you {author}."
-                        ).format(author=ctx.author.mention)
-                    )
-            except self.bot.paginator.NoChoice:
-                await money_back()
-                return await ctx.send(
-                    _(
-                        "They didn't choose anything. It seems they're not interested"
-                        " to play a game of Draw with you {author}."
-                    ).format(author=ctx.author.mention)
-                )
-
-            if not await has_money(self.bot, enemy.id, money) and enemy != ctx.me:
-                await money_back()
-                return await ctx.send(
-                    _("{enemy} You don't have enough money to play.").format(
-                        enemy=enemy.mention
-                    )
-                )
-            if enemy == ctx.me:
-                await self.bot.pool.execute(
-                    'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
-                    money,
-                    enemy.id,
-                )
-            else:
-                await self.bot.pool.execute(
-                    'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
-                    money,
-                    enemy.id,
-                )
-
-            cards = self.cards.copy()
-            cards = random.shuffle(cards)
-            rank_values = {
-                "jack": 11,
-                "queen": 12,
-                "king": 13,
-                "ace": 14,
-            }
-
-            while True:
-                try:
-                    author_card = cards.pop()
-
-                    enemy_card = cards.pop()
-                except IndexError:
-                    return await ctx.send(
-                        _(
-                            "Cards ran out. This is a very rare issue that could mean"
-                            " image files for cards have become insufficient. Please"
-                            " report this issue to the bot developers."
-                        )
-                    )
-
-                rank1 = author_card[: author_card.find("_")]
-                rank2 = enemy_card[: enemy_card.find("_")]
-                drawn_values = [
-                    int(rank_values.get(rank1, rank1)),
-                    int(rank_values.get(rank2, rank2)),
-                ]
-
-                await ctx.send(f"{drawn_values}")
-                async with self.bot.pool.acquire() as conn:
-                    if drawn_values[0] == drawn_values[1]:
-                        await conn.execute(
-                            'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2 OR'
-                            ' "user"=$3;',
-                            money,
-                            ctx.author.id,
-                            enemy.id,
-                        )
-                        text = _("Nobody won. {author} and {enemy} tied.").format(
-                            author=ctx.author.mention,
-                            enemy=enemy.mention,
-                        )
-                    else:
-
-                        players = [ctx.author, enemy]
-
-                        winner = players[drawn_values.index(max(drawn_values))]
-                        loser = players[players.index(winner) - 1]
-                        if winner.id != 750016080302440710 and enemy.id == 750016080302440710:
-
-                            await conn.execute(
-                                'UPDATE profile SET "money" = CASE WHEN "user" = $1 THEN "money" + $2 ELSE 0 END WHERE "user" IN ($1, $3);',
-                                winner.id,
-                                money * 2,
-                                loser.id,
-                            )
-                            await self.bot.log_transaction(
-                                ctx,
-                                from_=loser.id,
-                                to=winner.id,
-                                subject="gambling",
-                                data={"Gold": money},
-                                conn=conn,
-                            )
-                            text = _(
-                                "{winner} won the Draw vs {loser}! Congratulations!1"
-                            ).format(winner=winner.mention, loser=loser.mention)
-                            await ctx.send(f"{enemy_card}, {rank1}")
-                        elif loser.id != 750016080302440710 and enemy.id == 750016080302440710:
-                            await ctx.send(f"{enemy_card}, {rank1}")
-                            await conn.execute(
-                                'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
-                                money,
-                                winner.id,
-                            )
-                            await self.bot.log_transaction(
-                                ctx,
-                                from_=loser.id,
-                                to=winner.id,
-                                subject="gambling",
-                                data={"Gold": money},
-                                conn=conn,
-                            )
-                            text = _(
-                                "{winner} won the Draw vs {loser} {rank1}! Congratulations!2"
-                            ).format(winner=winner.mention, loser=loser.mention)
-                        else:
-                            await conn.execute(
-                                'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
-                                money * 2,
-                                winner.id,
-                            )
-                            await self.bot.log_transaction(
-                                ctx,
-                                from_=loser.id,
-                                to=winner.id,
-                                subject="gambling",
-                                data={"Gold": money},
-                                conn=conn,
-                            )
-                            text = _(
-                                "{winner} won the Draw vs {loser}! Congratulations!2"
-                            ).format(winner=winner.mention, loser=loser.mention)
-                await ctx.send(f"{enemy_card}, {rank1}")
-
-                await ctx.send(
-                    content=(
-                        _("{author}, while playing against {enemy}, you drew:").format(
-                            author=ctx.author.mention, enemy=enemy.mention
-                        )
-                    ),
-                    file=discord.File(f"assets/cards/{author_card}"),
-                )
-                await ctx.send(
-                    content=(
-                        _("{enemy}, while playing against {author}, you drew:").format(
-                            enemy=enemy.mention, author=ctx.author.mention
-                        )
-                    ),
-                    file=discord.File(f"assets/cards/{enemy_card}"),
-                )
-                await ctx.send(text)
-
-                if drawn_values[0] != drawn_values[1]:
-                    break
-                else:
-                    msg = await ctx.send(
-                        content=f"{ctx.author.mention}, {enemy.mention}",
-                        embed=discord.Embed(
-                            title=_("Break the tie?"),
-                            description=_(
-                                "{author}, {enemy} You tied. Do you want to break the"
-                                " tie by playing again for **${money}**?"
-                            ).format(
-                                author=ctx.author.mention,
-                                enemy=enemy.mention,
-                                money=money,
-                            ),
-                            colour=discord.Colour.blurple(),
-                        ),
-                    )
-
-                    emoji_no = "\U0000274e"
-                    emoji_yes = "\U00002705"
-                    emojis = (emoji_no, emoji_yes)
-
-                    for emoji in emojis:
-                        await msg.add_reaction(emoji)
-
-                    def check(r, u):
-                        return (
-                                str(r.emoji) in emojis
-                                and r.message.id == msg.id
-
-                                and u in [ctx.author, enemy]
-                                and not u.bot
-                        )
-
-                    async def cleanup() -> None:
-                        with suppress(discord.HTTPException):
-                            await msg.delete()
-
-                    accept_redraws = {}
-
-                if enemy == ctx.me:
-                    await ctx.send(f"{enemy_card}, {rank1}")
-                    while len(accept_redraws) < 1:
-                        try:
-                            reaction, user = await self.bot.wait_for(
-                                "reaction_add", timeout=15, check=check
-                            )
-                        except asyncio.TimeoutError:
-                            await cleanup()
-                            return await ctx.send(
-                                _("One of you or both didn't react on time.")
-                            )
-                        else:
-                            if not (accept := bool(emojis.index(str(reaction.emoji)))):
-                                await cleanup()
-                                return await ctx.send(
-                                    _("{user} declined to break the tie.").format(
-                                        user=user.mention
-                                    )
-                                )
-                            if user.id not in accept_redraws:
-                                accept_redraws[user.id] = accept
-
-                    await cleanup()
-
-                    if not await has_money(self.bot, ctx.author.id, money):
-                        return await ctx.send(
-                            _("{author} You don't have enough money to play.").format(
-                                author=ctx.author.mention
-                            )
-                        )
-                    if not await has_money(self.bot, enemy.id, money):
-                        return await ctx.send(
-                            _("{enemy} You don't have enough money to play.").format(
-                                enemy=enemy.mention
-                            )
-                        )
-
-                    if enemy != ctx.me:
-                        await self.bot.pool.execute(
-                            'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2 OR'
-                            ' "user"=$3;',
-                            money,
-                            ctx.author.id,
-                            enemy.id,
-                        )
-                else:
-                    while len(accept_redraws) < 2:
-                        try:
-                            reaction, user = await self.bot.wait_for(
-                                "reaction_add", timeout=15, check=check
-                            )
-                        except asyncio.TimeoutError:
-                            await cleanup()
-                            return await ctx.send(
-                                _("One of you or both didn't react on time.")
-                            )
-                        else:
-                            if not (accept := bool(emojis.index(str(reaction.emoji)))):
-                                await cleanup()
-                                return await ctx.send(
-                                    _("{user} declined to break the tie.").format(
-                                        user=user.mention
-                                    )
-                                )
-                            if user.id not in accept_redraws:
-                                accept_redraws[user.id] = accept
-
-                    await cleanup()
-
-                    if not await has_money(self.bot, ctx.author.id, money):
-                        return await ctx.send(
-                            _("{author} You don't have enough money to play.").format(
-                                author=ctx.author.mention
-                            )
-                        )
-                    if not await has_money(self.bot, enemy.id, money):
-                        return await ctx.send(
-                            _("{enemy} You don't have enough money to play.").format(
-                                enemy=enemy.mention
-                            )
-                        )
-
-                    if enemy != ctx.me:
-                        await self.bot.pool.execute(
-                            'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2 OR'
-                            ' "user"=$3;',
-                            money,
-                            ctx.author.id,
-                            enemy.id,
-                        )
 
     @has_char()
     @commands.cooldown(1, 15, commands.BucketType.user)
@@ -2022,7 +1682,7 @@ This command is in an alpha-stage, which means bugs are likely to happen. Play a
     ):
         _(
             """`[side]` - The coin side to bet on, can be heads or tails; defaults to heads
-            `[amount]` - A whole number from 1 to 100,000; defaults to 0
+            `[amount]` - A whole number from 1 to 250,000; defaults to 0
 
             Bet money on a coinflip.
 
@@ -2035,29 +1695,17 @@ This command is in an alpha-stage, which means bugs are likely to happen. Play a
             return await ctx.send(_("You are too poor."))
         # Check if the user's ID matches the desired ID
 
-        if ctx.author.id == 0: # Used to test bot flip
-            if side == "heads":
-                choices = [
-                    ("heads", "<:heads:988811246423904296>"),
-                    ("tails", "<:tails:988811244762980413>"),
-                ]
-            elif side == "tails":
-                choices = [
-                    ("tails", "<:tails:988811244762980413>"),
-                    ("heads", "<:heads:988811246423904296>"),
-                ]
-        else:
             # If it's any other user, it's a 50-50 chance for heads or tails.
-            if side == "heads":
-                choices = [
-                    ("heads", "<:heads:988811246423904296>"),
-                    ("tails", "<:tails:988811244762980413>"),
-                ]
-            elif side == "tails":
-                choices = [
-                    ("tails", "<:tails:988811244762980413>"),
-                    ("heads", "<:heads:988811246423904296>"),
-                ]
+        if side == "heads":
+            choices = [
+                ("heads", "<:heads:988811246423904296>"),
+                ("tails", "<:tails:988811244762980413>"),
+            ]
+        elif side == "tails":
+            choices = [
+                ("tails", "<:tails:988811244762980413>"),
+                ("heads", "<:heads:988811246423904296>"),
+            ]
 
         result = random.choice(choices)
         if result[0] == side:
@@ -2197,7 +1845,7 @@ This command is in an alpha-stage, which means bugs are likely to happen. Play a
     @locale_doc
     async def blackjack(self, ctx, amount: IntFromTo(0, 5000) = 0):
         _(
-            """`[amount]` - The amount of money you bet, must be between 0 and 2500; defaults to 0
+            """`[amount]` - The amount of money you bet, must be between 0 and 5000; defaults to 0
 
             Play a round of blackjack against the bot, controlled by reactions.
             The objective is to have a card value as close to 21 as possible, without exceeding it (known as bust).
@@ -2239,8 +1887,8 @@ This command is in an alpha-stage, which means bugs are likely to happen. Play a
 
     @has_char()
     @is_gm()
-    @commands.cooldown(1, 15, commands.BucketType.user)
-    @commands.command(aliases=["BetaDraw"], brief=_("Draw a card. - TESTING GM ONLY"))
+    @commands.cooldown(1, 4, commands.BucketType.user)
+    @commands.command(hidden=True, aliases=["BetaDraw"], brief=_("Draw a card. - TESTING GM ONLY"))
     @locale_doc
     async def bdraw(
             self, ctx, enemy: MemberWithCharacter = None, money: IntGreaterThan(-1) = 0
@@ -2254,8 +1902,8 @@ This command is in an alpha-stage, which means bugs are likely to happen. Play a
             This command has no effect on your balance if done with no enemy mentioned.
             (This command has a cooldown of 15 seconds.)"""
         )
-        if enemy == ctx.me and money > 750000:
-            return await ctx.send(_("Max bet against bot is **$750000**"))
+        #if enemy == ctx.me and money > 750000:
+           # return await ctx.send(_("Max bet against bot is **$750000**"))
 
         if not enemy:
             return await ctx.send(

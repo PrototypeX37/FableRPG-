@@ -421,14 +421,14 @@ class Battles(commands.Cog):
             )
         )
 
-    @commands.group()
+    @commands.group(aliases=["bt"])
     async def battletower(self, ctx):
         print("hello world")
         if ctx.invoked_subcommand is None:
             await ctx.invoke(self.progress)
 
     @is_gm()
-    @commands.command()
+    @commands.command(hidden=True)
     async def setbtlevel(self, ctx, user_id: int, level: int):
         # Check if the user invoking the command is allowed
         if ctx.author.id != 295173706496475136:
@@ -584,19 +584,301 @@ class Battles(commands.Cog):
                 except Exception as e:
                     await ctx.send(f"An error occurred: {e}")
 
+    async def find_opponentcust(self, ctx):
+        count = 0
+        score = 0
+        player = ctx.author
+        user_id = player.id
+        luck_booster = await self.bot.get_booster(player, "luck")
+        query_class = 'SELECT "class" FROM profile WHERE "user" = $1;'
+        query_xp = 'SELECT "xp" FROM profile WHERE "user" = $1;'
+        result_author = await self.bot.pool.fetch(query_class, ctx.author.id)
+        auth_xp = await self.bot.pool.fetch(query_xp, ctx.author.id)
+        base_health = 250
+        query = 'SELECT "luck", "health", "stathp" FROM profile WHERE "user" = $1;'
+
+        # Fetch initial stats for the author outside the loop
+        async with self.bot.pool.acquire() as conn:
+            result = await conn.fetchrow(query, user_id)
+            health = result['health'] + base_health
+            stathp = result['stathp'] * 50
+            dmg_author, deff_author = await self.bot.get_raidstats(player, conn=conn)
+            level = rpgtools.xptolevel(auth_xp[0]['xp'])
+            total_health_author = health + (level * 5) + stathp
+            author_current_hp = total_health_author  # Initialize author's current HP
+
+        while author_current_hp > 0:
+            players = []
+
+            # Find a random opponent
+            async with self.bot.pool.acquire() as connection:
+                while True:
+                    query = (
+                        'SELECT "user" FROM profile WHERE "user" != $1 '
+                        'ORDER BY RANDOM() LIMIT 1'
+                    )
+                    random_opponent_id = await connection.fetchval(query, ctx.author.id)
+                    if random_opponent_id and random_opponent_id != 730276802316206202:
+                        break
+
+                if not random_opponent_id:
+                    return None  # Couldn't find a suitable opponent
+
+                enemy = await self.bot.fetch_user(random_opponent_id)
+
+            if not enemy:
+                return None  # Failed to fetch opponent information
+
+            async with self.bot.pool.acquire() as conn:
+                for current_player in (ctx.author, enemy):
+                    try:
+                        # Define class-related values
+                        specified_words_values = {
+                            "Deathshroud": 20,
+                            "Soul Warden": 30,
+                            "Reaper": 40,
+                            "Phantom Scythe": 50,
+                            "Soul Snatcher": 60,
+                            "Deathbringer": 70,
+                            "Grim Reaper": 80,
+                        }
+
+                        life_steal_values = {
+                            "Little Helper": 7,
+                            "Gift Gatherer": 14,
+                            "Holiday Aide": 21,
+                            "Joyful Jester": 28,
+                            "Yuletide Guardian": 35,
+                            "Festive Enforcer": 40,
+                            "Festive Champion": 60,
+                        }
+
+                        mage_evolution_levels = {
+                            "Witcher": 1,
+                            "Enchanter": 2,
+                            "Mage": 3,
+                            "Warlock": 4,
+                            "Dark Caster": 5,
+                            "White Sorcerer": 6,
+                        }
+
+                        user_id = current_player.id
+                        query_class = 'SELECT "class" FROM profile WHERE "user" = $1;'
+                        query_xp = 'SELECT "xp" FROM profile WHERE "user" = $1;'
+
+                        # Fetch class and XP data
+                        result_player = await self.bot.pool.fetch(query_class, user_id)
+                        xp_player = await self.bot.pool.fetch(query_xp, user_id)
+
+                        level_player = rpgtools.xptolevel(xp_player[0]['xp'])
+
+                        chance = 0
+                        lifesteal = 0
+                        mage_evolution = None
+
+                        if result_player:
+                            player_classes = result_player[0]["class"]
+                            if not isinstance(player_classes, list):
+                                player_classes = [player_classes]
+
+                            def get_mage_evolution(classes):
+                                max_evolution = None
+                                for class_name in classes:
+                                    if class_name in mage_evolution_levels:
+                                        level = mage_evolution_levels[class_name]
+                                        if max_evolution is None or level > max_evolution:
+                                            max_evolution = level
+                                return max_evolution
+
+                            mage_evolution = get_mage_evolution(player_classes)
+
+                            for class_name in player_classes:
+                                if class_name in specified_words_values:
+                                    chance += specified_words_values[class_name]
+                                if class_name in life_steal_values:
+                                    lifesteal += life_steal_values[class_name]
+                        else:
+                            await ctx.send(f"User with ID {user_id} not found in the profile table.")
+                            continue
+
+                        luck_booster = await self.bot.get_booster(current_player, "luck")
+                        query = 'SELECT "luck", "health", "stathp" FROM profile WHERE "user" = $1;'
+                        result = await conn.fetchrow(query, user_id)
+
+                        if result:
+                            luck_value = float(result['luck'])
+                            if luck_value <= 0.3:
+                                Luck = 20
+                            else:
+                                Luck = ((luck_value - 0.3) / (1.5 - 0.3)) * 80 + 20
+                            Luck = float(round(Luck, 2))
+
+                            if luck_booster:
+                                Luck += Luck * 0.25
+                                Luck = float(min(Luck, 100))
+
+                            base_health = 250
+                            health1 = result['health'] + base_health
+                            stathp2 = result['stathp'] * 50
+
+                            level = rpgtools.xptolevel(xp_player[0]['xp'])
+                            total_health2 = health1 + (level * 5)
+                            total_health3 = total_health2 + stathp2
+
+                            dmg_current, deff_current = await self.bot.get_raidstats(current_player, conn=conn)
+
+                            if current_player == ctx.author:
+                                # Use author's current HP
+                                u = {
+                                    "user": current_player,
+                                    "hp": author_current_hp,  # Persist HP across battles
+                                    "armor": deff_author,
+                                    "damage": dmg_author,
+                                    "luck": Luck,
+                                    "mage_evolution": mage_evolution
+                                }
+                            else:
+                                # For enemy, use full health
+                                u = {
+                                    "user": current_player,
+                                    "hp": total_health3,
+                                    "armor": deff_current,
+                                    "damage": dmg_current,
+                                    "luck": Luck,
+                                    "mage_evolution": mage_evolution
+                                }
+
+                            players.append(u)
+                        else:
+                            await ctx.send(f"User with ID {user_id} not found in the profile table.")
+                    except Exception as e:
+                        await ctx.send(f"An error occurred: {e}")
+
+
+            battle_log = deque(
+                [
+                    (
+                        0,
+                        _("Raidbattle {p1} vs. {p2} started!").format(
+                            p1=players[0]["user"].display_name,
+                            p2=players[1]["user"].display_name
+                        ),
+                    )
+                ],
+                maxlen=3,
+            )
+
+            embed = discord.Embed(
+                description=battle_log[0][1],
+                color=self.bot.config.game.primary_colour
+            )
+
+            if count == 0:
+                log_message = await ctx.send(embed=embed)
+            else:
+                await log_message.edit(embed=embed)
+
+            await asyncio.sleep(4)
+
+            start = datetime.datetime.utcnow()
+            attacker, defender = random.sample(players, k=2)
+
+            # Battle logic
+            while players[0]["hp"] > 0 and players[1][
+                "hp"] > 0 and datetime.datetime.utcnow() < start + datetime.timedelta(minutes=5):
+                dmg = attacker["damage"] + Decimal(random.randint(0, 100)) - defender["armor"]
+                dmg = max(1, dmg)  # Ensure no negative damage
+
+                defender["hp"] -= dmg
+                if defender["hp"] < 0:
+                    defender["hp"] = 0
+
+                battle_log.append(
+                    (
+                        battle_log[-1][0] + 1,
+                        _("{attacker} attacks! {defender} takes **{dmg}HP** damage.").format(
+                            attacker=attacker["user"].display_name,
+                            defender=defender["user"].display_name,
+                            dmg=dmg,
+                        ),
+                    )
+                )
+
+                embed = discord.Embed(
+                    description=_("{p1} - {hp1} HP left\n{p2} - {hp2} HP left").format(
+                        p1=players[0]["user"].display_name,
+                        hp1=players[0]["hp"],
+                        p2=players[1]["user"].display_name,
+                        hp2=players[1]["hp"],
+                    ),
+                    color=self.bot.config.game.primary_colour,
+                )
+
+                for line in battle_log:
+                    embed.add_field(
+                        name=_("Action #{number}").format(number=line[0]), value=line[1]
+                    )
+
+                await log_message.edit(embed=embed)
+                await asyncio.sleep(4)
+                attacker, defender = defender, attacker  # Switch roles
+
+            # Determine winner and loser
+            players = sorted(players, key=lambda x: x["hp"])
+            winner = players[1]["user"]
+            loser = players[0]["user"]
+
+            if winner.id != ctx.author.id:
+                await ctx.send(
+                    _("{winner} won the raidbattle vs {loser}!").format(
+                        winner=winner.display_name, loser=loser.display_name
+                    )
+                )
+            count = 1
+
+            if winner == ctx.author:
+                author_current_hp = players[1]["hp"]  # Update author's HP for next battle
+                score += 1
+                await asyncio.sleep(3)  # Delay before next opponent
+            else:
+                await ctx.send(f"{ctx.author.mention}, you were defeated. Your final score was {score}")
+
+                try:
+                    highscore = await self.bot.pool.fetchval(
+                        'SELECT whored2 FROM profile WHERE "user" = $1', ctx.author.id
+                    )
+
+                    # Update the highscore if the current score is higher
+                    if score > highscore:
+                        async with self.bot.pool.acquire() as conn:
+                            await conn.execute(
+                                'UPDATE profile SET "whored2"=$1 WHERE "user"=$2;',
+                                score,
+                                ctx.author.id,
+                            )
+                    break
+                except Exception as e:
+                    await ctx.send(f"An error occurred: {e}")
+
     # Usage within a command
     @commands.command(aliases=["hd"], brief=_("Battle against players till you drop! (includes raidstats)"))
     @user_cooldown(300)
     @locale_doc
-    async def horde(self, ctx):
+    async def horde(self, ctx, modetype = "normal"):
         _(
             """
         Initiates the 'Horde' mode where a player engages in battles against other players randomly until they are defeated.
         The player's health points (HP) are retained after each battle, making it an endurance challenge.
         """
         )
+        try:
+            if modetype == "normal":
+                opponent = await self.find_opponent(ctx)
 
-        opponent = await self.find_opponent(ctx)
+            elif modetype == "custom":
+                opponent = await self.find_opponentcust(ctx)
+        except Exception as e:
+            await ctx.send(e)
 
     @battletower.command()
     async def start(self, ctx):
@@ -778,10 +1060,6 @@ class Battles(commands.Cog):
 
         return dialogue_embed
 
-    @commands.command()
-    async def ffew(self, ctx):
-        await ctx.send(f"eeee {self.fighting_players}")
-
     async def is_player_in_fight(self, player_id):
         # Check if the player is in a fight based on the dictionary
         return player_id in self.fighting_players
@@ -815,7 +1093,8 @@ class Battles(commands.Cog):
             "magic": "<:F_Magic:1139514865174720532>",
             "legendary": "<:F_Legendary:1139514868400132116>",
             "mystery": "<:F_mystspark:1139521536320094358>",
-            "fortune": "<:f_money:1146593710516224090>"
+            "fortune": "<:f_money:1146593710516224090>",
+            "divine": "<:f_divine:1169412814612471869>"
         }
 
         # Check if a lock exists for the player
@@ -4067,13 +4346,13 @@ class Battles(commands.Cog):
 
                         await ctx.send(f'This is the end for you... {ctx.author.mention}.. or is it..?')
 
-                        crate_options = ['legendary', 'divine', 'magic', 'mystery', 'fortune']
-                        weights = [10, 5, 60, 80, 8]  # Weighted values according to percentages
+                        crate_options = ['legendary', 'divine', 'mystery', 'fortune']
+                        weights = [0.25, 0.25, 0.25, 0.25]  # Weighted values according to percentages
 
                         selected_crate = randomm.choices(crate_options, weights)[0]
 
                         if ctx.author.id == 295173706496475136:
-                            selected_crate = "divine"
+                            selected_crate = 'divine'
 
 
                         async with self.bot.pool.acquire() as connection:
@@ -4528,90 +4807,6 @@ class Battles(commands.Cog):
             error_message = f"An error occurred before the battle: {e}"
             await ctx.send(error_message)
 
-    @commands.command()
-    async def qweqwe(self, ctx):
-        cosmic_embed = discord.Embed(
-            title="The Cosmic Abyss: A Symphony of Despair",
-            description=(
-                "As you stand amidst the cosmic ruins, triumphant after landing a fatal blow to the Guardian, the room immediately lights back up. However, a sinister revelation unfolds—a large shadow lurks behind you. Only then do you realize the shocking truth: you were a puppet the entire time, masked by the dark magic of the Overlord."
-                "\n\nThe malevolent magic twisted your perception, making you believe you were fighting evil. In reality, you were mercilessly slaying the forces of good. Your vision was impaired by the enchantment, distorting all that was pure into sinister illusions. The growls and snarls were not manifestations of evil, but the screams of horror as you rampaged through the tower, cutting down every good essence in your path."
-                "\n\nThe room, once filled with the triumphant glow of your victory, now becomes a haunting reminder of the manipulation that led you astray. The cosmic tragedy deepens as the Overlord's dark magic reveals its insidious nature, turning your heroic journey into a nightmarish descent into despair."
-                "\n\nThe mocking laughter of the Overlord of Shadows echoes through the void, resonating with the cruel irony of your unwitting role in this cosmic play. The once-heroic Guardians, sacrificed to contain the unleashed energies, now join the chorus of sorrowful echoes, their tales entwined with your own."
-                "\n\nAs you are forcibly teleported to a desolate room, the essence of nothingness prevails—an eternal void devoid of sensation. No family, no friends, no warmth, or comforting embrace; all connections to the world you once knew severed. Time itself unravels, trapping you in perpetual stasis amid the overwhelming silence that accentuates the profound emptiness."
-                "\n\nIn this timeless abyss, the weight of regret becomes an indomitable force. You, stripped of purpose and connection, are left to grapple with the consequences of your unwitting role in the tower's demise. The laughter of the Overlord of Shadows continues to reverberate, a haunting reminder of the malevolence that exploited your journey."
-                "\n\nAs you drift aimlessly through the emptiness, the echoes of the corrupted Guardians' stories intertwine with your own. Your existence becomes a forlorn symphony of despair, a solitary melody played in the cosmic void."
-                "\n\nThere is no escape, no redemption, only an eternity of isolation and remorse. The Battle Tower, once a beacon of hope, is now a distant memory, and you, adrift in the abyss, become a forgotten soul—lost to the cosmic tragedy orchestrated by the Overlord of Shadows."
-                "\n\nAnd in this void, a cruel twist awaits. You are subjected to an unending torment—a relentless loop that replays the events of the tower. However, in this distorted reality, you witness a distorted version of yourself, a puppet dancing to the malevolent tune of the Overlord."
-                "\n\nYou, now a mere spectator of your own nightmare, see yourself slaying innocent people, mercilessly striking down the Guardians of Radiance who once fought valiantly. The tortured souls of the fallen beg you to stop, their pleas echoing in the hollow abyss."
-                "\n\nYet, you are powerless to change the course of this macabre play. The visions unfold relentlessly, each repetition etching the weight of guilt deeper into your essence. The distorted version of you, manipulated by the Overlord's dark magic, becomes a puppet of cosmic tragedy, forever ensnared in a nightmarish loop of despair."
-            ),
-            color=0xff0000  # Red color for the climax
-        )
-
-        await ctx.send(embed=cosmic_embed)
-
-    @has_char()
-    @is_gm()
-    @user_cooldown(5)
-    @commands.command()
-    async def debug(self, ctx, enemy: discord.Member = None):
-        specified_words_values = {
-            "Dseathshroud": 6,
-            "Soul Warden": 12,
-            "Reaper": 18,
-            "Phantom Scythe": 24,
-            "Soul Snatcher": 30,
-            "Deathbringer": 36,
-            "Grim Reaper": 42,
-        }
-
-        try:
-            # User ID you want to check
-            user_id = ctx.author.id
-
-            # Query the "class" column for ctx.author.id
-            query_author = 'SELECT "class" FROM profile WHERE "user" = $1;'
-            result_author = await self.bot.pool.fetch(query_author, user_id)
-
-            # Initialize chance
-            author_chance = 0
-
-            if result_author:
-                author_classes = result_author[0]["class"]  # Assume it's a list of classes
-                for class_name in author_classes:
-                    if class_name in specified_words_values:
-                        author_chance += specified_words_values[class_name]
-
-            if author_chance == 0:
-                await ctx.send("ctx.author does not have any of the specified classes.")
-            else:
-                await ctx.send(f"ctx.author chance: {author_chance}")
-
-            if enemy:
-                enemy_id = enemy.id
-
-                # Query the "class" column for enemy.id
-                query_enemy = 'SELECT "class" FROM profile WHERE "user" = $1;'
-                result_enemy = await self.bot.pool.fetch(query_enemy, enemy_id)
-
-                # Initialize chance
-                enemy_chance = 0
-
-                if result_enemy:
-                    enemy_classes = result_enemy[0]["class"]  # Assume it's a list of classes
-                    for class_name in enemy_classes:
-                        if class_name in specified_words_values:
-                            enemy_chance += specified_words_values[class_name]
-
-                if enemy_chance == 0:
-                    await ctx.send("enemy does not have any of the specified classes.")
-                else:
-                    await ctx.send(f"enemy chance: {enemy_chance}")
-            else:
-                await ctx.send("No enemy specified.")
-
-        except Exception as e:
-            await ctx.send(f"An error occurred: {str(e)}")
 
     @has_char()
     @user_cooldown(100)
@@ -4626,6 +4821,8 @@ class Battles(commands.Cog):
 
             Fight against another player while betting money.
             To decide the players' stats, their items, race and class bonuses and raidstats are evaluated.
+            
+            You also have a change of tripping depending on your luck.
 
             The money is removed from both players at the start of the battle. Once a winner has been decided, they will receive their money, plus the enemy's money.
             The battle is divided into rounds, in which a player attacks. The first round's attacker is chosen randomly, all other rounds the attacker is the last round's defender.

@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,25 +16,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-"""
-The IdleRPG Discord Bot
-Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""
-
-
 import asyncio
 import datetime
 import string
@@ -48,6 +29,7 @@ import io
 import requests
 from cogs.shard_communication import user_on_cooldown as user_cooldown
 from utils.checks import has_char, is_gm
+from utils.i18n import locale_doc
 
 
 class Slots(commands.Cog):
@@ -87,7 +69,19 @@ class Slots(commands.Cog):
     @has_char()
     @user_cooldown(6)
     @commands.group()
+    @locale_doc
     async def slots(self, ctx):
+        _(
+            """Play the slot machine game.
+
+            Use this command to play the slot machine.
+
+            Subcommands:
+            - `seats`: View slot machine seat information.
+            - `takeseat <seat_number>`: Take a seat in the slot machine game.
+            - `leaveseat`: Leave your current seat.
+            """
+        )
 
         if ctx.invoked_subcommand is None:
 
@@ -177,7 +171,7 @@ class Slots(commands.Cog):
             except Exception as e:
                 return await ctx.send(f"An error occurred: {e}")
 
-            if money < 2000:
+            if money < 1500:
                 return await ctx.send("You are too poor.")
             else:
                 try:
@@ -207,9 +201,9 @@ class Slots(commands.Cog):
                     "🍒": 1000,
                     "🍎": 2000,
                     "🍊": 2500,
-                    "🍏": 4000,
-                    "🍓": 4500,
-                    "🍍": 7500,  # Adjusted value for 🍍 to cover the base value (2000) for 2 pineapples
+                    "🍏": 3000,
+                    "🍓": 4000,
+                    "🍍": 6500,  # Adjusted value for 🍍 to cover the base value (2000) for 2 pineapples
                 }
 
                 # Generate three random emojis for the slots with adjusted probabilities
@@ -248,6 +242,7 @@ class Slots(commands.Cog):
                 embed.add_field(name="Slot 3", value=slot_results[2], inline=True)
                 embed.add_field(name="**Reward**", value=f"${total_reward}", inline=False)
                 embed.add_field(name="Jackpot", value=f"${jackpot_result}", inline=False)
+                embed.add_field(name="Occupant", value=f"{ctx.author.mention}", inline=False)
                 await ctx.send(embed=embed)
 
                 if dragon_count > 0:
@@ -520,7 +515,14 @@ class Slots(commands.Cog):
 
     @has_char()
     @slots.command()
+    @locale_doc
     async def seats(self, ctx):
+        _(
+            """View information about slot machine seats.
+
+            Displays the status of each seat, including occupant, dragon HP, player HP, and the current jackpot.
+            """
+        )
 
         try:
             embed = discord.Embed(title="Seat Information", color=discord.Color.blurple())
@@ -555,25 +557,44 @@ class Slots(commands.Cog):
         # Stop the timeout check task when the cog is unloaded
         self.check_timeouts.cancel()
 
+    from discord import User
+
     @tasks.loop(seconds=60)
     async def check_timeouts(self):
-        # Check for timeouts every minute
-        now = datetime.datetime.utcnow()
+        try:
+            # Check for timeouts every minute
+            now = datetime.datetime.utcnow()
 
-        async with self.bot.pool.acquire() as connection:
-            for seat_info in await connection.fetch("SELECT seat, occupant, last_activity FROM dragonslots"):
-                seat_number = seat_info['seat']
-                occupant_id = seat_info['occupant']
-                last_activity = seat_info['last_activity']
 
-                if occupant_id and (now - last_activity).total_seconds() > self.timeout_duration:
-                    # If the occupant has timed out, clear the seat
-                    await connection.execute(
-                        "UPDATE dragonslots SET occupant = NULL, last_activity = NULL WHERE seat = $1", seat_number)
-                    user = self.bot.get_user(occupant_id)
-                    if user:
-                        await user.send(
-                            f"{user.mention}You have been automatically removed from seat #{seat_number} due to inactivity.")
+            async with self.bot.pool.acquire() as connection:
+                for seat_info in await connection.fetch("SELECT seat, occupant, last_activity FROM dragonslots"):
+                    seat_number = seat_info['seat']
+                    occupant_id = seat_info['occupant']
+                    last_activity = seat_info['last_activity']
+
+                    if occupant_id and (now - last_activity).total_seconds() > self.timeout_duration:
+                        # If the occupant has timed out, clear the seat
+                        await connection.execute(
+                            "UPDATE dragonslots SET occupant = NULL, last_activity = NULL WHERE seat = $1", seat_number)
+
+                        user = self.bot.get_user(occupant_id)
+                        if user:
+                            try:
+                                await user.send(
+                                    f"{user.mention} You have been automatically removed from seat #{seat_number} due to inactivity.")
+                            except discord.Forbidden:
+                                # Handle the 403 Forbidden error (the user might have DMs disabled)
+                                print(f"Could not send message to {user}. They might have DMs disabled.")
+                            except Exception as e:
+                                # Handle any other possible exceptions
+                                print(f"An error occurred: {e}")
+
+        except Exception as e:
+            # Handle any errors that occur during execution
+            error_user = self.bot.get_user(295173706496475136)  # Replace with the ID of the user to notify
+            if error_user:
+                await error_user.send(f"An error occurred: {str(e)}")
+            raise  # Re-raise the exception to allow it to propagate if needed
 
     async def update_last_activity(self, occupant_id):
         async with self.bot.pool.acquire() as connection:
@@ -583,11 +604,19 @@ class Slots(commands.Cog):
     @slots.command()
     @user_cooldown(300)
     @has_char()
+    @locale_doc
     async def takeseat(self, ctx, seat_number: int):
+        _(
+            """Take a seat in the slot machine game.
 
+            `<seat_number>` - The number of the seat you wish to occupy (1-8).
+
+            Occupy an available seat to participate in the slot machine game. You must leave your current seat before taking a new one.
+            """
+        )
 
         if ctx.author.id in self.captcha_lock:
-            await ctx.send("You are not currently locked by CAPTCHA verification.")
+            await ctx.send("You are currently locked by CAPTCHA verification.")
             self.bot.reset_cooldown(ctx)
             return
         try:
@@ -631,8 +660,18 @@ class Slots(commands.Cog):
 
 
     @is_gm()
-    @commands.command()
+    @commands.command(hidden=True)
+    @locale_doc
     async def gmjpforce(self, ctx):
+        _(
+            """Forcefully increase the jackpot for all slot seats.
+
+            **(Game Master only)**
+
+            This command increases the jackpot value for all seats, simulating player contributions.
+            """
+        )
+
         try:
             async with self.bot.pool.acquire() as connection:
                 # Get a list of all seat numbers
@@ -645,13 +684,13 @@ class Slots(commands.Cog):
                     occupied_seat = await connection.fetchval(
                         'SELECT seat FROM dragonslots WHERE seat = $1 AND occupant IS NOT NULL', seat_number)
 
-                    if not occupied_seat:
                         # Generate a random value between 15000 and 45000
-                        random_value = random.randint(10000, 45000)
+                    random_value = random.randint(10000, 12000)
 
                         # Increase the jackpot by the random value for the specific seat
-                        await connection.execute('UPDATE dragonslots SET jackpot = jackpot + $1 WHERE seat = $2',
+                    await connection.execute('UPDATE dragonslots SET jackpot = jackpot + $1 WHERE seat = $2',
                                                  random_value, seat_number)
+
         except Exception as e:
             await ctx.send(e)
 
@@ -672,7 +711,7 @@ class Slots(commands.Cog):
 
                         if not occupied_seat:
                             # Generate a random value between 15000 and 45000
-                            random_value = random.randint(10000, 45000)
+                            random_value = random.randint(10000, 12000)
 
                             # Increase the jackpot by the random value for the specific seat
                             await connection.execute('UPDATE dragonslots SET jackpot = jackpot + $1 WHERE seat = $2',
@@ -688,15 +727,32 @@ class Slots(commands.Cog):
     # ... (existing code)
 
     @is_gm()
-    @commands.command()
+    @commands.command(hidden=True)
+    @locale_doc
     async def gmjptimer(self, ctx):
+        _(
+            """Start the periodic increase of jackpot.
+
+            **(Game Master only)**
+
+            Initiates a background task that periodically increases the jackpot for unoccupied seats.
+            """
+        )
+
         # Start the periodic increase of jackpot in a separate task
         self.bot.loop.create_task(self.increase_jackpot_periodically(ctx))
         await ctx.send("Jackpot increase has been started.")
 
     @has_char()
     @slots.command()
+    @locale_doc
     async def leaveseat(self, ctx):
+        _(
+            """Leave your current seat in the slot machine game.
+
+            Use this command to vacate your seat, allowing others to occupy it.
+            """
+        )
 
         captcha_text = self.generate_distorted_captcha()
 
@@ -769,7 +825,7 @@ class Slots(commands.Cog):
             for seat_number in range(1, 9):
                 dragon_hp = 125
                 player_hp = 100
-                jackpot = random.randint(10000, 50000)
+                jackpot = random.randint(10000, 12000)
 
                 await connection.execute(
                     "INSERT INTO dragonslots(seat, dragon, player, jackpot) VALUES($1, $2, $3, $4)",
@@ -777,8 +833,18 @@ class Slots(commands.Cog):
                 )
 
     @is_gm()
-    @commands.command()
+    @commands.command(hidden=True)
+    @locale_doc
     async def gmdragonslotreset(self, ctx):
+        _(
+            """Reset the dragon slots to their initial state.
+
+            **(Game Master only)**
+
+            Resets all dragon slots, clearing occupants and restoring default HP and jackpot values.
+            """
+        )
+
         try:
             await self.init_database()
             await ctx.send("Dragon slots have been reset successfully!")
@@ -842,29 +908,39 @@ class Slots(commands.Cog):
             draw.line([(x, y), (x2, y2)], fill=shape_color, width=outline_thickness)
 
     @is_gm()
-    @commands.command()
+    @commands.command(hidden=True)
     async def captcha(self, ctx):
+        _(
+            """Generate a CAPTCHA image.
+
+            **(Game Master only)**
+
+            Creates and displays a CAPTCHA image for testing purposes.
+            """
+        )
+
         try:
             captcha_text = self.generate_distorted_captcha()
             await ctx.send(f"Enter the CAPTCHA Text below. You have 60 seconds", file=discord.File('captcha.png'))
         except Exception as e:
             await ctx.send(str(e))
 
-    @commands.command()
-    async def logslots(self, ctx):
-        if ctx.author.id == 708435868842459169:
-            if self.logger == 0:
-                await ctx.send("Logging has started for ID: 708435868842459169")
-                return
-            else:
-                await ctx.send(f"Logged profits so far: {self.logger}")
-                return
-        else:
-            return await ctx.send("Access Denied")
 
     @is_gm()
-    @commands.command()
+    @commands.command(hidden=True)
+    @locale_doc
     async def gmunlock(self, ctx, DiscordID: int):
+        _(
+            """Unlock a user from CAPTCHA lock.
+
+            `<DiscordID>` - The Discord ID of the user to unlock.
+
+            **(Game Master only)**
+
+            Removes a user from the CAPTCHA lock, allowing them to use commands again.
+            """
+        )
+
         DiscordID_str = str(DiscordID).strip()
         # await ctx.send(self.captcha_lock)
 
@@ -875,9 +951,16 @@ class Slots(commands.Cog):
         else:
             await ctx.send("User not found.")
 
-    @commands.command()
+    @commands.command(hidden=True)
     @has_char()
+    @locale_doc
     async def unlock(self, ctx):
+        _(
+            """Unlock yourself from CAPTCHA lock by completing a CAPTCHA.
+
+            If you are locked due to failed CAPTCHA attempts, use this command to verify and unlock yourself.
+            """
+        )
 
         if ctx.author.id not in self.captcha_lock:
             await ctx.send("You are not currently locked by CAPTCHA verification.")

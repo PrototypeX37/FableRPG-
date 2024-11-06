@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,9 +16,8 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-
 import asyncio
+from datetime import datetime
 
 import discord
 
@@ -520,14 +519,19 @@ class Marriage(commands.Cog):
                     )
                 )
                 name = None
+        now = datetime.now()
+
+        # Format the date as dd/mm/yyyy
+        formatted_date = now.strftime("%d/%m/%Y")
         await self.bot.pool.execute(
-            'INSERT INTO children ("mother", "father", "name", "age", "gender")'
-            " VALUES ($1, $2, $3, $4, $5);",
+            'INSERT INTO children ("mother", "father", "name", "age", "gender", "birth")'
+            " VALUES ($1, $2, $3, $4, $5, $6);",
             ctx.author.id,
             marriage,
             name,
             0,
             gender,
+            formatted_date,
         )
         await ctx.send(_("{name} was born.").format(name=name))
 
@@ -536,77 +540,85 @@ class Marriage(commands.Cog):
     @locale_doc
     async def family(self, ctx):
         _("""View your children. This will display their name, age and gender.""")
-        marriage = ctx.character_data["marriage"]
-        children = await self.bot.pool.fetch(
-            'SELECT * FROM children WHERE ("mother"=$1 AND "father"=$2) OR ("father"=$1'
-            ' AND "mother"=$2);',
-            ctx.author.id,
-            marriage,
-        )
-
-        additional = (
-            _("{amount} children").format(amount=len(children))
-            if len(children) != 1
-            else _("one child")
-        )
-        em = discord.Embed(
-            title=_("Your family, {additional}.").format(additional=additional),
-            description=_("{author}'s family").format(author=ctx.author.mention)
-            if not marriage
-            else _("Family of {author} and <@{marriage}>").format(
-                author=ctx.author.mention, marriage=marriage
-            ),
-        )
-        if not children:
-            em.add_field(
-                name=_("No children yet"),
-                value=_("Use `{prefix}child` to make one!").format(
-                    prefix=ctx.clean_prefix
-                )
-                if marriage
-                else _(
-                    "Get yourself a partner and use `{prefix}child` to make one!"
-                ).format(prefix=ctx.clean_prefix),
+        try:
+            marriage = ctx.character_data["marriage"]
+            children = await self.bot.pool.fetch(
+                'SELECT * FROM children WHERE ("mother"=$1 AND "father"=$2) OR ("father"=$1'
+                ' AND "mother"=$2);',
+                ctx.author.id,
+                marriage,
             )
-        if len(children) <= 5:
-            for child in children:
+
+            additional = (
+                _("{amount} children").format(amount=len(children))
+                if len(children) != 1
+                else _("one child")
+            )
+            em = discord.Embed(
+                title=_("Your family, {additional}.").format(additional=additional),
+                description=_("{author}'s family").format(author=ctx.author.mention)
+                if not marriage
+                else _("Family of {author} and <@{marriage}>").format(
+                    author=ctx.author.mention, marriage=marriage
+                ),
+            )
+            if not children:
                 em.add_field(
-                    name=child["name"],
-                    value=_("Gender: {gender}, Age: {age}").format(
-                        gender=child["gender"], age=child["age"]
-                    ),
-                    inline=False,
+                    name=_("No children yet"),
+                    value=_("Use `{prefix}child` to make one!").format(
+                        prefix=ctx.clean_prefix
+                    )
+                    if marriage
+                    else _(
+                        "Get yourself a partner and use `{prefix}child` to make one!"
+                    ).format(prefix=ctx.clean_prefix),
                 )
-            em.set_thumbnail(url=ctx.author.display_avatar.url)
-            await ctx.send(embed=em)
-        else:
-            embeds = []
-            children_lists = list(chunks(children, 9))
-            for small_list in children_lists:
-                em = discord.Embed(
-                    title=_("Your family, {additional}.").format(additional=additional),
-                    description=_("{author}'s family").format(author=ctx.author.mention)
-                    if not marriage
-                    else _("Family of {author} and <@{marriage}>").format(
-                        author=ctx.author.mention, marriage=marriage
-                    ),
-                )
-                for child in small_list:
+            if len(children) <= 5:
+                for child in children:
                     em.add_field(
                         name=child["name"],
-                        value=_("Gender: {gender}, Age: {age}").format(
-                            gender=child["gender"], age=child["age"]
+                        value=_("Gender: {gender}, Age: {age}, Born: {born}").format(
+                            gender=child["gender"], age=child["age"], born=child["birth"]
                         ),
-                        inline=True,
+                        inline=False,
                     )
-                em.set_footer(
-                    text=_("Page {cur} of {max}").format(
-                        cur=children_lists.index(small_list) + 1,
-                        max=len(children_lists),
+                em.set_thumbnail(url=ctx.author.display_avatar.url)
+                await ctx.send(embed=em)
+            else:
+                embeds = []
+                children_lists = list(chunks(children, 9))
+                for small_list in children_lists:
+                    em = discord.Embed(
+                        title=_("Your family, {additional}.").format(additional=additional),
+                        description=_("{author}'s family").format(author=ctx.author.mention)
+                        if not marriage
+                        else _("Family of {author} and <@{marriage}>").format(
+                            author=ctx.author.mention, marriage=marriage
+                        ),
                     )
-                )
-                embeds.append(em)
-            await self.bot.paginator.Paginator(extras=embeds).paginate(ctx)
+                    for child in small_list:
+                        em.add_field(
+                            name=child["name"],
+                            value=_("Gender: {gender}, Age: {age}, Born: {born}").format(
+                                gender=child["gender"], age=child["age"], born=child["birth"]
+                            ),
+                            inline=True,
+                        )
+                    em.set_footer(
+                        text=_("Page {cur} of {max}").format(
+                            cur=children_lists.index(small_list) + 1,
+                            max=len(children_lists),
+                        )
+                    )
+                    embeds.append(em)
+                await self.bot.paginator.Paginator(extras=embeds).paginate(ctx)
+        except Exception as e:
+            import traceback
+            error_message = f"Error occurred: {e}\n"
+            error_message += traceback.format_exc()
+            await ctx.send(error_message)
+            print(error_message)
+
 
     @has_char()
     @user_cooldown(1800)
@@ -618,15 +630,17 @@ class Marriage(commands.Cog):
 
             Every time you or your partner uses this command, your children:
               - have an 8/23 chance to grow older by one year
-              - have a 4/23 chance to be renamed
-              - have a 4/23 chance to take up to 1/64th of your money
-              - have a 4/23 chance to give you up to 1/64th of your current money extra
+              - have a 5/23 chance to be renamed
+              - have a 2/23 chance to take up to 1/64 of your money
+              - have a 5/23 chance to give you up to 1/64 of your current money extra
               - have a 2/23 chance to find a random crate for you:
                 + 500/761 (65%) chance for a common crate
                 + 200/761 (26%) chance for an uncommon crate
                 + 50/761 (6%) chance for a rare crate
                 + 10/761 (1%) chance for a magic crate
                 + 1/761 (0.1%) chance for a legendary crate
+                + 1/761 (0.1%) chance for a fortune crate
+                + 1/761 (0.1%) chance for a divine crate
               - have a 1/23 chance to die
 
             In each event you will know what happened.
@@ -644,14 +658,24 @@ class Marriage(commands.Cog):
             await self.bot.reset_cooldown(ctx)
             return await ctx.send(_("You don't have kids yet."))
         target = random.choice(children)
-        event = random.choice(
-            ["death"]
-            + ["age"] * 6
-            + ["namechange"] * 4
-            + ["crate"] * 2
-            + ["moneylose"] * 5
-            + ["moneygain"] * 5
-        )
+        if ctx.character_data["money"] > 10000000:
+            event = random.choice(
+                ["death"]
+                + ["age"] * 5
+                + ["namechange"] * 5
+                + ["crate"] * 2
+                + ["moneylose"] * 5
+                + ["moneygain"] * 2
+            )
+        else:
+            event = random.choice(
+                ["death"]
+                + ["age"] * 6
+                + ["namechange"] * 4
+                + ["crate"] * 2
+                + ["moneylose"] * 5
+                + ["moneygain"] * 5
+            )
         if event == "death":
             cause = random.choice(
                 [
@@ -1062,6 +1086,7 @@ class Marriage(commands.Cog):
                 + ["magic"] * 7
                 + ["fortune"] * 3
                 + ["legendary"]
+                + ["divine"]
             )
             async with self.bot.pool.acquire() as conn:
                 await conn.execute(

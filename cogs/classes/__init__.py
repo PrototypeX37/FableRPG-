@@ -1,6 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -58,13 +59,16 @@ class Classes(commands.Cog):
         _(
             """Change or select your primary or secondary class.
 
-            - Warriors gain added defense
+            - Warriors gain added defense (awaiting update)
             - Thieves gain access to `{prefix}steal`
-            - Mages gain added damage
+            - Mages gain added damage and have a chance to cast a fireball to deal massive damage.
             - Rangers gain access to a pet which can hunt for gear items
-            - Raiders gain additional raidstats, used in raidbattles and raids
+            - Raiders TBA
+            - Paladins can bless a user to gain additional XP in adventures.
+            - Reapers have a change to cheat death and survive a fatal hit in raid battles. (Seasonal)
+            - Santas Helper can gift users a present and have a life steal effect in raid battles (Seasonal)
             - Ritualists gain additional favor from sacrificing items and are twice as likely to receive loot from adventures
-            (- Paragons gain added damage *and* defense; the class is only available to donators)
+            - Paragons gain added damage *and* defense; the class is only available to donators
 
             The second class unlocks at level 12. Selecting a class the first time is free (No Class -> Class), but changing it later will cost $5,000 (Class -> another Class)
 
@@ -111,7 +115,7 @@ class Classes(commands.Cog):
                 title=_("Mage"),
                 description=_(
                     "Utilise powerful magic for stronger attacks.\n+1 damage per"
-                    " evolution."
+                    " evolution and the ability to have a chance to cast a fireball in battle for a massive damage boost."
                 ),
                 color=self.bot.config.game.primary_colour,
             ),
@@ -128,8 +132,7 @@ class Classes(commands.Cog):
                 title=_("Raider"),
                 description=_(
                     "A strong warrior who gives their life for the fight against"
-                    " Zerekiel.\nEvery evolution boosts your raidstats by an additional"
-                    " 10%."
+                    " Ragnarok."
                 ),
                 colour=self.bot.config.game.primary_colour,
             ),
@@ -280,7 +283,7 @@ class Classes(commands.Cog):
     @commands.command(brief=_("View your class(es)"))
     @locale_doc
     async def myclass(self, ctx):
-        _("""Show your class(es) and their added benefits, sent as images.""")
+        _("""Show your class(es) and their added benefits, sent as images. (Not complete)""")
         if (classes := ctx.character_data["class"]) == ["No Class", "No Class"]:
             return await ctx.send("You haven't got a class yet.")
         for class_ in classes:
@@ -311,12 +314,13 @@ class Classes(commands.Cog):
 
             - Warriors gain +1 defense per evolution
             - Thieves gain +8% for their success chance per evolution
-            - Mages gain +1 damage per evolution
+            - Mages gain +1 damage per evolution and additional damage for their fireball ability -110% 120% 130% 150% 175% & 200%
             - Rangers' pets' hunted item get +3 minimum stat and +6 maximum stat per evolution
               - This means level 1 pets can hunt items from stat 3 to stat 6; level 2 pets from stat 6 to stat 12
-        
+            - Reapers gain additional chance to survive the raid
+            - Santas Helper gains additional life steal on evolve.
             - Ritualists gain +5% extra favor when sacrificing per evolution
-            (- Paragons gain +1 damage *and* +1 defense per evolution)"""
+            - Paragons gain +1 damage *and* +1 defense per evolution)"""
         )
         level = rpgtools.xptolevel(ctx.character_data["xp"])
         if level < 5:
@@ -374,6 +378,10 @@ class Classes(commands.Cog):
     @commands.command(brief=_("Steal steel"))
     @locale_doc
     async def steel(self, ctx):
+        _(
+            # xgettext: no-python-format
+            """Steel lmao"""
+        )
         await ctx.send("Steel..? Sure here.. I guess: <:steel:1158572795022802964>")
 
     @is_class(Thief)

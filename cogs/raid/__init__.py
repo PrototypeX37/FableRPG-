@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,13 +16,13 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-
 import asyncio
 import datetime
 import re
+import traceback
+
 from discord import Embed, File
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP, getcontext
 import utils.misc as rpgtools
 import discord
 
@@ -80,7 +80,7 @@ class DecisionButton(Button):
     async def callback(self, interaction: Interaction):
         view: DecisionView = self.view
         view.value = self.custom_id
-        await interaction.response.send_message(f"You selected {self.custom_id}. Shortcut back: <#1154247430938841171>",
+        await interaction.response.send_message(f"You selected {self.custom_id}. Shortcut back: <#1199300390903099412>",
                                                 ephemeral=True)
         view.stop()
 
@@ -103,6 +103,8 @@ class Raid(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.raid = {}
+        self.toggle_list = set()  # Use a set for efficient membership checking
+
         self.joined = []
         self.raidactive = False
         self.active_view = None
@@ -188,6 +190,7 @@ class Raid(commands.Cog):
             # rest of your function
 
             """[Bot Admin only] Starts a raid."""
+            await ctx.message.delete()
             await self.set_raid_timer()
 
             self.boss = {"hp": hp, "initial_hp": hp, "min_dmg": 1, "max_dmg": 750}
@@ -242,7 +245,7 @@ class Raid(commands.Cog):
                 self.boss.update(message=message_ids)
 
                 if self.bot.config.bot.is_beta:
-                    summary_channel = self.bot.get_channel(1146711679858638910)
+                    summary_channel = self.bot.get_channel(1199299514490683392)
 
                     channels_ids = [1140211789573935164, 1199297906755252234,
                                     1158743317325041754]  # Replace with your actual channel IDs
@@ -252,7 +255,7 @@ class Raid(commands.Cog):
                         try:
                             channel = self.bot.get_channel(channel_id)  # Assumes ctx.guild is available
                             if channel:
-                                role_id = 1146279043692503112  # Replace with the actual role ID
+                                role_id = 1199307259965079552  # Replace with the actual role ID
                                 role = discord.utils.get(ctx.guild.roles, id=role_id)
                                 content = f"{role.mention} Ragnarok spawned! 15 Minutes until he is vulnerable..."
                                 sent_msg = await channel.send(content, allowed_mentions=discord.AllowedMentions(roles=True))
@@ -304,6 +307,8 @@ class Raid(commands.Cog):
                     await channel.send("**Ragnarok is vulnerable! Fetching participant data... Hang on!**")
 
             self.joined.extend(view.joined)
+            # Assuming you have the role ID for the server booster role
+            BOOSTER_ROLE_ID = 1281411439747268692  # Replace with your actual booster role ID
 
             tier_threshold = 1
 
@@ -321,6 +326,16 @@ class Raid(commands.Cog):
 
             # Append the User objects to your existing list (e.g., self.joined)
             self.joined.extend(users)
+
+            # Fetch members with the server booster role
+            guild = self.bot.get_guild(1199287508794626078)  # Replace YOUR_GUILD_ID with your server's ID
+            if guild:
+                booster_role = guild.get_role(BOOSTER_ROLE_ID)
+                if booster_role:
+                    # Fetch all members with the server booster role
+                    booster_members = [member for member in guild.members if booster_role in member.roles]
+                    # Append these members to self.joined
+                    self.joined.extend(booster_members)
 
             async with self.bot.pool.acquire() as conn:
                 for u in self.joined:
@@ -431,7 +446,7 @@ class Raid(commands.Cog):
                         "Emoji_here",
                         ":small_blue_diamond:" if self.boss["hp"] < 1 else ":vibration_mode:"
                     )
-                    summary_channel = self.bot.get_channel(1146711679858638910)
+                    summary_channel = self.bot.get_channel(1199299514490683392)
 
                     summary_msg = await summary_channel.send(summary)
                     self.raid.clear()
@@ -522,11 +537,17 @@ class Raid(commands.Cog):
                             highest_bid = [msg.author.id, bid]
                             if highest_bid[1] >= 100:
                                 next_bid = int(highest_bid[1] * 1.1)
-                                await ctx.send(
-                                    f"{msg.author.mention} bids **${msg.content}**!\n The minimum next bid is **${next_bid}**.")
+                                for channel_id in channels_ids:
+                                    channel = self.bot.get_channel(channel_id)
+                                    if channel:
+                                        await channel.send(f"{msg.author.mention} bids **${msg.content}**!\n The minimum next bid is **${next_bid}**.")
+
                             else:
-                                await ctx.send(
-                                    f"{msg.author.mention} bids **${msg.content}**!")
+                                for channel_id in channels_ids:
+                                    channel = self.bot.get_channel(channel_id)
+                                    if channel:
+                                        await channel.send(f"{msg.author.mention} bids **${msg.content}**!")
+
 
                     msg_content = (
                         f"Auction done! Winner is <@{highest_bid[0]}> with"
@@ -591,7 +612,7 @@ class Raid(commands.Cog):
 
                     # cash_pool = 4
                     #cash_pool = 1000000 / 4
-                    cash_pool = hp * 2
+                    cash_pool = hp * 1.3
                     survivors = len(self.raid)
                     self.raid = {(user, p_type): data for (user, p_type), data in self.raid.items() if
                                  p_type == "user" and not user.bot}
@@ -648,7 +669,7 @@ class Raid(commands.Cog):
                         "Emoji_here",
                         ":small_blue_diamond:" if self.boss["hp"] < 1 else ":vibration_mode:"
                     )
-                    summary_channel = self.bot.get_channel(1146711679858638910)
+                    summary_channel = self.bot.get_channel(1199299514490683392)
                     summary_msg = await summary_channel.send(summary)
 
                 #await ctx.send("attempting to clear keys...")
@@ -1339,219 +1360,287 @@ The hamburger will be vulnerable in 15 Minutes
 
     @is_god()
     @raid_free()
-    @commands.command(hidden=True, brief=_("Starts Astraea' trial"))
+    @commands.command(hidden=True, brief=_("Starts Astraea's trial"))
     async def goodspawn(self, ctx):
         """[Astraea only] Starts a Trial."""
         await self.set_raid_timer()
 
-        view = JoinView(
-            Button(style=ButtonStyle.primary, label="Join the trial!"),
-            message=_("You joined the trial."),
-            timeout=60 * 15,
-        )
+        try:
 
-        await ctx.send(
+            view = JoinView(
+                Button(style=ButtonStyle.primary, label="Join the trial!"),
+                message=_("You joined the trial."),
+                timeout=60 * 15,
+            )
+
+            channels = [
+                self.bot.get_channel(1154245321451388948),  # This is the current channel where the command was invoked
+                self.bot.get_channel(1199300356081995847),  # Replace with the actual channel ID
+            ]
+
+            channel1 = self.bot.get_channel(1154245321451388948)
+            channel2 = self.bot.get_channel(1199300356081995847)
+            role_id1 = 1153887457775980566
+            role_id2 = 1199303066227331163
+
+            if channel1:
+                role1 = ctx.guild.get_role(role_id1)
+                if role1:
+                    await channel1.send(content=f"{role1.mention}", allowed_mentions=discord.AllowedMentions(roles=True))
+
+            if channel2:
+                role2 = ctx.guild.get_role(role_id2)
+                if role2:
+                    await channel2.send(content=f"{role2.mention}", allowed_mentions=discord.AllowedMentions(roles=True))
+
+            # Message content, organized for better formatting
+            message_intro = """
+            In Athena's grace, embrace the light,
+            Seek trials that soothe, heal the blight.
+            With kindness as your guiding star,
+            Illuminate souls from near and far.
             """
-In Athena's grace, embrace the light,
-Seek trials that soothe, heal the blight.
-With kindness as your guiding star,
-Illuminate souls from near and far.
 
-**__Champions of compassion, take your stand.__**
-Trial Begins in 15 minutes
+            message_trial = """
+            **__Champions of compassion, take your stand.__**
+            Trial Begins in 15 minutes
+            """
 
-**Only followers of Astraea may join.**""",
-            file=discord.File("assets/other/lyx.webp"),
-            view=view,
-        )
-        if not self.bot.config.bot.is_beta:
-            await asyncio.sleep(300)
-            await ctx.send("**Astraea and her Ouroboros will be visible in 10 minutes**")
-            await asyncio.sleep(300)
-            await ctx.send("**Astraea and her Ouroboros will be visible in 5 minutes**")
-            await asyncio.sleep(180)
-            await ctx.send("**Astraea and her Ouroboros will be visible in 2 minutes**")
-            await asyncio.sleep(60)
-            await ctx.send("**Astraea and her Ouroboros will be visible in 1 minute**")
-            await asyncio.sleep(30)
-            await ctx.send("**Astraea and her Ouroboros will be visible in 30 seconds**")
-            await asyncio.sleep(20)
-            await ctx.send("**Astraea and her Ouroboros will be visible in 10 seconds**")
-        else:
-            await asyncio.sleep(300)
-            await ctx.send("**Astraea's trial will commence in 10 minutes**")
-            await asyncio.sleep(300)
-            await ctx.send("**Astraea's trial will commence in 5 minutes**")
-            await asyncio.sleep(180)
-            await ctx.send("**Astraea's trial will commence in 2 minutes**")
-            await asyncio.sleep(60)
-            await ctx.send("**Astraea's trial will commence in 1 minute**")
-            await asyncio.sleep(30)
-            await ctx.send("**Astraea's trial will commence in 30 seconds**")
-            await asyncio.sleep(20)
-            await ctx.send("**Astraea's trial will commence in 10 seconds**")
+            message_note = """
+            **Only followers of Astraea may join.**
+            """
 
-        view.stop()
+            # Create the embed with structured fields
+            embed = discord.Embed(
+                title="Champions of Compassion",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="Athena's Blessing", value=message_intro, inline=False)
+            embed.add_field(name="Trial Information", value=message_trial, inline=False)
+            embed.add_field(name="Notice", value=message_note, inline=False)
+            embed.set_footer(text="Prepare your souls for the trials to come.")
+            embed.timestamp = discord.utils.utcnow()
 
-        await ctx.send(
-            "**Astraea's trial will commence! Fetch participant data... Hang on!**"
-        )
+            # Attach the file (image)
+            file = discord.File("assets/other/lyx.webp", filename="lyx.webp")
+            embed.set_image(url="attachment://lyx.webp")
 
-        async with self.bot.pool.acquire() as conn:
-            raid = []
-            for u in view.joined:
-                if (
-                        not (
-                                profile := await conn.fetchrow(
-                                    'SELECT * FROM profile WHERE "user"=$1;', u.id
-                                )
-                        )
-                        or profile["god"] != "Astraea"
-                ):
-                    continue
-                raid.append(u)
+            # Updated helper function to send to both channels and handle file closing issue
+            async def send_to_channels(embed=None, content=None, view=None, file_path=None):
+                """Helper function to send a message to all channels."""
+                for channel in channels:
+                    if channel is not None:  # Ensure the channel is valid
+                        try:
+                            if file_path:
+                                file = discord.File(file_path, filename="lyx.webp")
+                                await channel.send(embed=embed, content=content, view=view, file=file)
+                            else:
+                                await channel.send(embed=embed, content=content, view=view)
+                        except Exception as e:
+                            await ctx.send(f"Failed to send message to {channel.name}: {str(e)}")
+                    else:
+                        await ctx.send("One of the channels could not be found.")
 
-        await ctx.send("**Done getting data!**")
+            # Call this function with file_path
+            await send_to_channels(embed=embed, content=None, view=view, file_path="assets/other/lyx.webp")
 
-        while len(raid) > 1:
-            time = random.choice(["day", "night"])
-            if time == "day":
+            # Sending the embed with the file to the channels
+
+            if not self.bot.config.bot.is_beta:
+                await asyncio.sleep(300)
+                await send_to_channels(content="**Astraea and her Ouroboros will be visible in 10 minutes**")
+                await asyncio.sleep(300)
+                await send_to_channels(content="**Astraea and her Ouroboros will be visible in 5 minutes**")
+                await asyncio.sleep(180)
+                await send_to_channels(content="**Astraea and her Ouroboros will be visible in 2 minutes**")
+                await asyncio.sleep(60)
+                await send_to_channels(content="**Astraea and her Ouroboros will be visible in 1 minute**")
+                await asyncio.sleep(30)
+                await send_to_channels(content="**Astraea and her Ouroboros will be visible in 30 seconds**")
+                await asyncio.sleep(20)
+                await send_to_channels(content="**Astraea and her Ouroboros will be visible in 10 seconds**")
+            else:
+                await asyncio.sleep(300)
+                await send_to_channels(content="**Astraea's trial will commence in 10 minutes**")
+                await asyncio.sleep(300)
+                await send_to_channels(content="**Astraea's trial will commence in 5 minutes**")
+                await asyncio.sleep(180)
+                await send_to_channels(content="**Astraea's trial will commence in 2 minutes**")
+                await asyncio.sleep(60)
+                await send_to_channels(content="**Astraea's trial will commence in 1 minute**")
+                await asyncio.sleep(30)
+                await send_to_channels(content="**Astraea's trial will commence in 30 seconds**")
+                await asyncio.sleep(20)
+                await send_to_channels(content="**Astraea's trial will commence in 10 seconds**")
+
+            view.stop()
+
+            await send_to_channels(content="**Astraea's trial will commence! Fetch participant data... Hang on!**")
+
+            async with self.bot.pool.acquire() as conn:
+                raid = []
+                for u in view.joined:
+                    if (
+                            not (
+                                    profile := await conn.fetchrow(
+                                        'SELECT * FROM profile WHERE "user"=$1;', u.id
+                                    )
+                            )
+                            or profile["god"] != "Astraea"
+                    ):
+                        continue
+                    raid.append(u)
+
+            await send_to_channels(content="**Done getting data!**")
+
+            while len(raid) > 1:
+                time = random.choice(["day", "night"])
+                if time == "day":
+                    em = discord.Embed(
+                        title="It turns day",
+                        description="As the sun's golden rays grace the horizon, a sense of renewal spreads across the "
+                                    "land. The world awakens from its slumber, bathed in warmth and hope.",
+                        colour=0xFFB900,
+                    )
+                else:
+                    em = discord.Embed(
+                        title="It turns night",
+                        description="The world embraces the embrace of the night, shrouded in mystery and quietude. The "
+                                    "stars twinkle like distant promises, and the nocturnal creatures begin their "
+                                    "whispered symphony.",
+                        colour=0xFFB900,
+                    )
+                em.set_thumbnail(url=f"{self.bot.BASE_URL}/image/lyx.png")
+                await send_to_channels(embed=em)
+                await asyncio.sleep(5)
+                target = random.choice(raid)
+                if time == "day":
+                    event = random.choice(
+                        [
+                            {
+                                "text": "Extend a Healing Hand",
+                                "win": 80,
+                                "win_text": "Your compassionate efforts have brought healing and solace. Astraea smiles "
+                                            "upon you.",
+                                "lose_text": "Despite your intentions, your healing touch falters. Astraea's grace eludes "
+                                             "you.",
+                            },
+                            {
+                                "text": "Ease Emotional Burdens",
+                                "win": 50,
+                                "win_text": "Through your empathetic words, you mend fractured souls. Astraea's favor "
+                                            "shines on you.",
+                                "lose_text": "Your words fall short, unable to mend the hearts before you. Astraea's "
+                                             "blessing slips away.",
+                            },
+                            {
+                                "text": "Kindness in Action",
+                                "win": 60,
+                                "win_text": "Your selfless actions spread ripples of kindness. Astraea's radiant gaze "
+                                            "embraces you.",
+                                "lose_text": "Your attempts at kindness don't fully resonate. Astraea's warmth remains "
+                                             "distant.",
+                            },
+                        ]
+                    )
+                else:
+                    event = random.choice(
+                        [
+                            {
+                                "text": "Guiding Light of Compassion",
+                                "win": 30,
+                                "win_text": "Amidst the tranquil night, your compassion brings light to dark corners. "
+                                            "Astraea's approval graces you.",
+                                "lose_text": "Your efforts to bring solace in the night are met with challenges. Astraea's "
+                                             "light evades you.",
+                            },
+                            {
+                                "text": "Healing Moon's Embrace",
+                                "win": 45,
+                                "win_text": "Under the moon's serenity, your healing touch is magnified. Astraea's "
+                                            "presence envelops you.",
+                                "lose_text": "Your attempts to heal are hindered by unseen forces. Astraea's touch remains "
+                                             "elusive.",
+                            },
+                            {
+                                "text": "Celestial Blessing of Serenity",
+                                "win": 20,
+                                "win_text": "As the stars align in your favor, Astraea's serene blessings envelop you. A "
+                                            "tranquil aura emanates from your being, soothing all around.",
+                                "lose_text": "Despite your efforts to channel the cosmos, Astraea's tranquility eludes "
+                                             "you, leaving only fleeting traces of its presence.",
+                            },
+                            {
+                                "text": "Stellar Harmonies of Renewal",
+                                "win": 20,
+                                "win_text": "In harmony with the celestial melodies, your actions resonate with Astraea's "
+                                            "essence. The stars themselves seem to sing your praises, infusing the air "
+                                            "with renewal.",
+                                "lose_text": "The cosmic harmonies remain elusive, and your attempts to align with "
+                                             "Astraea's melody falter, leaving a sense of missed opportunity in the "
+                                             "night's chorus.",
+                            }
+                        ]
+                    )
+                does_win = event["win"] >= random.randint(1, 100)
+                if does_win:
+                    text = event["win_text"]
+                else:
+                    text = event["lose_text"]
+                    raid.remove(target)
                 em = discord.Embed(
-                    title="It turns day",
-                    description="As the sun's golden rays grace the horizon, a sense of renewal spreads across the "
-                                "land. The world awakens from its slumber, bathed in warmth and hope.",
+                    title=event["text"],
+                    description=text,
                     colour=0xFFB900,
                 )
-            else:
-                em = discord.Embed(
-                    title="It turns night",
-                    description="The world embraces the embrace of the night, shrouded in mystery and quietude. The "
-                                "stars twinkle like distant promises, and the nocturnal creatures begin their "
-                                "whispered symphony.",
-                    colour=0xFFB900,
-                )
-            em.set_thumbnail(url=f"{self.bot.BASE_URL}/image/lyx.png")
-            await ctx.send(embed=em)
-            await asyncio.sleep(5)
-            target = random.choice(raid)
-            if time == "day":
-                event = random.choice(
-                    [
-                        {
-                            "text": "Extend a Healing Hand",
-                            "win": 80,
-                            "win_text": "Your compassionate efforts have brought healing and solace. Astraea smiles "
-                                        "upon you.",
-                            "lose_text": "Despite your intentions, your healing touch falters. Astraea's grace eludes "
-                                         "you.",
-                        },
-                        {
-                            "text": "Ease Emotional Burdens",
-                            "win": 50,
-                            "win_text": "Through your empathetic words, you mend fractured souls. Astraea's favor "
-                                        "shines on you.",
-                            "lose_text": "Your words fall short, unable to mend the hearts before you. Astraea's "
-                                         "blessing slips away.",
-                        },
-                        {
-                            "text": "Kindness in Action",
-                            "win": 60,
-                            "win_text": "Your selfless actions spread ripples of kindness. Astraea's radiant gaze "
-                                        "embraces you.",
-                            "lose_text": "Your attempts at kindness don't fully resonate. Astraea's warmth remains "
-                                         "distant.",
-                        },
-                    ]
-                )
-            else:
-                event = random.choice(
-                    [
-                        {
-                            "text": "Guiding Light of Compassion",
-                            "win": 30,
-                            "win_text": "Amidst the tranquil night, your compassion brings light to dark corners. "
-                                        "Astraea's approval graces you.",
-                            "lose_text": "Your efforts to bring solace in the night are met with challenges. Astraea's "
-                                         "light evades you.",
-                        },
-                        {
-                            "text": "Healing Moon's Embrace",
-                            "win": 45,
-                            "win_text": "Under the moon's serenity, your healing touch is magnified. Astraea's "
-                                        "presence envelops you.",
-                            "lose_text": "Your attempts to heal are hindered by unseen forces. Astraea's touch remains "
-                                         "elusive.",
-                        },
-                        {
-                            "text": "Celestial Blessing of Serenity",
-                            "win": 20,
-                            "win_text": "As the stars align in your favor, Astraea's serene blessings envelop you. A "
-                                        "tranquil aura emanates from your being, soothing all around.",
-                            "lose_text": "Despite your efforts to channel the cosmos, Astraea's tranquility eludes "
-                                         "you, leaving only fleeting traces of its presence.",
-                        },
-                        {
-                            "text": "Stellar Harmonies of Renewal",
-                            "win": 20,
-                            "win_text": "In harmony with the celestial melodies, your actions resonate with Astraea's "
-                                        "essence. The stars themselves seem to sing your praises, infusing the air "
-                                        "with renewal.",
-                            "lose_text": "The cosmic harmonies remain elusive, and your attempts to align with "
-                                         "Astraea's melody falter, leaving a sense of missed opportunity in the "
-                                         "night's chorus.",
-                        }
-                    ]
-                )
-            does_win = event["win"] >= random.randint(1, 100)
-            if does_win:
-                text = event["win_text"]
-            else:
-                text = event["lose_text"]
-                raid.remove(target)
-            em = discord.Embed(
-                title=event["text"],
-                description=text,
-                colour=0xFFB900,
-            )
-            em.set_author(name=f"{target}", icon_url=target.display_avatar.url)
-            em.set_footer(text=f"{len(raid)} followers remain")
-            em.set_thumbnail(url=f"{self.bot.BASE_URL}/image/lyx.png")
-            await ctx.send(embed=em)
-            await asyncio.sleep(5)
+                em.set_author(name=f"{target}", icon_url=target.display_avatar.url)
+                em.set_footer(text=f"{len(raid)} followers remain")
+                em.set_thumbnail(url=f"{self.bot.BASE_URL}/image/lyx.png")
+                await send_to_channels(embed=em)
+                await asyncio.sleep(5)
 
-        winner = raid[0]
-        async with self.bot.pool.acquire() as conn:
-            # Fetch the luck value for the specified user (winner)
-            luck_query = await conn.fetchval(
-                'SELECT luck FROM profile WHERE "user" = $1;',
-                winner.id,
+            winner = raid[0]
+            async with self.bot.pool.acquire() as conn:
+                # Fetch the luck value for the specified user (winner)
+                luck_query = await conn.fetchval(
+                    'SELECT luck FROM profile WHERE "user" = $1;',
+                    winner.id,
+                )
+
+            # Convert luck_query to float
+            luck_query_float = float(luck_query)
+
+            # Perform the multiplication
+            weightdivine = 0.20 * luck_query_float
+
+            # Round to the nearest .000
+            rounded_weightdivine = round(weightdivine, 3)
+
+            options = ['legendary', 'fortune', 'divine']
+            weights = [0.40, 0.40, rounded_weightdivine]
+
+            crate = randomm.choices(options, weights=weights)[0]
+
+            await send_to_channels(
+                content=f"In the divine radiance of Astraea, {winner.mention} ascends to the cosmic realm. Guided by the "
+                        f"goddess's embrace, they uncover a celestial treasure—an enigmatic, {crate} crate adorned with "
+                        f"stardust among the constellations."
             )
 
-        # Convert luck_query to float
-        luck_query_float = float(luck_query)
+            # Update the profile and clear the raid timer
+            async with self.bot.pool.acquire() as conn:
+                await conn.execute(
+                    f'UPDATE profile SET "crates_{crate}" = "crates_{crate}" + 1 WHERE "user" = $1;',
+                    winner.id,
+                )
 
-        # Perform the multiplication
-        weightdivine = 0.20 * luck_query_float
-
-        # Round to the nearest .000
-        rounded_weightdivine = round(weightdivine, 3)
-
-        options = ['legendary', 'fortune', 'divine']
-        weights = [0.40, 0.40, rounded_weightdivine]
-
-        crate = randomm.choices(options, weights=weights)[0]
-
-        await ctx.send(
-            f"In the divine radiance of Astraea, {winner.mention} ascends to the cosmic realm. Guided by the "
-            f"goddess's embrace, they uncover a celestial treasure—an enigmatic, {crate} crate adorned with "
-            f"stardust among the constellations."
-        )
-        async with self.bot.pool.acquire() as conn:
-            await conn.execute(
-                f'UPDATE profile SET "crates_{crate}" = "crates_{crate}" + 1 WHERE "user" = $1;',
-                winner.id,
-            )
-        await self.clear_raid_timer()
+            await self.clear_raid_timer()
+        except Exception as e:
+            import traceback
+            error_message = f"Error occurred: {e}\n"
+            error_message += traceback.format_exc()
+            await ctx.send(error_message)
+            print(error_message)
 
     async def get_player_decision(self, player, options, role, prompt=None, embed=None):
         """
@@ -2235,7 +2324,16 @@ Trial Begins in 15 minutes
         """[Drakath only] Starts a raid."""
         await self.set_raid_timer()
 
-        # boss_hp = random.randint(500, 1000)
+        # Define the channels where the raid messages will be sent
+        channels = [
+            self.bot.get_channel(1154244627822551060),  # This is the current channel where the command was invoked
+            self.bot.get_channel(1199300319256006746),  # Replace with the actual channel ID
+        ]
+
+        async def send_to_channels(embed=None, content=None, view=None):
+            """Helper function to send a message to all channels."""
+            for channel in channels:
+                await channel.send(embed=embed, content=content, view=view)
 
         view = JoinView(
             Button(style=ButtonStyle.primary, label="Join the raid!"),
@@ -2243,56 +2341,70 @@ Trial Begins in 15 minutes
             timeout=60 * 15,
         )
 
+        channel1 = self.bot.get_channel(1154244627822551060)
+        channel2 = self.bot.get_channel(1199300319256006746)
+        role_id1 = 1153880715419717672
+        role_id2 = 1199302687083204649
+
+        if channel1:
+            role1 = ctx.guild.get_role(role_id1)
+            if role1:
+                await channel1.send(content=f"{role1.mention}", allowed_mentions=discord.AllowedMentions(roles=True))
+
+        if channel2:
+            role2 = ctx.guild.get_role(role_id2)
+            if role2:
+                await channel2.send(content=f"{role2.mention}", allowed_mentions=discord.AllowedMentions(roles=True))
+
         em = discord.Embed(
             title="Raid the Void",
             description=f"""
-In Drakath's name, unleash the storm,
-Raiders of chaos, in shadows swarm.
-No order, no restraint, just untamed glee,
-Drakath's chaos shall set us free.
+    In Drakath's name, unleash the storm,
+    Raiders of chaos, in shadows swarm.
+    No order, no restraint, just untamed glee,
+    Drakath's chaos shall set us free.
 
-Eclipse the Void Conqueror has {boss_hp} HP and will be vulnerable in 15 Minutes
+    Eclipse the Void Conqueror has {boss_hp} HP and will be vulnerable in 15 Minutes
 
-**Only followers of Drakath may join.**""",
+    **Only followers of Drakath may join.**""",
             color=0xFFB900,
         )
-        em.set_image(url=f"https://i.imgur.com/YoszTlc.png")
-        await ctx.send(embed=em, view=view)
+        em.set_image(url="https://i.imgur.com/YoszTlc.png")
+
+        # Send the initial raid message and join button to both channels
+        await send_to_channels(embed=em, view=view)
+
 
         if not self.bot.config.bot.is_beta:
-
             await asyncio.sleep(300)
-            await ctx.send("**The raid on the void will start in 10 minutes**")
+            await send_to_channels(content="**The raid on the void will start in 10 minutes**")
             await asyncio.sleep(300)
-            await ctx.send("**The raid on the void will start in 5 minutes**")
+            await send_to_channels(content="**The raid on the void will start in 5 minutes**")
             await asyncio.sleep(180)
-            await ctx.send("**The raid on the void will start in 2 minutes**")
+            await send_to_channels(content="**The raid on the void will start in 2 minutes**")
             await asyncio.sleep(60)
-            await ctx.send("**The raid on the void will start in 1 minute**")
+            await send_to_channels(content="**The raid on the void will start in 1 minute**")
             await asyncio.sleep(30)
-            await ctx.send("**The raid on the void will start in 30 seconds**")
+            await send_to_channels(content="**The raid on the void will start in 30 seconds**")
             await asyncio.sleep(20)
-            await ctx.send("**The raid on the void will start in 10 seconds**")
-            await asyncio.sleep(10)
+            await send_to_channels(content="**The raid on the void will start in 10 seconds**")
         else:
             await asyncio.sleep(300)
-            await ctx.send("**The raid on the void will start in 10 minutes**")
+            await send_to_channels(content="**The raid on the void will start in 10 minutes**")
             await asyncio.sleep(300)
-            await ctx.send("**The raid on the void will start in 5 minutes**")
+            await send_to_channels(content="**The raid on the void will start in 5 minutes**")
             await asyncio.sleep(180)
-            await ctx.send("**The raid on the void will start in 2 minutes**")
+            await send_to_channels(content="**The raid on the void will start in 2 minutes**")
             await asyncio.sleep(60)
-            await ctx.send("**The raid on the void will start in 1 minute**")
+            await send_to_channels(content="**The raid on the void will start in 1 minute**")
             await asyncio.sleep(30)
-            await ctx.send("**The raid on the void will start in 30 seconds**")
+            await send_to_channels(content="**The raid on the void will start in 30 seconds**")
             await asyncio.sleep(20)
-            await ctx.send("**The raid on the void will start in 10 seconds**")
+            await send_to_channels(content="**The raid on the void will start in 10 seconds**")
 
         view.stop()
 
-        await ctx.send(
-            "**The raid on the facility started! Fetching participant data... Hang on!**"
-        )
+        await send_to_channels(content="**The raid on the facility started! Fetching participant data... Hang on!**")
 
         async with self.bot.pool.acquire() as conn:
             raid = {}
@@ -2308,7 +2420,7 @@ Eclipse the Void Conqueror has {boss_hp} HP and will be vulnerable in 15 Minutes
                     continue
                 raid[u] = 250
 
-        await ctx.send("**Done getting data!**")
+        await send_to_channels(content="**Done getting data!**")
 
         start = datetime.datetime.utcnow()
 
@@ -2334,8 +2446,8 @@ Eclipse the Void Conqueror has {boss_hp} HP and will be vulnerable in 15 Minutes
                 )
             em.add_field(name="Damage", value=dmg)
             em.set_author(name=str(target), icon_url=target.display_avatar.url)
-            em.set_thumbnail(url=f"https://i.imgur.com/YS4A6R7.png")
-            await ctx.send(embed=em)
+            em.set_thumbnail(url="https://i.imgur.com/YS4A6R7.png")
+            await send_to_channels(embed=em)
             if raid[target] <= 0:
                 del raid[target]
                 if len(raid) == 0:
@@ -2351,10 +2463,9 @@ Eclipse the Void Conqueror has {boss_hp} HP and will be vulnerable in 15 Minutes
                     colour=0xFFB900,
                 )
                 em.set_author(name=str(target), icon_url=target.display_avatar.url)
-                em.set_thumbnail(url=f"https://i.imgur.com/md5dWFk.png")
-                await ctx.send(embed=em)
+                em.set_thumbnail(url="https://i.imgur.com/md5dWFk.png")
+                await send_to_channels(embed=em)
 
-            # NIC traps might explode
             if random.randint(1, 5) == 1:
                 await asyncio.sleep(4)
                 if len(raid) >= 3:
@@ -2370,10 +2481,9 @@ Eclipse the Void Conqueror has {boss_hp} HP and will be vulnerable in 15 Minutes
                     description=f"It's super effective!\n{', '.join(str(u) for u in targets)} take 100 damage!",
                     colour=0xFFB900,
                 )
-                em.set_thumbnail(url=f"https://i.imgur.com/lDqNHua.png")
-                await ctx.send(embed=em)
+                em.set_thumbnail(url="https://i.imgur.com/lDqNHua.png")
+                await send_to_channels(embed=em)
 
-            # Sausages do 25dmg and a 10% crit of 75-100
             dmg_to_take = sum(
                 25 if random.randint(1, 10) != 10 else random.randint(75, 100)
                 for u in raid
@@ -2383,17 +2493,16 @@ Eclipse the Void Conqueror has {boss_hp} HP and will be vulnerable in 15 Minutes
             em = discord.Embed(
                 title="The power of Drakath's Followers attacks Eclipse!", colour=0xFF5C00
             )
-            em.set_thumbnail(url=f"https://i.imgur.com/kf3zcLs.png")
+            em.set_thumbnail(url="https://i.imgur.com/kf3zcLs.png")
             em.add_field(name="Damage", value=dmg_to_take)
             if boss_hp > 0:
                 em.add_field(name="HP left", value=boss_hp)
             else:
                 em.add_field(name="HP left", value="Dead!")
-            await ctx.send(embed=em)
+            await send_to_channels(embed=em)
             await asyncio.sleep(4)
 
         if boss_hp > 1 and len(raid) > 0:
-            # Timed out
             em = discord.Embed(
                 title="Defeat",
                 description="As Drakath's malevolent laughter echoes through the shattered realm, his followers stand "
@@ -2401,8 +2510,9 @@ Eclipse the Void Conqueror has {boss_hp} HP and will be vulnerable in 15 Minutes
                             "chaos's unyielding and capricious nature.",
                 color=0xFFB900,
             )
-            em.set_image(url=f"https://i.imgur.com/s5tvHMd.png")
-            await ctx.send(embed=em)
+            em.set_image(url="https://i.imgur.com/s5tvHMd.png")
+            await send_to_channels(embed=em)
+            await self.clear_raid_timer()
         elif len(raid) == 0:
             em = discord.Embed(
                 title="Defeat",
@@ -2411,25 +2521,20 @@ Eclipse the Void Conqueror has {boss_hp} HP and will be vulnerable in 15 Minutes
                             "like shattered illusions in the wake of their failure.",
                 color=0xFFB900,
             )
-            em.set_image(url=f"https://i.imgur.com/UpWW3fF.png")
-            await ctx.send(embed=em)
+            em.set_image(url="https://i.imgur.com/UpWW3fF.png")
+            await send_to_channels(embed=em)
+            await self.clear_raid_timer()
         else:
             winner = random.choice(list(raid.keys()))
             try:
                 async with self.bot.pool.acquire() as conn:
-                    # Fetch the luck value for the specified user (winner)
                     luck_query = await conn.fetchval(
                         'SELECT luck FROM profile WHERE "user" = $1;',
                         winner.id,
                     )
 
-                # Convert luck_query to float
                 luck_query_float = float(luck_query)
-
-                # Perform the multiplication
                 weightdivine = 0.20 * luck_query_float
-
-                # Round to the nearest .000
                 rounded_weightdivine = round(weightdivine, 3)
 
                 options = ['legendary', 'fortune', 'divine']
@@ -2447,22 +2552,32 @@ Eclipse the Void Conqueror has {boss_hp} HP and will be vulnerable in 15 Minutes
                 except Exception as e:
                     print(f"An error occurred: {e}")
 
-
-            except Exception as e:
-                # Handle the exception here, you can log it or perform any necessary actions
-                await ctx.send(f"An error occurred: {e}")
-
-            em = discord.Embed(
-                title="Win!",
-                description=f"The forces aligned with Drakath have triumphed over Eclipse, wresting victory from the "
-                            f"clutches of chaos itself!\n{winner.mention} emerges as a true champion of anarchy, "
-                            f"earning a {crate}) crate from Drakath as a token of recognition for their unrivaled "
-                            f"prowess!",
-                color=0xFFB900,
-            )
-            em.set_image(url=f"https://i.imgur.com/U1Of4tz.png")
-            await ctx.send(embed=em)
-        await self.clear_raid_timer()
+                em = discord.Embed(
+                    title="Win!",
+                    description=f"The forces aligned with Drakath have triumphed over Eclipse, wresting victory from the "
+                                f"clutches of chaos itself!\n{winner.mention} emerges as a true champion of anarchy, "
+                                f"earning a {crate}) crate from Drakath as a token of recognition for their unrivaled "
+                                f"prowess!",
+                    color=0xFFB900,
+                )
+                em.set_thumbnail(url="https://i.imgur.com/3pg9Msj.png")
+                em.set_image(url="https://i.imgur.com/s5tvHMd.png")
+                em.add_field(name="Crate Found", value=crate)
+                await send_to_channels(embed=em)
+                await self.clear_raid_timer()
+            except Exception:
+                em = discord.Embed(
+                    title="Win!",
+                    description=f"The forces aligned with Drakath have triumphed over Eclipse, wresting victory from the "
+                                f"clutches of chaos itself!\n{winner.mention} emerges as a true champion of anarchy, "
+                                f"earning a {crate}) crate from Drakath as a token of recognition for their unrivaled "
+                                f"prowess!",
+                    color=0xFFB900,
+                )
+                em.set_thumbnail(url="https://i.imgur.com/3pg9Msj.png")
+                em.set_image(url="https://i.imgur.com/s5tvHMd.png")
+                await send_to_channels(embed=em)
+                await self.clear_raid_timer()
 
     @commands.command()
     async def joinraid(self, ctx):
@@ -3119,22 +3234,142 @@ Atheistus will be vulnerable in 15 Minutes
             ).format(newlvl=newlvl, price=price)
         )
 
-    @has_char()
-    @commands.command(aliases=["rs"], brief=_("View your raid stats"))
-    @locale_doc
-    async def raidstats(self, ctx, player: discord.Member = None):
-        _(
-            """View your raidstats. These will affect your performance in raids and raidbattles."""
-        )
+    import discord
+    from discord.ext import commands
+    from decimal import Decimal, getcontext
+    import traceback
 
-        if player:
+    # Set decimal precision high enough for your application's needs
+    getcontext().prec = 28
+
+    # Replace this with the actual ID you want to check against
+    SPECIAL_USER_ID = 144932915682344960
+
+    import discord
+    from discord.ext import commands
+    from decimal import Decimal
+    import traceback
+
+    import discord
+    from discord.ext import commands
+    from decimal import Decimal
+    import traceback
+
+    @commands.command()
+    async def rspref(self, ctx):
+        if ctx.author.id in self.toggle_list:
+            self.toggle_list.remove(ctx.author.id)
+            await ctx.send("You are now using the new raid stats.")
+        else:
+            self.toggle_list.add(ctx.author.id)
+            await ctx.send("You are now using the old raid stats.")
+
+    @has_char()
+    @commands.command(aliases=["rs"], brief=_("View your raid stats or compare two players"))
+    @locale_doc
+    async def raidstats(self, ctx, player1: discord.Member = None, player2: discord.Member = None):
+
+        if ctx.author.id in self.toggle_list:
+
+            # Execute code if the ID matches one of the specified IDs
+            # Old raidstats implementation
+            _(
+                """View your raidstats. These will affect your performance in raids and raidbattles."""
+            )
+
+            if player1:
+                target_player = player1
+            else:
+                target_player = ctx.author
+
             try:
                 # Fetch class, attack multiplier, defense multiplier, health, and health per level
-                query = 'SELECT "class", "atkmultiply", "defmultiply", "health", "hplevel", "guild", "xp", "statdef", "statatk", "stathp" FROM profile WHERE "user" = $1;'
-                result = await self.bot.pool.fetch(query, player.id)
-
+                query = '''
+                    SELECT "class", "atkmultiply", "defmultiply", "health", "hplevel", 
+                           "guild", "xp", "statdef", "statatk", "stathp" 
+                    FROM profile 
+                    WHERE "user" = $1;
+                '''
+                result = await self.bot.pool.fetch(query, target_player.id)
 
                 if result:
+                    player_data = result[0]
+                    level = rpgtools.xptolevel(player_data["xp"])
+                    statdeff = player_data["statdef"] * Decimal("0.1")
+                    statatk = player_data["statatk"] * Decimal("0.1")
+                    atk = player_data["atkmultiply"] + statatk
+                    deff = player_data["defmultiply"] + statdeff
+
+                    stathp = player_data["stathp"] * 50
+                    base = 250 + (level * 5)
+                    hp = player_data["health"] + stathp + base
+                    hplevel = player_data["hplevel"]
+                    guild = player_data["guild"]
+                    hpprice = self.getpricetohp(hplevel + Decimal("0.1"))
+                    atkp = self.getpriceto(atk + Decimal("0.1") - statatk)
+                    deffp = self.getpriceto(deff + Decimal("0.1") - statdeff)
+                    classes = [class_from_string(c) for c in player_data["class"]]
+
+                    if buildings := await self.bot.get_city_buildings(player_data["guild"]):
+                        atk += Decimal("0.1") * buildings["raid_building"]
+                        deff += Decimal("0.1") * buildings["raid_building"]
+
+                    async with self.bot.pool.acquire() as conn:
+                        dmg, defff = await self.bot.get_raidstats(target_player, conn=conn)
+
+                    # Sanitize atk and deff to prevent negative multipliers
+                    atk = max(float(atk), 0)
+                    deff = max(float(deff), 0)
+
+
+                    embed = discord.Embed(
+                        title=f"{target_player.display_name}'s Raid Multipliers",
+                        description=(
+                            f"**Damage Multiplier:** x{atk}\n"
+                            f"**Upgrading:** ${int(atkp)}\n\n"  # Removed decimal
+                            f"**Health Multiplier:** x{hplevel}\n"
+                            f"**Upgrading:** ${int(hpprice)}\n\n"  # Removed decimal
+                            f"**Defense Multiplier:** x{deff}\n"
+                            f"**Upgrading:** ${int(deffp)}\n\n"  # Removed decimal
+                            f"**Player's Damage:** {dmg}\n"
+                            f"**Player's Defense:** {defff}\n"
+                            f"**Player's Health:** {hp}"
+                        ),
+                        color=0x00ff00,  # You can change the color code as needed
+                    )
+                else:
+                    embed = discord.Embed(
+                        description="❌ Player's data could not be retrieved.",
+                        color=0xFF0000
+                    )
+
+            except Exception as e:
+                error_message = f"Error occurred: {e}\n{traceback.format_exc()}"
+                await ctx.send(error_message)
+                print(error_message)
+                return
+
+            await ctx.send(embed=embed)
+
+        else:
+            # New raidstats implementation
+            _(
+                """View your raid stats or compare two players' raid stats. These stats will affect performance in raids and raid battles."""
+            )
+
+            # Function to fetch and process player data
+            async def get_player_data(player):
+                try:
+                    query = '''
+                        SELECT "class", "atkmultiply", "defmultiply", "health", "hplevel", 
+                               "guild", "xp", "statdef", "statatk", "stathp" 
+                        FROM profile 
+                        WHERE "user" = $1;
+                    '''
+                    result = await self.bot.pool.fetch(query, player.id)
+
+                    if not result:
+                        return None
 
                     player_data = result[0]
                     level = rpgtools.xptolevel(player_data["xp"])
@@ -3145,18 +3380,14 @@ Atheistus will be vulnerable in 15 Minutes
 
                     stathp = player_data["stathp"] * 50
                     base = 250 + (level * 5)
-                    hp = player_data["health"] + stathp + base # Adding 250 as per your original logic
+                    hp = player_data["health"] + stathp + base
                     hplevel = player_data["hplevel"]
                     guild = player_data["guild"]
                     hpprice = self.getpricetohp(hplevel + Decimal("0.1"))
                     atkp = self.getpriceto(atk + Decimal("0.1") - statatk)
                     deffp = self.getpriceto(deff + Decimal("0.1") - statdeff)
                     classes = [class_from_string(c) for c in player_data["class"]]
-                    #for c in classes:
-                        #if c and c.in_class_line(Raider):
-                            #tier = c.class_grade()
-                            #atk += Decimal("0.1") * tier
-                            #deff += Decimal("0.1") * tier
+
                     if buildings := await self.bot.get_city_buildings(player_data["guild"]):
                         atk += Decimal("0.1") * buildings["raid_building"]
                         deff += Decimal("0.1") * buildings["raid_building"]
@@ -3164,71 +3395,228 @@ Atheistus will be vulnerable in 15 Minutes
                     async with self.bot.pool.acquire() as conn:
                         dmg, defff = await self.bot.get_raidstats(player, conn=conn)
 
-                    embed = discord.Embed(
-                        title=f"{player.display_name}'s Raid Multipliers",
-                        description=(
-                            f"**Damage Multiplier:** x{atk}\n"
-                            f"**Upgrading:** ${atkp}\n\n"
-                            f"**Health Multiplier:** x{hplevel}\n"
-                            f"**Upgrading:** ${hpprice}\n\n"
-                            f"**Defense Multiplier:** x{deff}\n"
-                            f"**Upgrading:** ${deffp}\n\n"
-                            f"**Player's Damage:** {dmg}\n"
-                            f"**Player's Defense:** {defff}\n"
-                            f"**Player's Health:** {hp}"
-                        ),
-                        color=0x00ff00,  # You can change the color code as needed
-                    )
-            except Exception as e:
-                import traceback
-                error_message = f"Error occurred: {e}\n"
-                error_message += traceback.format_exc()
-                await ctx.send(error_message)
-                print(error_message)
+                    # Sanitize atk and deff to prevent negative multipliers
+                    atk = max(float(atk), 0)
+                    deff = max(float(deff), 0)
 
-        else:
-            statdeff = ctx.character_data["statdef"] * Decimal("0.1")
-            statatk = ctx.character_data["statatk"] * Decimal("0.1")
-            atk = ctx.character_data["atkmultiply"] + statatk
-            deff = ctx.character_data["defmultiply"] + statdeff
-            level = rpgtools.xptolevel(ctx.character_data["xp"])
-            stathp = ctx.character_data["stathp"] * 50
-            base = 250 + (level * 5)
-            hp = ctx.character_data["health"] + base + stathp  # Adding 250 as per your original logic
-            hplevel = ctx.character_data["hplevel"]
-            hpprice = self.getpricetohp(hplevel + Decimal("0.1"))
-            atkp = self.getpriceto(atk + Decimal("0.1") - statatk)
-            deffp = self.getpriceto(deff + Decimal("0.1") - statdeff)
-            classes = [class_from_string(c) for c in ctx.character_data["class"]]
-            #for c in classes:
-                #if c and c.in_class_line(Raider):
-                    #tier = c.class_grade()
-                    #atk += Decimal("0.1") * tier
-                    #deff += Decimal("0.1") * tier
-            if buildings := await self.bot.get_city_buildings(ctx.character_data["guild"]):
-                atk += Decimal("0.1") * buildings["raid_building"]
-                deff += Decimal("0.1") * buildings["raid_building"]
+                    # Format multipliers to one decimal place
+                    atk = float(f"{atk:.1f}")
+                    deff = float(f"{deff:.1f}")
+                    hplevel = float(f"{hplevel:.1f}")
 
-            async with self.bot.pool.acquire() as conn:
-                dmg, defff = await self.bot.get_raidstats(ctx.author, conn=conn)
+                    # Convert Decimal and integer values to float for consistency
+                    dmg = float(dmg)
+                    defff = float(defff)
+                    hp = float(hp)
+                    hpprice = float(hpprice)
+                    atkp = float(atkp)
+                    deffp = float(deffp)
 
-            embed = discord.Embed(
-                title=f"{ctx.author.display_name}'s Raid Multipliers",
-                description=(
-                    f"**Damage Multiplier:** x{atk}\n"
-                    f"**Upgrading:** ${atkp}\n\n"
-                    f"**Health Multiplier:** x{hplevel}\n"
-                    f"**Upgrading:** ${hpprice}\n\n"
-                    f"**Defense Multiplier:** x{deff}\n"
-                    f"**Upgrading:** ${deffp}\n\n"
-                    f"**Player's Damage:** {dmg}\n"
-                    f"**Player's Defense:** {defff}\n"
-                    f"**Player's Health:** {hp}"
-                ),
-                color=0x00ff00,  # You can change the color code as needed
-            )
 
-        await ctx.send(embed=embed)
+                    return {
+                        "player": player,
+                        "atk": atk,
+                        "deff": deff,
+                        "hp": hp,
+                        "hplevel": hplevel,
+                        "hpprice": hpprice,
+                        "atkp": atkp,
+                        "deffp": deffp,
+                        "dmg": dmg,
+                        "defff": defff,
+                    }
+                except Exception as e:
+                    error_message = f"Error fetching data for {player.display_name}: {e}\n{traceback.format_exc()}"
+                    await ctx.send(error_message)
+                    print(error_message)
+                    return None
+
+            # Function to compare two players
+            def compare_players(data1, data2):
+                # Define a scoring system with sanitized atk and deff
+                power1 = (max(data1["atk"], 0) * data1["dmg"]) + (max(data1["deff"], 0) * data1["defff"]) + data1["hp"]
+                power2 = (max(data2["atk"], 0) * data2["dmg"]) + (max(data2["deff"], 0) * data2["defff"]) + data2["hp"]
+
+                # Determine the difference
+                difference = power1 - power2
+                threshold = max(power1, power2) * 0.05  # 5% threshold for uncertainty
+
+                if abs(difference) < threshold:
+                    # Power method is too close; perform combat simulation
+
+                    def simulate_combat(attacker_first=True):
+                        # Initialize HPs
+                        p1_hp = data1["hp"]
+                        p2_hp = data2["hp"]
+
+                        if attacker_first:
+                            # Player 1 attacks Player 2
+                            damage = data1["dmg"] - data2["defff"]
+                            damage = max(damage, 0)
+                            p2_hp -= damage
+
+                            # Player 2 retaliates if still alive
+                            if p2_hp > 0:
+                                damage = data2["dmg"] - data1["defff"]
+                                damage = max(damage, 0)
+                                p1_hp -= damage
+
+                                # Player 1 attacks again if still alive
+                                if p1_hp > 0:
+                                    damage = data1["dmg"] - data2["defff"]
+                                    damage = max(damage, 0)
+                                    p2_hp -= damage
+                        else:
+                            # Player 2 attacks Player 1
+                            damage = data2["dmg"] - data1["defff"]
+                            damage = max(damage, 0)
+                            p1_hp -= damage
+
+                            # Player 1 retaliates if still alive
+                            if p1_hp > 0:
+                                damage = data1["dmg"] - data2["defff"]
+                                damage = max(damage, 0)
+                                p2_hp -= damage
+
+                                # Player 2 attacks again if still alive
+                                if p2_hp > 0:
+                                    damage = data2["dmg"] - data1["defff"]
+                                    damage = max(damage, 0)
+                                    p1_hp -= damage
+
+                        # Determine outcome
+                        if p1_hp > 0 and p2_hp <= 0:
+                            return 'player1'
+                        elif p2_hp > 0 and p1_hp <= 0:
+                            return 'player2'
+                        elif p1_hp > p2_hp:
+                            return 'player1'
+                        elif p2_hp > p1_hp:
+                            return 'player2'
+                        else:
+                            return 'tie'
+
+                    # Simulate both strike orders
+                    outcome_first_p1 = simulate_combat(attacker_first=True)
+                    outcome_first_p2 = simulate_combat(attacker_first=False)
+
+                    # Analyze outcomes
+                    if outcome_first_p1 == outcome_first_p2:
+                        if outcome_first_p1 == 'player1':
+                            result = f"🏆 **{data1['player'].display_name}** would win the raid battle against **{data2['player'].display_name}**."
+                            method_used = "Combat Simulation (Player 1 strikes first)"
+                        elif outcome_first_p1 == 'player2':
+                            result = f"🏆 **{data2['player'].display_name}** would win the raid battle against **{data1['player'].display_name}**."
+                            method_used = "Combat Simulation (Player 1 strikes first)"
+                        else:
+                            result = "⚖️ **The outcome is uncertain; the players are too closely matched.**"
+                            method_used = "Combat Simulation (Player 1 strikes first)"
+                    else:
+                        # Outcomes differ based on who strikes first
+                        result = (
+                            "⚖️ **The outcome depends on who strikes first; it's too close to call definitively.**\n\n"
+                            f"🔹 When **{data1['player'].display_name}** strikes first:\n {'🏆 ' + data1['player'].display_name + ' wins.' if outcome_first_p1 == 'player1' else '🏆 ' + data2['player'].display_name + ' wins.' if outcome_first_p1 == 'player2' else '⚖️ Tie.'}\n"
+                            f"\n🔹 When **{data2['player'].display_name}** strikes first:\n {'🏆 ' + data1['player'].display_name + ' wins.' if outcome_first_p2 == 'player1' else '🏆 ' + data2['player'].display_name + ' wins.' if outcome_first_p2 == 'player2' else '⚖️ Tie.'}"
+                        )
+                        method_used = "Combat Simulation (Both strike orders)"
+
+                    return result, method_used
+                else:
+                    # Use power-based comparison
+                    if difference > 0:
+                        result = f"🏆 **{data1['player'].display_name}** is more likely to win the raid battle against **{data2['player'].display_name}**."
+                    else:
+                        result = f"🏆 **{data2['player'].display_name}** is more likely to win the raid battle against **{data1['player'].display_name}**."
+                    method_used = "Power-Based Comparison"
+
+                    return result, method_used
+
+            # Function to create a stylish embed for a player
+            def create_player_embed(data):
+                embed = discord.Embed(
+                    title=f"{data['player'].display_name}'s Raid Stats",
+                    color=0x1E90FF,  # DodgerBlue
+                    timestamp=ctx.message.created_at
+                )
+                embed.set_thumbnail(
+                    url=data['player'].avatar.url if data['player'].avatar else data['player'].default_avatar.url)
+                embed.add_field(name="⚔️ **Damage Multiplier**", value=f"x{data['atk']}", inline=True)
+                embed.add_field(name="🛡️ **Defense Multiplier**", value=f"x{data['deff']}", inline=True)
+                embed.add_field(name="❤️ **Health Multiplier**", value=f"x{data['hplevel']}", inline=True)
+                embed.add_field(
+                    name="💰 **Upgrade Costs**",
+                    value=(
+                        f"**Damage:** ${int(data['atkp'])}\n"  # Removed decimal
+                        f"**Defense:** ${int(data['deffp'])}\n"  # Removed decimal
+                        f"**Health:** ${int(data['hpprice'])}"
+                    ),
+                    inline=False
+                )
+                embed.add_field(
+                    name="📈 **Player's Stats**",
+                    value=(
+                        f"**Damage:** {data['dmg']}\n"
+                        f"**Defense:** {data['defff']}\n"
+                        f"**Health:** {data['hp']}"
+                    ),
+                    inline=False
+                )
+                embed.set_footer(
+                    text=f"Requested by {ctx.author}",
+                    icon_url=ctx.author.avatar.url if ctx.author.avatar else ctx.author.default_avatar.url
+                )
+                return embed
+
+            # Determine which players to fetch data for
+            if player1 and player2:
+                # Compare two players
+                data1 = await get_player_data(player1)
+                data2 = await get_player_data(player2)
+
+                if not data1 or not data2:
+                    await ctx.send("❌ One or both players' data could not be retrieved.")
+                    return
+
+                # Create embeds for both players
+                embed1 = create_player_embed(data1)
+                embed2 = create_player_embed(data2)
+
+                # Compare and get the result along with the method used
+                comparison_result, method_used = compare_players(data1, data2)
+
+                # Create a final embed to show comparison result
+                comparison_embed = discord.Embed(
+                    title="🆚 Raid Battle Comparison",
+                    description=comparison_result,
+                    color=0xFFD700,  # Gold
+                    timestamp=ctx.message.created_at
+                )
+                comparison_embed.set_footer(
+                    text=f"Comparison requested by {ctx.author}",
+                    icon_url=ctx.author.avatar.url if ctx.author.avatar else ctx.author.default_avatar.url
+                )
+
+                # Send the main comparison embeds
+                try:
+                    await ctx.send(embeds=[embed1, embed2, comparison_embed])
+                except Exception as e:
+                    # Fallback for discord.py versions that don't support multiple embeds
+                    await ctx.send(embed=embed1)
+                    await ctx.send(embed=embed2)
+                    await ctx.send(embed=comparison_embed)
+
+            else:
+                # Show stats for one player (either specified or the command invoker)
+                target_player = player1 if player1 else ctx.author
+                data = await get_player_data(target_player)
+
+                if not data:
+                    await ctx.send("❌ Player's data could not be retrieved.")
+                    return
+
+                embed = create_player_embed(data)
+
+                await ctx.send(embed=embed)
 
     @commands.command(brief=_("Did somebody say Raid?"))
     @locale_doc

@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -13,21 +13,6 @@ but WITHOUT ANY WARRANTY; without even the implied warranty of
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU Affero General Public License for more details.
 
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""
-
-"""
-The IdleRPG Discord Bot
-Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
@@ -155,28 +140,33 @@ class Gods(commands.Cog):
             (This command has a cooldown of 3 minutes.)"""
         )
         god_roles = {
-            'Drakath': 1153880715419717672,
-            'Sepulchure': 1153897989635571844,
-            'Astraea': 1153887457775980566
+            'Drakath': 1199302687083204649,
+            'Sepulchure': 1199303145306726410,
+            'Astraea': 1199303066227331163
         }
+
+        # Check if the user already has a god and handle reset points
         if not has_no_god(ctx):
             if ctx.character_data["reset_points"] < 1:
                 return await ctx.send(_("You have no more reset points."))
             if not await ctx.confirm(
-                    _(
-                        "You already chose a god. This change now will cost you a reset"
-                        " point. Are you sure?"
-                    )
+                    _("You already chose a god. This change now will cost you a reset point. Are you sure?")
             ):
                 return
-            old_god = ctx.character_data["god"]
-            old_role_id = god_roles.get(old_god)
-            if old_role_id:
-                old_role = ctx.guild.get_role(old_role_id)
-                if old_role and old_role in ctx.author.roles:
-                    await ctx.author.remove_roles(old_role)
+            try:
+                old_god = ctx.character_data["god"]
+                old_role_id = god_roles.get(old_god)
+                if old_role_id:
+                    old_role = ctx.guild.get_role(old_role_id)
+                    if old_role and old_role in ctx.author.roles:
+                        await ctx.author.remove_roles(old_role)
+            except Exception as e:
+                print("Not in server")
+
         if ctx.character_data["reset_points"] < 0:
-            return await ctx.send("You became Godless and cannot follow a God anymore.")
+            return await ctx.send(_("You became Godless and cannot follow a God anymore."))
+
+        # Show gods selection to the user
         embeds = [
             discord.Embed(
                 title=god["name"],
@@ -191,17 +181,16 @@ class Gods(commands.Cog):
             choices=[g["name"] for g in self.bot.gods.values()],
         ).paginate(ctx)
 
+        # Confirm the user's choice of God
         if not await ctx.confirm(
-                _(
-                    """\
-        ⚠ **Warning**: When you have a God, your luck will change (**including decreasing it!**)
-        This impacts your adventure success chances amongst other things.
-    
-        Are you sure you want to follow {god}?"""
-                ).format(god=god)
+                _("""\
+    ⚠ **Warning**: When you have a God, your luck will change (**including decreasing it!**)
+    This impacts your adventure success chances amongst other things.
+    Are you sure you want to follow {god}?""").format(god=god)
         ):
             return
 
+        # Update the user's god and reset points in the database
         async with self.bot.pool.acquire() as conn:
             if (
                     await conn.fetchval(
@@ -210,15 +199,11 @@ class Gods(commands.Cog):
                     < 0
             ):
                 return await ctx.send(
-                    _(
-                        "You became Godless while using this command. Following a God"
-                        " is not allowed after that."
-                    )
+                    _("You became Godless while using this command. Following a God is not allowed after that.")
                 )
             if not has_no_god(ctx):
                 await conn.execute(
-                    'UPDATE profile SET "reset_points"="reset_points"-$1 WHERE'
-                    ' "user"=$2;',
+                    'UPDATE profile SET "reset_points"="reset_points"-$1 WHERE "user"=$2;',
                     1,
                     ctx.author.id,
                 )
@@ -226,17 +211,32 @@ class Gods(commands.Cog):
                 'UPDATE profile SET "god"=$1 WHERE "user"=$2;', god, ctx.author.id
             )
 
-        # Assign the chosen god's role to the user
-        role_id = god_roles.get(god)
-        if role_id:
-            role = ctx.guild.get_role(role_id)
-            if role:
-                await ctx.author.add_roles(role)
-                await ctx.send(_("You are now a follower of {god}.").format(god=god))
+        # Get the target guild and check if the user is a member
+        guild_id = 1199287508794626078
+        target_guild = self.bot.get_guild(guild_id)
+
+        if target_guild:
+            member = target_guild.get_member(ctx.author.id)
+            if member:
+                # Assign the god's role in the target guild if the user is a member
+                role_id = god_roles.get(god)
+                if role_id:
+                    role = target_guild.get_role(role_id)
+                    if role:
+                        await member.add_roles(role)
+                        await ctx.send(
+                            _("You are now a follower of {god}. Role assigned in the target guild.").format(god=god))
+                    else:
+                        await ctx.send(_("Failed to assign role in the target guild."))
+                else:
+                    await ctx.send(_("Failed to assign role."))
             else:
-                await ctx.send(_("Failed to assign role."))
+                await ctx.send(
+                    _("You have successfully followed {god}, but you are not a member of the target guild.").format(
+                        god=god))
         else:
-            await ctx.send(_("Failed to assign role."))
+            await ctx.send(
+                _("You have successfully followed {god}, but the target guild could not be found.").format(god=god))
 
     @has_char()
     @has_god()
@@ -257,9 +257,9 @@ class Gods(commands.Cog):
 
         old_god = ctx.character_data["god"]
         god_roles = {
-            'Drakath': 1153880715419717672,
-            'Sepulchure': 1153897989635571844,
-            'Astraea': 1153887457775980566
+            'Drakath': 1199302687083204649,
+            'Sepulchure': 1199303145306726410,
+            'Astraea': 1199303066227331163
         }
 
 
@@ -280,7 +280,7 @@ class Gods(commands.Cog):
 
         async with self.bot.pool.acquire() as conn:
             await conn.execute(
-                'UPDATE profile SET "favor"=0, "god"=NULL, "reset_points"=-1 WHERE'
+                'UPDATE profile SET "favor"=0, "god"=NULL, "reset_points"="reset_points"-1 WHERE'
                 ' "user"=$1;',
                 ctx.author.id,
             )
@@ -383,45 +383,53 @@ class Gods(commands.Cog):
     @locale_doc
     async def followers(self, ctx, limit: IntGreaterThan(0)):
         _(
-            """`<limit>` - A whole number from 0 to 25. If you are a God, the upper bound is lifted.
+            """`<limit>` - A whole number from 1 to 25. If you are a God, the upper bound is lifted.
 
             Display your God's (or your own, if you are a God) top followers, up to `<limit>`.
-
-            The format for this is as follows:
-              - Placement
-              - User ID
-              - Amount of favor
-              - current luck
-
-            The result is attached as a text file."""
+            """
         )
         if ctx.author.id in self.bot.gods:
             god = self.bot.gods[ctx.author.id]["name"]
         elif not ctx.character_data["god"]:
             return await ctx.send(
                 _(
-                    "You are not following any god currently, therefore the list cannot"
-                    " be generated."
+                    "You are not following any god currently, therefore the list cannot be generated."
                 )
             )
         else:
+            god = ctx.character_data["god"]
             if limit > 25:
                 return await ctx.send(_("Normal followers may only view the top 25."))
-            god = ctx.character_data["god"]
+
         data = await self.bot.pool.fetch(
             'SELECT * FROM profile WHERE "god"=$1 ORDER BY "favor" DESC LIMIT $2;',
             god,
             limit,
         )
-        formatted = "\n".join(
-            [
-                f"{idx + 1}. {i['user']}: {i['favor']} Favor, Luck: {i['luck']}"
-                for idx, i in enumerate(data)
-            ]
+
+        if not data:
+            return await ctx.send(_("No followers found for this God."))
+
+        # Create an embed
+        embed = discord.Embed(
+            title=_("Top Followers of {god}").format(god=god),
+            color=discord.Color.blue(),
         )
-        await ctx.send(
-            file=discord.File(filename="followers.txt", fp=BytesIO(formatted.encode()))
-        )
+
+        for idx, record in enumerate(data, start=1):
+            user = self.bot.get_user(record["user"])
+            display_name = user.display_name if user else _("Unknown User")
+            favor = record["favor"]
+            luck = record["luck"]
+
+            embed.add_field(
+                name=f"{idx}. {display_name}",
+                value=_("Favor: {favor}, Luck: {luck}").format(favor=favor, luck=luck),
+                inline=False,
+            )
+
+        # Send the embed
+        await ctx.send(embed=embed)
 
 
 async def setup(bot):

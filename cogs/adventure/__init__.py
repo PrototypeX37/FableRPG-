@@ -1,7 +1,6 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,24 +15,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-"""
-The IdleRPG Discord Bot
-Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""
-
 import asyncio
 
 from datetime import datetime, timedelta
@@ -59,7 +40,7 @@ from utils import misc as rpgtools
 from utils import random
 import random as randomm
 from utils.checks import has_adventure, has_char, has_no_adventure, is_class, is_gm
-from utils.i18n import _, locale_doc
+from utils.i18n import _, locale_doc, use_current_gettext
 from utils.maze import Cell, Maze
 
 from classes.classes import (
@@ -552,10 +533,10 @@ class Adventure(commands.Cog):
         levels_per_page = 10
         level_count = 1
 
-        while level_count <= 50:
+        while level_count <= 100:
             embed = discord.Embed(title="Adventure Success Chances")
             for _ in range(levels_per_page):
-                if level_count >= 51:
+                if level_count >= 101:
                     break
                 success = rpgtools.calcchance(
                     damage,
@@ -579,18 +560,14 @@ class Adventure(commands.Cog):
         aliases=["mission", "a"], brief=_("Sends your character on an adventure.")
     )
     @locale_doc
-    async def adventure(self, ctx, adventure_number: IntFromTo(1, 50)):
+    async def adventure(self, ctx, adventure_number: IntFromTo(1, 100)):
         _(
-            """`<adventure_number>` - a whole number from 1 to 30
+            """`<adventure_number>` - a whole number from 1 to 100
 
             Send your character on an adventure with the difficulty `<adventure_number>`.
             The adventure will take `<adventure_number>` hours if no time booster is used, and half as long if a time booster is used.
 
             If you are in an alliance which owns a city with adventure buildings, your adventure time will be reduced by the adventure building level in %.
-            Donators' time will also be reduced:
-              - 5% reduction for Silver Donators
-              - 10% reduction for Gold Donators
-              - 25% reduction for Emerald Donators and above
 
             Be sure to check `{prefix}status` to check how much time is left, or to check if you survived or died."""
         )
@@ -599,7 +576,7 @@ class Adventure(commands.Cog):
                 _("You must be on level **{level}** to do this adventure.").format(
                     level=adventure_number
                 )
-            )
+             )
         time = timedelta(hours=adventure_number)
 
         if buildings := await self.bot.get_city_buildings(ctx.character_data["guild"]):
@@ -613,6 +590,8 @@ class Adventure(commands.Cog):
                 time = time * 0.95
         if await self.bot.get_booster(ctx.author, "time"):
             time = time / 2
+
+
 
         await self.bot.start_adventure(ctx.author, adventure_number, time)
 
@@ -690,8 +669,11 @@ class Adventure(commands.Cog):
 
     @has_char()
     @commands.command(aliases=["isblessed"], brief=_("check your bless"))
+    @locale_doc
     async def checkbless(self, ctx, user: discord.Member = None):
-        """Check the blessing value of a user. If no user is mentioned, check the command caller."""
+        _(
+            """Check the blessing value of a user. If no user is mentioned, check the command caller."""
+        )
 
         # If no user is mentioned, check the command caller.
         if not user:
@@ -817,6 +799,7 @@ class Adventure(commands.Cog):
             num, time, done = ctx.adventure_data
 
             if not done:
+                # TODO: Embeds ftw
                 return await ctx.send(
                     embed=discord.Embed(
                         title=_("Adventure Status"),
@@ -884,6 +867,8 @@ class Adventure(commands.Cog):
 
             # Calculate XP with the blessing multiplier
             xp = round(random.randint(250 * num, 500 * num) * bless_multiplier)
+            if current_level < 30:
+                xp = xp * 1.25
 
             chance_of_loot = 5 if num == 1 else 5 + 1.5 * num
 
@@ -927,6 +912,11 @@ class Adventure(commands.Cog):
                 # ---------------
                 #eggs = int(num ** 1.2 * random.randint(3, 6))
 
+
+                # Halloween
+                # ---------------
+                #bones = int(num ** 1.2 * random.randint(1, 8))
+
                 await conn.execute(
                     'UPDATE profile SET "money"="money"+$1, "xp"="xp"+$2,'
                     ' "completed"="completed"+1 WHERE "user"=$3;',
@@ -969,6 +959,7 @@ class Adventure(commands.Cog):
                             " **{value}**\nExperience gained: **{xp}**."
                             #"\nEggs found: **{eggs}**"
                             # "\nSnowflakes gained: **{snowflakes}**."
+                             #"\nBones gained: **{bones}**."
                         ).format(
                             gold=gold,
                             type=_("Loot item") if storage_type == "loot" else item["type"],
@@ -983,6 +974,7 @@ class Adventure(commands.Cog):
                             storage_type=storage_type,
                             xp=xp,
                             #eggs=eggs,
+                            #bones=bones,
                         ),
                         colour=0x00FF00,
                     )

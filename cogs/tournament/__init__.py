@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,11 +16,10 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-
 import asyncio
 import datetime
 import math
+import random as randomm
 import utils.misc as rpgtools
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -290,19 +289,27 @@ class Tournament(commands.Cog):
     @locale_doc
     async def juggernaut(self, ctx, prize: IntFromTo(0, 100_000_000) = 0, hp: int = 250, juggernaut_hp: int = 7500):
         _(
-            """`[prize]` - The amount of money the winner will get
+            """`[prize]` - The amount of money the winner will get.
+        `[hp]` - The HP for each player; default is 250.
+        `[juggernaut_hp]` - The HP for the Juggernaut; default is 7500.
 
-            Start a new raid tournament. Players have 30 seconds to join via the reaction.
-            Tournament entries are free, only the tournament host has to pay the price.
+        Start a Juggernaut game mode where one player becomes the Juggernaut, and others attempt to defeat them.
 
-            Only an exponent of 2 (2^n) users can join. If there are more than the nearest exponent, the last joined players will be disregarded.
+        Usage:
+          `$juggernaut [prize] [hp] [juggernaut_hp]`
 
-            The match-ups will be decided at random, the battles themselves will be decided like raid battles (see `{prefix}help raidbattle` for details).
+        In this game mode:
+        - Players have 3 minutes to join via the button.
+        - A random player is chosen as the Juggernaut.
+        - The Juggernaut fights against all other players.
+        - If the Juggernaut defeats all players, the players receive buffs and attempt again.
+        - The game continues until the Juggernaut is defeated or all players are eliminated.
+        - The prize money is split between the Juggernaut and the player who deals the finishing blow.
 
-            The winner of a match moves onto the next round, the losers get eliminated, until there is only one player left.
-            Tournaments in IdleRPG follow the single-elimination principle.
-
-            (This command has a cooldown of 30 minutes.)"""
+        Note:
+        - You must have a character to use this command.
+        - This command has a cooldown of 5 minutes.
+        """
         )
 
         if ctx.character_data["money"] < prize:
@@ -608,6 +615,435 @@ class Tournament(commands.Cog):
                 await ctx.send(
                     f"Juggernaut received **${prizejug}** and {juggernaut_killer.mention} has received **${prize}** of the total prize of **{totalprize}**")
 
+    import asyncio
+    import random as randomm  # Keeping your original import
+    from decimal import Decimal
+    import discord
+    from discord.ext import commands
+    from discord.ui import Button, View
+    from discord import ButtonStyle
+
+    # Ensure that JoinView is defined elsewhere and remains unchanged
+    # from your_views_module import JoinView
+
+    @has_char()
+    @user_cooldown(300)  # 5-minute cooldown
+    @commands.command()
+    @locale_doc
+    async def juggernaut2(
+            self,
+            ctx,
+            prize: IntFromTo(0, 100_000_000) = 0,
+            hp: int = 250,
+            juggernaut_hp: int = 7500,
+    ):
+        """
+        `[prize]` - The amount of money the winner will get
+
+        Start a new Juggernaut game mode. Players have 3 minutes to join via the button.
+        Tournament entries are free; only the tournament host has to pay the prize.
+
+        In this mode, all players team up to defeat the Juggernaut. If they fail, they get buffs and try again.
+        The game continues until the Juggernaut is defeated or all players give up.
+
+        (This command has a cooldown of 30 minutes.)
+        """
+
+        # Check if the user has enough money
+        if ctx.character_data["money"] < prize:
+            await self.bot.reset_cooldown(ctx)
+            return await ctx.send("You don't have enough money to start the game.")
+
+        # Deduct the prize from the host's money
+        await self.bot.pool.execute(
+            'UPDATE profile SET "money"="money" - $1 WHERE "user" = $2;',
+            prize,
+            ctx.author.id,
+        )
+
+        # Preserve your original JoinView implementation
+        view = JoinView(
+            Button(
+                style=ButtonStyle.primary,
+                label="Join Juggernaut!",
+                emoji="⚔️",
+            ),
+            message="You joined the Juggernaut game mode.",
+            timeout=180,  # 3 minutes timeout
+        )
+
+        view.joined.add(ctx.author)
+
+        # Start the join phase
+        initial_message = await ctx.send(
+            f"{ctx.author.mention} started a Juggernaut game mode! Free entries, prize pool is **${prize}**! The game starts in 3 minutes!",
+            view=view,
+        )
+        await asyncio.sleep(180)  # Wait for 3 minutes
+        view.stop()
+
+        # Gather valid participants from the database
+        participants = []
+        async with self.bot.pool.acquire() as conn:
+            for u in view.joined:
+                if await conn.fetchrow('SELECT * FROM profile WHERE "user"=$1;', u.id):
+                    participants.append(u)
+
+        # Check if there are enough participants
+        if len(participants) < 3:
+            await self.bot.reset_cooldown(ctx)
+            await self.bot.pool.execute(
+                'UPDATE profile SET "money" = "money" + $1 WHERE "user" = $2;',
+                prize,
+                ctx.author.id,
+            )
+            return await ctx.send(
+                f"Not enough participants to start the game, {ctx.author.mention}."
+            )
+
+        await ctx.send(
+            f"There are {len(participants)} participants in the game."
+        )
+
+        # Select a Juggernaut randomly
+        juggernaut = randomm.choice(participants)
+        participants.remove(juggernaut)
+
+        # Get Juggernaut's stats without applying triple defense
+        async with self.bot.pool.acquire() as conn:
+            juggernaut_dmg, juggernaut_def = await self.bot.get_raidstats(juggernaut, conn=conn)
+
+        # Set Juggernaut's HP based on its defense
+        if juggernaut_def > 350:
+            juggernaut_hp = 10000
+        elif 200 <= juggernaut_def <= 350:
+            juggernaut_hp = 20000
+        elif 100 <= juggernaut_def < 200:
+            juggernaut_hp = 50000
+        else:
+            juggernaut_hp = 75000
+
+        try:
+            await ctx.send(
+                f"{juggernaut.mention} has been chosen as the Juggernaut with **{juggernaut_hp}** HP!"
+            )
+
+            # Initialize player stats
+            player_stats = {}
+            for player in participants:
+                async with self.bot.pool.acquire() as conn:
+                    dmg, deff = await self.get_raidstatsjug(player, conn=conn)
+                player_stats[player.id] = {
+                    "user": player,
+                    "hp": Decimal(hp),
+                    "damage": Decimal(dmg),
+                    "defense": Decimal(deff),
+                }
+
+            juggernaut_stats = {
+                "user": juggernaut,
+                "hp": Decimal(juggernaut_hp),
+                "damage": Decimal(juggernaut_dmg),
+                "defense": Decimal(juggernaut_def),
+                "base_damage": Decimal(juggernaut_dmg)  # To reset after revival
+            }
+
+            # Battle variables
+            battle_round = 1
+            battle_turn = 1
+            buff_amount = Decimal("0.3")  # Increased buff amount for better scaling
+            MAX_ROUNDS = 10  # Fixed maximum rounds for Juggernaut victory
+
+            # Initialize the embed with battle status
+            embed = discord.Embed(
+                title=f"Juggernaut Battle - Round {battle_round}",
+                description="The battle begins!",
+                color=self.bot.config.game.primary_colour,
+            )
+            embed.add_field(
+                name=f"{juggernaut_stats['user'].display_name}'s HP",
+                value=f"{juggernaut_stats['hp']:.2f}/{juggernaut_hp}",
+                inline=False,
+            )
+            player_statuses = []
+            for stats in player_stats.values():
+                status = (
+                        f"{stats['user'].mention}: {stats['hp']:.2f}/{hp} HP"
+                        + (" 💀" if stats["hp"] <= 0 else "")
+                )
+                player_statuses.append(status)
+            embed.add_field(
+                name="Players' Status",
+                value="\n".join(player_statuses),
+                inline=False,
+            )
+            battle_message = await ctx.send(embed=embed)
+
+            # Battle loop
+            while battle_round <= MAX_ROUNDS:
+                battle_log = []
+                embed.title = f"Juggernaut Battle - Round {battle_round}"
+                embed.description = f"*Battle Round {battle_round} - Turn {battle_turn} begins!*\n"
+
+                # Players' Turns
+                for player_id, stats in player_stats.items():
+                    if stats["hp"] <= 0:
+                        continue  # Skip defeated players
+
+                    # Determine if the attack hits
+                    hit_chance = randomm.random()
+                    if hit_chance < 0.1:
+                        # Missed attack: No damage and skip logging
+                        continue
+                    elif hit_chance > 0.9:
+                        # Critical hit
+                        damage = stats["damage"] * Decimal("2") + Decimal("40")  # +40 for both abilities
+                        battle_log.append(
+                            f"{stats['user'].mention} landed a critical hit! 🔥"
+                        )
+                    else:
+                        # Normal hit
+                        damage = stats["damage"] + Decimal("40")  # +40 for both abilities
+
+                    # Calculate damage to Juggernaut
+                    dmg = max(Decimal("1"), damage - juggernaut_stats["defense"])
+                    juggernaut_stats["hp"] -= dmg
+                    juggernaut_stats["hp"] = max(juggernaut_stats["hp"], Decimal("0"))  # Ensure HP doesn't go below 0
+
+                    # Log the damage if dmg > 0
+                    if dmg > 0:
+                        battle_log.append(
+                            f"{stats['user'].mention} deals {dmg:.2f} damage to the Juggernaut. ✅"
+                        )
+
+                    # Update the embed after each attack
+                    if battle_log:
+                        embed.description += "\n".join(battle_log) + "\n"
+                        embed.set_field_at(
+                            0,
+                            name=f"{juggernaut_stats['user'].display_name}'s HP",
+                            value=f"{juggernaut_stats['hp']:.2f}/{juggernaut_hp}",
+                            inline=False,
+                        )
+                        await battle_message.edit(embed=embed)
+                        await asyncio.sleep(2)  # 2-second delay per attack
+                        battle_log.clear()  # Clear the log for the next entry
+
+                    # Check if Juggernaut is defeated
+                    if juggernaut_stats["hp"] <= 0:
+                        break
+
+                # Check if Juggernaut is defeated
+                if juggernaut_stats["hp"] <= 0:
+                    battle_log.append("The Juggernaut has been defeated by the players! 🏆")
+                    embed.description += "\n".join(battle_log) + "\n"
+                    embed.set_field_at(
+                        0,
+                        name=f"{juggernaut_stats['user'].display_name}'s HP",
+                        value=f"{juggernaut_stats['hp']:.2f}/{juggernaut_hp}",
+                        inline=False,
+                    )
+                    await battle_message.edit(embed=embed)
+                    # Set winner_ids to all players still alive
+                    winner_ids = [pid for pid, stats in player_stats.items() if stats["hp"] > 0]
+                    break  # Exit the battle loop
+
+                # Juggernaut's Turn to Attack
+                battle_log = []
+                # Increment Juggernaut's damage by +40 for the new turn
+                juggernaut_stats["current_damage"] = juggernaut_stats.get("current_damage",
+                                                                          juggernaut_stats["base_damage"])
+                juggernaut_stats["current_damage"] += Decimal("40")
+
+                # Determine if Juggernaut uses Smash ability
+                smash_chance = randomm.random()
+                if smash_chance < 0.4:
+                    # Smash ability: Attack all players with increased damage (+40)
+                    battle_log.append("The Juggernaut uses Smash! 💥")
+                    for stats in player_stats.values():
+                        if stats["hp"] > 0:
+                            dmg = max(
+                                Decimal("1"),
+                                (juggernaut_stats["current_damage"] + Decimal("40")) - stats["defense"]
+                            )
+                            stats["hp"] -= dmg
+                            stats["hp"] = max(stats["hp"], Decimal("0"))  # Ensure HP doesn't go below 0
+                            battle_log.append(
+                                f"{stats['user'].mention} takes {dmg:.2f} damage from Smash. ⚔️"
+                            )
+                            if stats["hp"] <= 0:
+                                battle_log.append(
+                                    f"{stats['user'].mention} has been defeated! 💀"
+                                )
+                else:
+                    # Normal attack: Attack one random alive player with increased damage (+40)
+                    alive_players = [stats for stats in player_stats.values() if stats["hp"] > 0]
+                    if alive_players:
+                        target_stats = randomm.choice(alive_players)
+                        dmg = max(
+                            Decimal("1"), (juggernaut_stats["current_damage"] + Decimal("40")) - target_stats["defense"]
+                        )
+                        target_stats["hp"] -= dmg
+                        target_stats["hp"] = max(target_stats["hp"], Decimal("0"))  # Ensure HP doesn't go below 0
+                        battle_log.append(
+                            f"The Juggernaut attacks {target_stats['user'].mention} for {dmg:.2f} damage. ⚔️"
+                        )
+                        if target_stats["hp"] <= 0:
+                            battle_log.append(
+                                f"{target_stats['user'].mention} has been defeated! 💀"
+                            )
+
+                # Announce the Juggernaut's attack results
+                if battle_log:
+                    embed.description += "\n".join(battle_log) + "\n"
+                    embed.set_field_at(
+                        0,
+                        name=f"{juggernaut_stats['user'].mention}'s HP",
+                        value=f"{juggernaut_stats['hp']:.2f}/{juggernaut_hp}",
+                        inline=False,
+                    )
+                    # Update player statuses
+                    player_statuses = []
+                    for stats in player_stats.values():
+                        status = (
+                                f"{stats['user'].mention}: {stats['hp']:.2f}/{hp} HP"
+                                + (" 💀" if stats["hp"] <= 0 else "")
+                        )
+                        player_statuses.append(status)
+                    embed.set_field_at(
+                        1,
+                        name="Players' Status",
+                        value="\n".join(player_statuses),
+                        inline=False,
+                    )
+                    await battle_message.edit(embed=embed)
+                    await asyncio.sleep(5)  # 5-second delay after Juggernaut's attack
+
+                # Check if all players are defeated
+                if all(stats["hp"] <= 0 for stats in player_stats.values()):
+                    battle_log = ["All players have been defeated! They receive buffs and try again. 🔄"]
+                    # Buff players' stats
+                    for stats in player_stats.values():
+                        stats["hp"] = Decimal(hp)
+                        stats["damage"] *= (Decimal("1") + buff_amount)
+                        stats["defense"] *= (Decimal("1") + buff_amount)
+                    # Announce the buff
+                    battle_log.append("Players have been buffed! Their damage and defense have increased. 📈")
+                    # Increment the round
+                    battle_round += 1
+                    # Reset turns for the new round
+                    battle_turn = 1
+                    # Reset Juggernaut's damage to base_damage
+                    juggernaut_stats["current_damage"] = juggernaut_stats["base_damage"]
+                    # Update the embed with buff information
+                    embed = discord.Embed(
+                        title=f"Juggernaut Battle - Round {battle_round}",
+                        description="\n".join(battle_log),
+                        color=self.bot.config.game.primary_colour,
+                    )
+                    embed.add_field(
+                        name=f"{juggernaut_stats['user'].mention}'s HP",
+                        value=f"{juggernaut_stats['hp']:.2f}/{juggernaut_hp}",
+                        inline=False,
+                    )
+                    player_statuses = []
+                    for stats in player_stats.values():
+                        status = (
+                                f"{stats['user'].mention}: {stats['hp']:.2f}/{hp} HP"
+                                + (" 💀" if stats["hp"] <= 0 else "")
+                        )
+                        player_statuses.append(status)
+                    embed.add_field(
+                        name="Players' Status",
+                        value="\n".join(player_statuses),
+                        inline=False,
+                    )
+                    await battle_message.edit(embed=embed)
+                    await asyncio.sleep(3)  # 3-second wait between rounds
+                    continue  # Continue to the next round
+
+                # Increment the turn after Juggernaut's attack
+                battle_turn += 1
+
+                # Check if maximum rounds have been reached
+                if battle_round > MAX_ROUNDS:
+                    # Juggernaut wins
+                    battle_log = ["Maximum number of rounds reached. The Juggernaut wins! ⚔️"]
+                    embed.description += "\n".join(battle_log) + "\n"
+                    embed.set_field_at(
+                        0,
+                        name=f"{juggernaut_stats['user'].mention}'s HP",
+                        value=f"{juggernaut_stats['hp']:.2f}/{juggernaut_hp}",
+                        inline=False,
+                    )
+                    # Update player statuses
+                    player_statuses = []
+                    for stats in player_stats.values():
+                        status = (
+                                f"{stats['user'].mention}: {stats['hp']:.2f}/{hp} HP"
+                                + (" 💀" if stats["hp"] <= 0 else "")
+                        )
+                        player_statuses.append(status)
+                    embed.set_field_at(
+                        1,
+                        name="Players' Status",
+                        value="\n".join(player_statuses),
+                        inline=False,
+                    )
+                    await battle_message.edit(embed=embed)
+                    break  # Exit the battle loop
+
+            # Distribute prizes
+            juggernaut_prize = round(prize * 0.2)
+            winner_prize = round(prize * 0.8)
+            winners = [player_stats[pid]["user"] for pid in (winner_ids if 'winner_ids' in locals() else [])]
+
+            async with self.bot.pool.acquire() as conn:
+                # Give prize to Juggernaut
+                await conn.execute(
+                    'UPDATE profile SET "money" = "money" + $1 WHERE "user" = $2;',
+                    juggernaut_prize,
+                    juggernaut.id,
+                )
+                # Split prize among winners
+                if winners:
+                    prize_per_winner = winner_prize // len(winners)
+                    for winner in winners:
+                        await conn.execute(
+                            'UPDATE profile SET "money" = "money" + $1 WHERE "user" = $2;',
+                            prize_per_winner,
+                            winner.id,
+                        )
+                        # Log transaction for each winner
+                        await self.bot.log_transaction(
+                            ctx,
+                            from_=ctx.author.id,
+                            to=winner.id,
+                            subject="Juggernaut Game",
+                            data={"Gold": prize_per_winner},
+                            conn=conn,
+                        )
+                else:
+                    prize_per_winner = 0  # No winners
+
+            # Announce the results
+            if winners:
+                winner_mentions = ", ".join(winner.mention for winner in winners)
+                await ctx.send(
+                    f"Congratulations to {winner_mentions} for defeating the Juggernaut! Each winner receives **${prize_per_winner}**!"
+                )
+            else:
+                await ctx.send(
+                    "No winners this round. Better luck next time!"
+                )
+            await ctx.send(
+                f"{juggernaut.mention} receives **${juggernaut_prize}** for participating as the Juggernaut."
+            )
+        except Exception as e:
+            import traceback
+            error_message = f"Error occurred: {e}\n{traceback.format_exc()}"
+            await ctx.send(error_message)
+            print(error_message)
 
     @has_char()
     @user_cooldown(1800)

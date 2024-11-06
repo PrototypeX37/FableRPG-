@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.))
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -77,16 +77,16 @@ class Crates(commands.Cog):
         _(
             """Shows all the crates you can have.
 
-            Common crates contain items ranging from stats 1 to 30
-            Uncommon crates contain items ranging from stats 10 to 35
-            Rare crates contain items ranging from stats 20 to 40
-            Magic crates contain items ranging from stats 30 to 45
-            Legendary crates contain items ranging from stats 41 to 55
-            Divine crates contain items ranging from stats 51 to 100
-            Mystery crates contain a random crate
-            Fortune Crates contain either XP or money.
-
-            You can receive crates by voting for the bot using `{prefix}vote`, using `{prefix}daily` and with a small chance from `{prefix}familyevent`, if you have children."""
+            - **Common crates** contain items with stats ranging from **1 to 30**.
+            - **Uncommon crates** contain items with stats ranging from **10 to 35**.
+            - **Rare crates** contain items with stats ranging from **20 to 40**.
+            - **Magic crates** contain items with stats ranging from **30 to 55**.
+            - **Legendary crates** contain items with stats ranging from **41 to 80**.
+            - **Divine crates** contain items with stats ranging from **47 to 100**.
+            - **Mystery crates** contain a random crate type.
+            - **Fortune Crates** contain either XP or money.
+            
+            You can receive crates by voting for the bot using `{prefix}vote`, using `{prefix}daily`, and with a small chance from `{prefix}familyevent` if you have children."""
         )
 
         embed = discord.Embed(
@@ -114,6 +114,7 @@ class Crates(commands.Cog):
         )
 
         await ctx.send(embed=embed)
+
 
     @commands.cooldown(1, 10, commands.BucketType.user)
     @has_char()
@@ -233,72 +234,72 @@ class Crates(commands.Cog):
                     await ctx.send(text)
 
                 elif rarity == "fortune":
+                    for _i in range(amount):
+                        level = rpgtools.xptolevel(ctx.character_data["xp"])
+                        random_number = random.randint(1, 100)
 
-                    level = rpgtools.xptolevel(ctx.character_data["xp"])
-                    random_number = random.randint(1, 100)
+                        if random_number <= 50:  # Lower half, reward with XP
 
-                    if random_number <= 50:  # Lower half, reward with XP
+                            min_value, max_value = 100, 500  # Adjust the XP range as needed
 
-                        min_value, max_value = 100, 500  # Adjust the XP range as needed
+                            reward_type = "xp"
 
-                        reward_type = "xp"
+                        else:  # Upper half, reward with money
 
-                    else:  # Upper half, reward with money
+                            if random.randint(1, 100) <= 75:  # Simulating 70% chance
 
-                        if random.randint(1, 100) <= 75:  # Simulating 70% chance
+                                min_value, max_value = 250000, 470000
 
-                            min_value, max_value = 250000, 470000
+                            else:
 
-                        else:
+                                min_value, max_value = 470001, 850000
 
-                            min_value, max_value = 470001, 850000
+                            reward_type = "money"
 
-                        reward_type = "money"
+                        value = random.randint(min_value, max_value)
 
-                    value = random.randint(min_value, max_value)
+                        async with self.bot.pool.acquire() as conn:
 
-                    async with self.bot.pool.acquire() as conn:
+                            user_id = ctx.author.id
 
-                        user_id = ctx.author.id
+                            if reward_type == "xp":
 
-                        if reward_type == "xp":
+                                nurflevel = level
 
-                            nurflevel = level
+                                if level > 50:
+                                    nurflevel = 50
 
-                            if level > 12:
-                                nurflevel = 12
+                                xpvar = 2000 * level + 1500
 
-                            xpvar = 2000 * level + 1500
+                                random_xp = random.randint(1000 * nurflevel, xpvar)
 
-                            random_xp = random.randint(1000 * nurflevel, xpvar)
+                                await conn.execute('UPDATE profile SET "xp" = "xp" + $1 WHERE "user" = $2', random_xp,
+                                                   user_id)
 
-                            await conn.execute('UPDATE profile SET "xp" = "xp" + $1 WHERE "user" = $2', random_xp,
-                                               user_id)
+                                await ctx.send(
+                                    f"You opened a Fortune crate and gained **{random_xp}XP!**")
 
-                            await ctx.send(
-                                f"You opened a Fortune crate and gained **{random_xp}XP!**")
+                                await self.bot.public_log(
+                                    f"**{ctx.author}** opened a fortune crate and gained **{random_xp} XP!**"
+                                )
 
-                            await self.bot.public_log(
-                                f"**{ctx.author}** opened a fortune crate and gained **{random_xp} XP!**"
-                            )
+                                new_level = int(rpgtools.xptolevel(ctx.character_data["xp"] + random_xp))
 
-                            new_level = int(rpgtools.xptolevel(ctx.character_data["xp"] + random_xp))
+                                if level != new_level:
+                                    await self.bot.process_levelup(ctx, new_level, level)
 
-                            if level != new_level:
-                                await self.bot.process_levelup(ctx, new_level, level)
+                            else:
 
-                        else:
+                                reward = round(value, -2)
 
-                            reward = round(value, -2)
+                                await conn.execute('UPDATE profile SET "money" = "money" + $1 WHERE "user" = $2', reward,
+                                                   user_id)
 
-                            await conn.execute('UPDATE profile SET "money" = "money" + $1 WHERE "user" = $2', reward,
-                                               user_id)
+                                await ctx.send(f"You opened a Fortune crate and found **${reward}!**")
 
-                            await ctx.send(f"You opened a Fortune crate and found **${reward}!**")
-
-                            await self.bot.public_log(
-                                f"**{ctx.author}** opened a fortune crate and received **${reward}!**"
-                            )
+                                await self.bot.public_log(
+                                    f"**{ctx.author}** opened a fortune crate and received **${reward}!**"
+                                )
 
 
                 else:
@@ -329,20 +330,21 @@ class Crates(commands.Cog):
                                 minstat, maxstat = (20, 29)
                         elif rarity == "magic":
                             if rand < 2:  # 20% 41-45
-                                minstat, maxstat = (41, 45)
+                                minstat, maxstat = (41, 55)
                             elif rand < 5:  # 30% 35-40
                                 minstat, maxstat = (35, 40)
                             else:
                                 minstat, maxstat = (30, 34)
                         elif rarity == "legendary":  # no else because why
                             if rand < 2:  # 20% 49-50
-                                minstat, maxstat = (49, 65)
+                                minstat, maxstat = (49, 80)
                             elif rand < 5:  # 30% 46-48
-                                minstat, maxstat = (46, 48)
+                                minstat, maxstat = (46, 60)
                             else:  # 50% 41-45
                                 minstat, maxstat = (41, 45)
                         elif rarity == "divine":
                             rand = random.randint(1, 100)  # Using a range of 1 to 100 for clearer percentages
+
                             if rand <= 10:
                                 minstat, maxstat = (77, 100)
                             elif rand <= 60:
@@ -459,7 +461,7 @@ class Crates(commands.Cog):
     @commands.cooldown(1, 10, commands.BucketType.user)
     @has_char()
     @is_gm()
-    @commands.command(name="generateweapon", brief=_("Generate a weapon"))
+    @commands.command(hidden=True, name="generateweapon", brief=_("Generate a weapon"))
     @locale_doc
     async def generateweapon(self, ctx, amount: IntFromTo(1, 1000) = 1):
         _(
@@ -474,7 +476,7 @@ class Crates(commands.Cog):
             items = []
             for _i in range(amount):
                 # Randomly determine the weapon's stats between 5 and 50
-                minstat, maxstat = (5, 50)
+                minstat, maxstat = (5, 100)
 
                 item = await self.bot.create_random_item(
                     minstat=minstat,
@@ -664,12 +666,12 @@ class Crates(commands.Cog):
         _(
             """Vote and get crates.
 
-            Vote and get 2 crates, with each crate having a chance of being common (89%), uncommon (6%), rare (4%), magic (0.9%) or legendary (0.1%).
+            Vote and get 2 (4 for some patreon ranks) crates, with each crate having a chance of being common (89%), uncommon (6%), rare (4%), magic (0.9%), divine (0.1%) or legendary (0.1%).
 
             This command has a cooldown of 12 hours."""
         )
         rarities = ["common"] * 890 + ["uncommon"] * 60 + ["rare"] * 40 + ["magic"] * 6 + ["legendary"] + [
-            "mystery"] * 50 + ["fortune"] * 2
+            "mystery"] * 50 + ["fortune"] * 2 + ["divine"]
         rarity1 = random.choice(rarities)
         rarity2 = random.choice(rarities)
 

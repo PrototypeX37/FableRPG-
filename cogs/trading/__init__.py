@@ -912,13 +912,151 @@ class Trading(commands.Cog):
         await self.bot.reset_cooldown(ctx)  # we finished
 
     @has_char()
+    @user_cooldown(10)
+    @commands.command(brief=_("Lock a weapon so it won't be sold by `merchall`"))
+    @locale_doc
+    async def weaponlock(self, ctx, itemid: int):
+        _(
+            # xgettext: no-python-format
+            """`[itemid]` - The ID of the weapon you want to lock.
+
+            Locks a specific weapon so that it will be ignored by the `merchall` command.
+            Only non-equipped weapons can be locked, and the owner must match the item ID.
+
+            (This command has a cooldown of 2 minutes.)
+            """
+        )
+        try:
+
+            async with self.bot.pool.acquire() as conn:
+                # Fetch the item ID from inventory
+                inventory_item = await conn.fetchrow(
+                    'SELECT "item" FROM inventory WHERE "item" = $1;',
+                    itemid
+                )
+
+                if not inventory_item:
+                    await ctx.send(f"The item with ID {itemid} is not in your inventory.")
+                    return
+
+                # Fetch the item details from allitems to check ownership
+                item_details = await conn.fetchrow(
+                    'SELECT "owner" FROM allitems WHERE "id" = $1;',
+                    inventory_item["item"]
+                )
+
+                if not item_details:
+                    await ctx.send(f"The item with ID {itemid} does not exist or cannot be found.")
+                    return
+
+                # Check if the user is the owner
+                if item_details["owner"] != ctx.author.id:
+                    await ctx.send(f"You do not own the item with ID {itemid}.")
+                    return
+
+                # Check if the item is equipped
+                inventory_check = await conn.fetchrow(
+                    'SELECT "locked", "equipped" FROM inventory WHERE "item" = $1;',
+                    itemid
+                )
+
+                if inventory_check["equipped"]:
+                    await ctx.send(f"The item with ID {itemid} is currently equipped and cannot be locked.")
+                    return
+
+                if inventory_check["locked"]:
+                    await ctx.send(f"The item with ID {itemid} is already locked.")
+                    return
+
+                # Lock the item
+                await conn.execute(
+                    'UPDATE inventory SET "locked" = TRUE WHERE "item" = $1;',
+                    itemid
+                )
+
+                await ctx.send(f"Weapon with ID {itemid} has been successfully locked!")
+        except Exception as e:
+            import traceback
+            error_message = f"Error occurred: {e}\n"
+            error_message += traceback.format_exc()
+            await ctx.send(error_message)
+            print(error_message)
+
+    @has_char()
+    @user_cooldown(10)
+    @commands.command(brief=_("Unlock a weapon so it can be sold by `merchall`"))
+    @locale_doc
+    async def weaponunlock(self, ctx, itemid: int):
+        _(
+            # xgettext: no-python-format
+            """`[itemid]` - The ID of the weapon you want to unlock.
+
+            Unlocks a specific weapon so that it can be sold by the `merchall` command.
+            Only non-equipped weapons can be unlocked, and the owner must match the item ID.
+
+            (This command has a cooldown of 2 minutes.)
+            """
+        )
+        try:
+
+            async with self.bot.pool.acquire() as conn:
+                # Fetch the item ID from inventory
+                inventory_item = await conn.fetchrow(
+                    'SELECT "item" FROM inventory WHERE "item" = $1;',
+                    itemid
+                )
+
+                if not inventory_item:
+                    await ctx.send(f"The item with ID {itemid} is not in your inventory.")
+                    return
+
+                # Fetch the item details from allitems to check ownership
+                item_details = await conn.fetchrow(
+                    'SELECT "owner" FROM allitems WHERE "id" = $1;',
+                    inventory_item["item"]
+                )
+
+                if not item_details:
+                    await ctx.send(f"The item with ID {itemid} does not exist or cannot be found.")
+                    return
+
+                # Check if the user is the owner
+                if item_details["owner"] != ctx.author.id:
+                    await ctx.send(f"You do not own the item with ID {itemid}.")
+                    return
+
+                # Check if the item is equipped
+                inventory_check = await conn.fetchrow(
+                    'SELECT "locked", "equipped" FROM inventory WHERE "item" = $1;',
+                    itemid
+                )
+
+                if not inventory_check["locked"]:
+                    await ctx.send(f"The item with ID {itemid} is not locked.")
+                    return
+
+                # Lock the item
+                await conn.execute(
+                    'UPDATE inventory SET "locked" = FALSE WHERE "item" = $1;',
+                    itemid
+                )
+
+                await ctx.send(f"Weapon with ID {itemid} has been successfully unlocked!")
+        except Exception as e:
+            import traceback
+            error_message = f"Error occurred: {e}\n"
+            error_message += traceback.format_exc()
+            await ctx.send(error_message)
+            print(error_message)
+
+    @has_char()
     @user_cooldown(120)
     @commands.command(brief=_("Merch all non-equipped items"))
     @locale_doc
     async def merchall(
             self,
             ctx,
-            maxstat: IntFromTo(0, 100) = 100,
+            maxstat: IntFromTo(0, 100) = 200,
             minstat: IntFromTo(0, 100) = 0,
     ):
         _(
@@ -934,12 +1072,13 @@ class Trading(commands.Cog):
         async with self.bot.pool.acquire() as conn:
             allitems = await conn.fetch(
                 "SELECT ai.id, value FROM inventory i JOIN allitems ai ON"
-                " (i.item=ai.id) WHERE ai.owner=$1 AND i.equipped IS FALSE AND"
-                " ai.armor+ai.damage BETWEEN $2 AND $3;",
+                " (i.item = ai.id) WHERE ai.owner = $1 AND i.equipped IS FALSE"
+                " AND i.locked IS FALSE AND ai.armor + ai.damage BETWEEN $2 AND $3;",
                 ctx.author.id,
                 minstat,
                 maxstat,
             )
+
             count, money = len(allitems), sum(i["value"] for i in allitems)
             if count == 0:
                 await self.bot.reset_cooldown(ctx)
@@ -958,7 +1097,7 @@ class Trading(commands.Cog):
                 return await ctx.send(_("Cancelled selling your items."))
             newcount = await conn.fetchval(
                 "SELECT count(value) FROM inventory i JOIN allitems ai ON"
-                " (i.item=ai.id) WHERE ai.owner=$1 AND i.equipped IS FALSE AND"
+                " (i.item=ai.id) WHERE ai.owner=$1 AND i.equipped IS FALSE AND i.locked IS FALSE AND"
                 " ai.armor+ai.damage BETWEEN $2 AND $3;",
                 ctx.author.id,
                 minstat,
@@ -1179,6 +1318,8 @@ class Trading(commands.Cog):
                     conn=conn,
                 )
 
+                expected_price = price
+
                 # Only create items if it's not a token
                 if item_data and item_data['name'] != 'Weapontoken':  # Ensure item_data is not None and not a token
                     try:
@@ -1219,9 +1360,9 @@ class Trading(commands.Cog):
 
                     # Find the first item with the specified rarity and remove it
                     for name, (item, price, timestamp, item_rarity) in list(self.player_item_cache[player_id].items()):
-                        if item_rarity == rarity:
+                        if item_rarity == rarity and price == expected_price:
                             del self.player_item_cache[player_id][name]
-                            print(f"Removed {name} with rarity {rarity} from cache.")
+                            print(f"Removed {name} with rarity {rarity} and price {price} from cache.")
                             break  # Exit after removing the first match
 
                 # Handle weapontoken purchase

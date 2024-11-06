@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,8 +16,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-
 from __future__ import annotations
 
 import asyncio
@@ -199,13 +197,7 @@ class Scheduling(commands.Cog):
                     await self._send_reminder(reminder)
         except Exception as e:
             # If an exception occurs, send a direct message to a specific user
-            user_id = 295173706496475136  # ID of the user to send the message to
-            user = self.bot.get_user(user_id)
-            if user:
-                await user.send(f"An exception occurred in the reminder check loop: {e}")
-            else:
-                print(f"Failed to send DM: User {user_id} not found")
-
+            print(f"Failed to send DM: User not found")
     @reminder_check.before_loop
     async def before_reminder_check(self):
         await self.bot.wait_until_ready()  # Wait until the bot is fully ready
@@ -245,11 +237,12 @@ class Scheduling(commands.Cog):
                     )
         except Exception as e:
                     # Send a message to a specific user if any other error occurs
-            user_id = 295173706496475136  # ID of the user to send the message to
-            user = self.bot.get_user(user_id)
-            if user:
-                await user.send(f"An error occurred while sending the reminder: {e}")
-            else:
+                async with self.bot.pool.acquire() as connection:
+                    async with connection.transaction():
+                        await connection.execute(
+                            "DELETE FROM reminders WHERE id = $1",
+                            reminder_id
+                        )
                 print(f"Failed to send DM: User {user_id} not found.")
 
     def restart(self):

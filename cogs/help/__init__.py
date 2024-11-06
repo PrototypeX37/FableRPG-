@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,8 +16,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-
 import asyncio
 import math
 
@@ -302,13 +300,13 @@ class Help(commands.Cog):
         )
 
     @is_supporter()
-    @commands.command(brief=_("Allow someone/-thing to use helpme again"))
+    @commands.command(brief=_("Allow someone/-thing to use help_me again"))
     @locale_doc
-    async def unbanfromhelpme(self, ctx, thing_to_unban: discord.User | int):
+    async def unbanfromhelp_me(self, ctx, thing_to_unban: discord.User | int):
         _(
             """`<thing_to_unban>` - A discord User, their User ID, or a server ID
 
-            Unbans a previously banned user/server from using the `{prefix}helpme` command.
+            Unbans a previously banned user/server from using the `{prefix}help_me` command.
 
             Only Support Team Members can use this command."""
         )
@@ -317,58 +315,58 @@ class Help(commands.Cog):
         else:
             id = thing_to_unban
             thing_to_unban = self.bot.get_guild(id)
-        await self.bot.pool.execute('DELETE FROM helpme WHERE "id"=$1;', id)
+        await self.bot.pool.execute('DELETE FROM help_me WHERE "id"=$1;', id)
         await ctx.send(
-            _("{thing} has been unbanned for the helpme command :ok_hand:").format(
+            _("{thing} has been unbanned for the help_me command :ok_hand:").format(
                 thing=thing_to_unban.name
             )
         )
 
     @is_supporter()
-    @commands.command(brief=_("Ban someone/-thing from using helpme"))
+    @commands.command(brief=_("Ban someone/-thing from using help_me"))
     @locale_doc
-    async def banfromhelpme(self, ctx, thing_to_ban: discord.User | int):
+    async def banfromhelp_me(self, ctx, thing_to_ban: discord.User | int):
         _(
             """`<thing_to_ban>` - A discord User, their User ID, or a server ID
 
-            Bans a user/server from using the `{prefix}helpme` command.
+            Bans a user/server from using the `{prefix}help_me` command.
 
             Only Support Team Members can use this command."""
         )
         id = thing_to_ban.id if isinstance(thing_to_ban, discord.User) else thing_to_ban
         try:
-            await self.bot.pool.execute('INSERT INTO helpme ("id") VALUES ($1);', id)
+            await self.bot.pool.execute('INSERT INTO help_me ("id") VALUES ($1);', id)
         except UniqueViolationError:
             return await ctx.send(_("Error... Maybe they're already banned?"))
-        await ctx.send(_("They have been banned for the helpme command :ok_hand:"))
+        await ctx.send(_("They have been banned for the help_me command :ok_hand:"))
 
     @commands.guild_only()
     @commands.group(
         invoke_without_command=True, brief=_("Ask our Support Team for help")
     )
     @locale_doc
-    async def helpme(self, ctx, *, text: str):
+    async def help_me(self, ctx, *, text: str):
         _(
             """`<text>` - The text to describe the question or the issue you are having
 
             Ask our support team for help, allowing them to join your server and help you personally.
-            If they do not join within 48 hours, you may use the helpme command again.
+            If they do not join within 48 hours, you may use the help_me command again.
 
             Make sure the bot has permissions to create instant invites.
             English is preferred."""
         )
         if (
-            cd := await self.bot.redis.execute_command("TTL", f"helpme:{ctx.guild.id}")
+            cd := await self.bot.redis.execute_command("TTL", f"help_me:{ctx.guild.id}")
         ) != -2:
             time = timedelta(seconds=cd)
             return await ctx.send(
                 _(
-                    "You server already has a helpme request open! Please wait until"
+                    "You server already has a help_me request open! Please wait until"
                     " the support team gets to you or wait {time} to try again. "
                 ).format(time=time)
             )
         blocked = await self.bot.pool.fetchrow(
-            'SELECT * FROM helpme WHERE "id"=$1 OR "id"=$2;',
+            'SELECT * FROM help_me WHERE "id"=$1 OR "id"=$2;',
             ctx.guild.id,
             ctx.author.id,
         )
@@ -399,11 +397,11 @@ class Help(commands.Cog):
 
         with handle_message_parameters(embed=em) as params:
             message = await self.bot.http.send_message(
-                self.bot.config.game.helpme_channel, params=params
+                self.bot.config.game.help_me_channel, params=params
             )
         await self.bot.redis.execute_command(
             "SET",
-            f"helpme:{ctx.guild.id}",
+            f"help_me:{ctx.guild.id}",
             message["id"],
             "EX",
             172800,  # 48 hours
@@ -413,30 +411,30 @@ class Help(commands.Cog):
         )
 
     @is_supporter()
-    @helpme.command(hidden=True, brief=_("Finish the helpme request"))
+    @help_me.command(hidden=True, brief=_("Finish the help_me request"))
     @locale_doc
     async def finish(self, ctx, guild_id: int):
         _(
             """`<guild_id>` - The server ID of the requesting server
 
-            Clear a server's helpme cooldown. If this is not done, they will be on cooldown for 48 hours."""
+            Clear a server's help_me cooldown. If this is not done, they will be on cooldown for 48 hours."""
         )
-        await self.bot.redis.execute_command("DEL", f"helpme:{guild_id}")
+        await self.bot.redis.execute_command("DEL", f"help_me:{guild_id}")
         await ctx.send("Clear!", delete_after=5)
 
     @has_open_help_request()
-    @helpme.command(aliases=["correct"], brief=_("Change your helpme text"))
+    @help_me.command(aliases=["correct"], brief=_("Change your help_me text"))
     @locale_doc
     async def edit(self, ctx, *, new_text: str):
         _(
-            """`<new_text>` - The new text to use in your helpme request
+            """`<new_text>` - The new text to use in your help_me request
 
-            Edit the text on your open helpme request. Our Support Team will see the new text right away.
+            Edit the text on your open help_me request. Our Support Team will see the new text right away.
 
-            You can only use this command if your server has an open helpme request."""
+            You can only use this command if your server has an open help_me request."""
         )
         message = await self.bot.http.get_message(
-            self.bot.config.game.helpme_channel, ctx.helpme
+            self.bot.config.game.help_me_channel, ctx.help_me
         )
         inv = discord.utils.find(
             lambda f: f["name"] == "Invite", message["embeds"][0]["fields"]
@@ -454,55 +452,55 @@ class Help(commands.Cog):
         em.set_footer(text=f"Server ID: {ctx.guild.id}")
 
         await self.bot.http.edit_message(
-            self.bot.config.game.helpme_channel,
-            ctx.helpme,
+            self.bot.config.game.help_me_channel,
+            ctx.help_me,
             content=None,
             embed=em.to_dict(),
         )
         await ctx.send(
-            _("Successfully changed your helpme text from `{old}` to `{new}`!").format(
+            _("Successfully changed your help_me text from `{old}` to `{new}`!").format(
                 old=old_text, new=new_text
             )
         )
 
     @has_open_help_request()
-    @helpme.command(
-        aliases=["revoke", "remove"], brief=_("Cancel your open helpme request")
+    @help_me.command(
+        aliases=["revoke", "remove"], brief=_("Cancel your open help_me request")
     )
     @locale_doc
     async def delete(self, ctx):
         _(
-            """Cancel your ongoing helpme request. Our Support Team will not join your server.
+            """Cancel your ongoing help_me request. Our Support Team will not join your server.
 
-            You can only use this command if your server has an open helpme request."""
+            You can only use this command if your server has an open help_me request."""
         )
         if not await ctx.confirm(
-            _("Are you sure you want to cancel your helpme request?")
+            _("Are you sure you want to cancel your help_me request?")
         ):
             return await ctx.send(_("Cancelled cancellation."))
         await self.bot.http.delete_message(
-            self.bot.config.game.helpme_channel, ctx.helpme
+            self.bot.config.game.help_me_channel, ctx.help_me
         )
-        await self.bot.redis.execute_command("DEL", f"helpme:{ctx.guild.id}")
+        await self.bot.redis.execute_command("DEL", f"help_me:{ctx.guild.id}")
         with handle_message_parameters(
-            content=f"Helpme request for server {ctx.guild} ({ctx.guild.id}) was cancelled by {ctx.author}"
+            content=f"help_me request for server {ctx.guild} ({ctx.guild.id}) was cancelled by {ctx.author}"
         ) as params:
             await self.bot.http.send_message(
-                self.bot.config.game.helpme_channel, params=params
+                self.bot.config.game.help_me_channel, params=params
             )
-        await ctx.send(_("Your helpme request has been cancelled."))
+        await ctx.send(_("Your help_me request has been cancelled."))
 
     @has_open_help_request()
-    @helpme.command(brief=_("View your current helpme request"))
+    @help_me.command(brief=_("View your current help_me request"))
     @locale_doc
     async def view(self, ctx):
         _(
-            """View how your server's current helpme request looks like to our Support Team.
+            """View how your server's current help_me request looks like to our Support Team.
 
-            You can only use this command if your server has an open helpme request."""
+            You can only use this command if your server has an open help_me request."""
         )
         message = await self.bot.http.get_message(
-            self.bot.config.game.helpme_channel, ctx.helpme
+            self.bot.config.game.help_me_channel, ctx.help_me
         )
         embed = discord.Embed().from_dict(message["embeds"][0])
 

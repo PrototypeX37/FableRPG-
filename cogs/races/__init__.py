@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -13,21 +13,6 @@ but WITHOUT ANY WARRANTY; without even the implied warranty of
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU Affero General Public License for more details.
 
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""
-
-"""
-The IdleRPG Discord Bot
-Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
@@ -45,7 +30,7 @@ class Races(commands.Cog):
         self.bot = bot
 
     @has_char()
-    @user_cooldown(180)
+    @user_cooldown(604800)
     @commands.command(brief=_("Pick or change your race"))
     @locale_doc
     async def race(self, ctx):
@@ -59,22 +44,13 @@ class Races(commands.Cog):
               - Elf: +1 defense, +3 damage
               - Jikill: +0 defense, +4 damage
               - Shadeborn: +5 defense, -1 damage
+              - Djinn: -1 defense, +5 damage
               
 
             By default, you are a human.
 
             After picking the race, you will be asked a personal question, the answer may affect something."""
         )
-        if not is_nothing(ctx):
-            if ctx.character_data["reset_points"] < 1:
-                return await ctx.send(_("You have no more reset points."))
-            if not await ctx.confirm(
-                _(
-                    "You already chose a race. This change now will cost you a reset"
-                    " point. Are you sure?"
-                )
-            ):
-                return
         embeds = [
             discord.Embed(
                 title=_("Human"),
@@ -135,6 +111,16 @@ class Races(commands.Cog):
                 color=self.bot.config.game.primary_colour,
             ),
             discord.Embed(
+                title=_("Djinn"),
+                description=_(
+                    "Djinn are ethereal beings of pure magic and energy. They possess immense"
+                    " power and can unleash devastating attacks. However, their incorporeal form"
+                    " makes them less capable of withstanding physical damage."
+                    " +5 ATK -1 DEF"
+                ),
+                color=self.bot.config.game.primary_colour,
+            ),
+            discord.Embed(
                 title=_("Shadeborn"),
                 description=_(
                     " Shadeborn possess a shadowy nature that allows them to"
@@ -145,7 +131,7 @@ class Races(commands.Cog):
                 color=self.bot.config.game.primary_colour,
             ),
         ]
-        races = ["Human", "Dwarf", "Elf", "Orc", "Jikill", "Shadeborn"]
+        races = ["Human", "Dwarf", "Elf", "Orc", "Jikill", "Djinn", "Shadeborn"]
         questions = {
             "Human": {
                 "question": _("One of my biggest regrets is..."),
@@ -188,6 +174,15 @@ class Races(commands.Cog):
                     _("...spiritual pain"),
                     _("...extreme temperatures."),
                     _("...strange and powerful smells."),
+                ],
+            },
+            "Djinn": {
+                "question": _("My source of power is..."),
+                "answers": [
+                    _("...the boundless desert winds."),
+                    _("...the eternal flames."),
+                    _("...the deep ocean currents."),
+                    _("...the whispers of the cosmos."),
                 ],
             },
             "Shadeborn": {

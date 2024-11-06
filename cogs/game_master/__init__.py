@@ -1,7 +1,7 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2023-2024 Lunar (PrototypeX37)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,8 +16,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-
 import asyncio
 import secrets
 from asyncio import subprocess
@@ -28,6 +26,7 @@ import aiohttp
 import discord
 import discord
 from discord.ext import commands, menus
+from utils import misc as rpgtools
 
 from discord import Object, HTTPException
 from PIL import Image
@@ -218,6 +217,23 @@ class GameMaster(commands.Cog):
         await ctx.send("Bans Reloaded")
 
     @is_gm()
+    @commands.command(hidden=True)
+    async def changetier(self, ctx, userID: int, tier: int):
+        # Validate the tier input
+        if tier not in [0, 1, 2, 3, 4]:
+            await ctx.send("Invalid tier value. Please choose a tier between 0 and 4.")
+            return
+
+        # Update the tier using the PostgreSQL connection with placeholders
+        async with self.bot.pool.acquire() as connection:
+            await connection.execute(
+                'UPDATE profile SET "tier" = $1 WHERE "user" = $2',
+                tier, userID
+            )
+
+        await ctx.send(f"Tier for user ID {userID} has been updated to {tier}.")
+
+    @is_gm()
     @commands.command(hidden=True, brief=_("Bot-unban a user"))
     @locale_doc
     async def gmunban(self, ctx, other: int | discord.User, *, reason: str = ""):
@@ -251,6 +267,49 @@ class GameMaster(commands.Cog):
         except KeyError:
             await ctx.send(_("{other} is not banned.").format(other=other))
 
+
+
+
+
+    @is_gm()
+    @has_char()
+    @commands.command(hidden=True)
+    async def gmtokens(self, ctx, member: UserWithCharacter, tokens: int, reason: str = None):
+        # Fetch the current token value of the specified user from the database
+        weapontoken_value = await self.bot.pool.fetchval(
+            'SELECT weapontoken FROM profile WHERE "user"=$1;',
+            member.id  # Use the specified member's Discord ID
+        )
+
+        # If the user doesn't have a token value yet, set it to 0
+        if weapontoken_value is None:
+            weapontoken_value = 0
+
+        # Add the new tokens to the current value
+        new_value = weapontoken_value + tokens
+
+        # Update the database with the new token value
+        await self.bot.pool.execute(
+            'UPDATE profile SET weapontoken=$1 WHERE "user"=$2;',
+            new_value, member.id
+        )
+
+        # Send a confirmation message to the context
+        await ctx.send(f"{member.display_name} now has {new_value} weapon tokens!")
+
+        with handle_message_parameters(
+                content="**{gm}** gave **{tokens}** to **{member}**.\n\nReason: *{reason}*".format(
+                    gm=ctx.author,
+                    tokens=tokens,
+                    member=member,
+                    reason=reason or f"<{ctx.message.jump_url}>",
+                )
+        ) as params:
+            await self.bot.http.send_message(
+                self.bot.config.game.gm_log_channel,
+                params=params,
+            )
+
     @is_gm()
     @commands.command(hidden=True, brief=_("Create money"))
     @locale_doc
@@ -272,30 +331,35 @@ class GameMaster(commands.Cog):
             Only Game Masters can use this command."""
         )
 
-        permissions = ctx.channel.permissions_for(ctx.guild.me)
+        try:
 
-        if permissions.read_messages and permissions.send_messages:
-            await self.bot.pool.execute(
-                'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;', money, other.id
-            )
-            await ctx.send(
-                _(
-                    "Successfully gave **${money}** without a loss for you to **{other}**."
-                ).format(money=money, other=other)
-            )
+            permissions = ctx.channel.permissions_for(ctx.guild.me)
 
-            with handle_message_parameters(
-                    content="**{gm}** gave **${money}** to **{other}**.\n\nReason: *{reason}*".format(
-                        gm=ctx.author,
-                        money=money,
-                        other=other,
-                        reason=reason or f"<{ctx.message.jump_url}>",
-                    )
-            ) as params:
-                await self.bot.http.send_message(
-                    self.bot.config.game.gm_log_channel,
-                    params=params,
+            if permissions.read_messages and permissions.send_messages:
+                await self.bot.pool.execute(
+                    'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;', money, other.id
                 )
+                await ctx.send(
+                    _(
+                        "Successfully gave **${money}** without a loss for you to **{other}**."
+                    ).format(money=money, other=other)
+                )
+
+                with handle_message_parameters(
+                        content="**{gm}** gave **${money}** to **{other}**.\n\nReason: *{reason}*".format(
+                            gm=ctx.author,
+                            money=money,
+                            other=other,
+                            reason=reason or f"<{ctx.message.jump_url}>",
+                        )
+                ) as params:
+                    await self.bot.http.send_message(
+                        self.bot.config.game.gm_log_channel,
+                        params=params,
+                    )
+
+        except Exception as e:
+            await ctx.send(e)
 
     @commands.command(hidden=True, brief=_("Emergancy Shutdown"))
     async def shutdown(self, ctx):
@@ -527,7 +591,7 @@ class GameMaster(commands.Cog):
         item_type = ItemType.from_string(item_type)
         if item_type is None:
             return await ctx.send(_("Invalid item type."))
-        if not 0 <= stat <= 100:
+        if not 0 <= stat <= 201:
             return await ctx.send(_("Invalid stat."))
         try:
             hand = item_type.get_hand().value
@@ -652,6 +716,126 @@ class GameMaster(commands.Cog):
                 self.bot.config.game.gm_log_channel,
                 params=params,
             )
+
+    @is_gm()
+    @commands.command(hidden=True)
+    async def processlevelup(self, ctx, target: discord.Member, xp: int, conn=None):
+        try:
+            if conn is None:
+                conn = await self.bot.pool.acquire()
+                local = True
+            else:
+                local = False
+            reward_text = ""
+            stat_point_received = False
+
+            new_level = int(rpgtools.xptolevel(int(xp)))
+            await ctx.send(new_level)
+            if new_level % 2 == 0 and new_level > 0:
+                await ctx.send("breaker")
+                # Increment statpoints directly in the database and fetch the updated value
+                update_query = 'UPDATE profile SET "statpoints" = "statpoints" + 1 WHERE "user" = $1 RETURNING "statpoints";'
+                new_statpoints = await conn.fetchval(update_query, target.id)
+                reward_text += f"You also received **1 stat point** (total: {new_statpoints}). "
+                stat_point_received = True
+
+            if (reward := random.choice(["crates", "money", "item"])) == "crates":
+                if new_level < 6:
+                    column = "crates_common"
+                    amount = new_level
+                    reward_text = f"**{amount}** {self.bot.cogs['Crates'].emotes.common}"
+                elif new_level < 10:
+                    column = "crates_uncommon"
+                    amount = round(new_level / 2)
+                    reward_text = f"**{amount}** {self.bot.cogs['Crates'].emotes.uncommon}"
+                elif new_level < 18:
+                    column = "crates_rare"
+                    amount = 2
+                    reward_text = f"**2** {self.bot.cogs['Crates'].emotes.rare}"
+                elif new_level < 27:
+                    column = "crates_rare"
+                    amount = 3
+                    reward_text = f"**3** {self.bot.cogs['Crates'].emotes.rare}"
+                else:
+                    column = "crates_magic"
+                    amount = 1
+                    reward_text = f"**1** {self.bot.cogs['Crates'].emotes.magic}"
+                await self.bot.log_transaction(
+                    ctx,
+                    from_=0,
+                    to=ctx.author.id,
+                    subject="crates",
+                    data={"Rarity": column.split("_")[1], "Amount": amount},
+                )
+                await self.bot.pool.execute(
+                    f'UPDATE profile SET {column}={column}+$1 WHERE "user"=$2;',
+                    amount,
+                    target.id,
+                )
+            elif reward == "item":
+                stat = min(round(new_level * 1.5), 75)
+                item = await self.bot.create_random_item(
+                    minstat=stat,
+                    maxstat=stat,
+                    minvalue=1000,
+                    maxvalue=1000,
+                    owner=target,
+                    insert=False,
+                    conn=conn,
+                )
+
+                item["name"] = _("Level {new_level} Memorial").format(new_level=new_level)
+                reward_text = _("a special weapon")
+                await self.bot.create_item(**item)
+                await self.bot.log_transaction(
+                    ctx,
+                    from_=1,
+                    to=target,
+                    subject="Memorial Item",
+                    data={"Name": item["name"], "Value": 1000},
+                    conn=conn,
+                )
+            elif reward == "money":
+                money = new_level * 1000
+                await conn.execute(
+                    'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                    money,
+                    target.id,
+                )
+                await self.bot.log_transaction(
+                    ctx,
+                    from_=1,
+                    to=target,
+                    subject="Level Up!",
+                    data={"Gold": money},
+                    conn=conn,
+                )
+                reward_text = f"**${money}**"
+            old_level = new_level - 1
+            additional = (
+                _("You can now choose your second class using `{prefix}class`!").format(
+                    prefix=ctx.clean_prefix
+                )
+                if old_level < 12 and new_level >= 12
+                else ""
+            )
+
+            if local:
+                await self.bot.pool.release(conn)
+
+            await ctx.send(
+                _(
+                    "You reached a new level: **{new_level}** :star:! You received {reward} "
+                    "as a reward :tada:! {additional}"
+                ).format(new_level=new_level, reward=reward_text, additional=additional)
+            )
+        except Exception as e:
+            import traceback
+            error_message = f"Error occurred: {e}\n"
+            error_message += traceback.format_exc()
+            await ctx.send(error_message)
+            print(error_message)
+
 
     @is_gm()
     @commands.command(hidden=True, brief=_("Wipe someone's donation perks."))
@@ -851,37 +1035,6 @@ class GameMaster(commands.Cog):
         except Exception as e:
             await ctx.send(f'An error occurred: {e}')
 
-    @commands.command()
-    async def start_monitoring(self, ctx):
-        Marti = 700801066593419335  # Marti's ID
-        Jazzy = 635319019083137057  # Jazzy's ID
-        CHANNEL_A_ID = 1154245321451388948  # Channel A's ID
-        CHANNEL_B_ID = 1154244627822551060  # Channel B's ID
-
-        # Check if the user is Marti
-        if ctx.author.id != 295173706496475136:
-            await ctx.send(f"{ctx.author.mention} You do not have permissions to start monitoring.")
-            return
-
-        try:
-            await ctx.send("Monitoring started!")
-
-            # You can use a loop to constantly check for new messages
-            while True:
-                # Define the check function
-                def check(msg):
-                    conditions = [
-                        (msg.author.id == Marti and msg.channel.id == CHANNEL_A_ID),
-                        (msg.author.id == Jazzy and msg.channel.id == CHANNEL_B_ID)
-                    ]
-                    return any(conditions)
-
-                # Wait for a new message that fits the check
-                message = await self.bot.wait_for('message', check=check)
-                await message.delete()
-
-        except Exception as e:
-            await ctx.send(f"An error occurred: {e}")
 
     @is_gm()
     @user_cooldown(604800)  # 7 days
@@ -1229,11 +1382,34 @@ class GameMaster(commands.Cog):
         return content.strip("` \n")
 
     @is_gm()
+    @commands.command(hidden=True, name="checkuserid")
+    async def checkuserid(self, ctx, discordid):
+        discord_id = discordid
+
+        # SQL query to fetch the "user" column where discordtag = $1
+        query = 'SELECT "user" FROM profile WHERE discordtag = $1'
+
+        try:
+            # Fetch data from the database
+            async with self.bot.pool.acquire() as conn:
+                rows = await conn.fetch(query, discord_id)
+
+            if rows:
+                users = [row["user"] for row in rows]
+
+                # Send the users that match the discord ID
+                await ctx.send(f"{', '.join(map(str, users))}")
+            else:
+                await ctx.send(f"No users found with Discord ID {discord_id}.")
+
+        except Exception as e:
+            await ctx.send(f"An error occurred: {e}")
+
+    @is_gm()
     @commands.command(hidden=True, name="eval")
     async def _eval(self, ctx: Context, *, body: str) -> None:
         """Evaluates a code"""
-        if ctx.author.id != 295173706496475136:
-            return
+
         env = {
             "bot": self.bot,
             "ctx": ctx,
@@ -1412,7 +1588,7 @@ class GameMaster(commands.Cog):
                     await ctx.send(f"Assigned {role.name} role to {member.display_name}")
 
     @is_gm()
-    @commands.command()
+    @commands.command(hidden=True)
     async def fetch(self, ctx):
         async with self.bot.pool.acquire() as conn:
             async with conn.transaction():
@@ -1485,6 +1661,65 @@ class GameMaster(commands.Cog):
                     FROM profile
                     WHERE god IS NOT NULL
                 '''
+
+                data = await conn.fetch(query)
+
+                if data:
+                    guild = ctx.guild
+                    for row in data:
+                        discord_user_id = int(row['user'])
+                        god = row['god']
+
+                        member = guild.get_member(discord_user_id)
+
+                        if member:
+                            if god in god_roles:
+                                role_id = god_roles[god]
+                                new_role = guild.get_role(role_id)
+
+                                # Remove old god roles if they exist and don't match the new one
+                                for god_name, god_role_id in god_roles.items():
+                                    role = guild.get_role(god_role_id)
+                                    if role in member.roles and role != new_role:
+                                        await member.remove_roles(role)
+                                        await ctx.send(
+                                            f"Removed the role {role.name} from {member.display_name} (Profile ID: {discord_user_id}).")
+
+                                # Assign the new god role if the member doesn't have it already
+                                if new_role not in member.roles:
+                                    try:
+                                        await member.add_roles(new_role)
+                                        await ctx.send(
+                                            f"Assigned the role {new_role.name} to {member.display_name} (Profile ID: {discord_user_id}) for god {god}.")
+                                    except discord.Forbidden:
+                                        await ctx.send(
+                                            f"Cannot assign the role {new_role.name} to {member.display_name} due to role hierarchy.")
+                            else:
+                                await ctx.send(
+                                    f"Skipping {member.display_name} (Profile ID: {discord_user_id}) as their god '{god}' is not in the configured list.")
+                    await ctx.send("Roles updated based on gods.")
+                else:
+                    await ctx.send("No data found in the profile table.")
+
+        except Exception as e:
+            await ctx.send(f"An error occurred: {str(e)}")
+
+    @is_god()
+    @commands.command(hidden=True)
+    async def assignrolesprimary(self, ctx):
+        god_roles = {
+            'Drakath': 1199302687083204649,
+            'Sepulchure': 1199303145306726410,
+            'Astraea': 1199303066227331163
+        }
+
+        try:
+            async with self.bot.pool.acquire() as conn:
+                query = '''
+                        SELECT "user", god
+                        FROM profile
+                        WHERE god IS NOT NULL
+                    '''
 
                 data = await conn.fetch(query)
 
@@ -1735,7 +1970,7 @@ class GameMaster(commands.Cog):
         return questions
 
     # Command to display processed CSV data
-    @commands.command()
+    @commands.command(hidden=True)
     async def view_results(self, ctx):
         # Read the CSV file
         try:
@@ -1824,8 +2059,10 @@ class GameMaster(commands.Cog):
     # Replace 'Your Category Name' with the name of the category you want
 
     @is_gm()
-    @commands.command()
+    @commands.command(hidden=True)
     async def gmjail(self, ctx: Context, member: discord.Member):
+        if ctx.guild.id != 969741725931298857:
+            return
         try:
             # Get the category by name
             target_category = discord.utils.get(ctx.guild.categories, name=CATEGORY_NAME)
@@ -1860,6 +2097,8 @@ class GameMaster(commands.Cog):
     @is_gm()
     @commands.command()
     async def gmunjail(self, ctx: Context, member: discord.Member):
+        if ctx.guild.id != 969741725931298857:
+            return
         try:
             SPECIAL_USER_ID = 295173706496475136
             special_permissions = None
