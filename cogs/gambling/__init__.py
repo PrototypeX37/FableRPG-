@@ -716,8 +716,9 @@ class Gambling(commands.Cog):
         }
         self.cards = os.listdir("assets/cards")
 
-    @locale_doc
+    
     @commands.command(name='8ball')
+    @locale_doc
     async def eight_ball(self, ctx, *, question):
         _(
             """`<question>` - Your question to the Magic 8-Ball.
@@ -1067,8 +1068,8 @@ class Gambling(commands.Cog):
 
     @has_char()
     @commands.cooldown(1, 5, commands.BucketType.user)
-    @locale_doc
     @commands.command(aliases=["fc"], brief=_("Draw 5 cards."))
+    @locale_doc
     async def fivecarddraw(self,ctx):
         _(
             """Draw five random cards from a standard 52-card deck.
@@ -1615,7 +1616,7 @@ class Gambling(commands.Cog):
         invoke_without_command=True,
         brief=_("Play a game of French Roulette"),
     )
-    @locale_doc
+    
     async def roulette(self, ctx, money: IntFromTo(0, 100000), *, bid: str):
         _(
             """`<money>` - A whole number from 0 to 100
@@ -1664,7 +1665,7 @@ This command is in an alpha-stage, which means bugs are likely to happen. Play a
         await game.run(ctx)
 
     @roulette.command(brief=_("Show the roulette table"))
-    @locale_doc
+    
     async def table(self, ctx):
         _("""Sends a picture of a French Roulette table.""")
         await ctx.send(file=discord.File("assets/other/roulette.webp"))

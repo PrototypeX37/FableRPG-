@@ -133,8 +133,8 @@ class Miscellaneous(commands.Cog):
 
     @has_char()
     @user_cooldown(1)
-    @locale_doc
     @commands.command()
+    @locale_doc
     async def all(self, ctx):
         _(
             """Automatically invokes several daily commands for you.
@@ -224,6 +224,7 @@ class Miscellaneous(commands.Cog):
         """Calculate the number of seconds until the next midnight UTC."""
         return int(86400 - (time.time() % 86400))
 
+    
     @has_char()
     @next_day_cooldown()
     @commands.command(brief=_("Get your daily reward"))
@@ -371,6 +372,7 @@ class Miscellaneous(commands.Cog):
 
     @is_gm()
     @commands.command(hidden=True, name="challenges")
+    @locale_doc
     async def send_challenges(self, ctx):
         try:
             challenges = self.read_challenges_from_file("challenges.txt")  # Read challenges from file
@@ -381,9 +383,10 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
+    
     @user_cooldown(5)
-    @locale_doc
     @commands.command(brief="Hug someone with a cute GIF!")
+    @locale_doc
     async def hug(self, ctx, user: discord.Member):
         _(
             """`<user>` - The member to hug.
@@ -423,6 +426,7 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
+    
     @user_cooldown(5)
     @commands.command(brief="Kiss someone with a cute GIF!")
     @locale_doc
@@ -463,6 +467,7 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
+    
     @user_cooldown(5)
     @commands.command(brief="Pat someone with a cute GIF!")
     @locale_doc
@@ -503,6 +508,7 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
+    
     @user_cooldown(5)
     @commands.command(brief="Slap someone with a GIF!")
     @locale_doc
@@ -543,6 +549,7 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
+    
     @user_cooldown(5)
     @commands.command(brief="Give someone a high five!")
     @locale_doc
@@ -583,6 +590,7 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
+    
     @user_cooldown(5)
     @commands.command(brief="Wave at someone with a GIF!")
     @locale_doc
@@ -623,6 +631,7 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
+    
     @user_cooldown(5)
     @commands.command(brief="Cuddle someone with a cute GIF!")
     @locale_doc
@@ -663,6 +672,7 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
+    
     @user_cooldown(5)
     @commands.command(brief="Poke someone gently with a cute GIF!")
     @locale_doc
@@ -703,6 +713,7 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
+    
     @user_cooldown(5)
     @commands.command(brief="Bite someone gently with a playful GIF!")
     @locale_doc
@@ -743,6 +754,7 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
+    
     @user_cooldown(5)
     @commands.command(brief="Tickle someone with a GIF!")
     @locale_doc
@@ -783,6 +795,7 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
+    
     @user_cooldown(5)
     @commands.command(brief="Nuzzle someone affectionately!")
     @locale_doc
@@ -823,7 +836,7 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
-
+    
     @user_cooldown(5)
     @commands.command(brief="Lick someone!")
     @locale_doc
@@ -864,7 +877,7 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
-
+    
     @user_cooldown(5)
     @commands.command(brief="Punch someone with a GIF!")
     @locale_doc
@@ -905,6 +918,7 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
+    
     @has_char()
     @commands.command(brief=_("Roll"))
     @locale_doc
@@ -923,6 +937,7 @@ class Miscellaneous(commands.Cog):
 
         await ctx.send("🥖")
 
+    
     @has_char()
     @commands.command(brief=_("View your current streak"))
     @locale_doc
@@ -946,6 +961,7 @@ class Miscellaneous(commands.Cog):
             )
         )
 
+    
     @commands.command(aliases=["donate"], brief=_("Support the bot financially"))
     @locale_doc
     async def patreon(self, ctx):
@@ -976,6 +992,7 @@ Even $1 can help us.
             ).format(guild_count=guild_count)
         )
 
+    
     @commands.command(
         aliases=["license"], brief=_("Shows the source code and license.")
     )
@@ -988,6 +1005,7 @@ Even $1 can help us.
 
         await ctx.send("Fable - AGPLv3+\nhttps://github.com/prototypeX37/FableRPG-")
 
+    
     @commands.command(brief=_("Invite the bot to your server."))
     @locale_doc
     async def invite(self, ctx):
@@ -1014,6 +1032,7 @@ Even $1 can help us.
 
         return predicate
 
+    
     @commands.command()
     @locale_doc
     async def allcommands(self, ctx):
@@ -1064,6 +1083,7 @@ Even $1 can help us.
         except Exception as e:
             await ctx.send(f"An error occurred: {str(e)}")
 
+    
     @commands.command(brief=_("Shows statistics about the bot"))
     @locale_doc
     async def stats(self, ctx):
@@ -1171,6 +1191,7 @@ Average hours of work: **{hours}**"""
         )
         await ctx.send(embed=embed)
 
+    
     @commands.command(brief=_("View the uptime"))
     @locale_doc
     async def uptime(self, ctx):
@@ -1181,6 +1202,7 @@ Average hours of work: **{hours}**"""
             )
         )
 
+    
     @commands.command()
     @has_char()
     @locale_doc
@@ -1202,7 +1224,7 @@ Average hours of work: **{hours}**"""
 
         await ctx.send(f"You have **{freecredits}** free images left and a balance of **${creditss}**.")
 
-
+    
     @commands.command()
     @has_char()
     @user_cooldown(60)
@@ -1285,6 +1307,7 @@ Average hours of work: **{hours}**"""
         except Exception as e:
             await ctx.send(f"An error has occurred")
 
+    
     @commands.command()
     @user_cooldown(80)
     @has_char()
@@ -1349,6 +1372,7 @@ Average hours of work: **{hours}**"""
         except Exception as e:
             await ctx.send(f"An error has occurred")
 
+    
     @commands.command(name='talk', help='Ask ChatGPT a question!')
     @locale_doc
     async def talk(self, ctx, *, question):
@@ -1402,8 +1426,7 @@ Average hours of work: **{hours}**"""
         for chunk in self.split_message(response):
             await ctx.send(chunk)
 
-
-
+    
     @commands.command()
     @locale_doc
     async def cookie(self, ctx, target_member: discord.Member):
@@ -1422,8 +1445,9 @@ Average hours of work: **{hours}**"""
         await ctx.send(
             f"**{target_member.display_name}**, you've been given a cookie by **{ctx.author.display_name}**. 🍪")
 
-    @locale_doc
+    
     @commands.command()
+    @locale_doc
     async def ice(self, ctx, target_member: discord.Member):
         _(
             """`<user>` - The member to give ice cream to.
@@ -1440,8 +1464,9 @@ Average hours of work: **{hours}**"""
         await ctx.send(
             f"{target_member.mention}, here is your ice: 🍨!")
 
-    @locale_doc
+    
     @commands.command(name='wipe', help='Clear your conversation history with the bot.')
+    @locale_doc
     async def clear_memory(self, ctx):
         _(
             """Clear your conversation history with the AI assistant.
@@ -1477,8 +1502,9 @@ Average hours of work: **{hours}**"""
 
     async def get_gpt_response_async(self, conversation_history):
         url = "https://api.openai.com/v1/chat/completions"
+        OPENAI_KEY = self.bot.config.external.openai
         headers = {
-            "Authorization": f"Bearer ",
+            "Authorization": f"Bearer {OPENAI_KEY}",
             "Content-Type": "application/json"
         }
         data = {
@@ -1498,8 +1524,9 @@ Average hours of work: **{hours}**"""
 
     async def get_gpt_response_async2(self, conversation_history):
         url = "https://api.openai.com/v1/chat/completions"
+        OPENAI_KEY = self.bot.config.external.openai
         headers = {
-            "Authorization": f"Bearer ",
+            "Authorization": f"Bearer {OPENAI_KEY}",
             "Content-Type": "application/json"
         }
         data = {
@@ -1517,7 +1544,7 @@ Average hours of work: **{hours}**"""
         except Exception as e:
             return f"Unexpected error! Is the pipeline server running? {e}"
 
-
+    
     @commands.command(
         aliases=["pages", "about"], brief=_("Info about the bot and related sites")
     )
@@ -1550,6 +1577,7 @@ This bot is developed by people who love to code for a good cause and improving 
             )
         )
 
+    
     @commands.command(brief=_("Show the rules again"))
     @locale_doc
     async def rules(self, ctx):
