@@ -46,7 +46,8 @@ class Race(Enum):
     Human = 2
     Elf = 3
     Orc = 4
-    Shadowborn = 5
+    Djinn = 5
+    Shadowborn = 6
 
 
 class Faction(Enum):
@@ -126,8 +127,11 @@ class Entity:
             damage += 3
         elif self.race == Race.Jikill:
             damage += 4
+        elif self.race == Race.Djinn:
+            damage += 5
         elif self.race == Race.Shadowborn:
             damage += -1
+
 
         if self.effects.weakened:
             damage *= 0.7
@@ -150,6 +154,8 @@ class Entity:
             armor += 1
         elif self.race == Race.Orc:
             armor += 4
+        elif self.race == Race.Djinn:
+            armor += -1
         elif self.race == Race.Shadowborn:
             armor += 5
         return armor
