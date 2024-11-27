@@ -310,12 +310,20 @@ class Raid(commands.Cog):
             # Assuming you have the role ID for the server booster role
             BOOSTER_ROLE_ID = 1281411439747268692  # Replace with your actual booster role ID
 
-            tier_threshold = 1
+            # Define the tier threshold and the user ID to exclude
+            tier_threshold = 1  # Assuming you want tiers >= 1
+            excluded_user_id = 782017044828782642
 
-            # Fetch Discord IDs where tier is 1 or above
+            # Fetch Discord IDs where tier is >= tier_threshold and user is not excluded_user_id
             discord_ids = await self.bot.pool.fetch(
-                'SELECT "user" FROM profile WHERE "tier" >= $1;',
-                tier_threshold
+                '''
+                SELECT "user" 
+                FROM profile 
+                WHERE "tier" >= $1 
+                  AND "user" != $2;
+                ''',
+                tier_threshold,
+                excluded_user_id
             )
 
             # Extract the IDs from the result and append them to a list
@@ -1681,7 +1689,6 @@ The hamburger will be vulnerable in 15 Minutes
         """[Evil God only] Starts a raid."""
 
         try:
-
             await self.set_raid_timer()
 
             view = JoinView(
@@ -1691,69 +1698,50 @@ The hamburger will be vulnerable in 15 Minutes
             )
 
             embed = Embed(
-                title="A Sacred Temple Emerges",
+                title="🌑 The Eclipse Begins",
                 description="""
-            A sacred temple emerges, filled with divine power. The dark followers are called upon to weaken this temple and bring forth the darkness.
-            This temple's divine power will be vulnerable in 15 Minutes
+            The moon turns blood red as a sacred temple emerges from the shadows, emanating an aura of dread. The dark followers are summoned to perform the Infernal Ritual to awaken an ancient evil.
 
-            **Only followers of the Sepulchure may join.**
+            **Only the most devoted followers of Sepulchure may partake in this unholy ceremony.**
                 """,
-                color=0x901C1C  # You can change the color as you like
+                color=0x550000  # Dark red color
             )
 
-            # Use an image URL instead of a local file
+            # Use an image URL for dramatic effect
             image_url = "https://i.ibb.co/Yf6q0K4/OIG-15.png"
             embed.set_image(url=image_url)
 
             await ctx.send(embed=embed, view=view)
 
             await ctx.send(
-                "Note: This mode may need improvements and is considered **BETA**. There may be issues, too easy or unfair.")
+                "Prepare yourselves. The ritual will commence soon. This is **BETA** and may require balancing.")
 
-            if self.bot.config.bot.is_beta:
-                await asyncio.sleep(300)
-                await ctx.send("**The temple's defense mechanisms will activate in 10 minutes**")
-                await asyncio.sleep(300)
-                await ctx.send("**The temple's defense mechanisms will activate in 5 minutes**")
-                await asyncio.sleep(180)
-                await ctx.send("**The temple's defense mechanisms will activate in 2 minutes**")
-                await asyncio.sleep(60)
-                await ctx.send("**The temple's defense mechanisms will activate in 1 minute**")
-                await asyncio.sleep(60)
-                await ctx.send("**The temple's defense mechanisms will activate in 30 seconds**")
-                await asyncio.sleep(20)
-                await ctx.send("**The temple's defense mechanisms will activate in 10 seconds**")
-                await asyncio.sleep(10)
-            else:
-                await asyncio.sleep(300)
-                await ctx.send("**The temple's defense mechanisms will activate in 10 minutes**")
-                await asyncio.sleep(300)
-                await ctx.send("**The temple's defense mechanisms will activate in 5 minutes**")
-                await asyncio.sleep(180)
-                await ctx.send("**The temple's defense mechanisms will activate in 2 minutes**")
-                await asyncio.sleep(60)
-                await ctx.send("**The temple's defense mechanisms will activate in 1 minute**")
-                await asyncio.sleep(60)
-                await ctx.send("**The temple's defense mechanisms will activate in 30 seconds**")
-                await asyncio.sleep(20)
-                await ctx.send("**The temple's defense mechanisms will activate in 10 seconds**")
-                await asyncio.sleep(10)
-                await ctx.send("**The temple's defense mechanisms will activate in 30 seconds**")
-                await asyncio.sleep(20)
-                await ctx.send("**The temple's defense mechanisms will activate in 10 seconds**")
+            # Wait for the ritual to start
+            await asyncio.sleep(300)
+            await ctx.send("**The shadows deepen... The ritual begins in 10 minutes.**")
+            await asyncio.sleep(300)
+            await ctx.send("**Whispers fill the air... 5 minutes remain.**")
+            await asyncio.sleep(180)
+            await ctx.send("**Your heart pounds... 2 minutes until the ritual commences.**")
+            await asyncio.sleep(60)
+            await ctx.send("**A chill runs down your spine... 1 minute left.**")
+            await asyncio.sleep(60)
+            await ctx.send("**The ground trembles... 30 seconds.**")
+            await asyncio.sleep(20)
+            await ctx.send("**Darkness engulfs you... 10 seconds.**")
+            await asyncio.sleep(10)
 
             view.stop()
 
             await ctx.send(
-                "**The temple's defenses are now active! Fetching participant data... Hang on!**"
+                "**💀 The ritual begins! The Guardian awakens from its slumber... 💀**"
             )
 
             raid = {}
-            progress = 0
 
             def progress_bar(current, total, bar_length=10):
                 progress = (current / total)
-                arrow = '▶️'
+                arrow = '⬛'
                 space = '⬜'
                 num_of_arrows = int(progress * bar_length)
                 return arrow * num_of_arrows + space * (bar_length - num_of_arrows)
@@ -1785,16 +1773,21 @@ The hamburger will be vulnerable in 15 Minutes
                     raid[u] = {"hp": 250, "armor": deff, "damage": dmg}
 
             async def is_valid_participant(user, conn):
-                # Here, for example, we're checking if the user is a follower of "Sepulchure"
+                # Check if the user is a follower of "Sepulchure"
                 profile = await conn.fetchrow('SELECT * FROM profile WHERE "user"=$1;', user.id)
                 if profile and profile["god"] == "Sepulchure":
                     return True
                 return False
 
-            await ctx.send("**Done getting data!**")
+            await ctx.send("**Gathering the faithful...**")
             embed_message_id = None
             async with self.bot.pool.acquire() as conn:
                 participants = [u for u in view.joined if await is_valid_participant(u, conn)]
+
+            if not participants:
+                await ctx.send("No valid participants joined the ritual.")
+                await self.clear_raid_timer()
+                return
 
             champion = random.choice(participants)
             participants.remove(champion)
@@ -1805,94 +1798,112 @@ The hamburger will be vulnerable in 15 Minutes
 
             followers = participants
 
-            announcement_color = 0x901C1C
+            announcement_color = 0x550000
             champion_embed = discord.Embed(
-                title="👑 Champion Announcement 👑",
-                description=f"{champion.mention} has been chosen as the champion!",
+                title="👑 The Chosen Champion 👑",
+                description=f"{champion.mention} has been marked by darkness as the Champion!",
                 color=announcement_color
             )
             await ctx.send(embed=champion_embed)
             if priest:
                 priest_embed = discord.Embed(
-                    title="🌟 Priest Announcement 🌟",
-                    description=f"{priest.mention} has been chosen as the priest!",
+                    title="🔮 The Dark Priest 🔮",
+                    description=f"{priest.mention} has embraced the shadows as the Priest!",
                     color=announcement_color
                 )
                 await ctx.send(embed=priest_embed)
-            # Generate a list of follower mentions
-            follower_mentions = "\n".join(f"{follower.mention}" for follower in followers)
+            else:
+                await ctx.send("No Priest was chosen. The ritual will be more perilous without one.")
 
-            follower_embed = discord.Embed(
-                title="🔥 Followers 🔥",
-                description=follower_mentions,
-                color=announcement_color
-            )
-            await ctx.send(embed=follower_embed)
+            # Generate a list of follower mentions
+            if followers:
+                follower_mentions = "\n".join(f"{follower.mention}" for follower in followers)
+
+                follower_embed = discord.Embed(
+                    title="🕯️ The Faithful Followers 🕯️",
+                    description=follower_mentions,
+                    color=announcement_color
+                )
+                await ctx.send(embed=follower_embed)
+            else:
+                await ctx.send("No Followers are participating. The ritual relies solely on the Champion and Priest.")
 
             # Common Embed Color for the Ritual Theme
             EVIL_RITUAL_COLOR = discord.Color.dark_red()
 
             # General Ritual Embed
             ritual_embed_help = discord.Embed(
-                title="🌌 The Dark Ritual Begins 🌌",
-                description=("The night has come, and the ritual is about to start. "
-                             "Work together to ensure its successful completion, "
-                             "but remember, darkness is not without its perils..."),
+                title="🌑 The Infernal Ritual 🌑",
+                description=("The hour is nigh. Unite your efforts to awaken the ancient evil. "
+                             "But beware, the Guardian will stop at nothing to prevent the completion of the ritual."),
                 color=EVIL_RITUAL_COLOR
             )
             ritual_embed_help.add_field(name="Warning",
-                                        value="Should the Champion fall, the ritual ends in failure. Protect them at all costs!")
+                                        value="If the Champion falls, all hope is lost. Protect them with your lives!")
 
             # Champion Embed
             champion_embed_help = discord.Embed(
                 title="🛡️ Role: Champion 🛡️",
-                description=("As the heart of the ritual, you are its beacon and its shield. "
-                             "Your survival is key. If you fall, darkness fades and the ritual fails."),
+                description=("You are the vessel for the ancient evil. Your survival is paramount. "
+                             "Lead your followers and withstand the Guardian's assault."),
                 color=EVIL_RITUAL_COLOR
             )
-            champion_embed_help.add_field(name="⚔️ Smite", value="Strike at those who dare oppose the ritual.",
+            champion_embed_help.add_field(name="⚔️ Smite", value="Unleash dark power upon the Guardian.", inline=False)
+            champion_embed_help.add_field(name="❤️ Heal", value="Draw upon shadows to mend your wounds.",
                                           inline=False)
-            champion_embed_help.add_field(name="❤️ Mend", value="Call upon the dark energies to mend your wounds.",
+            champion_embed_help.add_field(name="🌀 Haste",
+                                          value="Accelerate the ritual's progress. (Cooldown applies; makes you vulnerable)",
                                           inline=False)
-            champion_embed_help.add_field(name="🌀 Accelerate",
-                                          value="Force the ritual to progress quicker at your command.",
+            champion_embed_help.add_field(name="🛡️ Defend", value="Brace yourself, reducing incoming damage next turn.",
+                                          inline=False)
+            champion_embed_help.add_field(name="💔 Sacrifice",
+                                          value="Offer your life force to significantly advance the ritual.",
                                           inline=False)
 
             # Followers Embed
             followers_embed_help = discord.Embed(
                 title="🔮 Role: Followers 🔮",
-                description="Your energy and devotion fuel the ritual. Assist the Champion and Priest in any way possible.",
+                description="Your devotion fuels the ritual. Support the Champion and Priest through any means necessary.",
                 color=EVIL_RITUAL_COLOR
             )
-            followers_embed_help.add_field(name="🌌 Enhance Ritual", value="Pour your energy to hasten the ritual.",
+            followers_embed_help.add_field(name="🌌 Boost Ritual", value="Channel your energy to hasten the ritual.",
                                            inline=False)
-            followers_embed_help.add_field(name="🛡️ Shield Champion",
-                                           value="Protect the Champion using your collective might.", inline=False)
+            followers_embed_help.add_field(name="🛡️ Protect Champion",
+                                           value="Use your collective will to shield the Champion.",
+                                           inline=False)
             followers_embed_help.add_field(name="💥 Empower Priest",
-                                           value="Augment the Priest's dark spells for a turn.",
+                                           value="Enhance the Priest's dark incantations.",
                                            inline=False)
-            followers_embed_help.add_field(name="🔥 Weaken Guardian",
-                                           value="Sap the strength of any opposing guardians.",
+            followers_embed_help.add_field(name="🔥 Sabotage Guardian",
+                                           value="Undermine the Guardian's strength.",
                                            inline=False)
-            followers_embed_help.add_field(name="🎵 Dark Chant",
-                                           value="Intensify the power of the ritual with your chants.",
+            followers_embed_help.add_field(name="🎵 Chant",
+                                           value="Raise your voices to amplify the ritual's power.",
+                                           inline=False)
+            followers_embed_help.add_field(name="💉 Heal Champion",
+                                           value="Offer some of your vitality to heal the Champion.",
                                            inline=False)
 
             # Priest Embed
             priest_embed_help = discord.Embed(
                 title="🌙 Role: Priest 🌙",
-                description="Harness the forbidden magics to assist or devastate. Your spells can tip the balance.",
+                description="Master the forbidden arts to sway the ritual's outcome. Your spells are pivotal.",
                 color=EVIL_RITUAL_COLOR
             )
-            priest_embed_help.add_field(name="🔥 Dark Blessing", value="Augment the Champion's might with black magic.",
+            priest_embed_help.add_field(name="🔥 Bless", value="Imbue the Champion with dark might.",
                                         inline=False)
-            priest_embed_help.add_field(name="🔮 Ethereal Barrier",
-                                        value="Protect the Champion with an unworldly shield.",
+            priest_embed_help.add_field(name="🔮 Barrier",
+                                        value="Conjure an unholy shield around the Champion.",
                                         inline=False)
-            priest_embed_help.add_field(name="😵 Hex", value="Curse the Guardians, making them feeble and weak.",
+            priest_embed_help.add_field(name="😵 Curse", value="Afflict the Guardian with debilitating hexes.",
+                                        inline=False)
+            priest_embed_help.add_field(name="❤️ Revitalize", value="Invoke dark energies to heal the Champion.",
+                                        inline=False)
+            priest_embed_help.add_field(name="🌟 Channel",
+                                        value="Focus your power to significantly boost ritual progress.",
                                         inline=False)
 
-            # You can then send these embeds to the main chat or to the respective players.
+            # Send these embeds to the main chat or to the respective players.
             await ctx.send(embed=ritual_embed_help)
 
             # DM the champion the instructions
@@ -1910,9 +1921,11 @@ The hamburger will be vulnerable in 15 Minutes
             TOTAL_TURNS = 25
 
             CHAMPION_ABILITIES = {
-                "Smite": "Strike the guardians with divine power.",
+                "Smite": "Strike the Guardian with dark power.",
                 "Heal": "Heal yourself.",
-                "Haste": "Boost the ritual's progress but remain exposed next turn."
+                "Haste": "Boost the ritual's progress but become vulnerable next turn.",
+                "Defend": "Reduce incoming damage next turn.",
+                "Sacrifice": "Greatly advance the ritual at the cost of your HP."
             }
             default_champion_damage = 750
             champion_stats = {
@@ -1920,135 +1933,338 @@ The hamburger will be vulnerable in 15 Minutes
                 "damage": default_champion_damage,
                 "protection": False,  # No protection at the start
                 "shield_points": 0,  # No shield points at the start
-                "barrier active": False,  # Assuming no active barrier at the start
+                "barrier_active": False,  # Assuming no active barrier at the start
                 "max_hp": 1500,  # Maximum allowable HP
-                "healing_rate": 200  # Hypothetical amount champion heals for; adjust as needed
+                "healing_rate": 200,  # Hypothetical amount champion heals for; adjust as needed
+                "haste_cooldown": 0,
+                "vulnerable": False,
+                "defending": False
+            }
+
+            # Guardian Phases based on Ritual Progress
+            GUARDIAN_PHASES = {
+                1: {
+                    "name": "The Sentinel",
+                    "description": "A towering figure emerges, cloaked in ancient armor. Its eyes glow with a cold light.",
+                    "abilities": ["strike", "shield", "purify"],
+                    "progress_threshold": 10  # Ritual progress percentage to move to next phase
+                },
+                2: {
+                    "name": "The Corrupted",
+                    "description": "The Guardian's form twists and darkens, tendrils of shadow emanate from its body.",
+                    "abilities": ["strike", "corrupting_blast", "shadow_shield", "purify", "fear_aura"],
+                    "progress_threshold": 30
+                },
+                3: {
+                    "name": "The Abyssal Horror",
+                    "description": "With a deafening roar, the Guardian transforms into a nightmarish entity from the abyss. Its mere presence instills terror.",
+                    "abilities": ["obliterate", "dark_aegis", "soul_drain", "apocalyptic_roar"],
+                    "progress_threshold": 60  # Final phase; beyond ritual completion
+                }
             }
 
             guardians_stats = {
-                "hp": 5000,  # Assuming a default value; adjust as necessary
-                "cursed": False,  # Assuming the guardian isn't cursed at the start
-                "damage_multiplier": 1.0,  # Default damage multiplier
-                "shield active": False,  # No active shield at the start
-                "base_damage": 150,  # Hypothetical base damage; adjust as needed
-                "regeneration_rate": 500  # Amount of HP restored by "regenerate" action; adjust as needed
+                "hp": 5000,  # Starting HP
+                "max_hp": 5000,
+                "cursed": False,
+                "damage_multiplier": 1.0,
+                "shield_active": False,
+                "base_damage": 150,
+                "regeneration_rate": 500,
+                "enraged": False,
+                "phase": 1,
+                "incapacitated_turns": 0  # New key to track incapacitation
             }
 
-            guardians_down_turns = 0
             TIMEOUT = 90
             priest_stats = {
-                "healing boost": 1.0  # Default value; adjust if needed
+                "healing_boost": 1.0,
+                "mana": 100,
+                "max_mana": 100
             }
+
+            def apply_damage_with_protection(target_stats, damage):
+                """Apply damage to target taking protection (shield) into consideration."""
+                if "protection" in target_stats and target_stats["protection"]:
+                    # Calculate remaining damage after shield absorption
+                    shield_absorption = min(damage, target_stats.get("shield_points", 0))
+                    target_stats["shield_points"] -= shield_absorption
+                    damage_after_shield = damage - shield_absorption
+                    if target_stats["shield_points"] <= 0:
+                        target_stats["protection"] = False
+                        target_stats["shield_points"] = 0
+                else:
+                    damage_after_shield = damage
+
+                # Apply remaining damage to target's HP
+                target_stats["hp"] -= damage_after_shield
+
+            progress = 0
+
+            # Initial Guardian appearance
+            phase_info = GUARDIAN_PHASES[guardians_stats["phase"]]
+            guardian_appearance_embed = discord.Embed(
+                title=f"💀 {phase_info['name']} Appears 💀",
+                description=phase_info["description"],
+                color=0x550000
+            )
+            await ctx.send(embed=guardian_appearance_embed)
 
             for turn in range(TOTAL_TURNS):
 
+                if champion_stats["hp"] <= 0:
+                    await ctx.send(f"💔 {champion.mention} has fallen. The ritual fails as darkness recedes...")
+                    await self.clear_raid_timer()
+                    return
+
+                if progress >= 100:
+                    break
+
+                # Priest's turn
                 if priest:
                     decision_embed = discord.Embed(
-                        title="🌠 Decision Time! 🌠",
-                        description=f"{priest.mention}, it's your sacred duty to guide the ritual. Make your choice wisely:",
-                        color=discord.Color.gold()  # Golden color for the priest
+                        title="🔮 Priest's Turn 🔮",
+                        description=f"{priest.mention}, your arcane knowledge is needed. Choose your action:",
+                        color=discord.Color.dark_purple()
                     )
 
-                    # Using emojis for added flair
-                    decision_embed.add_field(name="🙏 Bless", value="Boost the Champion's power", inline=True)
-                    decision_embed.add_field(name="🔮 Barrier", value="Protect the Champion", inline=True)
-                    decision_embed.add_field(name="🔥 Curse", value="Weaken the guardians", inline=True)
+                    # Priest abilities with mana costs
+                    priest_abilities = {
+                        "Bless": {"description": "Boost the Champion's power", "mana_cost": 20},
+                        "Barrier": {"description": "Protect the Champion", "mana_cost": 30},
+                        "Curse": {"description": "Weaken the Guardian", "mana_cost": 25},
+                        "Revitalize": {"description": "Heal the Champion", "mana_cost": 20},
+                        "Channel": {"description": "Significantly increase ritual progress", "mana_cost": 15}
+                    }
 
-                    # Add a footer to the embed
+                    for ability, info in priest_abilities.items():
+                        if priest_stats["mana"] >= info["mana_cost"]:
+                            decision_embed.add_field(name=f"{ability} (Cost: {info['mana_cost']} Mana)",
+                                                     value=info["description"], inline=False)
                     decision_embed.set_footer(
-                        text="Time is of the essence. The fate of the ritual rests in your hands!")
+                        text=f"Mana: {priest_stats['mana']}/{priest_stats['max_mana']}")
 
                     await ctx.send(f"It's {priest.mention}'s turn to make a decision, check DMs!")
 
-                    try:
-                        priest_decision = await asyncio.wait_for(
-                            self.get_player_decision(
-                                player=priest,
-                                options=["Bless", "Barrier", "Curse"],
-                                role="priest",
-                                embed=decision_embed
-                            ),
-                            timeout=TIMEOUT
-                        )
+                    valid_priest_options = [ability for ability, info in priest_abilities.items()
+                                            if priest_stats["mana"] >= info["mana_cost"]]
 
-                        if priest_decision == "Bless":
-                            champion_stats["damage"] += 200 * priest_stats["healing boost"]
-                        elif priest_decision == "Barrier":
-                            champion_stats["barrier active"] = True
-                        elif priest_decision == "Curse":
-                            guardians_stats["cursed"] = True
-                    except asyncio.TimeoutError:
-                        await ctx.send(f"{priest.mention} took too long! Moving on...")
-
-                # Guardian's decisions
-                await ctx.send(f"It's the Guardian's turn to make a decision.")
-
-                # Enhanced Guardian's Decision-making
-                if progress >= 80:
-                    guardian_decision = "purify"
-                elif guardians_stats.get("cursed"):
-                    if guardians_stats.get("hp") <= 4500:
-                        guardian_decision = random.choice(
-                            ["strike", "purify", "regenerate"])  # Add chance to regenerate if cursed
+                    if not valid_priest_options:
+                        await ctx.send(f"{priest.mention} has no mana left to perform any action.")
+                        priest_decision = None
                     else:
-                        guardian_decision = random.choice(
-                            ["strike", "purify"])  # Add chance to regenerate if cursed
-                elif champion_stats.get("barrier active"):
-                    guardian_decision = random.choice(["purify", "counter"])  # Add chance to counter barrier
+                        try:
+                            priest_decision = await asyncio.wait_for(
+                                self.get_player_decision(
+                                    player=priest,
+                                    options=valid_priest_options,
+                                    role="priest",
+                                    embed=decision_embed
+                                ),
+                                timeout=TIMEOUT
+                            )
+                            # Deduct mana cost
+                            priest_stats["mana"] -= priest_abilities[priest_decision]["mana_cost"]
+                            if priest_decision == "Bless":
+                                champion_stats["damage"] += 200 * priest_stats["healing_boost"]
+                                await ctx.send(f"✨ The Priest blesses the Champion, increasing their power!")
+                            elif priest_decision == "Barrier":
+                                champion_stats["barrier_active"] = True
+                                await ctx.send(f"🛡️ A mystical barrier surrounds the Champion!")
+                            elif priest_decision == "Curse":
+                                guardians_stats["cursed"] = True
+                                await ctx.send(f"🔒 The Priest casts a curse on the Guardian, weakening it!")
+                            elif priest_decision == "Revitalize":
+                                heal_amount = 300 * priest_stats["healing_boost"]
+                                champion_stats["hp"] = min(
+                                    champion_stats["hp"] + heal_amount, champion_stats["max_hp"])
+                                await ctx.send(f"❤️ The Priest heals the Champion for {int(heal_amount)} HP!")
+                            elif priest_decision == "Channel":
+                                progress += 5
+                                await ctx.send(f"🌟 The Priest channels energy, advancing the ritual!")
+                        except asyncio.TimeoutError:
+                            await ctx.send(f"{priest.mention} took too long! Moving on...")
+                            priest_decision = None
                 else:
-                    guardian_decision = random.choice(["strike", "shield", "purify"])
+                    priest_decision = None
 
-                if guardian_decision == "strike":
-                    damage = random.randint(100, 250)
-                    if champion_stats.get("barrier active"):
-                        damage = int(damage * 0.5)
-                        del champion_stats["barrier active"]
-                    champion_stats["hp"] -= damage
-                elif guardian_decision == "shield":
-                    guardians_stats["shield active"] = True
-                elif guardian_decision == "purify":
-                    progress = max(0, progress - 10)
-                elif guardian_decision == "regenerate":  # New regenerate action
-                    guardians_stats["hp"] += 500
-                elif guardian_decision == "counter":  # New counter action
-                    champion_stats["damage"] = default_champion_damage  # Reset champion damage
+                # Check if the Guardian's HP is <= 0 and handle incapacitation
+                if guardians_stats["hp"] <= 0 and guardians_stats["incapacitated_turns"] == 0:
+                    # Guardian is incapacitated for 2 turns
+                    guardians_stats["incapacitated_turns"] = 2
+                    await ctx.send("💀 The Guardian collapses, giving you a brief respite!")
+                    # Optionally, you can allow players to gain extra progress during this time
+                    progress += 10  # Bonus progress for defeating the Guardian temporarily
 
-                # Negative Effects of Curse: Guardian's moves become less effective without the curse
-                if not guardians_stats.get("cursed"):
-                    guardians_stats["damage_multiplier"] = 1.0  # Increase damage output by 50% if not cursed
+                # Guardian's turn
+                if guardians_stats["incapacitated_turns"] > 0:
+                    guardians_stats["incapacitated_turns"] -= 1
+                    if guardians_stats["incapacitated_turns"] == 0:
+                        # Guardian revives with some HP and possibly increased strength
+                        guardians_stats["hp"] = int(guardians_stats["max_hp"] * 0.5)
+                        guardians_stats["damage_multiplier"] += 0.2
+                        await ctx.send("😈 The Guardian rises again, more enraged than ever!")
+                        # Announce the new phase if applicable
+                        if guardians_stats["phase"] < 3:
+                            guardians_stats["phase"] += 1
+                            phase_info = GUARDIAN_PHASES[guardians_stats["phase"]]
+                            phase_embed = discord.Embed(
+                                title=f"😈 The Guardian Transforms into {phase_info['name']}!",
+                                description=phase_info["description"],
+                                color=0x8B0000  # Dark red color
+                            )
+                            await ctx.send(embed=phase_embed)
+                    else:
+                        await ctx.send("💀 The Guardian is incapacitated and cannot act this turn.")
                 else:
-                    guardians_stats["damage_multiplier"] = 0.6  # Reset to normal if cursed
+                    await ctx.send(f"💢 The Guardian takes its turn.")
+
+                    current_phase = guardians_stats["phase"]
+                    next_phase = current_phase + 1
+
+                    if next_phase in GUARDIAN_PHASES:
+                        phase_info_next = GUARDIAN_PHASES[next_phase]
+                        progress_threshold = phase_info_next["progress_threshold"]
+                        if progress >= progress_threshold:
+                            guardians_stats["phase"] = next_phase
+                            guardians_stats["damage_multiplier"] += 0.3  # Increase damage multiplier
+                            # Announce the phase change
+                            phase_embed = discord.Embed(
+                                title=f"😈 The Guardian Transforms into {phase_info_next['name']}!",
+                                description=phase_info_next["description"],
+                                color=0x8B0000
+                            )
+                            await ctx.send(embed=phase_embed)
+                            # Update phase_info to the new phase
+                            phase_info = phase_info_next
+                    # Else, phase_info remains as the current phase
+
+                    guardians_decisions = phase_info["abilities"]
+
+                    # Guardian decision logic based on phase
+                    if progress >= 80 and "purify" in guardians_decisions:
+                        guardian_decision = "purify"
+                    elif guardians_stats.get("cursed") and "regenerate" in guardians_decisions:
+                        guardian_decision = random.choice(["strike", "purify", "regenerate"])
+                    elif champion_stats.get("barrier_active") and "disrupt" in guardians_decisions:
+                        guardian_decision = random.choice(["purify", "disrupt"])
+                    else:
+                        guardian_decision = random.choice(guardians_decisions)
+
+                    # Execute the Guardian's action
+                    if guardian_decision == "strike":
+                        # Existing strike logic
+                        damage = random.randint(100, 250) * guardians_stats["damage_multiplier"]
+                        if guardians_stats.get("enraged"):
+                            damage *= 1.5
+                        if champion_stats.get("barrier_active"):
+                            damage *= 0.5
+                            champion_stats["barrier_active"] = False
+                        if champion_stats.get("defending"):
+                            damage *= 0.5
+                            champion_stats["defending"] = False
+                        if champion_stats.get("vulnerable"):
+                            damage *= 1.5
+                            champion_stats["vulnerable"] = False
+                        apply_damage_with_protection(champion_stats, damage)
+                        await ctx.send(f"💥 The Guardian strikes the Champion for **{int(damage)} damage**!")
+
+                    elif guardian_decision == "corrupting_blast":
+                        # Phase 2 ability
+                        damage = random.randint(150, 250) * guardians_stats["damage_multiplier"]
+                        champion_stats["damage"] = max(champion_stats["damage"] - 100, 0)
+                        apply_damage_with_protection(champion_stats, damage)
+                        await ctx.send(
+                            f"⚡ The Guardian unleashes a Corrupting Blast, dealing **{int(damage)} damage** and severely reducing the Champion's damage!")
+
+                    elif guardian_decision == "shadow_shield":
+                        guardians_stats["shield_active"] = True
+                        guardians_stats["damage_multiplier"] *= 0.8
+                        await ctx.send("🛡️ The Guardian casts a Shadow Shield, reducing incoming damage by **20%**!")
+
+                    elif guardian_decision == "obliterate":
+                        # Phase 3 ability
+                        damage = random.randint(400, 900) * guardians_stats["damage_multiplier"]
+                        apply_damage_with_protection(champion_stats, damage)
+                        await ctx.send(
+                            f"☠️ The Guardian attempts to obliterate the Champion with a devastating attack, dealing **{int(damage)} damage**!")
+
+                    elif guardian_decision == "dark_aegis":
+                        guardians_stats["shield_active"] = True
+                        guardians_stats["damage_multiplier"] *= 0.5
+                        await ctx.send(
+                            "🔰 The Guardian envelops itself in a Dark Aegis, greatly reducing incoming damage by **50%**!")
+
+                    elif guardian_decision == "soul_drain":
+                        damage = random.randint(200, 300)
+                        guardians_stats["hp"] += damage
+                        guardians_stats["hp"] = min(guardians_stats["hp"], guardians_stats["max_hp"])
+                        apply_damage_with_protection(champion_stats, damage)
+                        await ctx.send(
+                            f"🩸 The Guardian uses Soul Drain, siphoning **{damage} HP** from the Champion to heal itself, dealing **{int(damage)} damage**!")
+
+                    elif guardian_decision == "purify":
+                        progress_before = progress
+                        progress = max(0, progress - 20)
+                        progress_reduction = progress_before - progress
+                        await ctx.send(
+                            f"💫 The Guardian attempts to purify the ritual, significantly reducing its progress by **{progress_reduction}%**!")
+
+                    elif guardian_decision == "shield":
+                        guardians_stats["shield_active"] = True
+                        await ctx.send("🛡️ The Guardian raises a shield, preparing to absorb incoming damage!")
+
+                    elif guardian_decision == "fear_aura":
+                        # Phase 2 ability
+                        # Potentially reduce followers' actions
+                        await ctx.send(
+                            "😱 The Guardian emits a Fear Aura, unsettling the followers and reducing their effectiveness!")
+
+                    elif guardian_decision == "apocalyptic_roar":
+                        # Phase 3 ability
+                        damage = random.randint(150, 250)
+                        champion_stats["hp"] -= damage
+                        if priest:
+                            # Implement priest HP if applicable
+                            pass
+                        for follower in followers:
+                            # Implement followers' HP or effectiveness reduction
+                            pass
+                        await ctx.send(
+                            f"🌋 The Guardian unleashes an Apocalyptic Roar, dealing **{damage} damage** to the Champion and harming all who hear it!")
 
                 # Followers' decisions
-                await ctx.send(f"It's the Followers' turn to make decisions, check DMs!")
+                await ctx.send(f"🙏 The Followers are making their decisions.")
 
                 follower_combined_decision = {
                     "Boost Ritual": 0,
                     "Protect Champion": 0,
                     "Empower Priest": 0,
                     "Sabotage Guardian": 0,
-                    "Chant": 0
+                    "Chant": 0,
+                    "Heal Champion": 0
                 }
 
                 follower_embed = discord.Embed(
-                    title="🛡 Followers' Resolve 🛡",
-                    description="Followers, your combined strength can tip the scales of this ritual. Choose your action:",
-                    color=discord.Color.purple()  # Purple color for the followers
+                    title="🕯️ Followers' Actions 🕯️",
+                    description="Choose your action to support the ritual:",
+                    color=discord.Color.purple()
                 )
 
-                # Add abilities with emojis for added flair
+                # Add abilities with emojis
                 follower_embed.add_field(name="🔆 Boost Ritual", value="Increase the ritual's progress", inline=True)
-                follower_embed.add_field(name="🛡️ Protect Champion", value="Provide a shield to the champion",
+                follower_embed.add_field(name="🛡️ Protect Champion", value="Provide a shield to the Champion",
                                          inline=True)
-                follower_embed.add_field(name="🌟 Empower Priest", value="Amplify the priest's next action", inline=True)
-                follower_embed.add_field(name="💥 Sabotage Guardian", value="Disrupt the guardian's next move",
+                follower_embed.add_field(name="🌟 Empower Priest", value="Amplify the Priest's next action", inline=True)
+                follower_embed.add_field(name="💥 Sabotage Guardian", value="Disrupt the Guardian's next move",
                                          inline=True)
-                follower_embed.add_field(name="🎶 Chant", value="Contribute to the overall power of the ritual",
+                follower_embed.add_field(name="🎶 Chant", value="Contribute to the ritual's power",
                                          inline=True)
+                follower_embed.add_field(name="💉 Heal Champion", value="Heal the Champion a small amount", inline=True)
 
                 # Add a footer to the embed
                 follower_embed.set_footer(
-                    text="Your collective decision will shape the fate of the ritual. Act wisely!")
+                    text="Your collective will shapes the ritual's fate.")
 
                 # Separate function to obtain each follower's decision
                 async def get_follower_decision(follower):
@@ -2068,128 +2284,138 @@ The hamburger will be vulnerable in 15 Minutes
 
                 # Process the results
                 for result in results:
-                    if isinstance(result, Exception):  # handle exceptions if there are any
+                    if isinstance(result, Exception):
                         continue
                     follower, decision = result
                     follower_combined_decision[decision] += 1
 
-                # boost_ritual: Increase ritual progress by the number of followers who chose it
+                # Implement followers' combined actions
                 if follower_combined_decision["Boost Ritual"]:
-                    progress += 10
+                    progress += min(2 * follower_combined_decision["Boost Ritual"], 8)
 
-                # protect_champion: If any follower chose it, provide a shield to the champion
+                    await ctx.send(
+                        f"🔺 Followers boost the ritual by {min(2 * follower_combined_decision['Boost Ritual'], 8)}%!")
                 if follower_combined_decision["Protect Champion"] > 0:
                     champion_stats["protection"] = True
-                    # Setting a value for the protection, for example, 200 points of shield
-                    champion_stats["shield_points"] = 200
-
-                # empower_priest: Let's say this boosts the next priest action by some percentage.
-                # The exact logic depends on what the priest's actions are, and how you want this to manifest.
-                # As an example, let's say it boosts the priest's healing ability:
-                if follower_combined_decision["Empower Priest"] > 0:
-                    priest_stats["healing boost"] = 1.2  # Boosts healing by 20% for the next turn
-
-                # sabotage_guardian: This could delay the guardian's next action, weaken it, or have some other effect.
-                # Here's an example where it reduces the guardian's damage for the next turn:
+                    champion_stats["shield_points"] += 50 * follower_combined_decision["Protect Champion"]
+                    await ctx.send(f"🛡️ Followers shield the Champion with {champion_stats['shield_points']} points!")
+                if follower_combined_decision["Empower Priest"] > 0 and priest:
+                    priest_stats["healing_boost"] += 0.1 * follower_combined_decision["Empower Priest"]
+                    await ctx.send(f"✨ Followers empower the Priest!")
                 if follower_combined_decision["Sabotage Guardian"] > 0:
-                    guardians_stats["damage multiplier"] = 0.8  # Reduces damage output by 20%
-
-                # chant: This could have a varied effect. Let's say it boosts overall progress by a percentage of the chanters:
-                progress += 2 * follower_combined_decision["Chant"]  # Add 0.5% progress for each chanter
+                    guardians_stats["damage_multiplier"] -= 0.1 * follower_combined_decision["Sabotage Guardian"]
+                    guardians_stats["damage_multiplier"] = max(0.5, guardians_stats["damage_multiplier"])
+                    await ctx.send(f"🌀 Followers sabotage the Guardian, reducing its damage!")
+                if follower_combined_decision["Chant"]:
+                    progress += 1 * follower_combined_decision["Chant"]
+                    await ctx.send(
+                        f"🎵 Followers chant, increasing the ritual by {1 * follower_combined_decision['Chant']}%!")
+                if follower_combined_decision["Heal Champion"]:
+                    total_healing = 50 * follower_combined_decision["Heal Champion"]
+                    champion_stats["hp"] = min(champion_stats["hp"] + total_healing, champion_stats["max_hp"])
+                    await ctx.send(f"💖 Followers heal the Champion for {total_healing} HP!")
 
                 # Champion's decisions
                 abilities_msg = "\n".join(f"{k}: {v}" for k, v in CHAMPION_ABILITIES.items())
+
+                champion_embed = discord.Embed(
+                    title="⚔️ Champion's Turn ⚔️",
+                    description=f"{champion.mention}, choose your action:",
+                    color=discord.Color.red()
+                )
+
+                # Add abilities with emojis
+                champion_embed.add_field(name="⚡ Smite", value="Deal damage to the Guardian", inline=True)
+                champion_embed.add_field(name="❤️ Heal", value="Recover some of your lost HP", inline=True)
+                haste_description = "Boost the ritual's progress"
+                if champion_stats["haste_cooldown"] > 0:
+                    haste_description += f" (Cooldown: {champion_stats['haste_cooldown']} turns)"
+                champion_embed.add_field(name="🌀 Haste", value=haste_description, inline=True)
+                champion_embed.add_field(name="🛡️ Defend", value="Reduce incoming damage next turn", inline=True)
+                champion_embed.add_field(name="💔 Sacrifice", value="Advance the ritual by 20% at the cost of  400 HP",
+                                         inline=True)
+
+                # Add a footer to the embed
+                champion_embed.set_footer(text="The fate of the ritual rests upon you.")
+
+                await ctx.send(f"It's {champion.mention}'s turn to make a decision, check DMs!")
+
+                valid_actions = ["Smite", "Heal", "Defend", "Sacrifice"]
+                if champion_stats["haste_cooldown"] == 0:
+                    valid_actions.append("Haste")
+                else:
+                    await champion.send(f"'Haste' is on cooldown for {champion_stats['haste_cooldown']} more turns.")
+
                 try:
-                    # Champion's decisions
-                    champion_embed = discord.Embed(
-                        title="⚔️ Champion's Valor ⚔️",
-                        description=f"{champion.mention}, as the chosen one, your power will determine the outcome of this ritual. Choose your action:",
-                        color=discord.Color.red()  # Red color for the champion
+                    champion_decision = await asyncio.wait_for(
+                        self.get_player_decision(
+                            player=champion,
+                            options=valid_actions,
+                            role="champion",
+                            embed=champion_embed
+                        ),
+                        timeout=TIMEOUT
                     )
-
-                    # Add abilities with emojis for added flair
-                    champion_embed.add_field(name="⚡ Smite", value="Deal significant damage to the guardians",
-                                             inline=True)
-                    champion_embed.add_field(name="❤️ Heal", value="Recover some of your lost HP", inline=True)
-                    champion_embed.add_field(name="🌀 Haste", value="Boost the ritual's progress", inline=True)
-
-                    # Add a footer to the embed
-                    champion_embed.set_footer(text="Your allies rely on your might. Choose wisely and swiftly!")
-
-                    await ctx.send(f"It's {champion.mention}'s turn to make a decision, check DMs!")
-
-                    champion_decision = "Smite"  # default action
-                    try:
-                        champion_decision = await asyncio.wait_for(
-                            self.get_player_decision(
-                                player=champion,
-                                options=["Smite", "Heal", "Haste"],
-                                role="champion",
-                                embed=champion_embed
-                            ),
-                            timeout=TIMEOUT
-                        )
-                    except asyncio.TimeoutError:
-                        await ctx.send(f"{champion.mention} took too long to decide! Defaulting to 'Smite'.")
-
                     if champion_decision == "Smite":
                         guardians_stats["hp"] -= champion_stats["damage"]
+                        if guardians_stats.get("shield_active"):
+                            guardians_stats["hp"] += 200  # Guardian's shield absorbs some damage
+                            guardians_stats["shield_active"] = False
+                        await ctx.send(f"⚔️ The Champion smites the Guardian for {champion_stats['damage']} damage!")
                     elif champion_decision == "Heal":
-                        champion_stats["hp"] = min(champion_stats["hp"] + 200, 1500)
+                        heal_amount = 200
+                        champion_stats["hp"] = min(champion_stats["hp"] + heal_amount, champion_stats["max_hp"])
+                        await ctx.send(f"❤️ The Champion heals for {heal_amount} HP!")
                     elif champion_decision == "Haste":
-                        progress += 20  # This line is now correctly inside the try block
+                        progress += 15  # Increase progress
+                        champion_stats["haste_cooldown"] = 3  # Haste will be unavailable for the next 3 turns
+                        champion_stats["vulnerable"] = True
+                        await ctx.send(f"🌀 The Champion uses Haste, advancing the ritual but becoming vulnerable!")
+                    elif champion_decision == "Defend":
+                        champion_stats["defending"] = True
+                        await ctx.send(f"🛡️ The Champion braces for the next attack!")
+                    elif champion_decision == "Sacrifice":
+                        damage_to_self = 400
+                        champion_stats["hp"] -= damage_to_self
+                        progress += 20
+                        await ctx.send(f"💔 The Champion sacrifices {damage_to_self} HP to advance the ritual!")
+                except asyncio.TimeoutError:
+                    await ctx.send(f"{champion.mention} took too long to decide! Defaulting to 'Smite'.")
+                    champion_decision = "Smite"
 
-                except Exception as e:
-                    ctx.send(f"An error has occured {e}")
+                    # Apply damage to the Guardian
+                    guardians_stats["hp"] -= champion_stats["damage"]
+                    if guardians_stats.get("shield_active"):
+                        guardians_stats["hp"] += 200  # Guardian's shield absorbs some damage
+                        guardians_stats["shield_active"] = False
+                    await ctx.send(f"⚔️ The Champion smites the Guardian for {champion_stats['damage']} damage!")
 
-                    # Guardians' reactions post champion's decision
+                def format_action(action):
+                    """Formats action names by replacing underscores with spaces and capitalizing each word."""
+                    return action.replace('_', ' ').title()
 
-                def apply_damage_with_protection(target_stats, damage):
-                    """Apply damage to target taking protection (shield) into consideration."""
-                    if "protection" in target_stats and target_stats["protection"]:
-                        # Calculate remaining damage after shield absorption
-                        damage_after_shield = max(damage - target_stats.get("shield_points", 0), 0)
-                        # Update shield points in the target_stats
-                        target_stats["shield_points"] = max(target_stats.get("shield_points", 0) - damage, 0)
-                    else:
-                        damage_after_shield = damage
-
-                    # Apply remaining damage to target's HP
-                    target_stats["hp"] -= damage_after_shield
-
-                # Guardian striking the champion
-                if guardian_decision == "strike" and guardians_stats.get("damage_multiplier"):
-                    damage_to_champion = int(random.randint(100, 200) * guardians_stats["damage_multiplier"])
-                    apply_damage_with_protection(champion_stats, damage_to_champion)
-
-                if guardians_down_turns > 0:
-                    guardians_down_turns -= 1
-                    if guardians_down_turns == 0:
-                        guardians_stats["hp"] = 5000
-                elif guardians_stats["hp"] <= 0:
-                    guardians_down_turns = 2
-                else:
-                    damage_to_champion = random.randint(100, 200)
-                    apply_damage_with_protection(champion_stats, damage_to_champion)
-                    if champion_stats["hp"] <= 0:
-                        break
-
-                progress += 5
+                # Reduce cooldowns and reset temporary statuses
+                if champion_stats["haste_cooldown"] > 0:
+                    champion_stats["haste_cooldown"] -= 1
 
                 # Aesthetic improvements for the Ritual Progress embed
                 progress_color = 0x4CAF50 if progress >= 80 else 0xFFC107 if progress >= 50 else 0xFF5722
+                if progress >= 100 and champion_stats["hp"] > 0:
+                    progress = 100
                 em = discord.Embed(
-                    title="🌌 Ritual Progress 🌌",
+                    title="🌑 Ritual Progress 🌑",
                     description=f"Turn {turn + 1}/{TOTAL_TURNS}",
                     color=progress_color
                 )
-                ritual_status = f"{progress_bar(progress, 100)} ({progress}%)"
-                champion_status = f"❤️ {champion_stats['hp']} HP"
-                guardians_status = f"🛡️ {guardians_stats['hp']} HP"
-                em.add_field(name="<:ritual:1156170252430876692> Ritual Completion <:ritual:1156170252430876692>",
+                ritual_status = f"{progress_bar(progress, 100)} ({int(progress)}%)"
+                champion_status = f"❤️ {int(champion_stats['hp'])}/{champion_stats['max_hp']} HP"
+                guardians_status = f"😈 {phase_info['name']} ({int(guardians_stats['hp'])}/{guardians_stats['max_hp']} HP)"
+                em.add_field(name="🔮 Ritual Completion",
                              value=ritual_status, inline=False)
-                em.add_field(name=f"🛡️ {champion.name} 🛡️", value=champion_status, inline=True)
-                em.add_field(name="⚔️ Guardians ⚔️", value=guardians_status, inline=True)
+                em.add_field(name=f"🛡️ {champion.name} (Champion)",
+                             value=champion_status, inline=True)
+                em.add_field(name="💀 Guardian",
+                             value=guardians_status, inline=True)
 
                 # Display priest and guardian buffs
                 if champion_stats.get("damage") > default_champion_damage:
@@ -2197,9 +2423,17 @@ The hamburger will be vulnerable in 15 Minutes
                 if champion_stats.get("barrier_active"):
                     em.add_field(name="Priest's Barrier", value="🔰 Champion Protected", inline=True)
                 if guardians_stats.get("cursed"):
-                    em.add_field(name="Priest's Curse", value="😵 Guardians Weakened", inline=True)
+                    em.add_field(name="Priest's Curse", value="😵 Guardian Weakened", inline=True)
                 if guardians_stats.get("shield_active"):
-                    em.add_field(name="Guardians' Shield", value="🔰 Active", inline=True)
+                    em.add_field(name="Guardian's Shield", value="🔰 Active", inline=True)
+                if guardians_stats.get("enraged"):
+                    em.add_field(name="Guardian Enraged", value="🔥 Increased Damage", inline=True)
+                if champion_stats.get("vulnerable"):
+                    em.add_field(name="Champion Vulnerable", value="⚠️ Increased Damage Taken", inline=True)
+                if guardians_stats.get("incapacitated_turns", 0) > 0:
+                    em.add_field(name="Guardian Incapacitated",
+                                 value=f"🛌 Incapacitated for {guardians_stats['incapacitated_turns']} more turn(s)",
+                                 inline=True)
 
                 if turn != 0 and embed_message_id:
                     old_message = await ctx.channel.fetch_message(embed_message_id)
@@ -2210,50 +2444,61 @@ The hamburger will be vulnerable in 15 Minutes
 
                 # Decision Summary Embed
                 decision_embed = discord.Embed(
-                    title="⚔️ Fates Converge ⚔️",
-                    description="The forces have made their choices. The ritual's fate hangs in the balance...",
-                    color=0x8B0000  # Dark red color
+                    title="🕯️ Actions This Turn 🕯️",
+                    description="An overview of this turn's actions.",
+                    color=0x8B0000
                 )
 
                 # Display Priest's Decision
                 if priest:
-                    priest_action = priest_decision if priest_decision else "No decision"
-                    decision_embed.add_field(name=f"🌠 {priest.name} (Priest) 🌠", value=priest_action, inline=False)
+                    priest_action = priest_decision if priest_decision else "No action"
+                    decision_embed.add_field(name=f"🔮 {priest.name} (Priest)", value=priest_action, inline=False)
 
                 # Display Guardian's Decision
-                decision_embed.add_field(name="⚔️ Guardians ⚔️", value=guardian_decision, inline=False)
+                if guardians_stats["incapacitated_turns"] > 0:
+                    guardian_action = "Incapacitated"
+                else:
+                    guardian_action = format_action(guardian_decision)  # Format the action name
 
-                # Display Follower's Collective Decision
+                    guardian_action = guardian_decision.capitalize()
+                decision_embed.add_field(name="💀 Guardian", value=guardian_action, inline=False)
+
+                # Display Followers' Collective Decision
                 followers_decisions = "\n".join(
-                    [f"{action}: {count}" for action, count in follower_combined_decision.items()])
-                decision_embed.add_field(name="🛡 Followers' Collective Will 🛡", value=followers_decisions, inline=False)
+                    [f"{action}: {count}" for action, count in follower_combined_decision.items() if count > 0])
+                if followers_decisions:
+                    decision_embed.add_field(name="🕯️ Followers", value=followers_decisions,
+                                             inline=False)
+                else:
+                    decision_embed.add_field(name="🕯️ Followers", value="No actions taken",
+                                             inline=False)
 
                 # Display Champion's Decision
-                decision_embed.add_field(name=f"🔥 {champion.name} (Champion) 🔥", value=champion_decision, inline=False)
+                decision_embed.add_field(name=f"🛡️ {champion.name} (Champion)", value=champion_decision, inline=False)
 
                 # Add a footer for added menace
-                decision_embed.set_footer(text="The ritual's energy surges as choices clash...")
+                decision_embed.set_footer(text="The ritual's energy intensifies...")
 
                 # Send the Decision Summary Embed
                 await ctx.send(embed=decision_embed)
 
-                if progress >= 100:
-                    break
-
                 # Cleanup: Reset certain states for the next turn
+                guardians_stats["damage_multiplier"] = 1.0
                 if guardians_stats.get("cursed"):
                     del guardians_stats["cursed"]
-                if guardians_stats.get("damage_multiplier"):
-                    del guardians_stats["damage_multiplier"]
                 if champion_stats.get("damage") > default_champion_damage:
                     champion_stats["damage"] = default_champion_damage
-                if champion_stats.get("protection"):
-                    del champion_stats["protection"]
+                if champion_stats.get("protection") and champion_stats["shield_points"] <= 0:
+                    champion_stats["protection"] = False
+
+                # Regenerate Priest's mana
+                if priest:
+                    priest_stats["mana"] = min(priest_stats["mana"] + 10, priest_stats["max_mana"])
 
                 await asyncio.sleep(15)
 
             # Post-Raid Outcome
-            if progress >= 100:
+            if progress >= 100 and champion_stats["hp"] > 0:
                 progress = 100
                 # Create an enhanced embed message
 
@@ -2281,9 +2526,9 @@ The hamburger will be vulnerable in 15 Minutes
                 crate = randomm.choices(options, weights=weights)[0]
 
                 embed = Embed(
-                    title="The Ritual of Sepulchure",
-                    description=f"The night resonates with dark energy as Sepulchure's power reaches its zenith. The ritual has been successfully consummated! As a token of Sepulchure's dark favor, one chosen acolyte will be granted a {crate} crate. The rest, fear not, for riches of the shadow realm shall be your reward.",
-                    color=0x901C1C  # Red color;
+                    title="🔥 The Ritual is Complete 🔥",
+                    description=f"With a final surge of power, the ritual reaches its climax. A portal opens, and Sepulchure's presence is felt throughout the realm. As a reward for your unwavering devotion, one among you shall receive a **{crate} crate**. All participants are granted riches beyond measure.",
+                    color=0x901C1C  # Dark color
                 )
 
                 # Add the image to the embed
@@ -2291,7 +2536,7 @@ The hamburger will be vulnerable in 15 Minutes
 
                 await ctx.send(embed=embed)
                 await ctx.send(
-                    f"🦇 Dark tidings, <@{random_user}>! You have been selected as the chosen acolyte, and you shall receive a {crate} crate in the Ritual of Sepulchure. 💀")
+                    f"🎉 Congratulations, <@{random_user}>! You have been chosen to receive a **{crate} crate**!")
                 async with self.bot.pool.acquire() as conn:
                     await conn.execute(
                         f'UPDATE profile SET "crates_{crate}" = "crates_{crate}" + 1 WHERE "user" = $1;',
@@ -2305,17 +2550,17 @@ The hamburger will be vulnerable in 15 Minutes
                     users,
                 )
                 await ctx.send(
-                    f"**Distributed ${cash_reward} of the Sepulchure's favor to all"
-                    " the loyal followers!**"
+                    f"💰 All participants receive **${cash_reward}** as a token of Sepulchure's gratitude!"
                 )
 
-            elif champion_stats["hp"] <= 0:
-                await ctx.send(f"{champion.mention} has been defeated. The ritual has failed!")
+            else:
+                await ctx.send(f"💔 The ritual failed to reach completion. Darkness retreats as the Guardian prevails.")
 
             await self.clear_raid_timer()
         except Exception as e:
             await ctx.send(f"An error occurred: {e}")
-            # If you have a logger set up:d
+            # Log the error if a logger is set up.
+
 
     @is_god()
     @raid_free()
@@ -3056,7 +3301,7 @@ Atheistus will be vulnerable in 15 Minutes
         return sum(i * 25000 for i in range(1, int(level * 10) - 9))
 
     def getpricetohp(self, level: float):
-        return 2 * sum(i * 25000 for i in range(1, int(level * 10) - 9))
+        return 2 * sum(i * 15000 for i in range(1, int(level * 10) - 9))
 
     @commands.group(invoke_without_command=True, brief=_("Increase your raidstats"))
     @locale_doc
@@ -3071,7 +3316,7 @@ Atheistus will be vulnerable in 15 Minutes
             ).format(prefix=ctx.clean_prefix)
         )
 
-    @user_cooldown(60, identifier="increase")
+    @user_cooldown(30, identifier="increase")
     @has_char()
     @increase.command(brief=_("Upgrade your raid damage"))
     @locale_doc
@@ -3123,7 +3368,7 @@ Atheistus will be vulnerable in 15 Minutes
             ).format(newlvl=newlvl, price=price)
         )
 
-    @user_cooldown(60, identifier="increase")
+    @user_cooldown(30, identifier="increase")
     @has_char()
     @increase.command(brief=_("Upgrade your raid damage"))
     @locale_doc
@@ -3182,7 +3427,7 @@ Atheistus will be vulnerable in 15 Minutes
             ).format(healthpoolcheck=healthpoolcheck, price=price)
         )
 
-    @user_cooldown(60, identifier="increase")
+    @user_cooldown(30, identifier="increase")
     @has_char()
     @increase.command(brief=_("Upgrade your raid defense"))
     @locale_doc
@@ -3259,17 +3504,17 @@ Atheistus will be vulnerable in 15 Minutes
     async def rspref(self, ctx):
         if ctx.author.id in self.toggle_list:
             self.toggle_list.remove(ctx.author.id)
-            await ctx.send("You are now using the new raid stats.")
+            await ctx.send("You are now using the old raid stats.")
         else:
             self.toggle_list.add(ctx.author.id)
-            await ctx.send("You are now using the old raid stats.")
+            await ctx.send("You are now using the new raid stats.")
 
     @has_char()
     @commands.command(aliases=["rs"], brief=_("View your raid stats or compare two players"))
     @locale_doc
     async def raidstats(self, ctx, player1: discord.Member = None, player2: discord.Member = None):
 
-        if ctx.author.id in self.toggle_list:
+        if ctx.author.id not in self.toggle_list:
 
             # Execute code if the ID matches one of the specified IDs
             # Old raidstats implementation
@@ -3439,7 +3684,7 @@ Atheistus will be vulnerable in 15 Minutes
 
                 # Determine the difference
                 difference = power1 - power2
-                threshold = max(power1, power2) * 0.05  # 5% threshold for uncertainty
+                threshold = max(power1, power2) * 0.10  # 5% threshold for uncertainty
 
                 if abs(difference) < threshold:
                     # Power method is too close; perform combat simulation
