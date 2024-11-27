@@ -19,6 +19,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import asyncio
 import datetime
 import decimal
+import math
 
 import utils.misc as rpgtools
 from collections import deque
@@ -29,7 +30,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import discord
 import random as randomm
 from discord.enums import ButtonStyle
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord.ui.button import Button
 
 from classes.classes import Ranger, Reaper
@@ -41,10 +42,212 @@ from utils.checks import has_char, has_money, is_gm
 from utils.i18n import _, locale_doc
 from utils.joins import SingleJoinView
 
+from discord.ui import View
+from discord import Embed, Interaction
+
+import discord
+from discord.ext import commands
+import datetime
+
+from utils.random import randint
+
+
+import discord
+from discord.ui import View, Button
+from discord import Interaction
+import asyncio
+
+class TradeConfirmationView(View):
+    def __init__(self, initiator: discord.User, receiver: discord.User, timeout=120):
+        super().__init__(timeout=timeout)
+        self.initiator = initiator
+        self.receiver = receiver
+        self.value = None  # Will store True (accepted) or False (declined)
+
+    @discord.ui.button(label="Accept Trade", style=discord.ButtonStyle.success, emoji="✅")
+    async def accept(self, interaction: Interaction, button: Button):
+        if interaction.user != self.receiver:
+            await interaction.response.send_message("❌ You are not authorized to respond to this trade.", ephemeral=True)
+            return
+        self.value = True
+        await interaction.response.send_message("✅ Trade accepted.", ephemeral=True)
+        self.stop()
+
+    @discord.ui.button(label="Decline Trade", style=discord.ButtonStyle.danger, emoji="❌")
+    async def decline(self, interaction: Interaction, button: Button):
+        if interaction.user != self.receiver:
+            await interaction.response.send_message("❌ You are not authorized to respond to this trade.", ephemeral=True)
+            return
+        self.value = False
+        await interaction.response.send_message("❌ Trade declined.", ephemeral=True)
+        self.stop()
+
+
+class SellConfirmationView(View):
+    def __init__(self, initiator: discord.User, receiver: discord.User, price: int, timeout=120):
+        super().__init__(timeout=timeout)
+        self.initiator = initiator
+        self.receiver = receiver
+        self.price = price
+        self.value = None  # Will store True (accepted) or False (declined)
+
+    @discord.ui.button(label="Accept Sale", style=discord.ButtonStyle.success, emoji="✅")
+    async def accept(self, interaction: Interaction, button: Button):
+        if interaction.user != self.receiver:
+            await interaction.response.send_message("❌ You are not authorized to respond to this sale.", ephemeral=True)
+            return
+        self.value = True
+        await interaction.response.send_message("✅ Sale accepted.", ephemeral=True)
+        self.stop()
+
+    @discord.ui.button(label="Decline Sale", style=discord.ButtonStyle.danger, emoji="❌")
+    async def decline(self, interaction: Interaction, button: Button):
+        if interaction.user != self.receiver:
+            await interaction.response.send_message("❌ You are not authorized to respond to this sale.", ephemeral=True)
+            return
+        self.value = False
+        await interaction.response.send_message("❌ Sale declined.", ephemeral=True)
+        self.stop()
+
+
+
+
+class PetPaginator(View):
+    def __init__(self, pets, author):
+        super().__init__(timeout=60)
+        self.pets = pets
+        self.author = author
+        self.index = 0
+        self.message = None  # To store the message reference
+
+    def get_embed(self):
+        pet = self.pets[self.index]
+
+        growth_stages = {
+            1: {"stage": "baby", "growth_time": 2, "stat_multiplier": 0.25, "hunger_modifier": 1.0},
+            2: {"stage": "juvenile", "growth_time": 2, "stat_multiplier": 0.50, "hunger_modifier": 0.8},
+            3: {"stage": "young", "growth_time": 1, "stat_multiplier": 0.75, "hunger_modifier": 0.6},
+            4: {"stage": "adult", "growth_time": None, "stat_multiplier": 1.0, "hunger_modifier": 0.0},
+            # Self-sufficient
+        }
+
+        stage_data = growth_stages.get(pet["growth_index"], growth_stages[1])  # Default to 'baby' stage
+        stat_multiplier = stage_data["stat_multiplier"]
+        hp = round(pet["hp"] * stat_multiplier)
+        attack = round(pet["attack"] * stat_multiplier)
+        defense = round(pet["defense"] * stat_multiplier)
+
+        # Calculate growth time left
+        growth_time_left = None
+        if pet["growth_stage"] != "adult":
+            if pet["growth_time"]:
+                time_left = pet["growth_time"] - datetime.datetime.utcnow()
+                growth_time_left = str(time_left).split('.')[0] if time_left.total_seconds() > 0 else "Ready to grow!"
+
+        petid = pet['id']
+
+        # Improved embed design
+        if pet['growth_stage'] == "baby":
+            stage_icon = "🍼"
+        elif pet['growth_stage'] == "juvenile":
+            stage_icon = "🌱"
+        elif pet['growth_stage'] == "young":
+            stage_icon = "🐕"
+        else:
+            stage_icon = "🦁"
+
+        embed = Embed(
+            title=f"🐾 Your Pet: {pet['name']}",
+            color=discord.Color.green(),
+            description=f"**Stage:** {pet['growth_stage'].capitalize()} {stage_icon}\n**ID:** {petid}"
+            if pet['growth_stage'] != "baby"
+            else f"**Stage:** {pet['growth_stage'].capitalize()} {stage_icon}\n**ID:** {petid}"
+        )
+
+        embed.add_field(
+            name="✨ **Stats**",
+            value=(
+                f"**HP:** {hp}\n"
+                f"**Attack:** {attack}\n"
+                f"**Defense:** {defense}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="🌟 **Details**",
+            value=(
+                f"**Element:** {pet['element']}\n"
+                f"**Happiness:** {pet['happiness']}%\n"
+                f"**Hunger:** {pet['hunger']}%"
+            ),
+            inline=False,
+        )
+        if growth_time_left:
+            embed.add_field(
+                name="⏳ **Growth Time Left**",
+                value=f"{growth_time_left}",
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="🎉 **Growth**",
+                value="Your pet is fully grown!",
+                inline=False,
+            )
+
+        embed.set_footer(
+            text=f"Viewing pet {self.index + 1} of {len(self.pets)} | Use the buttons to navigate."
+        )
+        embed.set_image(url=pet["url"])
+
+        return embed
+
+    async def send_page(self, interaction: Interaction):
+        embed = self.get_embed()
+
+        if self.message is None:
+            self.message = interaction.message
+
+        if interaction.response.is_done():
+            await self.message.edit(embed=embed, view=self)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.blurple)
+    async def previous_button(self, interaction: Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author.id:
+            return await interaction.response.send_message("This is not your pet list.", ephemeral=True)
+
+        self.index = (self.index - 1) % len(self.pets)
+        await self.send_page(interaction)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.blurple)
+    async def next_button(self, interaction: Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author.id:
+            return await interaction.response.send_message("This is not your pet list.", ephemeral=True)
+
+        self.index = (self.index + 1) % len(self.pets)
+        await self.send_page(interaction)
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.red)
+    async def close_button(self, interaction: Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author.id:
+            return await interaction.response.send_message("This is not your pet list.", ephemeral=True)
+
+        await interaction.message.delete()
+        self.stop()
+
 
 class Battles(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        if not self.decrease_pet_stats.is_running():
+            self.decrease_pet_stats.start()
+        if not self.check_egg_hatches.is_running():
+            self.check_egg_hatches.start()
+        if not self.check_pet_growth.is_running():
+            self.check_pet_growth.start()
+
         self.emoji_to_element = {
             "<:f_corruption:1170192253256466492>": "Corrupted",
             "<:f_water:1170191321571545150>": "Water",
@@ -299,6 +502,315 @@ class Battles(commands.Cog):
                 "boss": {"hp": 600, "armor": 200, "damage": 190}
             }
         }
+
+
+
+    # Command to use the paginator
+    @commands.group(invoke_without_command=True)
+    async def pets(self, ctx):
+        async with self.bot.pool.acquire() as conn:
+            pets = await conn.fetch("SELECT * FROM monster_pets WHERE user_id = $1;", ctx.author.id)
+            if not pets:
+                await ctx.send("You don't have any pets.")
+                return
+
+        view = PetPaginator(pets, ctx.author)
+        embed = view.get_embed()
+        view.message = await ctx.send(embed=embed, view=view)
+
+    @has_char()
+    @pets.command(brief=_("Trade your pet with another user's pet"))
+    async def trade(self, ctx, your_pet_id: int, their_pet_id: int):
+        async with self.bot.pool.acquire() as conn:
+            # Fetch your pet
+            your_pet = await conn.fetchrow(
+                "SELECT * FROM monster_pets WHERE user_id = $1 AND id = $2;",
+                ctx.author.id,
+                your_pet_id
+            )
+            if not your_pet:
+                await ctx.send(f"❌ You don't have a pet with ID `{your_pet_id}`.")
+                return
+
+            # Fetch their pet
+            their_pet = await conn.fetchrow(
+                "SELECT * FROM monster_pets WHERE id = $1;",
+                their_pet_id
+            )
+            if not their_pet:
+                await ctx.send(f"❌ No pet found with ID `{their_pet_id}`.")
+                return
+
+            their_user_id = their_pet['user_id']
+            if their_user_id == ctx.author.id:
+                await ctx.send("❌ You cannot trade with your own pets.")
+                return
+
+            # Fetch the receiver user
+            their_user = self.bot.get_user(their_user_id)
+            if not their_user:
+                await ctx.send("❌ Could not find the user who owns the pet.")
+                return
+
+            # Check if the receiver has not blocked the bot
+
+
+            # Create and send the confirmation view
+            view = TradeConfirmationView(ctx.author, their_user)
+            try:
+                await their_user.send(
+                    f"{their_user.mention}, {ctx.author.mention} wants to trade their pet **{your_pet['name']}** (ID: {your_pet_id}) with your pet **{their_pet['name']}** (ID: {their_pet_id}). Do you accept?", view=view)
+            except discord.Forbidden:
+                await ctx.send(f"❌ Cannot send a DM to {their_user.mention}. They might have DMs disabled.")
+                return
+
+            await view.wait()
+
+            if view.value is True:
+                # Perform the trade within a transaction
+                async with conn.transaction():
+                    await conn.execute(
+                        "UPDATE monster_pets SET user_id = $1 WHERE id = $2;",
+                        their_user_id,
+                        your_pet_id
+                    )
+                    await conn.execute(
+                        "UPDATE monster_pets SET user_id = $1 WHERE id = $2;",
+                        ctx.author.id,
+                        their_pet_id
+                    )
+                await ctx.send(
+                    f"✅ Trade successful! You traded **{your_pet['name']}** with {their_user.mention}'s **{their_pet['name']}**.")
+            elif view.value is False:
+                await ctx.send(f"❌ Trade declined by {their_user.mention}.")
+            else:
+                # Timeout
+                await ctx.send(f"⌛ Trade request to {their_user.mention} timed out. No changes were made.")
+
+    @has_char()
+    @pets.command(brief=_("Sell your pet to another user for in-game money"))
+    async def sell(self, ctx, your_pet_id: int, buyer: discord.Member, price: int):
+        if price <= 0:
+            await ctx.send("❌ The price must be a positive integer.")
+            return
+
+        async with self.bot.pool.acquire() as conn:
+            # Fetch your pet
+            your_pet = await conn.fetchrow(
+                "SELECT * FROM monster_pets WHERE user_id = $1 AND id = $2;",
+                ctx.author.id,
+                your_pet_id
+            )
+            if not your_pet:
+                await ctx.send(f"❌ You don't have a pet with ID `{your_pet_id}`.")
+                return
+
+            # Check if the pet is equipped
+            if your_pet['equipped']:
+                await ctx.send(
+                    f"❌ You cannot sell **{your_pet['name']}** while it is equipped. Please unequip it first.")
+                return
+
+            # Check if the buyer is valid and not the seller
+            if buyer.id == ctx.author.id:
+                await ctx.send("❌ You cannot sell a pet to yourself.")
+                return
+
+            # Check if the buyer has enough money
+            buyer_money = await conn.fetchval(
+                'SELECT "money" FROM profile WHERE "user" = $1;',
+                buyer.id
+            )
+            if buyer_money is None:
+                await ctx.send("❌ The buyer does not have a profile.")
+                return
+            if buyer_money < price:
+                await ctx.send(f"❌ {buyer.mention} does not have enough money to buy the pet.")
+                return
+
+            # Send a DM to the buyer
+
+
+            # Create and send the confirmation view
+            view = SellConfirmationView(ctx.author, buyer, price)
+            try:
+                await ctx.send(
+                    f"{buyer.mention}, {ctx.author.mention} is offering to sell their pet **{your_pet['name']}** (ID: {your_pet_id}) for **${price}**. Do you accept?", view=view)
+            except discord.Forbidden:
+                await ctx.send(f"❌ Cannot send a DM to {buyer.mention}. They might have DMs disabled.")
+                return
+
+            await view.wait()
+
+            if view.value is True:
+                # Perform the sale within a transaction
+                async with conn.transaction():
+                    # Transfer the pet to the buyer
+                    await conn.execute(
+                        "UPDATE monster_pets SET user_id = $1 WHERE id = $2;",
+                        buyer.id,
+                        your_pet_id
+                    )
+                    # Deduct money from buyer
+                    await conn.execute(
+                        "UPDATE profile SET money = money - $1 WHERE profile.user = $2;",
+                        price,
+                        buyer.id
+                    )
+                    # Add money to seller
+                    await conn.execute(
+                        "UPDATE profile SET money = money + $1 WHERE profile.user = $2;",
+                        price,
+                        ctx.author.id
+                    )
+                await ctx.send(f"✅ **{your_pet['name']}** has been sold to {buyer.mention} for **${price}**.")
+            elif view.value is False:
+                await ctx.send(f"❌ {buyer.mention} declined the sale.")
+            else:
+                # Timeout
+                await ctx.send(f"⌛ Sale request to {buyer.mention} timed out. No changes were made.")
+
+    @pets.command(brief=_("Release a pet or an egg with a sad farewell"))
+    async def release(self, ctx, id: int):
+        """
+        Release a pet or an egg with a sad farewell story.
+        """
+        # Sad farewell stories
+        pet_stories_standard = [
+            _("You whisper goodbye to **{name}** as it looks back at you one last time before running off into the wild."),
+            _("With a heavy heart, you release **{name}**. It hesitates for a moment before disappearing into the distance."),
+            _("You watch **{name}** fade into the horizon, a bittersweet memory etched in your heart."),
+            _("As **{name}** scurries away, you can't help but hope it finds happiness in its new life."),
+            _("Tears fill your eyes as **{name}** takes its first steps into freedom. A part of you leaves with it."),
+        ]
+
+        pet_stories_extra = [
+            _("A lump forms in your throat as you let go of **{name}**. The bond you shared feels unbreakable, yet you must part ways."),
+            _("Your heart aches as **{name}** turns to face you one final time before venturing into the unknown."),
+            _("**{name}** gives you a lingering gaze filled with trust and farewell, leaving you with a sorrowful heart."),
+            _("The silence between you is deafening as **{name}** begins to walk away, carrying your memories into the vast wilderness."),
+            _("You hold back tears as **{name}** takes the first step towards its new journey, leaving an emptiness in your soul."),
+        ]
+
+        pet_stories_extra_extra = [
+            _("A profound sadness envelops you as you release **{name}**. The absence of its presence leaves a void that words cannot fill."),
+            _("Your soul weeps as **{name}** slips away into the twilight, taking with it the joy and companionship you cherished."),
+            _("The ground feels hollow as **{name}** disappears from sight, leaving behind only echoes of laughter and love."),
+            _("You feel a deep, unrelenting sorrow as **{name}** embarks on its final journey, a piece of your heart left behind."),
+            _("As **{name}** vanishes into the mist, a tear escapes your eye, mourning the loss of a beloved friend."),
+        ]
+
+        egg_stories_standard = [
+            _("You carefully place the **{name}** egg in a safe spot in the wild, hoping it will find its way."),
+            _("Letting go of the **{name}** egg was hard, but you know it's for the best. Farewell, little one."),
+            _("You leave the **{name}** egg where the sun can keep it warm. Maybe one day it will hatch and thrive."),
+            _("The **{name}** egg glimmers in the sunlight as you bid it farewell. The world feels a little emptier."),
+            _("You set down the **{name}** egg gently, whispering a silent prayer for its safety."),
+        ]
+
+        egg_stories_extra = [
+            _("A heavy heart weighs on you as you release the **{name}** egg, entrusting its fate to the wild."),
+            _("Your eyes mist over as you place the **{name}** egg in the untouched wilderness, filled with hope and sorrow."),
+            _("The **{name}** egg rests in its new home, a silent testament to your love and the farewell you must make."),
+            _("With a tearful sigh, you let go of the **{name}** egg, knowing it's destined for a future you can only imagine."),
+            _("The **{name}** egg lies under the canopy, carrying the dreams and wishes you hold dear."),
+        ]
+
+        egg_stories_extra_extra = [
+            _("A profound sorrow fills your being as you release the **{name}** egg, its fate now beyond your reach."),
+            _("Your spirit aches as you place the **{name}** egg into the wild, a piece of your heart left to wander."),
+            _("The **{name}** egg shimmers briefly before being swallowed by the earth, leaving you with an indescribable emptiness."),
+            _("You release the **{name}** egg with a shattered heart, mourning the loss of a future you envisioned together."),
+            _("As the **{name}** egg vanishes into the foliage, your soul weeps for the dreams that will never come to fruition."),
+        ]
+
+        # Combine all stories with weights
+        # Standard: 60%, Extra: 30%, Extra-Extra: 10%
+        pet_all_stories = (
+                pet_stories_standard * 6 +  # 5 stories * 6 = 30
+                pet_stories_extra * 3 +  # 5 stories * 3 = 15
+                pet_stories_extra_extra * 1  # 5 stories * 1 = 5
+        )
+
+        egg_all_stories = (
+                egg_stories_standard * 6 +
+                egg_stories_extra * 3 +
+                egg_stories_extra_extra * 1
+        )
+
+        async with self.bot.pool.acquire() as conn:
+            # Check if the ID corresponds to a pet or an egg
+            pet = await conn.fetchrow("SELECT * FROM monster_pets WHERE user_id = $1 AND id = $2;", ctx.author.id, id)
+            egg = await conn.fetchrow("SELECT * FROM monster_eggs WHERE user_id = $1 AND id = $2;", ctx.author.id, id)
+
+            if not pet and not egg:
+                await ctx.send(_("❌ No pet or egg with ID `{id}` found in your collection.").format(id=id))
+                return
+
+            # Determine the name and type (pet or egg)
+            item_name = pet['name'] if pet else egg['egg_type']
+            # Select a random story based on type
+            if pet:
+                story = random.choice(pet_all_stories)
+            else:
+                story = random.choice(egg_all_stories)
+
+            # Confirmation prompt
+            confirmation_message = await ctx.send(
+                _("⚠️ Are you sure you want to release your **{item_name}**? This action cannot be undone.").format(
+                    item_name=item_name)
+            )
+
+            # Add buttons for confirmation
+            confirm_view = View()
+
+            async def confirm_callback(interaction):
+                try:
+                    if interaction.user != ctx.author:
+                        await interaction.response.send_message(
+                            _("❌ You are not authorized to respond to this release."),
+                            ephemeral=True)
+                        return
+                    await interaction.response.defer()  # Acknowledge interaction to prevent timeout
+                    async with self.bot.pool.acquire() as conn:
+                        if pet:
+                            await conn.execute("DELETE FROM monster_pets WHERE id = $1;", id)
+                        elif egg:
+                            await conn.execute("DELETE FROM monster_eggs WHERE id = $1;", id)
+
+                    farewell_message = story.format(name=item_name)
+                    await interaction.followup.send(farewell_message)
+
+                    for child in confirm_view.children:
+                        child.disabled = True
+                    await confirmation_message.edit(view=confirm_view)
+                except Exception as e:
+                    print(e)
+
+
+
+            async def cancel_callback(interaction):
+                if interaction.user != ctx.author:
+                    await interaction.response.send_message(_("❌ You are not authorized to cancel this release."),
+                                                            ephemeral=True)
+                    return
+                await interaction.response.send_message(_("✅ Release action cancelled."), ephemeral=True)
+                # Disable buttons after cancellation
+                for child in confirm_view.children:
+                    child.disabled = True
+                await confirmation_message.edit(view=confirm_view)
+
+            confirm_button = Button(label=_("Confirm Release"), style=discord.ButtonStyle.red, emoji="💔")
+            confirm_button.callback = confirm_callback
+            cancel_button = Button(label=_("Cancel"), style=discord.ButtonStyle.grey, emoji="❌")
+            cancel_button.callback = cancel_callback
+
+            confirm_view.add_item(confirm_button)
+            confirm_view.add_item(cancel_button)
+
+            await confirmation_message.edit(view=confirm_view)
+
+
 
     @has_char()
     @user_cooldown(90)
@@ -877,6 +1389,8 @@ class Battles(commands.Cog):
 
             elif modetype == "custom":
                 opponent = await self.find_opponentcust(ctx)
+            else:
+                await self.bot.reset_cooldown(ctx)
         except Exception as e:
             await ctx.send(e)
 
@@ -1085,7 +1599,18 @@ class Battles(commands.Cog):
         enemychance = 0
         cheated = False
         level = rpgtools.xptolevel(ctx.character_data["xp"])
+        victory_description = None
 
+        emoji_to_element = {
+            "🌟": "Light",
+            "🌑": "Dark",
+            "🔥": "Fire",
+            "💧": "Water",
+            "🌿": "Nature",
+            "⚡": "Electric",
+            "💨": "Wind",
+            "🌀": "Corrupted"
+        }
         emotes = {
             "common": "<:F_common:1139514874016309260>",
             "uncommon": "<:F_uncommon:1139514875828252702>",
@@ -1101,6 +1626,8 @@ class Battles(commands.Cog):
         if await self.is_player_in_fight(ctx.author.id):
             await ctx.send("You are already in a battle.")
             return
+
+
 
         try:
 
@@ -2078,6 +2605,8 @@ class Battles(commands.Cog):
                 embed = discord.Embed(title="Frostfire Behemoth", color=0x003366)
                 embed.set_thumbnail(url=face_image_url)
 
+
+
                 # Function to create dialogue pages with specified titles, avatars, and thumbnails
                 def create_dialogue_page(page):
                     dialogue_embed = discord.Embed(
@@ -2417,11 +2946,32 @@ class Battles(commands.Cog):
                 # Start the battle after all dialogue
                 await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
 
+            def create_hp_bar(current_hp, max_hp, length=20):
+                """
+                Creates a visual representation of the HP bar.
+
+                Args:
+                    current_hp (float): The current HP of the combatant.
+                    max_hp (float): The maximum HP of the combatant.
+                    length (int, optional): The total length of the HP bar. Defaults to 20.
+
+                Returns:
+                    str: A string representing the HP bar.
+                """
+                if max_hp <= 0:
+                    max_hp = 1  # Prevent division by zero
+
+                filled_length = int(round(length * current_hp / max_hp))
+                filled_length = max(0, min(filled_length, length))  # Clamp between 0 and length
+
+                bar = '█' * filled_length + '░' * (length - filled_length)
+                return bar
+
             # ===============================================================================================
             # ===============================================================================================
 
             if level == 0:
-                await self.remove_player_from_fight(ctx.author.id)
+
                 if player_balance < 10000:
                     await self.bot.reset_cooldown(ctx)
                     return await ctx.send(
@@ -2440,6 +2990,7 @@ class Battles(commands.Cog):
                         await self.bot.reset_cooldown(ctx)
                         await ctx.send("You chosen not to approach the gates.")
                 except Exception as e:
+                    await self.remove_player_from_fight(ctx.author.id)
                     error_message = f"{e}"
                     await ctx.send(error_message)
                     await self.bot.reset_cooldown(ctx)
@@ -2567,384 +3118,574 @@ class Battles(commands.Cog):
                 # Start the battle after all dialogue
                 await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
 
-            minion1_name = level_data["minion1_name"]
-            minion2_name = level_data["minion2_name"]
-            boss_name = level_data["boss_name"]
-            minion1_stats = level_data["minion1"]
-            minion2_stats = level_data["minion2"]
-            boss_stats = level_data["boss"]
-
-            await self.add_player_to_fight(ctx.author.id)
-
-            # Create a lock for the player if it doesn't exist
-
-            specified_words_values = {
-                "Deathshroud": 20,
-                "Soul Warden": 30,
-                "Reaper": 40,
-                "Phantom Scythe": 50,
-                "Soul Snatcher": 60,
-                "Deathbringer": 70,
-                "Grim Reaper": 80,
-            }
-
-            life_steal_values = {
-                "Little Helper": 7,
-                "Gift Gatherer": 14,
-                "Holiday Aide": 21,
-                "Joyful Jester": 28,
-                "Yuletide Guardian": 35,
-                "Festive Enforcer": 40,
-                "Festive Champion": 60,
-            }
-
-            # Mage evolution levels and damage multipliers
-            mage_evolution_levels = {
-                "Witcher": 1,
-                "Enchanter": 2,
-                "Mage": 3,
-                "Warlock": 4,
-                "Dark Caster": 5,
-                "White Sorcerer": 6,
-            }
-
-            evolution_damage_multiplier = {
-                1: 1.10,  # 110%
-                2: 1.20,  # 120%
-                3: 1.30,  # 130%
-                4: 1.50,  # 150%
-                5: 1.75,  # 175%
-                6: 2.00,  # 200%
-            }
-
             try:
-                user_id = ctx.author.id
-                # Define common queries
-                query_class = 'SELECT "class" FROM profile WHERE "user" = $1;'
-                query_xp = 'SELECT "xp" FROM profile WHERE "user" = $1;'
 
-                # Query data for ctx.author.id
-                result_author = await self.bot.pool.fetch(query_class, ctx.author.id)
-                auth_xp = await self.bot.pool.fetch(query_xp, ctx.author.id)
 
-                # Convert XP to level for ctx.author.id
-                auth_level = rpgtools.xptolevel(auth_xp[0]['xp'])
+                def select_target(targets, player_prob=0.75, pet_prob=0.25):
+                    """
+                    Selects a target from the given list based on provided probabilities.
+                    - player_prob: Probability of selecting the player.
+                    - pet_prob: Probability of selecting the pet.
+                    """
+                    # Filter out None values from the targets
+                    valid_targets = [target for target in targets if target]
 
-                # Initialize chance
-                maxedhp = False
-                author_chance = 0
-                lifestealauth = 0
-                lifestealopp = 0
-                cheated = False  # Initialize cheated variable
-                # Mage evolution level
-                author_mage_evolution = None
+                    if not valid_targets:
+                        return None  # No valid targets to select
 
-                if result_author:
-                    author_classes = result_author[0]["class"]  # Assume it's a list of classes
-                    if isinstance(author_classes, list):
-                        author_classes = author_classes
+                    rand = randomm.random()
+                    cumulative = 0.0
+                    for target in valid_targets:
+                        if target.get("is_pet"):
+                            cumulative += pet_prob
+                        else:
+                            cumulative += player_prob
+
+                        if rand < cumulative:
+                            return target
+
+                    return valid_targets[-1]  # Fallback to the last target
+                # Initialize variables
+                max_hp_limit = 5000
+                authorchance = 0
+                cheated = False
+                battle_log = deque(maxlen=5)
+                battle_log.append("**Action #0**\nBattle Tower battle started!")
+                action_number = 1
+
+                # Fetch level data (assuming level_data is defined elsewhere)
+
+                minion1_name = level_data["minion1_name"]
+                minion2_name = level_data["minion2_name"]
+                boss_name = level_data["boss_name"]
+                minion1_stats = level_data["minion1"]
+                minion2_stats = level_data["minion2"]
+                boss_stats = level_data["boss"]
+
+                async with self.bot.pool.acquire() as conn:
+                    current_player = ctx.author  # Fixed: Assign ctx.author directly instead of iterating
+                    try:
+                        # Define class-related values
+                        specified_words_values = {
+                            "Deathshroud": 20,
+                            "Soul Warden": 30,
+                            "Reaper": 40,
+                            "Phantom Scythe": 50,
+                            "Soul Snatcher": 60,
+                            "Deathbringer": 70,
+                            "Grim Reaper": 80,
+                        }
+
+                        life_steal_values = {
+                            "Little Helper": 7,
+                            "Gift Gatherer": 14,
+                            "Holiday Aide": 21,
+                            "Joyful Jester": 28,
+                            "Yuletide Guardian": 35,
+                            "Festive Enforcer": 40,
+                            "Festive Champion": 60,
+                        }
+
+                        mage_evolution_levels = {
+                            "Witcher": 1,
+                            "Enchanter": 2,
+                            "Mage": 3,
+                            "Warlock": 4,
+                            "Dark Caster": 5,
+                            "White Sorcerer": 6,
+                        }
+
+                        user_id = current_player.id
+                        query_class = 'SELECT "class" FROM profile WHERE "user" = $1;'
+                        query_xp = 'SELECT "xp" FROM profile WHERE "user" = $1;'
+
+                        # Fetch class and XP data using fetchrow since we expect only one record
+                        result_player = await self.bot.pool.fetchrow(query_class, user_id)
+                        xp_player = await self.bot.pool.fetchrow(query_xp, user_id)
+
+                        if xp_player and 'xp' in xp_player:
+                            level_player = rpgtools.xptolevel(xp_player['xp'])
+                        else:
+                            await ctx.send(f"XP data for user with ID {user_id} not found in the profile table.")
+                            raise Exception("XP data not found in profile table.")
+
+                        chance = 0
+                        lifesteal = 0
+                        mage_evolution = None
+
+                        if result_player and 'class' in result_player:
+                            player_classes = result_player["class"]
+                            if not isinstance(player_classes, list):
+                                player_classes = [player_classes]
+
+                            def get_mage_evolution(classes):
+                                max_evolution = None
+                                for class_name in classes:
+                                    if class_name in mage_evolution_levels:
+                                        level = mage_evolution_levels[class_name]
+                                        if max_evolution is None or level > max_evolution:
+                                            max_evolution = level
+                                return max_evolution
+
+                            mage_evolution = get_mage_evolution(player_classes)
+
+                            for class_name in player_classes:
+                                if class_name in specified_words_values:
+                                    chance += specified_words_values[class_name]
+                                if class_name in life_steal_values:
+                                    lifesteal += life_steal_values[class_name]
+                        else:
+                            await ctx.send(f"User with ID {user_id} not found in the profile table.")
+                            # Removed 'continue' since we're no longer in a loop
+                            raise Exception("User not found in profile table.")
+
+                        luck_booster = await self.bot.get_booster(current_player, "luck")
+                        query = 'SELECT "luck", "health", "stathp" FROM profile WHERE "user" = $1;'
+                        result = await conn.fetchrow(query, user_id)
+
+                        if result:
+                            luck_value = float(result['luck'])
+                            if luck_value <= 0.3:
+                                Luck = 20
+                            else:
+                                Luck = ((luck_value - 0.3) / (1.5 - 0.3)) * 80 + 20
+                            Luck = float(round(Luck, 2))
+
+                            if luck_booster:
+                                Luck += Luck * 0.25
+                                Luck = float(min(Luck, 100))
+
+                            base_health = 250
+                            health1 = result['health'] + base_health
+                            stathp2 = result['stathp'] * 50
+
+                            # Reuse level_player if already calculated
+                            total_health2 = health1 + (level_player * 5)
+                            total_health3 = total_health2 + stathp2
+
+                            dmg_current, deff_current = await self.bot.get_raidstats(current_player, conn=conn)
+
+                        else:
+                            await ctx.send(f"User with ID {user_id} not found in the profile table.")
+                            raise Exception("User not found in profile table.")
+                    except Exception as e:
+                        await self.remove_player_from_fight(ctx.author.id)
+                        await ctx.send(f"An error occurred: {e}")
+                        raise  # Re-raise exception to be caught by outer try-except
+
+                # Fetch player data and combatants
+                async with self.bot.pool.acquire() as conn:
+                    try:
+                        # Fetch highest element
+                        highest_element_author = await self.fetch_highest_element(ctx.author.id)
+
+                        # Fetch classes, XP, and other stats
+                        result_author = await conn.fetchrow('SELECT "class", "xp" FROM profile WHERE "user" = $1;',
+                                                            ctx.author.id)
+                        if result_author and 'class' in result_author and 'xp' in result_author:
+                            auth_classes = result_author["class"] if isinstance(result_author["class"], list) else [
+                                result_author["class"]]
+                            auth_xp = result_author["xp"]
+                        else:
+                            await ctx.send(f"User with ID {user_id} not found in the profile table.")
+                            raise Exception("Author data not found in profile table.")
+
+                        auth_level = rpgtools.xptolevel(auth_xp)
+
+                        # Calculate chances and lifesteal
+                        author_chance = 0
+                        lifestealauth = 0
+                        mage_evolution = None
+
+                        if auth_classes:
+                            mage_evolution = get_mage_evolution(auth_classes)
+                            for class_name in auth_classes:
+                                if class_name in specified_words_values:
+                                    author_chance += specified_words_values[class_name]
+                                if class_name in life_steal_values:
+                                    lifestealauth += life_steal_values[class_name]
+
+                        if author_chance != 0:
+                            authorchance = author_chance
+
+                        # Fetch combatants (player and pet)
+                        player_combatant, pet_combatant = await self.fetch_combatants(
+                            ctx, ctx.author, highest_element_author, auth_level, lifestealauth, mage_evolution, conn
+                        )
+                    except Exception as e:
+                        await self.remove_player_from_fight(ctx.author.id)
+                        await ctx.send(f"An error occurred while fetching combatants: {e}")
+                        raise  # Re-raise exception to be caught by outer try-except
+
+                async with self.bot.pool.acquire() as conn:
+                    try:
+                        prestige_level = await conn.fetchval('SELECT prestige FROM battletower WHERE id = $1',
+                                                             ctx.author.id)
+                        level = await conn.fetchval('SELECT level FROM battletower WHERE id = $1', ctx.author.id)
+                    except Exception as e:
+                        await self.remove_player_from_fight(ctx.author.id)
+                        await ctx.send(f"An error occurred while fetching prestige data: {e}")
+                        raise Exception("Prestige data fetch failed.")
+
+                if prestige_level and prestige_level != 0:
+                    prestige_multiplier = 1 + (0.40 * prestige_level)
+                    prestige_multiplierhp = 1 + (0.20 * prestige_level)
+                else:
+                    prestige_multiplier = 1
+                    prestige_multiplierhp = 1
+
+                # Initialize opponents with prestige multipliers
+                # Initialize opponents with prestige multipliers (unchanged)
+                opponents = [
+                    {
+                        "user": minion1_name,
+                        "hp": int(round(minion1_stats["hp"] * prestige_multiplierhp)),
+                        "max_hp": int(round(minion1_stats["hp"] * prestige_multiplierhp)),
+                        "armor": int(round(minion1_stats["armor"] * prestige_multiplierhp)),
+                        "damage": int(round(minion1_stats["damage"] * prestige_multiplier)),
+                        "is_pet": False,
+                        "element": minion1_stats.get("element", "unknown")  # Ensure 'element' key exists
+                    },
+                    {
+                        "user": minion2_name,
+                        "hp": int(round(minion2_stats["hp"] * prestige_multiplierhp)),
+                        "max_hp": int(round(minion2_stats["hp"] * prestige_multiplierhp)),
+                        "armor": int(round(minion2_stats["armor"] * prestige_multiplierhp)),
+                        "damage": int(round(minion2_stats["damage"] * prestige_multiplier)),
+                        "is_pet": False,
+                        "element": minion2_stats.get("element", "unknown")
+                    },
+                    {
+                        "user": boss_name,
+                        "hp": int(round(boss_stats["hp"] * prestige_multiplierhp)),
+                        "max_hp": int(round(boss_stats["hp"] * prestige_multiplierhp)),
+                        "armor": int(round(boss_stats["armor"] * prestige_multiplierhp)),
+                        "damage": int(round(boss_stats["damage"] * prestige_multiplier)),
+                        "is_pet": False,
+                        "element": boss_stats.get("element", "unknown")
+                    },
+                ]
+
+                # ... [Previous code for fetching data and initializing opponents remains unchanged] ...
+
+                await self.add_player_to_fight(ctx.author.id)
+
+                # Initialize 'winner' to None
+                winner = None
+
+                # Create initial embed with the first opponent
+                current_opponent = opponents[0]
+                embed = discord.Embed(
+                    title=f"Battle Tower: {ctx.author.display_name} vs {current_opponent['user']}",
+                    color=self.bot.config.game.primary_colour
+                )
+
+                # Add player and pet status
+                for combatant in [player_combatant, pet_combatant]:
+                    if not combatant:
+                        continue
+                    current_hp = max(0, round(combatant["hp"], 1))
+                    max_hp = round(combatant["max_hp"], 1)
+                    hp_bar = create_hp_bar(current_hp, max_hp)
+                    element_emoji = "❌"  # Default emoji
+                    for emoji, element in emoji_to_element.items():
+                        if element == combatant["element"]:
+                            element_emoji = emoji
+                            break
+                    field_name = f"**[TEAM A]** \n{combatant['user'].display_name} {element_emoji}" if not combatant.get(
+                        "is_pet") else f"{combatant['pet_name']} {element_emoji}"
+                    field_value = f"HP: {current_hp:.1f}/{max_hp:.1f}\n{hp_bar}"
+                    embed.add_field(name=field_name, value=field_value, inline=False)
+
+                # Add current opponent status
+                opponent_element = current_opponent.get("element", "unknown")  # Assuming opponents have 'element'
+                opponent_emoji = emoji_to_element.get(opponent_element, "❌")
+                current_opponent_field = f"**[TEAM B]** \n{current_opponent['user']} {opponent_emoji}"
+                current_opponent_hp = max(0, round(current_opponent["hp"], 1))
+                current_opponent_max_hp = round(current_opponent["max_hp"], 1)
+                current_opponent_hp_bar = create_hp_bar(current_opponent_hp, current_opponent_max_hp)
+                embed.add_field(name=current_opponent_field,
+                                value=f"HP: {current_opponent_hp:.1f}/{current_opponent_max_hp:.1f}\n{current_opponent_hp_bar}",
+                                inline=False)
+
+                # Add battle log
+                battle_log = deque(maxlen=5)
+                battle_log.append(f"**Action #0**\nBattle started against {current_opponent['user']}!")
+                embed.add_field(name="Battle Log", value=battle_log[0], inline=False)
+
+                # Send initial embed
+                log_message = await ctx.send(embed=embed)
+                await asyncio.sleep(4)
+
+                # Start battle loop
+                start_time = datetime.datetime.utcnow()
+                battle_ongoing = True
+                opponent_index = 0  # Track current opponent
+                current_turn = 0  # Start turn tracker
+                action_number = 1  # Initialize action counter
+
+                turn_order_options = [
+                    [player_combatant, pet_combatant],  # Team A
+                    [current_opponent]  # Team B
+                ]
+
+                combatant_order = turn_order_options[0] + turn_order_options[1]  # Merge teams into combatant_order
+
+                while battle_ongoing and datetime.datetime.utcnow() < start_time + datetime.timedelta(minutes=9):
+                    if opponent_index >= len(opponents):
+                        break  # All opponents defeated
+
+                    # Ensure combatant_order always includes the current opponent
+                    combatant_order = [player_combatant, pet_combatant, current_opponent]
+
+                    # Determine the current combatant based on turn
+                    combatant = combatant_order[current_turn % len(combatant_order)]
+                    current_turn += 1  # Increment turn tracker
+
+                    if not combatant or combatant["hp"] <= 0:
+                        continue  # Skip if combatant is invalid or dead
+
+                    # Determine target
+                    if combatant in [player_combatant, pet_combatant]:
+                        target = current_opponent  # Player's turn: attack the current opponent
                     else:
-                        author_classes = [author_classes]
+                        target = select_target(
+                            [c for c in [player_combatant, pet_combatant] if c and c["hp"] > 0],
+                            player_prob=0.75,
+                            pet_prob=0.25
+                        )  # Opponent's turn: attack player or pet
 
-                    # Function to get Mage evolution level
-                    def get_mage_evolution(classes):
-                        max_evolution = None
-                        for class_name in classes:
-                            if class_name in mage_evolution_levels:
-                                level = mage_evolution_levels[class_name]
-                                if max_evolution is None or level > max_evolution:
-                                    max_evolution = level
-                        return max_evolution
+                    if target is not None:
+                        # Calculate damage
+                        damage_variance = randomm.randint(0, 100) if not combatant.get("is_pet") else randomm.randint(0,
+                                                                                                                      50)
+                        dmg = round(max(combatant["damage"] + damage_variance - target["armor"], 1), 3)
+                        target["hp"] -= dmg
+                        target["hp"] = max(target["hp"], 0)
 
-                    author_mage_evolution = get_mage_evolution(author_classes)
+                        # Build attack message
+                        if combatant.get("is_pet"):
+                            attacker_name = combatant['pet_name']
+                        else:
+                            attacker_name = combatant['user'].mention if isinstance(combatant['user'],
+                                                                                    discord.User) else combatant['user']
 
-                    for class_name in author_classes:
-                        if class_name in specified_words_values:
-                            author_chance += specified_words_values[class_name]
-                        if class_name in life_steal_values:
-                            lifestealauth += life_steal_values[class_name]
+                        if target.get("is_pet"):
+                            target_name = target['pet_name']
+                        else:
+                            target_name = target['user'].mention if isinstance(target['user'], discord.User) else \
+                            target['user']
+
+                        message = f"{attacker_name} attacks! {target_name} takes **{dmg:.1f}HP** damage."
+
+                        # Handle lifesteal if applicable
+                        if not combatant.get("is_pet") and combatant["user"] == ctx.author and lifestealauth != 0:
+                            lifesteal_percentage = lifestealauth / 100.0
+                            heal = round(lifesteal_percentage * dmg, 1)
+                            combatant["hp"] = min(combatant["hp"] + heal, combatant["max_hp"])
+                            message += f" Lifesteals: **{heal:.1f}HP**"
+
+                        # Check if target is defeated
+                        if target["hp"] <= 0:
+
+                            if target["user"] == ctx.author:
+                                #await ctx.send(author_chance)
+                                target["hp"] = 0
+                                # Handle Cheating Death for the player being attacked
+                                if not cheated:
+                                    chance = author_chance
+                                    random_number = randomm.randint(1, 100)
+                                    #await ctx.send(random_number)
+                                    if random_number <= chance:
+                                        target["hp"] = 75
+                                        cheated = True
+                                        message += _(f"\n\n{ctx.author} cheat death and survive with **75HP**")
+                                    else:
+                                        message += f" {target_name} has been defeated!"
+                            else:
+                                message += f" {target_name} has been defeated!"
+
+                            # Append the final attack message
+                            battle_log.append(f"**Action #{action_number}**\n{message}")
+                            action_number += 1
+
+                            # Update embed to reflect the final attack
+                            embed = discord.Embed(
+                                title=f"Battle Tower: {ctx.author.display_name} vs {current_opponent['user']}",
+                                color=self.bot.config.game.primary_colour
+                            )
+
+                            # Add player and pet status
+                            for c in [player_combatant, pet_combatant]:
+                                if not c:
+                                    continue
+                                current_hp = max(0, round(c["hp"], 1))
+                                max_hp = round(c["max_hp"], 1)
+                                hp_bar = create_hp_bar(current_hp, max_hp)
+                                element_emoji = "❌"  # Default emoji
+                                for emoji, element in emoji_to_element.items():
+                                    if element == c["element"]:
+                                        element_emoji = emoji
+                                        break
+                                field_name = f"**[TEAM A]** \n{c['user'].display_name} {element_emoji}" if not c.get(
+                                    "is_pet") else f"{c['pet_name']} {element_emoji}"
+                                field_value = f"HP: {current_hp:.1f}/{max_hp:.1f}\n{hp_bar}"
+                                embed.add_field(name=field_name, value=field_value, inline=False)
+
+                            # Add current opponent status (should be 0 HP)
+                            opponent_element = current_opponent.get("element", "unknown")
+                            opponent_emoji = emoji_to_element.get(opponent_element, "❌")
+                            current_opponent_field = f"**[TEAM B]** \n{current_opponent['user']} {opponent_emoji}"
+                            current_opponent_hp = max(0, round(current_opponent["hp"], 1))
+                            current_opponent_max_hp = round(current_opponent["max_hp"], 1)
+                            current_opponent_hp_bar = create_hp_bar(current_opponent_hp, current_opponent_max_hp)
+                            embed.add_field(name=current_opponent_field,
+                                            value=f"HP: {current_opponent_hp:.1f}/{current_opponent_max_hp:.1f}\n{current_opponent_hp_bar}",
+                                            inline=False)
+
+                            # Add battle log
+                            battle_log_text = '\n\n'.join(battle_log)
+                            embed.add_field(name="Battle Log", value=battle_log_text, inline=False)
+
+                            # Update embed with the final attack
+                            await log_message.edit(embed=embed)
+                            await asyncio.sleep(4)  # Allow players to see the final attack
+
+                            if target["user"] == ctx.author:
+                                if target["hp"] <= 0:
+                                    break
+
+                            # Transition to the next opponent
+                            if target == current_opponent:
+                                opponent_index += 1
+                                if opponent_index < len(opponents):
+                                    current_opponent = opponents[opponent_index]  # Update to the next opponent
+
+                                    # Reset turn order and action counter
+                                    combatant_order = [player_combatant, pet_combatant, current_opponent]
+                                    current_turn = 0  # Reset turn tracker
+                                    action_number = 1  # Reset the action counter
+                                    battle_log = deque(maxlen=5)  # Reset battle log
+                                    battle_log.append(
+                                        f"**Action #0**\nBattle started against {current_opponent['user']}!")
+
+                                    # Create new embed for the next opponent
+                                    embed = discord.Embed(
+                                        title=f"Battle Tower: {ctx.author.display_name} vs {current_opponent['user']}",
+                                        color=self.bot.config.game.primary_colour
+                                    )
+
+                                    # Add player and pet status
+                                    for c in [player_combatant, pet_combatant]:
+                                        if not c:
+                                            continue
+                                        current_hp = max(0, round(c["hp"], 1))
+                                        max_hp = round(c["max_hp"], 1)
+                                        hp_bar = create_hp_bar(current_hp, max_hp)
+                                        element_emoji = "❌"  # Default emoji
+                                        for emoji, element in emoji_to_element.items():
+                                            if element == c["element"]:
+                                                element_emoji = emoji
+                                                break
+                                        field_name = f"**[TEAM A]** \n{c['user'].display_name} {element_emoji}" if not c.get(
+                                            "is_pet") else f"{c['pet_name']} {element_emoji}"
+                                        field_value = f"HP: {current_hp:.1f}/{max_hp:.1f}\n{hp_bar}"
+                                        embed.add_field(name=field_name, value=field_value, inline=False)
+
+                                    # Add new opponent status
+                                    opponent_element = current_opponent.get("element", "unknown")
+                                    opponent_emoji = emoji_to_element.get(opponent_element, "❌")
+                                    current_opponent_field = f"**[TEAM B]** \n{current_opponent['user']} {opponent_emoji}"
+                                    current_opponent_hp = max(0, round(current_opponent["hp"], 1))
+                                    current_opponent_max_hp = round(current_opponent["max_hp"], 1)
+                                    current_opponent_hp_bar = create_hp_bar(current_opponent_hp,
+                                                                            current_opponent_max_hp)
+                                    embed.add_field(name=current_opponent_field,
+                                                    value=f"HP: {current_opponent_hp:.1f}/{current_opponent_max_hp:.1f}\n{current_opponent_hp_bar}",
+                                                    inline=False)
+
+                                    # Add battle log
+                                    battle_log_text = '\n\n'.join(battle_log)
+                                    embed.add_field(name="Battle Log", value=battle_log_text, inline=False)
+
+                                    # Update embed for the new opponent
+                                    await log_message.edit(embed=embed)
+                                    await ctx.send(f"**Battle started with {current_opponent['user']}!**")
+                                    await asyncio.sleep(4)
+                                else:
+                                    # All opponents defeated
+                                    battle_ongoing = False
+                                    winner = ctx.author
+                                    break
+
+                        else:
+                            # Append to battle log if target wasn't defeated
+                            battle_log.append(f"**Action #{action_number}**\n{message}")
+                            action_number += 1
+
+                            # Update embed with current status
+                            embed = discord.Embed(
+                                title=f"Battle Tower: {ctx.author.display_name} vs {current_opponent['user']}",
+                                color=self.bot.config.game.primary_colour
+                            )
+
+                            # Add player and pet status
+                            for c in [player_combatant, pet_combatant]:
+                                if not c:
+                                    continue
+                                current_hp = max(0, round(c["hp"], 1))
+                                max_hp = round(c["max_hp"], 1)
+                                hp_bar = create_hp_bar(current_hp, max_hp)
+                                element_emoji = "❌"  # Default emoji
+                                for emoji, element in emoji_to_element.items():
+                                    if element == c["element"]:
+                                        element_emoji = emoji
+                                        break
+                                field_name = f"**[TEAM A]** \n{c['user'].display_name} {element_emoji}" if not c.get(
+                                    "is_pet") else f"{c['pet_name']} {element_emoji}"
+                                field_value = f"HP: {current_hp:.1f}/{max_hp:.1f}\n{hp_bar}"
+                                embed.add_field(name=field_name, value=field_value, inline=False)
+
+                            # Add current opponent status
+                            opponent_element = current_opponent.get("element", "unknown")
+                            opponent_emoji = emoji_to_element.get(opponent_element, "❌")
+                            current_opponent_field = f"**[TEAM B]** \n{current_opponent['user']} {opponent_emoji}"
+                            current_opponent_hp = max(0, round(current_opponent["hp"], 1))
+                            current_opponent_max_hp = round(current_opponent["max_hp"], 1)
+                            current_opponent_hp_bar = create_hp_bar(current_opponent_hp, current_opponent_max_hp)
+                            embed.add_field(name=current_opponent_field,
+                                            value=f"HP: {current_opponent_hp:.1f}/{current_opponent_max_hp:.1f}\n{current_opponent_hp_bar}",
+                                            inline=False)
+
+                            # Add battle log
+                            battle_log_text = '\n\n'.join(battle_log)
+                            embed.add_field(name="Battle Log", value=battle_log_text, inline=False)
+
+                            # Edit the embed message
+                            await log_message.edit(embed=embed)
+                            await asyncio.sleep(4)
+
+                    # After the loop, declare the winner
+                if winner == ctx.author:
+                    await ctx.send(
+                            f"**Congratulations {ctx.author.display_name}! You have defeated all opponents!**")
+                else:
+                    await ctx.send(f"**{ctx.author.mention}**, you have been defeated. Better luck next time!")
+                    await self.remove_player_from_fight(ctx.author.id)
+                    return
+
+
+
 
             except Exception as e:
                 import traceback
-                error_message = f"Error occurred: {e}\n"
-                error_message += traceback.format_exc()
+                await self.remove_player_from_fight(ctx.author.id)
+                error_message = f"An error occurred during the battletower battle: {e}\n{traceback.format_exc()}"
                 await ctx.send(error_message)
                 print(error_message)
 
-            if author_chance != 0:
-                authorchance = author_chance
-
-            if level != 16:
-                levelhp = rpgtools.xptolevel(ctx.character_data["xp"])
-                async with self.bot.pool.acquire() as conn:
-                    query = 'SELECT "health", "stathp" FROM profile WHERE "user" = $1;'
-                    result = await conn.fetchrow(query, user_id)
-
-                if result:
-                    # Extract the health value from the result
-                    base_health = 250
-                    health = result['health'] + base_health
-                    stathp = result['stathp'] * 50
-
-                    # Calculate total health based on level and add to current health
-                    total_health = health + (levelhp * 5)
-                    total_health = total_health + stathp
-
-                newhp = ctx.character_data["health"] + 250 + levelhp
-                async with self.bot.pool.acquire() as conn:
-                    dmg, deff = await self.bot.get_raidstats(ctx.author, conn=conn)
-                player = {"user": ctx.author, "hp": total_health, "armor": deff, "damage": dmg}
-                async with self.bot.pool.acquire() as connection:
-                    prestige_level = await connection.fetchval('SELECT prestige FROM battletower WHERE id = $1',
-                                                               ctx.author.id)
-                    level = await connection.fetchval('SELECT level FROM battletower WHERE id = $1', ctx.author.id)
-                if prestige_level != 0:
-                    prestige_multiplier = 1 + (0.40 * prestige_level)
-                    prestige_multiplierhp = 1 + (0.20 * prestige_level)
-
-                    opponents = [
-                        {"user": minion1_name, "hp": int(round(minion1_stats["hp"] * prestige_multiplierhp)),
-                         "armor": int(round(minion1_stats["armor"] * prestige_multiplierhp)),
-                         "damage": int(round(minion1_stats["damage"] * prestige_multiplier))},
-                        {"user": minion2_name, "hp": int(round(minion2_stats["hp"] * prestige_multiplierhp)),
-                         "armor": int(round(minion2_stats["armor"] * prestige_multiplierhp)),
-                         "damage": int(round(minion2_stats["damage"] * prestige_multiplier))},
-                        {"user": boss_name, "hp": int(round(boss_stats["hp"] * prestige_multiplierhp)),
-                         "armor": int(round(boss_stats["armor"] * prestige_multiplierhp)),
-                         "damage": int(round(boss_stats["damage"] * prestige_multiplier))},
-                    ]
-
-                else:
-                    opponents = [
-                        {"user": minion1_name, "hp": minion1_stats["hp"], "armor": minion1_stats["armor"],
-                         "damage": minion1_stats["damage"]},
-                        {"user": minion2_name, "hp": minion2_stats["hp"], "armor": minion2_stats["armor"],
-                         "damage": minion2_stats["damage"]},
-                        {"user": boss_name, "hp": boss_stats["hp"], "armor": boss_stats["armor"],
-                         "damage": boss_stats["damage"]},
-                    ]
-            else:
-                levelhp = rpgtools.xptolevel(ctx.character_data["xp"])
-                async with self.bot.pool.acquire() as conn:
-                    query = 'SELECT "health", "stathp" FROM profile WHERE "user" = $1;'
-                    result = await conn.fetchrow(query, user_id)
-
-                if result:
-                    # Extract the health value from the result
-                    base_health = 250
-                    health = result['health'] + base_health
-                    stathp = result['stathp'] * 50
-
-                    # Calculate total health based on level and add to current health
-                    total_health = health + (levelhp * 5)
-                    total_health = total_health + stathp
-                levelhp = level * 5
-                newhp = ctx.character_data["health"] + 250 + levelhp
-                async with self.bot.pool.acquire() as conn:
-                    dmg, deff = await self.bot.get_raidstats(ctx.author, conn=conn)
-                    m1dmg, m1deff = await self.bot.get_raidstats(random_user_object_1.id, conn=conn)
-                    m2dmg, m2deff = await self.bot.get_raidstats(random_user_object_2.id, conn=conn)
-                player = {"user": ctx.author, "hp": total_health, "armor": deff, "damage": dmg}
-
-                opponents = [
-                    {"user": random_user_object_1.display_name, "hp": 250, "armor": m1deff,
-                     "damage": m1dmg},
-                    {"user": random_user_object_2.display_name, "hp": 250, "armor": m2deff,
-                     "damage": m2dmg},
-                    {"user": boss_name, "hp": boss_stats["hp"], "armor": boss_stats["armor"],
-                     "damage": boss_stats["damage"]},
-                ]
-            maxhp = player["hp"]
-
-            victory_description = None
-            import utils.random as random
-
-            for opponent in opponents:
-                defender = opponent
-                staticdefender = defender["user"]
-                battle_log = deque(
-                    [
-                        (
-                            0,
-                            _("Raidbattle {p1} vs. {p2} started!").format(
-                                p1=player["user"], p2=defender["user"]
-                            ),
-                        )
-                    ],
-                    maxlen=3,
-                )
-
-                embed = discord.Embed(
-                    description=battle_log[0][1], color=self.bot.config.game.primary_colour
-                )
-
-                log_message = await ctx.send(
-                    embed=embed
-                )
-                await asyncio.sleep(4)
-
-                # Initialize the attacker and defender
-
-                random_number = random.randint(1, 3)
-
-
-                if random_number <= 2:
-                    attacker, defender = player, opponent
-                else:
-                    attacker, defender = opponent, player
-
-                while player["hp"] > 0 and defender["hp"] > 0:
-                    # Perform the attack with the current attacker
-                    # Calculate damage
-                    if attacker == player and author_mage_evolution is not None:
-                        # Mage's Fireball ability with 40% chance
-                        fireball_chance = random.randint(1, 100)
-                        if fireball_chance <= 40:
-                            # Fireball triggers
-                            evolution_level = author_mage_evolution
-                            damage_multiplier = evolution_damage_multiplier.get(evolution_level, 1.0)
-                            damage = (
-                                    (attacker["damage"] + Decimal(random.randint(0, 100)) - defender["armor"])
-                                    * Decimal(damage_multiplier)
-                            )
-                            damage = 1 if damage <= 0 else damage  # Ensure no negative damage
-                            defender["hp"] -= damage
-
-                            # Initialize message
-                            message = _("{attacker} casts Fireball! {defender} takes **{dmg}HP** damage.").format(
-                                attacker=attacker["user"],
-                                defender=defender["user"],
-                                dmg=damage,
-                            )
-                        else:
-                            # Regular attack
-                            damage = (
-                                    attacker["damage"] + Decimal(random.randint(0, 100)) - defender["armor"]
-                            )
-                            damage = 1 if damage <= 0 else damage  # Ensure no negative damage
-                            defender["hp"] -= damage
-
-                            # Initialize message
-                            message = _("{attacker} attacks! {defender} takes **{dmg}HP** damage.").format(
-                                attacker=attacker["user"],
-                                defender=defender["user"],
-                                dmg=damage,
-                            )
-                    else:
-                        # Opponent attacks or player is not a Mage
-                        damage = (
-                                attacker["damage"] + Decimal(random.randint(0, 100)) - defender["armor"]
-                        )
-                        damage = 1 if damage <= 0 else damage  # Ensure no negative damage
-                        defender["hp"] -= damage
-
-                        # Initialize message
-                        message = _("{attacker} attacks! {defender} takes **{dmg}HP** damage.").format(
-                            attacker=attacker["user"],
-                            defender=defender["user"],
-                            dmg=damage,
-                        )
-
-                    # Now check if defender is defeated
-                    if defender["hp"] <= 0:
-                        # Handle cheat death if defender is the player
-                        if defender["user"] == ctx.author:
-                            chance = authorchance
-                            random_number = random.randint(1, 100)
-                            if not cheated:
-                                if random_number <= chance:
-                                    defender["hp"] = 75
-                                    cheated = True
-                                    message += _(" {defender} cheats death and survives with 75HP!").format(
-                                        defender=defender["user"]
-                                    )
-                                else:
-                                    defender["hp"] = 0
-                                    message += _(" {defender} is defeated!").format(
-                                        defender=defender["user"]
-                                    )
-                            else:
-                                defender["hp"] = 0
-                                message += _(" {defender} is defeated!").format(
-                                    defender=defender["user"]
-                                )
-                        else:
-                            defender["hp"] = 0
-                            message += _(" {defender} is defeated!").format(
-                                defender=defender["user"]
-                            )
-                    else:
-                        # Handle lifesteal if applicable
-                        if attacker == player:
-                            if lifestealauth != 0:
-                                lifesteal_percentage = Decimal(lifestealauth) / Decimal(100)
-                                heal = lifesteal_percentage * Decimal(damage)
-                                attacker["hp"] += heal.quantize(Decimal('0.00'), rounding=ROUND_HALF_UP)
-                                if attacker["hp"] > maxhp:
-                                    attacker["hp"] = maxhp
-                                    maxedhp = True
-                                message += _(" Lifesteals: **{heal}HP**").format(heal=heal)
-
-                    # Append message to battle log
-                    battle_log.append(
-                        (
-                            battle_log[-1][0] + 1,
-                            message,
-                        )
-                    )
-                    if attacker["user"] == ctx.author:
-                        # Update the embed with the correct attacker and defender names and HP
-                        embed = discord.Embed(
-                            description=_("{p1} - {hp1} HP left\n{p2} - {hp2} HP left").format(
-                                p1=attacker["user"],
-                                hp1=attacker["hp"],
-                                p2=defender["user"],
-                                hp2=defender["hp"],
-                            ),
-                            color=self.bot.config.game.primary_colour,
-                        )
-                    else:
-                        # Update the embed with the correct attacker and defender names and HP
-                        embed = discord.Embed(
-                            description=_("{p1} - {hp1} HP left\n{p2} - {hp2} HP left").format(
-                                p1=defender["user"],
-                                hp1=defender["hp"],
-                                p2=attacker["user"],
-                                hp2=attacker["hp"],
-                            ),
-                            color=self.bot.config.game.primary_colour,
-                        )
-
-                    for line in battle_log:
-                        embed.add_field(
-                            name=_("Action #{number}").format(number=line[0]), value=line[1]
-                        )
-
-                    await log_message.edit(embed=embed)
-                    await asyncio.sleep(4)
-
-                    # Check if defender is defeated and break the loop if so
-                    if defender["hp"] <= 0:
-                        break  # Move to the next opponent or end the battle
-
-                    # Swap attacker and defender for the next turn
-                    attacker, defender = defender, attacker
-
-                await asyncio.sleep(2)  # Delay after defeating an opponent
-
-                if player["hp"] <= 0:
-                    victory_description = _(f"{ctx.author.mention} Better luck next time. You were defeated.")
-                    await self.remove_player_from_fight(ctx.author.id)
-                    break  # Exit the loop if the player loses
-                else:
-                    # victory_description = _("{opponent} has been defeated!").format(opponent=defender["user"])
-                    await asyncio.sleep(2)  # Delay before the next battle
-
-                # Check if there are more opponents
-                if opponent != opponents[-1]:
-                    await asyncio.sleep(2)  # Delay before the next battle
-
             # Rest of your code continues...
+
 
             if victory_description:
                 await ctx.send(victory_description)
@@ -3598,6 +4339,7 @@ class Battles(commands.Cog):
                     )
                     chest_embed.set_footer(text=f"Type left or right to make your decision.")
                     await ctx.send(embed=chest_embed)
+                    import random
                     legran = random.randint(1, 2)
 
                     async with self.bot.pool.acquire() as connection:
@@ -4804,9 +5546,31 @@ class Battles(commands.Cog):
                     pass
 
         except Exception as e:
+            await self.remove_player_from_fight(ctx.author.id)
             error_message = f"An error occurred before the battle: {e}"
             await ctx.send(error_message)
 
+    import asyncio
+    import datetime
+    import random
+    from collections import deque
+
+    import discord
+    from discord.ext import commands
+    from discord.ui import Button, View
+
+    # Assuming necessary decorators and utility functions are defined elsewhere:
+    # - has_char
+    # - user_cooldown
+    # - locale_doc
+    # - SingleJoinView
+    # - has_money
+    # - rpgtools.xptolevel
+    # - self.bot.pool (asyncpg pool)
+    # - self.bot.get_booster
+    # - self.bot.get_raidstats
+    # - self.bot.log_transaction
+    # - self.bot.config.game.primary_colour
 
     @has_char()
     @user_cooldown(100)
@@ -4821,13 +5585,13 @@ class Battles(commands.Cog):
 
             Fight against another player while betting money.
             To decide the players' stats, their items, race and class bonuses and raidstats are evaluated.
-            
-            You also have a change of tripping depending on your luck.
+
+            You also have a chance of tripping depending on your luck.
 
             The money is removed from both players at the start of the battle. Once a winner has been decided, they will receive their money, plus the enemy's money.
-            The battle is divided into rounds, in which a player attacks. The first round's attacker is chosen randomly, all other rounds the attacker is the last round's defender.
+            The battle is divided into turns, in which each combatant (player or pet) takes an action.
 
-            The battle ends if one player's HP drops to 0 (winner decided), or if 5 minutes after the battle started pass (tie).
+            The battle ends if one side's all combatants' HP drop to 0 (winner decided), or if 5 minutes after the battle started pass (tie).
             In case of a tie, both players will get their money back.
 
             The battle's winner will receive a PvP win, which shows on their profile.
@@ -4846,12 +5610,14 @@ class Battles(commands.Cog):
             await self.bot.reset_cooldown(ctx)
             return await ctx.send(_("You are too poor."))
 
+        # Deduct money from the author
         await self.bot.pool.execute(
             'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
             money,
             ctx.author.id,
         )
 
+        # Prepare battle initiation message
         if not enemy:
             text = _("{author} - **LVL {level}** seeks a raidbattle! The price is **${money}**.").format(
                 author=ctx.author.mention, level=rpgtools.xptolevel(ctx.character_data["xp"]), money=money
@@ -4862,17 +5628,24 @@ class Battles(commands.Cog):
                 xp_value = await conn.fetchval(query, enemy.id)
             text = _(
                 "{author} - **LVL {level}** seeks a raidbattle with {enemy} - LVL **{levelen}**! The price is **${money}**."
-            ).format(author=ctx.author.mention, level=rpgtools.xptolevel(ctx.character_data["xp"]), enemy=enemy.mention,
-                     levelen=rpgtools.xptolevel(xp_value), money=money)
+            ).format(
+                author=ctx.author.mention,
+                level=rpgtools.xptolevel(ctx.character_data["xp"]),
+                enemy=enemy.mention,
+                levelen=rpgtools.xptolevel(xp_value) if xp_value else "Unknown",
+                money=money
+            )
 
+        # Define a check for the join view
         async def check(user: discord.User) -> bool:
             return await has_money(self.bot, user.id, money)
 
+        # Create the join view
         future = asyncio.Future()
         view = SingleJoinView(
             future,
             Button(
-                style=ButtonStyle.primary,
+                style=discord.ButtonStyle.primary,
                 label=_("Join the raidbattle!"),
                 emoji="\U00002694",
             ),
@@ -4889,6 +5662,7 @@ class Battles(commands.Cog):
             enemy_ = await future
         except asyncio.TimeoutError:
             await self.bot.reset_cooldown(ctx)
+            # Refund money to the author
             await self.bot.pool.execute(
                 'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
                 money,
@@ -4900,54 +5674,32 @@ class Battles(commands.Cog):
                 )
             )
 
+        # Deduct money from the enemy
         await self.bot.pool.execute(
-            'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;', money, enemy_.id
+            'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
+            money,
+            enemy_.id
         )
 
-        players = []
-
+        # Initialize combatants
         try:
-            # Fetch elements for the player and the enemy
-            highest_item = await self.bot.pool.fetchrow(
-                "SELECT ai.element FROM profile p JOIN allitems ai ON (p.user=ai.owner) JOIN"
-                " inventory i ON (ai.id=i.item) WHERE i.equipped IS TRUE AND p.user=$1"
-                " ORDER BY GREATEST(ai.damage, ai.armor) DESC LIMIT 1;",
-                ctx.author.id,
-            )
+            # Fetch elements for both players
+            highest_element_author = await self.fetch_highest_element(ctx.author.id)
+            highest_element_enemy = await self.fetch_highest_element(enemy_.id)
 
-            if highest_item:
-                highest_element = highest_item[0]
-                highest_element = highest_element.capitalize()
-                if highest_element in self.emoji_to_element.values():
-                    for emoji, element in self.emoji_to_element.items():
-                        if element == highest_element:
-                            emoji_for_element = emoji
-                            break
-                else:
-                    emoji_for_element = "❌"
-            else:
-                emoji_for_element = "❌"
+            # Define element to emoji mapping
+            emoji_to_element = {
+                "🌟": "Light",
+                "🌑": "Dark",
+                "🔥": "Fire",
+                "💧": "Water",
+                "🌿": "Nature",
+                "⚡": "Electric",
+                "💨": "Wind",
+                "🌀": "Corrupted"
+            }
 
-            highest_item_enemy = await self.bot.pool.fetchrow(
-                "SELECT ai.element FROM profile p JOIN allitems ai ON (p.user=ai.owner) JOIN"
-                " inventory i ON (ai.id=i.item) WHERE i.equipped IS TRUE AND p.user=$1"
-                " ORDER BY GREATEST(ai.damage, ai.armor) DESC LIMIT 1;",
-                enemy_.id,
-            )
-
-            if highest_item_enemy:
-                highest_element_enemy = highest_item_enemy[0]
-                highest_element_enemy = highest_element_enemy.capitalize()
-                if highest_element_enemy in self.emoji_to_element.values():
-                    for emoji, element in self.emoji_to_element.items():
-                        if element == highest_element_enemy:
-                            emoji_for_elementenemy = emoji
-                            break
-                else:
-                    emoji_for_elementenemy = "❌"
-            else:
-                emoji_for_elementenemy = "❌"
-
+            # Define other mappings
             specified_words_values = {
                 "Deathshroud": 20,
                 "Soul Warden": 30,
@@ -4986,129 +5738,73 @@ class Battles(commands.Cog):
                 6: 2.00,  # 200%
             }
 
-            # User IDs
-            user_id = ctx.author.id
-            enemy_id = enemy_.id
+            # Fetch classes and XP for both players
+            async with self.bot.pool.acquire() as conn:
+                # Fetch data for the author
+                result_author = await conn.fetchrow(
+                    'SELECT "class", "xp" FROM profile WHERE "user" = $1;',
+                    ctx.author.id
+                )
+                auth_classes = result_author["class"] if result_author and "class" in result_author else []
+                auth_xp = result_author["xp"] if result_author and "xp" in result_author else 0
+                auth_level = rpgtools.xptolevel(auth_xp)
 
-            # Fetch classes and XP
-            try:
-                # Define common queries
-                query_class = 'SELECT "class" FROM profile WHERE "user" = $1;'
-                query_xp = 'SELECT "xp" FROM profile WHERE "user" = $1;'
+                # Fetch data for the enemy
+                result_enemy = await conn.fetchrow(
+                    'SELECT "class", "xp" FROM profile WHERE "user" = $1;',
+                    enemy_.id
+                )
+                enemy_classes = result_enemy["class"] if result_enemy and "class" in result_enemy else []
+                enemy_xp = result_enemy["xp"] if result_enemy and "xp" in result_enemy else 0
+                enemy_level = rpgtools.xptolevel(enemy_xp)
 
-                # Query data for ctx.author.id
-                result_author = await self.bot.pool.fetch(query_class, user_id)
-                auth_xp = await self.bot.pool.fetch(query_xp, user_id)
+            # Initialize chance variables
+            author_chance = 0
+            enemy_chance = 0
+            lifestealauth = 0
+            lifestealopp = 0
 
-                # Convert XP to level for ctx.author.id
-                auth_level = rpgtools.xptolevel(auth_xp[0]['xp'])
+            # Function to get Mage evolution level
+            def get_mage_evolution(classes):
+                max_evolution = None
+                for class_name in classes:
+                    if class_name in mage_evolution_levels:
+                        level = mage_evolution_levels[class_name]
+                        if max_evolution is None or level > max_evolution:
+                            max_evolution = level
+                return max_evolution
 
-                # Query data for enemy_.id
-                result_opp = await self.bot.pool.fetch(query_class, enemy_id)
-                opp_xp = await self.bot.pool.fetch(query_xp, enemy_id)
+            # Calculate chances for the author
+            author_mage_evolution = get_mage_evolution(auth_classes)
+            for class_name in auth_classes:
+                if class_name in specified_words_values:
+                    author_chance += specified_words_values[class_name]
+                if class_name in life_steal_values:
+                    lifestealauth += life_steal_values[class_name]
 
-                # Convert XP to level for enemy_.id
-                opp_level = rpgtools.xptolevel(opp_xp[0]['xp'])
+            # Calculate chances for the enemy
+            enemy_mage_evolution = get_mage_evolution(enemy_classes)
+            for class_name in enemy_classes:
+                if class_name in specified_words_values:
+                    enemy_chance += specified_words_values[class_name]
+                if class_name in life_steal_values:
+                    lifestealopp += life_steal_values[class_name]
 
-                # Initialize chance
-                author_chance = 0
-                enemy_chance = 0
-                lifestealauth = 0
-                lifestealopp = 0
-
-                # Function to get Mage evolution level
-                def get_mage_evolution(classes):
-                    max_evolution = None
-                    for class_name in classes:
-                        if class_name in mage_evolution_levels:
-                            level = mage_evolution_levels[class_name]
-                            if max_evolution is None or level > max_evolution:
-                                max_evolution = level
-                    return max_evolution
-
-                if result_author:
-                    author_classes = result_author[0]["class"]
-                    if isinstance(author_classes, list):
-                        author_classes = author_classes
-                    else:
-                        author_classes = [author_classes]
-
-                    author_mage_evolution = get_mage_evolution(author_classes)
-                    for class_name in author_classes:
-                        if class_name in specified_words_values:
-                            author_chance += specified_words_values[class_name]
-                        if class_name in life_steal_values:
-                            lifestealauth += life_steal_values[class_name]
-
-                if result_opp:
-                    opp_classes = result_opp[0]["class"]
-                    if isinstance(opp_classes, list):
-                        opp_classes = opp_classes
-                    else:
-                        opp_classes = [opp_classes]
-
-                    opp_mage_evolution = get_mage_evolution(opp_classes)
-                    for class_name in opp_classes:
-                        if class_name in specified_words_values:
-                            enemy_chance += specified_words_values[class_name]
-                        if class_name in life_steal_values:
-                            lifestealopp += life_steal_values[class_name]
-
-            except Exception as e:
-                await ctx.send(f"An error occurred while fetching classes and XP: {e}")
-
+            # Assign chances
             if author_chance != 0:
                 authorchance = author_chance
 
             if enemy_chance != 0:
                 enemychance = enemy_chance
 
-            # Fetch player stats
+            # Fetch player stats and assign to sides
             async with self.bot.pool.acquire() as conn:
-                for player in (ctx.author, enemy_):
-                    try:
-                        user_id = player.id
-
-                        luck_booster = await self.bot.get_booster(player, "luck")
-
-                        query = 'SELECT "luck", "health", "stathp" FROM profile WHERE "user" = $1;'
-                        result = await conn.fetchrow(query, user_id)
-                        if result:
-                            luck_value = float(result['luck'])
-                            if luck_value <= 0.3:
-                                Luck = 20
-                            else:
-                                Luck = ((luck_value - 0.3) / (1.5 - 0.3)) * 80 + 20
-                            Luck = float(round(Luck, 2))
-
-                            if luck_booster:
-                                Luck += Luck * 0.25
-                                Luck = float(min(Luck, 100))
-
-                            base_health = 250
-                            health = result['health'] + base_health
-                            stathp = result['stathp'] * 50
-                            dmg, deff = await self.bot.get_raidstats(player, conn=conn)
-
-                            level = rpgtools.xptolevel(
-                                auth_xp[0]['xp']) if player == ctx.author else rpgtools.xptolevel(opp_xp[0]['xp'])
-                            total_health = health + (level * 5)
-                            total_health = total_health + stathp
-
-                            # Get Mage evolution level
-                            if player == ctx.author:
-                                mage_evolution = author_mage_evolution
-                            else:
-                                mage_evolution = opp_mage_evolution
-
-                            # Create player dictionary with relevant information
-                            u = {"user": player, "hp": total_health, "armor": deff, "damage": dmg, "luck": Luck,
-                                 "mage_evolution": mage_evolution}
-                            players.append(u)
-                        else:
-                            await ctx.send(f"User with ID {user_id} not found in the profile table.")
-                    except Exception as e:
-                        await ctx.send(f"An error occurred: {e}")
+                author_combatant, author_pet_combatant = await self.fetch_combatants(
+                    ctx, ctx.author, highest_element_author, auth_level, lifestealauth, author_mage_evolution, conn
+                )
+                enemy_combatant, enemy_pet_combatant = await self.fetch_combatants(
+                    ctx, enemy_, highest_element_enemy, enemy_level, lifestealopp, enemy_mage_evolution, conn
+                )
 
             # Determine elements for damage modifiers
             element_strengths = {
@@ -5119,163 +5815,716 @@ class Battles(commands.Cog):
                 "Electric": "Water",
                 "Water": "Fire",
                 "Fire": "Nature",
-                "Wind": "Electric"
+                "Wind": "Electric",
+                "Unknown": None  # Adding 'Unknown' to handle default cases
             }
 
-            def calculate_damage_modifier(player_element, enemy_element):
-                if player_element in element_strengths and element_strengths[player_element] == enemy_element:
-                    return decimal.Decimal(round(randomm.uniform(0.1, 0.3), 1))
-                elif enemy_element in element_strengths and element_strengths[enemy_element] == player_element:
-                    return decimal.Decimal(round(randomm.uniform(-0.1, -0.3), 1))
-                return decimal.Decimal('0')
+            def calculate_damage_modifier(attacker_element, defender_element):
+                if attacker_element in element_strengths and element_strengths[attacker_element] == defender_element:
+                    return round(randomm.uniform(0.1, 0.3), 3)  # Positive modifier
+                elif defender_element in element_strengths and element_strengths[defender_element] == attacker_element:
+                    return round(randomm.uniform(-0.3, -0.1), 3)  # Negative modifier
+                return 0.0
 
-            player_element = highest_element
-            enemy_element = highest_element_enemy
+            # Apply damage modifiers
+            author_combatant["damage"] = round(author_combatant["damage"] * (
+                    1 + calculate_damage_modifier(author_combatant["element"], enemy_combatant["element"])), 3)
+            if author_pet_combatant:
+                author_pet_combatant["damage"] = round(author_pet_combatant["damage"] * (
+                        1 + calculate_damage_modifier(author_pet_combatant["element"], enemy_combatant["element"])),
+                                                       3)
 
-            damage_modifier_player = calculate_damage_modifier(player_element, enemy_element)
-            damage_modifier_enemy = calculate_damage_modifier(enemy_element, player_element)
+            enemy_combatant["damage"] = round(enemy_combatant["damage"] * (
+                    1 + calculate_damage_modifier(enemy_combatant["element"], author_combatant["element"])), 3)
+            if enemy_pet_combatant:
+                enemy_pet_combatant["damage"] = round(enemy_pet_combatant["damage"] * (
+                        1 + calculate_damage_modifier(enemy_pet_combatant["element"], author_combatant["element"])),
+                                                      3)
 
-            for player in players:
-                if player["user"] == ctx.author:
-                    player["damage"] = round(player["damage"] * (1 + damage_modifier_player), 2)
-                else:
-                    player["damage"] = round(player["damage"] * (1 + damage_modifier_enemy), 2)
-
-            # Begin the battle
+            # Create initial battle log
             battle_log = deque(
                 [
-                    (
-                        0,
-                        _("Raidbattle {p1} vs. {p2} started!").format(
-                            p1=players[0]["user"], p2=players[1]["user"]
-                        ),
-                    )
+                    f"**Action #0**\nRaidbattle {ctx.author.mention} vs. {enemy_.mention} started!"
                 ],
-                maxlen=3,
+                maxlen=5  # Adjust as needed for log size
             )
 
+            # Create initial embed
             embed = discord.Embed(
-                description=battle_log[0][1], color=self.bot.config.game.primary_colour
+                title=f"Raid Battle: {ctx.author.display_name} vs {enemy_.display_name}",
+                color=self.bot.config.game.primary_colour
             )
 
-            log_message = await ctx.send(
-                embed=embed
-            )
+            # Initialize player and pet stats in the embed
+            for combatant in [author_combatant, author_pet_combatant, enemy_combatant, enemy_pet_combatant]:
+                if not combatant:
+                    continue  # Skip if pet does not exist
+                current_hp = max(0, round(combatant["hp"], 1))  # Rounded to .0
+                max_hp = round(combatant["max_hp"], 1)
+                hp_bar = self.create_hp_bar(current_hp, max_hp)
+                if not combatant.get("is_pet"):
+                    # Player's element emoji
+                    element_emoji = "❌"  # Default emoji
+                    for emoji, element in emoji_to_element.items():
+                        if element == combatant["element"]:
+                            element_emoji = emoji
+                            break
+                    if combatant['user'].id == ctx.author.id:
+                        field_name = f"[TEAM A]\n{combatant['user'].display_name} {element_emoji}"
+                    else:
+                        field_name = f"[TEAM B]\n{combatant['user'].display_name} {element_emoji}"
+                else:
+                    # Pet's element emoji
+                    pet_element_emoji = "❌"  # Default emoji
+                    for emoji, element in emoji_to_element.items():
+                        if element == combatant["element"]:
+                            pet_element_emoji = emoji
+                            break
+                    field_name = f"{combatant['pet_name']} {pet_element_emoji}"
+                # Format HP with one decimal place
+                field_value = f"HP: {current_hp:.1f}/{max_hp:.1f}\n{hp_bar}"
+                embed.add_field(name=field_name, value=field_value, inline=False)
+
+            # Add initial battle log
+            embed.add_field(name="Battle Log", value=battle_log[0], inline=False)
+
+            log_message = await ctx.send(embed=embed)
             await asyncio.sleep(4)
 
-            start = datetime.datetime.utcnow()
-            attacker_is_player = random.choice([True, False])
+            start_time = datetime.datetime.utcnow()
 
-            # Main battle loop
-            while (
-                    players[0]["hp"] > 0
-                    and players[1]["hp"] > 0
-                    and datetime.datetime.utcnow() < start + datetime.timedelta(minutes=5)
-            ):
-                if attacker_is_player:
-                    attacker = players[0]
-                    defender = players[1]
+            action_number = 1  # Starting from Action #1
+
+            battle_ongoing = True
+            combatant_order_options = [
+                [author_combatant, enemy_pet_combatant, author_pet_combatant, enemy_combatant],
+                [enemy_combatant, author_pet_combatant, enemy_pet_combatant, author_combatant]
+            ]
+
+            combatant_order = random.choice(combatant_order_options)
+
+            while battle_ongoing and datetime.datetime.utcnow() < start_time + datetime.timedelta(minutes=5):
+                # Randomly choose the combatant order
+
+
+                for combatant in combatant_order:
+
+
+                    if not combatant or combatant["hp"] <= 0:
+                        continue  # Skip dead or non-existent combatants
+
+                    # Determine the opponent's combatants
+                    if combatant in [author_combatant, author_pet_combatant]:
+                        opponent_combatant = enemy_combatant
+                        opponent_pet_combatant = enemy_pet_combatant
+                        opponent_user = enemy_
+                    else:
+                        opponent_combatant = author_combatant
+                        opponent_pet_combatant = author_pet_combatant
+                        opponent_user = ctx.author
+
+                    # Combatant attacks
+                    target = self.select_target(opponent_combatant, opponent_pet_combatant, player_prob=0.25,
+                                                pet_prob=0.75)
+                    if target is not None:
+                        # Calculate damage
+                        if combatant.get("is_pet"):
+                            damage_variance = random.randint(0, 50)
+                        else:
+                            damage_variance = random.randint(0, 100)
+                        dmg = round(max(combatant["damage"] + damage_variance - target["armor"], 1), 3)
+                        target["hp"] -= dmg
+                        target["hp"] = max(target["hp"], 0)
+
+                        # Build message
+                        if combatant.get("is_pet"):
+                            attacker_name = combatant['pet_name']
+                        else:
+                            attacker_name = combatant['user'].mention
+                        if target.get("is_pet"):
+                            target_name = target['pet_name']
+                        else:
+                            target_name = target['user'].mention
+                        message = f"{attacker_name} attacks! {target_name} takes **{dmg:.3f}HP** damage."
+
+                        # Handle lifesteal if applicable
+                        if not combatant.get("is_pet"):
+                            if combatant["user"] == ctx.author and lifestealauth != 0:
+                                lifesteal_percentage = lifestealauth / 100.0
+                                heal = round(lifesteal_percentage * dmg, 3)
+                                combatant["hp"] = min(combatant["hp"] + heal, combatant["max_hp"])
+                                message += f" Lifesteals: **{heal:.3f}HP**"
+                            elif combatant["user"] == enemy_ and lifestealopp != 0:
+                                lifesteal_percentage = lifestealopp / 100.0
+                                heal = round(lifesteal_percentage * dmg, 3)
+                                combatant["hp"] = min(combatant["hp"] + heal, combatant["max_hp"])
+                                message += f" Lifesteals: **{heal:.3f}HP**"
+
+                        # Check if target is defeated
+                        if target["hp"] <= 0:
+                            message += f" {target_name} has been defeated!"
+
+                        # Append message to battle log
+                        battle_log.append(f"**Action #{action_number}**\n{message}")
+                        action_number += 1
+
+                        # Update the embed after each action
+                        embed = discord.Embed(
+                            title=f"Raid Battle: {ctx.author.display_name} vs {enemy_.display_name}",
+                            color=self.bot.config.game.primary_colour
+                        )
+
+                        # Update player and pet stats in the embed
+                        for c in [author_combatant, author_pet_combatant, enemy_combatant, enemy_pet_combatant]:
+                            if not c:
+                                continue  # Skip if pet does not exist
+                            current_hp = max(0, round(c["hp"], 1))  # Rounded to .0
+                            max_hp = round(c["max_hp"], 1)
+                            hp_bar = self.create_hp_bar(current_hp, max_hp)
+                            if not c.get("is_pet"):
+                                # Player's element emoji
+                                element_emoji = "❌"  # Default emoji
+                                for emoji, element in emoji_to_element.items():
+                                    if element == c["element"]:
+                                        element_emoji = emoji
+                                        break
+                                if c['user'].id == ctx.author.id:
+                                    field_name = f"[TEAM A]\n{c['user'].display_name} {element_emoji}"
+                                else:
+                                    field_name = f"[TEAM B]\n{c['user'].display_name} {element_emoji}"
+                            else:
+                                # Pet's element emoji
+                                pet_element_emoji = "❌"  # Default emoji
+                                for emoji, element in emoji_to_element.items():
+                                    if element == c["element"]:
+                                        pet_element_emoji = emoji
+                                        break
+                                field_name = f"{c['pet_name']} {pet_element_emoji}"
+                            # Format HP with one decimal place
+                            field_value = f"HP: {current_hp:.1f}/{max_hp:.1f}\n{hp_bar}"
+                            embed.add_field(name=field_name, value=field_value, inline=False)
+
+                        # Update battle log in the embed
+                        battle_log_text = '\n\n'.join(battle_log)
+                        embed.add_field(name="Battle Log", value=battle_log_text, inline=False)
+
+                        await log_message.edit(embed=embed)
+                        await asyncio.sleep(4)
+
+                        # Check for win condition
+                        if opponent_combatant["hp"] <= 0 and (
+                                opponent_pet_combatant is None or opponent_pet_combatant["hp"] <= 0):
+                            battle_ongoing = False
+                            winner = combatant['user'] if not combatant.get("is_pet") else combatant['user']
+                            loser = opponent_user
+                            break
+                        elif author_combatant["hp"] <= 0 and (
+                                author_pet_combatant is None or author_pet_combatant["hp"] <= 0):
+                            battle_ongoing = False
+                            winner = enemy_
+                            loser = ctx.author
+                            break
+                        elif enemy_combatant["hp"] <= 0 and (
+                                enemy_pet_combatant is None or enemy_pet_combatant["hp"] <= 0):
+                            battle_ongoing = False
+                            winner = ctx.author
+                            loser = enemy_
+                            break
+
+            if battle_ongoing:
+                # Time limit reached, it's a tie
+                # Refund money
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                        money,
+                        ctx.author.id,
+                    )
+                    await conn.execute(
+                        'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                        money,
+                        enemy_.id,
+                    )
+                await ctx.send(
+                    _("The raidbattle between {p1} and {p2} ended in a tie! Money has been refunded.").format(
+                        p1=ctx.author.mention, p2=enemy_.mention
+                    )
+                )
+            else:
+                # We have a winner
+                if winner:
+                    # Update database and send final message
+                    async with self.bot.pool.acquire() as conn:
+                        await conn.execute(
+                            'UPDATE profile SET "money"="money"+$1, "pvpwins"="pvpwins"+1 WHERE'
+                            ' "user"=$2;',
+                            money * 2,
+                            winner.id,
+                        )
+                        await self.bot.log_transaction(
+                            ctx,
+                            from_=loser.id,
+                            to=winner.id,
+                            subject="RaidBattle Bet",
+                            data={"Gold": money},
+                            conn=conn,
+                        )
+                    await ctx.send(
+                        _("{p1} won the raidbattle vs {p2}! Congratulations!").format(
+                            p1=winner.mention, p2=loser.mention
+                        )
+                    )
                 else:
-                    attacker = players[1]
-                    defender = players[0]
+                    # It's a tie (should not happen here)
+                    await ctx.send(
+                        _("The raidbattle between {p1} and {p2} ended in a tie! Money has been refunded.").format(
+                            p1=ctx.author.mention, p2=enemy_.mention
+                        )
+                    )
+        except Exception as e:
+            import traceback
+            error_message = f"An error occurred while determining the winner: {e}\n"
+            error_message += traceback.format_exc()
+            await ctx.send(error_message)
+            print(error_message)
+
+    # Helper methods within your Cog or Bot class
+
+    async def fetch_highest_element(self, user_id):
+        try:
+            highest_items = await self.bot.pool.fetch(
+                "SELECT ai.element FROM profile p JOIN allitems ai ON (p.user=ai.owner) JOIN"
+                " inventory i ON (ai.id=i.item) WHERE i.equipped IS TRUE AND p.user=$1"
+                " ORDER BY GREATEST(ai.damage, ai.armor) DESC;",
+                user_id,
+            )
+            highest_element = highest_items[0]["element"].capitalize() if highest_items and highest_items[0][
+                "element"] else "Unknown"
+            return highest_element
+        except Exception as e:
+            await self.bot.pool.execute(
+                'UPDATE profile SET "element"="Unknown" WHERE "user"=$1;',
+                user_id
+            )
+            return "Unknown"
+
+    async def fetch_combatants(self, ctx, player, highest_element, level, lifesteal, mage_evolution, conn):
+        try:
+            # Fetch stats
+            query = 'SELECT "luck", "health", "stathp" FROM profile WHERE "user" = $1;'
+            result = await conn.fetchrow(query, player.id)
+            if result:
+                luck_value = float(result['luck'])
+                if luck_value <= 0.3:
+                    Luck = 20.0
+                else:
+                    Luck = ((luck_value - 0.3) / (1.5 - 0.3)) * 80 + 20
+                Luck = round(Luck, 2)
+
+                # Apply luck booster
+                luck_booster = await self.bot.get_booster(player, "luck")
+                if luck_booster:
+                    Luck += Luck * 0.25
+                    Luck = min(Luck, 100.0)
+
+                base_health = 250.0
+                health = float(result['health']) + base_health
+                stathp = float(result['stathp']) * 50.0
+                dmg, deff = await self.bot.get_raidstats(player, conn=conn)
+
+                # Ensure dmg and deff are floats
+                dmg = float(dmg)
+                deff = float(deff)
+
+                total_health = health + level * 5.0 + stathp
+
+                # Create combatant dictionary
+                combatant = {
+                    "user": player,
+                    "hp": total_health,
+                    "armor": deff,
+                    "damage": dmg,
+                    "luck": Luck,
+                    "mage_evolution": mage_evolution,
+                    "max_hp": total_health,
+                    "is_pet": False,
+                    "element": highest_element if highest_element else "Unknown"
+                }
+
+                # Fetch and assign equipped pet
+                pet = await conn.fetchrow(
+                    "SELECT * FROM monster_pets WHERE user_id = $1 AND equipped = TRUE;",
+                    player.id
+                )
+                if pet:
+                    pet_element = pet["element"].capitalize() if pet["element"] else "Unknown"
+                    pet_combatant = {
+                        "user": player,  # Reference to owner
+                        "owner_id": player.id,  # Owner's Discord ID
+                        "pet_name": pet["name"],  # Pet's name
+                        "hp": float(pet["hp"]),
+                        "armor": float(pet["defense"]),
+                        "damage": float(pet["attack"]),
+                        "luck": 50.0,  # Assuming fixed luck; adjust as needed
+                        "element": pet_element,  # Already capitalized or set to "Unknown"
+                        "max_hp": float(pet["hp"]),
+                        "is_pet": True
+                    }
+                    return combatant, pet_combatant
+                else:
+                    return combatant, None
+            else:
+                # Default combatant if no profile found
+                combatant = {
+                    "user": player,
+                    "hp": 500.0,
+                    "armor": 50.0,
+                    "damage": 50.0,
+                    "luck": 50.0,
+                    "mage_evolution": None,
+                    "max_hp": 500.0,
+                    "is_pet": False,
+                    "element": "Unknown"
+                }
+                return combatant, None
+        except Exception as e:
+            await ctx.send(f"An error occurred while fetching stats for {player.display_name}: {e}")
+            # Return default combatant
+            combatant = {
+                "user": player,
+                "hp": 500.0,
+                "armor": 50.0,
+                "damage": 50.0,
+                "luck": 50.0,
+                "mage_evolution": None,
+                "max_hp": 500.0,
+                "is_pet": False,
+                "element": "Unknown"
+            }
+            return combatant, None
+
+    def create_hp_bar(self, current_hp, max_hp, length=20):
+        ratio = current_hp / max_hp if max_hp > 0 else 0
+        ratio = max(0, min(1, ratio))  # Ensure ratio is between 0 and 1
+        filled_length = int(length * ratio)
+        bar = '█' * filled_length + '░' * (length - filled_length)
+        return bar
+
+    def select_target(self, player_combatant, pet_combatant, player_prob=0.25, pet_prob=0.75):
+        targets = []
+        weights = []
+        if player_combatant and player_combatant['hp'] > 0:
+            targets.append(player_combatant)
+            weights.append(player_prob)
+        if pet_combatant and pet_combatant['hp'] > 0:
+            targets.append(pet_combatant)
+            weights.append(pet_prob)
+        if targets:
+            return randomm.choices(targets, weights=weights)[0]
+        else:
+            return None
+
+    @is_gm()
+    @has_char()
+    @user_cooldown(100)
+    @commands.command(brief=_("Battle in teams of two against another team (includes raidstats)"))
+    @locale_doc
+    async def raidbattle2v2(
+            self, ctx, money: IntGreaterThan(-1) = 0, teammate: discord.Member = None,
+            opponents: commands.Greedy[discord.Member] = None
+    ):
+        _(
+            """`[money]` - A whole number that can be 0 or greater; defaults to 0
+            `[teammate]` - A user who will join your team
+            `[opponents]` - Two users who will be the opposing team
+
+            Fight in teams of two against another team while betting money.
+            To decide the players' stats, their items, race and class bonuses and raidstats are evaluated.
+
+            You also have a chance of tripping depending on your luck.
+
+            The money is removed from all players at the start of the battle. Once a winning team has been decided, they will receive their money, plus the opposing team's money.
+            The battle is divided into rounds, where each team takes turns attacking.
+
+            The battle ends if all players on a team have their HP drop to 0 (winner decided), or if 5 minutes after the battle started pass (tie).
+            In case of a tie, all players will get their money back.
+
+            Each member of the winning team will receive a PvP win, which shows on their profile.
+            (This command has a cooldown of 5 minutes)"""
+        )
+
+        # Initial checks
+        if teammate == ctx.author:
+            await self.bot.reset_cooldown(ctx)
+            return await ctx.send(_("You can't be your own teammate."))
+
+        if not opponents or len(opponents) != 2:
+            await self.bot.reset_cooldown(ctx)
+            return await ctx.send(_("You must specify exactly two opponents."))
+
+        if ctx.author in opponents or teammate in opponents or teammate == ctx.author:
+            await self.bot.reset_cooldown(ctx)
+            return await ctx.send(_("Invalid team configuration."))
+
+        if ctx.character_data["money"] < money:
+            await self.bot.reset_cooldown(ctx)
+            return await ctx.send(_("You are too poor."))
+
+        # Deduct money from initiating player
+        await self.bot.pool.execute(
+            'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
+            money,
+            ctx.author.id,
+        )
+
+        # Create the battle invitation
+        text = _("{author} and {teammate} seek a 2v2 raidbattle! The price is **${money}** per player.").format(
+            author=ctx.author.mention,
+            teammate=teammate.mention if teammate else "an ally",
+            money=money
+        )
+
+        # Function to check if a user has enough money
+        async def check(user: discord.User) -> bool:
+            return await has_money(self.bot, user.id, money)
+
+        future_teammate = asyncio.Future()
+        future_opponents = [asyncio.Future(), asyncio.Future()]
+
+        # Create the join view for the teammate
+        view_teammate = SingleJoinView(
+            future_teammate,
+            Button(
+                style=ButtonStyle.primary,
+                label=_("Join as Teammate"),
+                emoji="🤝",
+            ),
+            allowed=teammate,
+            prohibited=ctx.author,
+            timeout=60,
+            check=check,
+            check_fail_message=_("You don't have enough money to join the raidbattle."),
+        )
+
+        # Send the invitation for the teammate
+        await ctx.send(text, view=view_teammate)
+
+        # Wait for teammate to join
+        try:
+            teammate_ = await future_teammate
+        except asyncio.TimeoutError:
+            await self.bot.reset_cooldown(ctx)
+            await self.bot.pool.execute(
+                'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                money,
+                ctx.author.id,
+            )
+            return await ctx.send(
+                _("Your teammate did not join in time, {author}.").format(
+                    author=ctx.author.mention
+                )
+            )
+
+        # Deduct money from teammate
+        await self.bot.pool.execute(
+            'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
+            money,
+            teammate_.id,
+        )
+
+        # Create the join views for the opponents
+        opponent_views = []
+        for i, opponent in enumerate(opponents):
+            view_opponent = SingleJoinView(
+                future_opponents[i],
+                Button(
+                    style=ButtonStyle.danger,
+                    label=_("Join as Opponent"),
+                    emoji="⚔️",
+                ),
+                allowed=opponent,
+                prohibited=[ctx.author, teammate_],
+                timeout=60,
+                check=check,
+                check_fail_message=_("You don't have enough money to join the raidbattle."),
+            )
+            opponent_views.append(view_opponent)
+            await ctx.send(
+                _("{opponent}, you have been challenged to a raidbattle!").format(
+                    opponent=opponent.mention
+                ),
+                view=view_opponent,
+            )
+
+        # Wait for opponents to join
+        try:
+            opponents_ = [await future for future in future_opponents]
+        except asyncio.TimeoutError:
+            await self.bot.reset_cooldown(ctx)
+            # Refund money to initiating team
+            await self.bot.pool.execute(
+                'UPDATE profile SET "money"="money"+$1 WHERE "user" IN ($2, $3);',
+                money,
+                ctx.author.id,
+                teammate_.id,
+            )
+            return await ctx.send(
+                _("Not all opponents joined the raidbattle, {author} and {teammate}.").format(
+                    author=ctx.author.mention,
+                    teammate=teammate_.mention
+                )
+            )
+
+        # Deduct money from opponents
+        for opponent in opponents_:
+            await self.bot.pool.execute(
+                'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
+                money,
+                opponent.id,
+            )
+
+        # Now, set up the teams
+        team_a = [ctx.author, teammate_]
+        team_b = opponents_
+
+        # Initialize players' data
+        players_data = []
+
+        # Fetch player stats for all players
+        async with self.bot.pool.acquire() as conn:
+            for player in team_a + team_b:
+                try:
+                    user_id = player.id
+
+                    luck_booster = await self.bot.get_booster(player, "luck")
+
+                    query = 'SELECT "luck", "health", "stathp" FROM profile WHERE "user" = $1;'
+                    result = await conn.fetchrow(query, user_id)
+                    if result:
+                        luck_value = float(result['luck'])
+                        if luck_value <= 0.3:
+                            Luck = 20
+                        else:
+                            Luck = ((luck_value - 0.3) / (1.5 - 0.3)) * 80 + 20
+                        Luck = float(round(Luck, 2))
+
+                        if luck_booster:
+                            Luck += Luck * 0.25
+                            Luck = float(min(Luck, 100))
+
+                        base_health = 250
+                        health = result['health'] + base_health
+                        stathp = result['stathp'] * 50
+                        dmg, deff = await self.bot.get_raidstats(player, conn=conn)
+
+                        # Get XP and level
+                        xp = await conn.fetchval('SELECT "xp" FROM profile WHERE "user" = $1;', user_id)
+                        level = rpgtools.xptolevel(xp)
+                        total_health = health + (level * 5)
+                        total_health = total_health + stathp
+
+                        # Create player dictionary with relevant information
+                        player_data = {
+                            "user": player,
+                            "hp": total_health,
+                            "max_hp": total_health,
+                            "armor": deff,
+                            "damage": dmg,
+                            "luck": Luck,
+                            "team": "A" if player in team_a else "B"
+                        }
+                        players_data.append(player_data)
+                    else:
+                        await ctx.send(f"User with ID {user_id} not found in the profile table.")
+                except Exception as e:
+                    await ctx.send(f"An error occurred: {e}")
+
+        # Begin the battle
+        battle_log = deque(
+            [
+                (
+                    0,
+                    _("Raidbattle Team A vs. Team B started!")
+                )
+            ],
+            maxlen=5,
+        )
+
+        # Function to create HP bar
+        def create_hp_bar(self, current_hp, max_hp, length=20):
+            ratio = current_hp / max_hp if max_hp > 0 else 0
+            ratio = max(0, min(1, ratio))  # Ensure ratio is between 0 and 1
+            filled_length = int(length * ratio)
+            bar = '█' * filled_length + '░' * (length - filled_length)
+            return bar
+
+        # Create initial embed
+        embed = discord.Embed(
+            title=_("Raid Battle: Team A vs Team B"),
+            color=self.bot.config.game.primary_colour
+        )
+
+        # Initialize player stats in the embed
+        for team_label, team in [("Team A", team_a), ("Team B", team_b)]:
+            team_players = [p for p in players_data if p["user"] in team]
+            for player in team_players:
+                current_hp = max(0, round(player["hp"], 2))
+                max_hp = player["max_hp"]
+                hp_bar = create_hp_bar(current_hp, max_hp)
+                field_name = f"{player['user'].display_name} [{team_label}]"
+                field_value = f"HP: {current_hp}/{max_hp}\n{hp_bar}"
+                embed.add_field(name=field_name, value=field_value, inline=False)
+
+        # Add initial battle log
+        embed.add_field(name=_("Battle Log"), value=battle_log[0][1], inline=False)
+
+        log_message = await ctx.send(embed=embed)
+        await asyncio.sleep(4)
+
+        start = datetime.datetime.utcnow()
+        attacking_team = random.choice(["A", "B"])
+        team_players = {"A": [p for p in players_data if p["team"] == "A"],
+                        "B": [p for p in players_data if p["team"] == "B"]}
+
+        # Main battle loop
+        while (
+                any(p["hp"] > 0 for p in team_players["A"])
+                and any(p["hp"] > 0 for p in team_players["B"])
+                and datetime.datetime.utcnow() < start + datetime.timedelta(minutes=5)
+        ):
+            # Attacking team attacks
+            attackers = [p for p in team_players[attacking_team] if p["hp"] > 0]
+            defenders = [p for p in team_players["B" if attacking_team == "A" else "A"] if p["hp"] > 0]
+
+            for attacker in attackers:
+                if not defenders:
+                    break  # No defenders left
+                defender = random.choice(defenders)
 
                 trickluck = float(random.randint(1, 100))
 
                 if float(trickluck) < float(attacker["luck"]):
-                    # Check for Mage's Fireball ability
-                    if attacker.get("mage_evolution") is not None:
-                        fireball_chance = random.randint(1, 100)
-                        if fireball_chance <= 40:
-                            evolution_level = attacker["mage_evolution"]
-                            damage_multiplier = evolution_damage_multiplier.get(evolution_level, 1.0)
-                            dmg = (
-                                    (attacker["damage"] + Decimal(random.randint(0, 100)) - defender["armor"])
-                                    * Decimal(damage_multiplier)
-                            )
-                            dmg = max(dmg, 1)
-                            defender["hp"] -= dmg
+                    # Regular attack
+                    dmg = (
+                            attacker["damage"] + Decimal(random.randint(0, 100)) - defender["armor"]
+                    )
+                    dmg = max(dmg, 1)
+                    defender["hp"] -= dmg
 
-                            # Initialize message
-                            message = _("{attacker} casts Fireball! {defender} takes **{dmg}HP** damage.").format(
-                                attacker=attacker["user"],
-                                defender=defender["user"],
-                                dmg=dmg,
-                            )
-                        else:
-                            # Regular attack
-                            dmg = (
-                                    attacker["damage"] + Decimal(random.randint(0, 100)) - defender["armor"]
-                            )
-                            dmg = max(dmg, 1)
-                            defender["hp"] -= dmg
-
-                            # Initialize message
-                            message = _("{attacker} attacks! {defender} takes **{dmg}HP** damage.").format(
-                                attacker=attacker["user"],
-                                defender=defender["user"],
-                                dmg=dmg,
-                            )
-                    else:
-                        # Regular attack for non-Mage
-                        dmg = (
-                                attacker["damage"] + Decimal(random.randint(0, 100)) - defender["armor"]
-                        )
-                        dmg = max(dmg, 1)
-                        defender["hp"] -= dmg
-
-                        # Initialize message
-                        message = _("{attacker} attacks! {defender} takes **{dmg}HP** damage.").format(
-                            attacker=attacker["user"],
-                            defender=defender["user"],
-                            dmg=dmg,
-                        )
+                    # Initialize message
+                    message = _("{attacker} attacks! {defender} takes **{dmg}HP** damage.").format(
+                        attacker=attacker["user"],
+                        defender=defender["user"],
+                        dmg=dmg,
+                    )
 
                     # Check if defender is defeated
                     if defender["hp"] <= 0:
-                        # Handle cheat death if defender is the player
-                        if defender["user"] == ctx.author:
-                            chance = authorchance
-                            random_number = random.randint(1, 100)
-                            if not cheated:
-                                if random_number <= chance:
-                                    defender["hp"] = 75
-                                    cheated = True
-                                    message += _(" {defender} cheats death and survives with 75HP!").format(
-                                        defender=defender["user"]
-                                    )
-                                else:
-                                    defender["hp"] = 0
-                                    message += _(" {defender} is defeated!").format(
-                                        defender=defender["user"]
-                                    )
-                            else:
-                                defender["hp"] = 0
-                                message += _(" {defender} is defeated!").format(
-                                    defender=defender["user"]
-                                )
-                        else:
-                            defender["hp"] = 0
-                            message += _(" {defender} is defeated!").format(
-                                defender=defender["user"]
-                            )
-                    else:
-                        # Handle lifesteal if applicable
-                        if attacker["user"] == ctx.author:
-                            if lifestealauth != 0:
-                                lifesteal_percentage = Decimal(lifestealauth) / Decimal(100)
-                                heal = lifesteal_percentage * Decimal(dmg)
-                                attacker["hp"] += heal.quantize(Decimal('0.00'), rounding=ROUND_HALF_UP)
-                                if attacker["hp"] > max_hp_limit:
-                                    attacker["hp"] = max_hp_limit
-                                message += _(" Lifesteals: **{heal}HP**").format(heal=heal)
-                        else:
-                            if lifestealopp != 0:
-                                lifesteal_percentage = Decimal(lifestealopp) / Decimal(100)
-                                heal = lifesteal_percentage * Decimal(dmg)
-                                attacker["hp"] += heal.quantize(Decimal('0.00'), rounding=ROUND_HALF_UP)
-                                if attacker["hp"] > max_hp_limit:
-                                    attacker["hp"] = max_hp_limit
-                                message += _(" Lifesteals: **{heal}HP**").format(heal=heal)
+                        defender["hp"] = 0
+                        message += _(" {defender} is defeated!").format(
+                            defender=defender["user"]
+                        )
+                        defenders.remove(defender)
                 else:
                     # Attacker tripped and took damage
                     dmg = Decimal('10.000')
@@ -5294,67 +6543,1463 @@ class Battles(commands.Cog):
                     )
                 )
 
-                # Update the embed with fixed positions
+                # Update the embed
                 embed = discord.Embed(
-                    description=_("{p1} {emoji1} - {hp1} HP left\n{p2} {emoji2} - {hp2} HP left").format(
-                        p1=players[0]["user"],
-                        hp1=players[0]["hp"],
-                        p2=players[1]["user"],
-                        hp2=players[1]["hp"],
-                        emoji1=emoji_for_element,
-                        emoji2=emoji_for_elementenemy,
-                    ),
-                    color=self.bot.config.game.primary_colour,
+                    title=_("Raid Battle: Team A vs Team B"),
+                    color=self.bot.config.game.primary_colour
                 )
 
+                # Update player stats in the embed
+                for team_label, team in [("Team A", team_a), ("Team B", team_b)]:
+                    team_players_list = [p for p in players_data if p["user"] in team]
+                    for player in team_players_list:
+                        current_hp = max(0, round(player["hp"], 2))
+                        max_hp = player["max_hp"]
+                        hp_bar = create_hp_bar(current_hp, max_hp)
+                        field_name = f"{player['user'].display_name} [{team_label}]"
+                        field_value = f"HP: {current_hp}/{max_hp}\n{hp_bar}"
+                        embed.add_field(name=field_name, value=field_value, inline=False)
+
+                # Update battle log in the embed
+                battle_log_text = ''
                 for line in battle_log:
-                    embed.add_field(
-                        name=_("Action #{number}").format(number=line[0]), value=line[1]
+                    battle_log_text += f"**Action #{line[0]}**\n{line[1]}\n"
+
+                embed.add_field(name=_("Battle Log"), value=battle_log_text, inline=False)
+
+                await log_message.edit(embed=embed)
+                await asyncio.sleep(2)
+
+                # Check if defenders are defeated and break if so
+                if not any(p["hp"] > 0 for p in defenders):
+                    break  # Battle ends
+
+            # Swap attacking team for the next turn
+            attacking_team = "B" if attacking_team == "A" else "A"
+
+        # Determine the winning team
+        if any(p["hp"] > 0 for p in team_players["A"]):
+            winning_team = team_players["A"]
+            losing_team = team_players["B"]
+        else:
+            winning_team = team_players["B"]
+            losing_team = team_players["A"]
+
+        # Update database and send final message
+        async with self.bot.pool.acquire() as conn:
+            # Distribute winnings
+            total_money = money * 4
+            winnings_per_player = total_money / 2  # Split among two winning players
+            for winner in winning_team:
+                await conn.execute(
+                    'UPDATE profile SET "money"="money"+$1, "pvpwins"="pvpwins"+1 WHERE "user"=$2;',
+                    winnings_per_player,
+                    winner["user"].id,
+                )
+            # Log transactions
+            for loser in losing_team:
+                await self.bot.log_transaction(
+                    ctx,
+                    from_=loser["user"].id,
+                    to=None,
+                    subject="RaidBattle Bet Loss",
+                    data={"Gold": money},
+                    conn=conn,
+                )
+            for winner in winning_team:
+                await self.bot.log_transaction(
+                    ctx,
+                    from_=None,
+                    to=winner["user"].id,
+                    subject="RaidBattle Bet Win",
+                    data={"Gold": winnings_per_player},
+                    conn=conn,
+                )
+
+        # Announce the winning team
+        winning_team_mentions = ", ".join([p["user"].mention for p in winning_team])
+        losing_team_mentions = ", ".join([p["user"].mention for p in losing_team])
+        await ctx.send(
+            _("{winners} won the raidbattle against {losers}! Congratulations!").format(
+                winners=winning_team_mentions,
+                losers=losing_team_mentions
+            )
+        )
+
+    @pets.command(brief=_("Equip a pet"),
+                      description="Equip one of your pets to use in battles. Only one pet can be equipped at a time.")
+    async def equip(self, ctx, petid: int):
+        async with self.bot.pool.acquire() as conn:
+            # Fetch the specified pet
+            pet = await conn.fetchrow(
+                "SELECT * FROM monster_pets WHERE user_id = $1 AND monster_pets.id = $2;",
+                ctx.author.id,
+                petid,
+            )
+            if not pet:
+                await ctx.send(f"You don't have a pet with the ID: {id}.")
+                return
+            petname = pet["name"]
+            # Check if the pet is at least "young"
+            if pet["growth_stage"] not in ["young", "adult"]:
+                await ctx.send(f"{petname} must be at least in the young growth stage to be equipped.")
+                return
+
+            # Unequip the currently equipped pet, if any
+            await conn.execute(
+                "UPDATE monster_pets SET equipped = FALSE WHERE user_id = $1 AND equipped = TRUE;",
+                ctx.author.id,
+            )
+
+            # Equip the selected pet
+            await conn.execute(
+                "UPDATE monster_pets SET equipped = TRUE WHERE monster_pets.id = $1;",
+                petid,
+            )
+
+            await ctx.send(f"You have equipped {petname} successfully!")
+
+    @pets.command(brief=_("Unequip a pet"),
+                      description="Unequip one of your pets to use in battles. Only one pet can be equipped at a time.")
+    async def unequip(self, ctx, petid: int):
+        async with self.bot.pool.acquire() as conn:
+            # Fetch the specified pet
+            pet = await conn.fetchrow(
+                "SELECT * FROM monster_pets WHERE user_id = $1 AND monster_pets.id = $2;",
+                ctx.author.id,
+                petid,
+            )
+            if not pet:
+                await ctx.send(f"You don't have a pet with the ID: {id}.")
+                return
+            petname = pet["name"]
+            # Check if the pet is at least "young"
+            if pet["growth_stage"] not in ["young", "adult"]:
+                await ctx.send(f"{petname} must be at least in the young growth stage to be equipped.")
+                return
+
+            # Unequip the currently equipped pet, if any
+            await conn.execute(
+                "UPDATE monster_pets SET equipped = FALSE WHERE user_id = $1 AND equipped = TRUE;",
+                ctx.author.id,
+            )
+
+
+
+            await ctx.send(f"You have equipped {petname} successfully!")
+
+    @pets.command(brief=_("Learn how to use the pet system"))
+    async def help(self, ctx):
+        """
+        Provides a detailed guide on pet-related commands and how to get a pet.
+        """
+        embed = discord.Embed(
+            title=_("Pet System Guide"),
+            description=_("Learn how to care for, manage, and interact with your pets in the game!"),
+            color=discord.Color.green(),
+        )
+
+        embed.add_field(
+            name=_("🐾 How to Get a Pet"),
+            value=_(
+                "You can find **monster eggs** as rare rewards during PVE battles. Each egg hatches into a unique pet after a specific time.\n"
+                "Use `$pets eggs` to check your eggs!"
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="\u200b",  # Invisible spacer field
+            value="\u200b",
+            inline=False,
+        )
+
+        embed.add_field(
+            name=_("🔍 `$pets`"),
+            value=_(
+                "View all your current pets in a **paginated list**. Use the buttons to navigate through your pets.\n"
+                "This command shows their stats, growth stage, and other details."
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="\u200b",  # Invisible spacer field
+            value="\u200b",
+            inline=False,
+        )
+
+        embed.add_field(
+            name=_("🍖 `$pets feed <id>`"),
+            value=_(
+                "Feed a specific pet by its ID to increase its **hunger** and **happiness**.\n"
+                "Pets need regular feeding to stay happy and healthy.\n"
+                "⚠️ If hunger or happiness drops to zero, your pet may run away or starve!"
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="\u200b",  # Invisible spacer field
+            value="\u200b",
+            inline=False,
+        )
+
+        embed.add_field(
+            name=_("⚔️ `$pets equip <id>`"),
+            value=_(
+                "Equip a pet to fight alongside you in battles and raids.\n"
+                "Only pets in the **young** stage or older can be equipped.\n"
+                "Equipped pets will use their stats to support you in combat."
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="\u200b",  # Invisible spacer field
+            value="\u200b",
+            inline=False,
+        )
+
+        embed.add_field(
+            name=_("💔 `$pets release <id>`"),
+            value=_(
+                "Release a pet back into the wild or an egg into nature.\n"
+                "⚠️ This action is permanent, so choose wisely.\n"
+                "A touching farewell message will accompany their departure."
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="\u200b",  # Invisible spacer field
+            value="\u200b",
+            inline=False,
+        )
+
+        embed.add_field(
+            name=_("🔄 `$pets trade <your_pet_id> <their_pet_id>`"),
+            value=_(
+                "Initiate a **trade** with another user by exchanging pets.\n"
+                "Both users must agree to the trade within **2 minutes**, or the pets will remain with their original owners."
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="\u200b",  # Invisible spacer field
+            value="\u200b",
+            inline=False,
+        )
+
+        embed.add_field(
+            name=_("💰 `$pets sell <id> <@user> <amount>`"),
+            value=_(
+                "Sell one of your pets to another user for an agreed price.\n"
+                "The transaction must be completed within **2 minutes**, or the pet and money will return to their owners."
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="\u200b",  # Invisible spacer field
+            value="\u200b",
+            inline=False,
+        )
+
+        embed.add_field(
+            name=_("📦 `$pets eggs`"),
+            value=_(
+                "View all your unhatched eggs and their remaining hatch time.\n"
+                "Make sure to keep track of your eggs to avoid missing out!"
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="\u200b",  # Invisible spacer field
+            value="\u200b",
+            inline=False,
+        )
+
+        embed.add_field(
+            name=_("🎮 `$pets mypets`"),
+            value=_(
+                "View and manage your current pets, including their stats, happiness, and hunger levels."
+            ),
+            inline=False,
+        )
+
+        embed.set_footer(text=_("Take care of your pets to grow them into powerful allies!"))
+        await ctx.send(embed=embed)
+
+
+    # Initialize the bot with the desired prefix
+    #Function to format the monsters data
+
+
+    @has_char()
+    @commands.command(brief=_("Battle against a monster and gain XP"), hidden=True)
+    @user_cooldown(3600)  # 5-minute cooldown
+    @locale_doc
+    async def pve(self, ctx):
+        _(
+            """Battle against a monster and gain experience points.
+
+            Fight against a monster of your level.
+            To decide your stats, your items, race, and class bonuses are evaluated.
+
+            You also have a chance of tripping depending on your luck.
+
+            The battle is divided into rounds, where you and the monster take turns attacking.
+
+            The battle ends if your HP or the monster's HP drops to 0 (winner decided), or if 5 minutes pass (tie).
+
+            In case of a tie, no XP is gained.
+
+            If you win, you gain XP based on the monster's level.
+
+            (This command has a cooldown of 5 minutes)"""
+        )
+
+
+        # Define the elements and their strengths
+        elements = ['Fire', 'Water', 'Earth', 'Wind', 'Light', 'Dark', 'Electric', 'Nature', 'Corrupted']
+
+        # Define element strengths for damage modifiers
+        element_strengths = {
+            "Light": "Corrupted",
+            "Dark": "Light",
+            "Corrupted": "Dark",
+            "Nature": "Electric",
+            "Electric": "Water",
+            "Water": "Fire",
+            "Fire": "Nature",
+            "Wind": "Electric"
+        }
+
+        # Define element to emoji mapping
+        element_to_emoji = {
+            "Light": "🌟",
+            "Dark": "🌑",
+            "Corrupted": "🌀",
+            "Nature": "🌿",
+            "Electric": "⚡",
+            "Water": "💧",
+            "Fire": "🔥",
+            "Wind": "💨",
+            "Earth": "🌍",
+        }
+
+        # Define class-specific values
+        specified_words_values = {
+            "Deathshroud": 20,
+            "Soul Warden": 30,
+            "Reaper": 40,
+            "Phantom Scythe": 50,
+            "Soul Snatcher": 60,
+            "Deathbringer": 70,
+            "Grim Reaper": 80,
+        }
+
+        life_steal_values = {
+            "Little Helper": 7,
+            "Gift Gatherer": 14,
+            "Holiday Aide": 21,
+            "Joyful Jester": 28,
+            "Yuletide Guardian": 35,
+            "Festive Enforcer": 40,
+            "Festive Champion": 60,
+        }
+
+        mage_evolution_levels = {
+            "Witcher": 1,
+            "Enchanter": 2,
+            "Mage": 3,
+            "Warlock": 4,
+            "Dark Caster": 5,
+            "White Sorcerer": 6,
+        }
+
+        evolution_damage_multiplier = {
+            1: 1.10,  # 110%
+            2: 1.20,  # 120%
+            3: 1.30,  # 130%
+            4: 1.50,  # 150%
+            5: 1.75,  # 175%
+            6: 2.00,  # 200%
+        }
+
+        # Define the monsters per level
+        monsters = {
+            1: [
+                {"name": "Sneevil", "hp": 100, "attack": 95, "defense": 100, "element": "Earth", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Sneevil-removebg-preview.png"},
+                {"name": "Slime", "hp": 120, "attack": 100, "defense": 105, "element": "Water", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_slime.png"},
+                {"name": "Frogzard", "hp": 120, "attack": 90, "defense": 95, "element": "Nature", "url": "https://static.wikia.nocookie.net/aqwikia/images/d/d6/Frogzard.png"},
+                {"name": "Rat", "hp": 90, "attack": 100, "defense": 90, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Rat-removebg-preview.png"},
+                {"name": "Bat", "hp": 150, "attack": 95, "defense": 85, "element": "Wind", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Bat-removebg-preview.png"},
+                {"name": "Skeleton", "hp": 190, "attack": 105, "defense": 100, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Skelly-removebg-preview.png"},
+                {"name": "Imp", "hp": 180, "attack": 95, "defense": 85, "element": "Fire", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zZquzlh-removebg-preview.png"},
+                {"name": "Pixie", "hp": 100, "attack": 90, "defense": 80, "element": "Light", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_pixie-removebg-preview.png"},
+                {"name": "Zombie", "hp": 170, "attack": 100, "defense": 95, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zombie-removebg-preview.png"},
+                {"name": "Spiderling", "hp": 220, "attack": 95, "defense": 90, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_spider-removebg-preview.png"},
+                {"name": "Spiderling", "hp": 220, "attack": 95, "defense": 90, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_spider-removebg-preview.png"},
+                {"name": "Moglin", "hp": 200, "attack": 90, "defense": 85, "element": "Light", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Moglin.png"},
+                {"name": "Red Ant", "hp": 140, "attack": 105, "defense": 100, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_redant-removebg-preview.png"},
+                {"name": "Chickencow", "hp": 300, "attack": 150, "defense": 90, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChickenCow-removebg-preview.png"},
+                {"name": "Tog", "hp": 380, "attack": 105, "defense": 95, "element": "Earth", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Tog-removebg-preview.png"},
+                {"name": "Lemurphant", "hp": 340, "attack": 95, "defense": 80, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Lemurphant-removebg-preview.png"},
+                {"name": "Fire Imp", "hp": 200, "attack": 100, "defense": 90, "element": "Fire", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zZquzlh-removebg-preview.png"},
+                {"name": "Zardman", "hp": 300, "attack": 95, "defense": 100, "element": "Earth", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Zardman-removebg-preview.png"},
+                {"name": "Wind Elemental", "hp": 165, "attack": 90, "defense": 85, "element": "Wind", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_WindElemental-removebg-preview.png"},
+                {"name": "Dark Wolf", "hp": 200, "attack": 100, "defense": 90, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DarkWolf-removebg-preview.png"},
+                {"name": "Treeant", "hp": 205, "attack": 105, "defense": 95, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Treeant-removebg-preview.png"},
+            ],
+            2: [
+                {"name": "Cyclops Warlord", "hp": 230, "attack": 160, "defense": 155, "element": "Earth", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_CR-removebg-preview.png"},
+                {"name": "Fishman Soldier", "hp": 200, "attack": 165, "defense": 160, "element": "Water", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Fisherman-removebg-preview.png"},
+                {"name": "Fire Elemental", "hp": 215, "attack": 150, "defense": 145, "element": "Fire", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_fire_elemental-removebg-preview.png"},
+                {"name": "Vampire Bat", "hp": 200, "attack": 170, "defense": 160, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_viO2oSJ-removebg-preview.png"},
+                {"name": "Blood Eagle", "hp": 195, "attack": 165, "defense": 150, "element": "Wind", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BloodEagle-removebg-preview.png"},
+                {"name": "Earth Elemental", "hp": 190, "attack": 175, "defense": 160, "element": "Earth", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Earth_Elemental-removebg-preview.png"},
+                {"name": "Fire Mage", "hp": 200, "attack": 160, "defense": 140, "element": "Fire", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireMage-removebg-preview.png"},
+                {"name": "Dready Bear", "hp": 230, "attack": 155, "defense": 150, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_dreddy-removebg-preview.png"},
+                {"name": "Undead Soldier", "hp": 280, "attack": 160, "defense": 155, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_UndeadSoldier-removebg-preview.png"},
+                {"name": "Skeleton Warrior", "hp": 330, "attack": 155, "defense": 150, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SkeelyWarrior-removebg-preview.png"},
+                {"name": "Giant Spider", "hp": 350, "attack": 160, "defense": 145, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DreadSpider-removebg-preview.png"},
+                {"name": "Castle spider", "hp": 310, "attack": 170, "defense": 160, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Castle-removebg-preview.png"},
+                {"name": "ConRot", "hp": 210, "attack": 165, "defense": 155, "element": "Water", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ConRot-removebg-preview.png"},
+                {"name": "Horc Warrior", "hp": 270, "attack": 175, "defense": 170, "element": "Earth", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_HorcWarrior-removebg-preview.png"},
+                {"name": "Shadow Hound", "hp": 300, "attack": 160, "defense": 150, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Hound-removebg-preview.png"},
+                {"name": "Fire Sprite", "hp": 290, "attack": 165, "defense": 155, "element": "Fire", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireSprite-removebg-preview.png"},
+                {"name": "Rock Elemental", "hp": 300, "attack": 160, "defense": 165, "element": "Earth", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Earth_Elemental-removebg-preview.png"},
+                {"name": "Shadow Serpent", "hp": 335, "attack": 155, "defense": 150, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadowSerpant-removebg-preview.png"},
+                {"name": "Dark Elemental", "hp": 340, "attack": 165, "defense": 155, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DarkEle-Photoroom.png"},
+                {"name": "Forest Guardian", "hp": 500, "attack": 250, "defense": 250, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ForestGuardian-removebg-preview.png"},
+            ],
+            3: [
+                {"name": "Mana Golem", "hp": 200, "attack": 220, "defense": 210, "element": "Corrupted", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_managolum-removebg-preview.png"},
+                {"name": "Karok the Fallen", "hp": 180, "attack": 215, "defense": 205, "element": "Ice", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_VIMs8un-removebg-preview.png"},
+                {"name": "Water Draconian", "hp": 220, "attack": 225, "defense": 200, "element": "Water", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_waterdrag-removebg-preview.png"},
+                {"name": "Shadow Creeper", "hp": 190, "attack": 220, "defense": 205, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_shadowcreep-removebg-preview.png"},
+                {"name": "Wind Djinn", "hp": 210, "attack": 225, "defense": 215, "element": "Wind", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_djinn-removebg-preview.png"},
+                {"name": "Autunm Fox", "hp": 205, "attack": 230, "defense": 220, "element": "Earth", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Autumn_Fox-removebg-preview.png"},
+                {"name": "Dark Draconian", "hp": 195, "attack": 220, "defense": 200, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_darkdom-removebg-preview.png"},
+                {"name": "Light Elemental", "hp": 185, "attack": 215, "defense": 210, "element": "Light", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_LightELemental-removebg-preview.png"},
+                {"name": "Undead Giant", "hp": 230, "attack": 220, "defense": 210, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_UndGiant-removebg-preview.png"},
+                {"name": "Chaos Spider", "hp": 215, "attack": 215, "defense": 205, "element": "Corrupted", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosSpider-removebg-preview.png"},
+                {"name": "Seed Spitter", "hp": 225, "attack": 220, "defense": 200, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SeedSpitter-removebg-preview.png"},
+                {"name": "Beach Werewolf", "hp": 240, "attack": 230, "defense": 220, "element": "Water", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BeachWerewold-removebg-preview.png"},
+                {"name": "Boss Dummy", "hp": 220, "attack": 225, "defense": 210, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BossDummy-removebg-preview.png"},
+                {"name": "Rock", "hp": 235, "attack": 225, "defense": 215, "element": "Earth", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Rock-removebg-preview.png"},
+                {"name": "Shadow Serpent", "hp": 200, "attack": 220, "defense": 205, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadoeSerpant-removebg-preview.png"},
+                {"name": "Flame Elemental", "hp": 210, "attack": 225, "defense": 210, "element": "Fire", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireElemental-removebg-preview.png"},
+                {"name": "Bear", "hp": 225, "attack": 215, "defense": 220, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732611726453.png"},
+                {"name": "Chair", "hp": 215, "attack": 210, "defense": 215, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_chair-removebg-preview.png"},
+                {"name": "Chaos Serpant", "hp": 230, "attack": 220, "defense": 205, "element": "Corrupted", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosSerp-removebg-preview.png"},
+                {"name": "Gorillaphant", "hp": 240, "attack": 225, "defense": 210, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_gorillaserpant-removebg-preview.png"},
+            ],
+            4: [
+                {"name": "Hydra Head", "hp": 300, "attack": 280, "defense": 270, "element": "Water", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_hydra.png"},
+                {"name": "Blessed Deer", "hp": 280, "attack": 275, "defense": 265, "element": "Light", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BlessedDeer-removebg-preview.png"},
+                {"name": "Chaos Sphinx", "hp": 320, "attack": 290, "defense": 275, "element": "Corrupted", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaopsSpinx.png"},
+                {"name": "Inferno Dracolion", "hp": 290, "attack": 285, "defense": 270, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614284328.png"},
+                {"name": "Wind Cyclone", "hp": 310, "attack": 290, "defense": 280, "element": "Wind", "url": ""},
+                {"name": "Dwakel Blaster", "hp": 305, "attack": 295, "defense": 285, "element": "Electric", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Bubble.png"},
+                {"name": "Infernal Fiend", "hp": 295, "attack": 285, "defense": 270, "element": "Fire", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614284328.png"},
+                {"name": "Dark Mukai", "hp": 285, "attack": 275, "defense": 265, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614826889.png"},
+                {"name": "Undead Berserker", "hp": 330, "attack": 285, "defense": 275, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614863579.png"},
+                {"name": "Chaos Warrior", "hp": 315, "attack": 280, "defense": 270, "element": "Corrupted", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosWarrior-removebg-preview.png"},
+                {"name": "Dire Wolf", "hp": 325, "attack": 285, "defense": 275, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DireWolf-removebg-preview.png"},
+                {"name": "Skye Warrior", "hp": 340, "attack": 295, "defense": 285, "element": "Corrupted", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SkyeWarrior-removebg-preview.png"},
+                {"name": "Death On Wings", "hp": 320, "attack": 290, "defense": 275, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DeathonWings-removebg-preview.png"},
+                {"name": "Chaorruption", "hp": 335, "attack": 295, "defense": 285, "element": "Corrupted", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Chaorruption-removebg-preview.png"},
+                {"name": "Shadow Beast", "hp": 300, "attack": 285, "defense": 270, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadowBeast-removebg-preview.png"},
+                {"name": "Hootbear", "hp": 310, "attack": 290, "defense": 275, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_HootBear-removebg-preview.png"},
+                {"name": "Anxiety", "hp": 325, "attack": 280, "defense": 290, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_anxiety-removebg-preview.png"},
+                {"name": "Twilly", "hp": 315, "attack": 275, "defense": 285, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Twilly-removebg-preview.png"},
+                {"name": "Black Cat", "hp": 330, "attack": 285, "defense": 270, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_QJsLMnk-removebg-preview.png"},
+                {"name": "Forest Guardian", "hp": 340, "attack": 290, "defense": 275, "element": "Nature", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ForestGuardian-removebg-preview.png"},
+            ],
+            5: [
+                {"name": "Chaos Dragon", "hp": 400, "attack": 380, "defense": 370, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosDragon-removebg-preview.png"},
+                {"name": "Wooden Door", "hp": 380, "attack": 375, "defense": 365, "element": "Earth", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_WoodenDoor-removebg-preview.png"},
+                {"name": "Garvodeus", "hp": 420, "attack": 390, "defense": 375, "element": "Water", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Garvodeus-removebg-preview.png"},
+                {"name": "Shadow Lich", "hp": 390, "attack": 385, "defense": 370, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadowLich-removebg-preview.png"},
+                {"name": "Zorbak", "hp": 410, "attack": 390, "defense": 380, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Zorbak-removebg-preview.png"},
+                {"name": "Dwakel Rocketman", "hp": 405, "attack": 395, "defense": 385, "element": "Electric", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DwarkalRock-removebg-preview.png"},
+                {"name": "Kathool", "hp": 395, "attack": 385, "defense": 370, "element": "Water", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Kathool-removebg-preview.png"},
+                {"name": "Celestial Honud", "hp": 385, "attack": 375, "defense": 365, "element": "Light", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_CelestialHound-removebg-preview.png"},
+                {"name": "Undead Raxgore", "hp": 430, "attack": 385, "defense": 375, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Raxfore-removebg-preview_1.png"},
+                {"name": "Droognax", "hp": 415, "attack": 380, "defense": 370, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Droognax-removebg-preview.png"},
+                {"name": "Corrupted Boar", "hp": 425, "attack": 385, "defense": 375, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Corrupted_Bear-removebg-preview.png"},
+                {"name": "Fressa", "hp": 440, "attack": 395, "defense": 385, "element": "Water", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Fressa-removebg-preview.png"},
+                {"name": "Grimskull", "hp": 420, "attack": 390, "defense": 375, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Grimskull-removebg-preview.png"},
+                {"name": "Chaotic Chicken", "hp": 435, "attack": 385, "defense": 380, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaoticChicken-removebg-preview.png"},
+                {"name": "Baelgar", "hp": 400, "attack": 385, "defense": 370, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Baelgar-removebg-preview.png"},
+                {"name": "Blood Dragon", "hp": 410, "attack": 390, "defense": 375, "element": "Fire", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BloodDragon-removebg-preview.png"},
+                {"name": "Avatar of Desolich", "hp": 425, "attack": 380, "defense": 390, "element": "Fire", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732696555786.png"},
+                {"name": "Piggy Drake", "hp": 415, "attack": 375, "defense": 385, "element": "Wind", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732696596976.png"},
+                {"name": "Chaos Alteon", "hp": 430, "attack": 385, "defense": 370, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Chaos_Alteon-removebg-preview.png"},
+                {"name": "Argo", "hp": 440, "attack": 380, "defense": 375, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Argo-removebg-preview.png"},
+            ],
+            6: [
+                {"name": "Ultra Chaos Dragon", "hp": 500, "attack": 470, "defense": 460, "element": "Corrupted", "url":""},
+                {"name": "Earth Titan Golem", "hp": 480, "attack": 465, "defense": 455, "element": "Earth", "url":""},
+                {"name": "Water Titan Kraken", "hp": 520, "attack": 475, "defense": 460, "element": "Water", "url":""},
+                {"name": "Shadow Lord Sepulchure", "hp": 490, "attack": 470, "defense": 455, "element": "Dark", "url":""},
+                {"name": "Wind Elemental Titan", "hp": 510, "attack": 475, "defense": 465, "element": "Wind", "url":""},
+                {"name": "Dwakel Mecha", "hp": 505, "attack": 480, "defense": 470, "element": "Electric", "url":""},
+                {"name": "Infernal Warlord", "hp": 495, "attack": 470, "defense": 455, "element": "Fire", "url":""},
+                {"name": "Divine Guardian", "hp": 485, "attack": 465, "defense": 455, "element": "Light", "url":""},
+                {"name": "Undead Legion Overlord", "hp": 530, "attack": 475, "defense": 460, "element": "Dark", "url":""},
+                {"name": "Chaos Vordred", "hp": 515, "attack": 470, "defense": 455, "element": "Corrupted", "url":""},
+                {"name": "Dire Mammoth", "hp": 525, "attack": 475, "defense": 460, "element": "Nature", "url":""},
+                {"name": "Storm Titan Lord", "hp": 540, "attack": 480, "defense": 470, "element": "Electric", "url":""},
+                {"name": "Leviathan", "hp": 520, "attack": 475, "defense": 460, "element": "Water", "url":""},
+                {"name": "Earth Elemental Lord", "hp": 535, "attack": 475, "defense": 465, "element": "Earth", "url":""},
+                {"name": "Shadow Beast King", "hp": 500, "attack": 470, "defense": 455, "element": "Dark", "url":""},
+                {"name": "Blazing Inferno Dragon", "hp": 510, "attack": 475, "defense": 460, "element": "Fire", "url":""},
+                {"name": "Obsidian Colossus", "hp": 525, "attack": 465, "defense": 475, "element": "Earth", "url":""},
+                {"name": "Tempest Dragon", "hp": 515, "attack": 460, "defense": 470, "element": "Wind", "url":""},
+                {"name": "Chaos Beast Kathool", "hp": 530, "attack": 475, "defense": 460, "element": "Corrupted", "url":""},
+                {"name": "Great Treeant", "hp": 540, "attack": 470, "defense": 455, "element": "Nature", "url":""},
+            ],
+            7: [
+                {"name": "Ultra Chaos Vordred", "hp": 600, "attack": 570, "defense": 560, "element": "Corrupted", "url":""},
+                {"name": "Earth Colossus", "hp": 580, "attack": 565, "defense": 555, "element": "Earth", "url":""},
+                {"name": "Water Titan Leviathan Prime", "hp": 620, "attack": 575, "defense": 560, "element": "Water", "url":""},
+                {"name": "Shadow Lord Alteon", "hp": 590, "attack": 570, "defense": 555, "element": "Dark", "url":""},
+                {"name": "Wind Titan Zephyr", "hp": 610, "attack": 575, "defense": 565, "element": "Wind", "url":""},
+                {"name": "Dwakel Mecha Prime", "hp": 605, "attack": 580, "defense": 570, "element": "Electric", "url":""},
+                {"name": "Infernal Dragon", "hp": 595, "attack": 570, "defense": 555, "element": "Fire", "url":""},
+                {"name": "Divine Light Elemental", "hp": 585, "attack": 565, "defense": 555, "element": "Light", "url":""},
+                {"name": "Undead Legion Titan", "hp": 630, "attack": 575, "defense": 560, "element": "Dark", "url":""},
+                {"name": "Chaos Beast Escherion", "hp": 615, "attack": 570, "defense": 555, "element": "Corrupted", "url":""},
+                {"name": "Dire Bear", "hp": 625, "attack": 575, "defense": 560, "element": "Nature", "url":""},
+                {"name": "Storm Emperor", "hp": 640, "attack": 580, "defense": 570, "element": "Electric", "url":""},
+                {"name": "Kraken", "hp": 620, "attack": 575, "defense": 560, "element": "Water", "url":""},
+                {"name": "Earth Elemental Prime", "hp": 635, "attack": 575, "defense": 565, "element": "Earth", "url":""},
+                {"name": "Shadow King", "hp": 600, "attack": 570, "defense": 555, "element": "Dark", "url":""},
+                {"name": "Blazing Inferno Titan", "hp": 610, "attack": 575, "defense": 560, "element": "Fire", "url":""},
+                {"name": "Obsidian Titan", "hp": 625, "attack": 565, "defense": 575, "element": "Earth", "url":""},
+                {"name": "Tempest Dragon Prime", "hp": 615, "attack": 560, "defense": 570, "element": "Wind", "url":""},
+                {"name": "Chaos Beast Ledgermayne", "hp": 630, "attack": 575, "defense": 560, "element": "Corrupted", "url":""},
+                {"name": "Ancient Treeant", "hp": 640, "attack": 570, "defense": 555, "element": "Nature", "url":""},
+            ],
+            8: [
+                {"name": "Ultra Chaos Beast", "hp": 700, "attack": 680, "defense": 670, "element": "Corrupted", "url":""},
+                {"name": "Earth Colossus Prime", "hp": 680, "attack": 675, "defense": 665, "element": "Earth", "url":""},
+                {"name": "Water Lord Leviathan", "hp": 720, "attack": 690, "defense": 675, "element": "Water", "url":""},
+                {"name": "Shadow Dragon", "hp": 690, "attack": 680, "defense": 665, "element": "Dark", "url":""},
+                {"name": "Wind Titan Lord", "hp": 710, "attack": 685, "defense": 675, "element": "Wind", "url":""},
+                {"name": "Dwakel Ultimate Mecha", "hp": 705, "attack": 690, "defense": 680, "element": "Electric", "url":""},
+                {"name": "Infernal Warlord Prime", "hp": 695, "attack": 680, "defense": 665, "element": "Fire", "url":""},
+                {"name": "Divine Lightbringer", "hp": 685, "attack": 675, "defense": 665, "element": "Light", "url":""},
+                {"name": "Undead Legion Overlord", "hp": 730, "attack": 680, "defense": 670, "element": "Dark", "url":""},
+                {"name": "Chaos Beast Wolfwing", "hp": 715, "attack": 675, "defense": 665, "element": "Corrupted", "url":""},
+                {"name": "Dire Lion", "hp": 725, "attack": 690, "defense": 675, "element": "Nature", "url":""},
+                {"name": "Storm King Prime", "hp": 740, "attack": 695, "defense": 685, "element": "Electric", "url":""},
+                {"name": "Leviathan Prime", "hp": 720, "attack": 680, "defense": 670, "element": "Water", "url":""},
+                {"name": "Earth Elemental King", "hp": 735, "attack": 675, "defense": 680, "element": "Earth", "url":""},
+                {"name": "Shadow Lord Prime", "hp": 700, "attack": 680, "defense": 665, "element": "Dark", "url":""},
+                {"name": "Blazing Inferno Dragon Prime", "hp": 710, "attack": 685, "defense": 670, "element": "Fire", "url":""},
+                {"name": "Obsidian Colossus Prime", "hp": 725, "attack": 675, "defense": 680, "element": "Earth", "url":""},
+                {"name": "Tempest Dragon Lord", "hp": 715, "attack": 670, "defense": 680, "element": "Wind", "url":""},
+                {"name": "Chaos Beast Kimberly", "hp": 730, "attack": 680, "defense": 665, "element": "Corrupted", "url":""},
+                {"name": "Elder Treeant", "hp": 740, "attack": 675, "defense": 660, "element": "Nature", "url":""},
+            ],
+            9: [
+                {"name": "Ultra Kathool", "hp": 800, "attack": 780, "defense": 770, "element": "Corrupted", "url":""},
+                {"name": "Earth Titan Overlord", "hp": 780, "attack": 775, "defense": 765, "element": "Earth", "url":""},
+                {"name": "Water Lord Leviathan Prime", "hp": 820, "attack": 790, "defense": 775, "element": "Water", "url":""},
+                {"name": "Shadow Lord Alteon Prime", "hp": 790, "attack": 780, "defense": 765, "element": "Dark", "url":""},
+                {"name": "Wind Titan Emperor", "hp": 810, "attack": 785, "defense": 775, "element": "Wind", "url":""},
+                {"name": "Dwakel Ultimate Mecha Prime", "hp": 805, "attack": 790, "defense": 780,
+                 "element": "Electric", "url":""},
+                {"name": "Infernal Warlord Supreme", "hp": 795, "attack": 780, "defense": 765, "element": "Fire", "url":""},
+                {"name": "Divine Light Guardian", "hp": 785, "attack": 775, "defense": 765, "element": "Light", "url":""},
+                {"name": "Undead Legion DoomKnight", "hp": 830, "attack": 780, "defense": 770, "element": "Dark", "url":""},
+                {"name": "Chaos Beast Tibicenas", "hp": 815, "attack": 775, "defense": 765, "element": "Corrupted", "url":""},
+                {"name": "Dire Mammoth Prime", "hp": 825, "attack": 790, "defense": 775, "element": "Nature", "url":""},
+                {"name": "Storm Emperor Prime", "hp": 840, "attack": 795, "defense": 785, "element": "Electric", "url":""},
+                {"name": "Kraken Supreme", "hp": 820, "attack": 780, "defense": 770, "element": "Water", "url":""},
+                {"name": "Earth Elemental Overlord", "hp": 835, "attack": 775, "defense": 780, "element": "Earth", "url":""},
+                {"name": "Shadow Dragon Prime", "hp": 800, "attack": 780, "defense": 765, "element": "Dark", "url":""},
+                {"name": "Blazing Inferno Titan Prime", "hp": 810, "attack": 785, "defense": 770, "element": "Fire", "url":""},
+                {"name": "Obsidian Titan Supreme", "hp": 825, "attack": 775, "defense": 785, "element": "Earth", "url":""},
+                {"name": "Tempest Dragon Emperor", "hp": 815, "attack": 770, "defense": 785, "element": "Wind", "url":""},
+                {"name": "Chaos Beast Iadoa", "hp": 830, "attack": 780, "defense": 765, "element": "Corrupted", "url":""},
+                {"name": "Ancient Guardian Treeant", "hp": 840, "attack": 775, "defense": 760, "element": "Nature", "url":""},
+            ],
+            10: [
+                {"name": "Ultra Chaos Vordred", "hp": 1200, "attack": 600, "defense": 600, "element": "Corrupted", "url":""},
+                {"name": "Shadow Guardian", "hp": 1180, "attack": 595, "defense": 600, "element": "Dark", "url":""},
+                {"name": "Ultra Kathool", "hp": 1250, "attack": 605, "defense": 595, "element": "Corrupted", "url":""},
+                {"name": "Elemental Dragon of Time", "hp": 1220, "attack": 600, "defense": 590, "element": "Electric", "url":""},
+                {"name": "Celestial Dragon", "hp": 1240, "attack": 595, "defense": 595, "element": "Light", "url":""},
+                {"name": "Infernal Warlord Nulgath", "hp": 1230, "attack": 600, "defense": 585, "element": "Fire", "url":""},
+                {"name": "Obsidian Colossus Supreme", "hp": 1260, "attack": 605, "defense": 580, "element": "Earth", "url":""},
+                {"name": "Tempest Dragon King", "hp": 1210, "attack": 600, "defense": 600, "element": "Wind", "url":""},
+                {"name": "Chaos Lord Xiang", "hp": 1250, "attack": 605, "defense": 575, "element": "Corrupted", "url":""},
+                {"name": "Dark Spirit Orbs", "hp": 1190, "attack": 595, "defense": 605, "element": "Dark", "url":""},
+                {"name": "Electric Titan", "hp": 1230, "attack": 600, "defense": 590, "element": "Electric", "url":""},
+                {"name": "Light Elemental Lord", "hp": 1240, "attack": 595, "defense": 595, "element": "Light", "url":""},
+                {"name": "Flame Dragon", "hp": 1220, "attack": 605, "defense": 585, "element": "Fire", "url":""},
+                {"name": "ShadowFlame Dragon", "hp": 1200, "attack": 600, "defense": 600, "element": "Dark", "url":""},
+                {"name": "Chaos Beast Mana Golem", "hp": 1250, "attack": 605, "defense": 575, "element": "Corrupted", "url":""},
+                {"name": "Electric Phoenix", "hp": 1230, "attack": 600, "defense": 590, "element": "Electric", "url":""},
+                {"name": "Light Bringer", "hp": 1240, "attack": 595, "defense": 595, "element": "Light", "url":""},
+                {"name": "Void Dragon", "hp": 1260, "attack": 605, "defense": 580, "element": "Corrupted", "url":""},
+                {"name": "Elemental Titan", "hp": 1210, "attack": 600, "defense": 600, "element": "Electric", "url":""},
+                {"name": "Celestial Guardian Dragon", "hp": 1250, "attack": 605, "defense": 580, "element": "Light", "url":""},
+            ],
+            11: [
+                {"name": "Drakath", "hp": 2500, "attack": 1022, "defense": 648, "element": "Corrupted", "url":""},
+                {"name": "Astraea", "hp": 3100, "attack": 723, "defense": 733, "element": "Light", "url":""},
+                {"name": "Sepulchure", "hp": 2310, "attack": 690, "defense": 866, "element": "Dark", "url":""},
+            ]
+        }
+
+        try:
+            # Ensure all levels have the required number of monsters
+            for level in range(1, 12):
+                if level not in monsters:
+                    await ctx.send(
+                        _("Monsters for level {level} are incomplete. Please contact the admin.").format(level=level))
+                    return
+                if level != 11 and len(monsters[level]) < 20:
+                    await ctx.send(
+                        _("Monsters for level {level} are incomplete. Please contact the admin.").format(level=level))
+                    return
+                if level == 11 and len(monsters[level]) < 3:
+                    await ctx.send(
+                        _("Level 11 monsters are incomplete. Please contact the admin."))
+                    return
+
+            # Fetch the player's XP and level
+            player_xp = ctx.character_data.get("xp", 0)
+            player_level = rpgtools.xptolevel(player_xp)
+
+            # Send an embed indicating that the player is searching for a monster
+            searching_embed = discord.Embed(
+                title=_("Searching for a monster..."),
+                description=_("Your journey begins as you venture into the unknown to find a worthy foe."),
+                color=self.bot.config.game.primary_colour,
+
+            )
+            searching_message = await ctx.send(embed=searching_embed)
+
+            # Simulate searching time
+            await asyncio.sleep(randomm.randint(3, 7))  # Adjust the sleep time as desired
+
+            # Determine if a legendary monster (level 11) should spawn
+            legendary_spawn_chance = 0.01 # 1% chance
+            spawn_legendary = False
+            if player_level >= 5:
+                if randomm.random() < legendary_spawn_chance:
+                    spawn_legendary = True
+
+            if spawn_legendary:
+                # Select one of the 3 legendary gods
+                monster = random.choice(monsters[11])
+                # Send a dramatic announcement
+                legendary_embed = discord.Embed(
+                    title=_("A Legendary God Appears!"),
+                    description=_(
+                        "Behold! **{monster}** has descended to challenge you! Prepare for an epic battle!").format(
+                        monster=monster["name"]
+                    ),
+                    color=discord.Color.gold(),
+
+
+                )
+                await ctx.send(embed=legendary_embed)
+                levelchoice = 11
+                await asyncio.sleep(4)
+            else:
+                # Determine monster level based on player level
+                base_monster_level = math.ceil((player_level - 10) / 10) + 3
+                base_monster_level = max(1, min(10, base_monster_level))  # Clamp between 1 and 10
+
+                # Add some randomness: monster level can vary by ±1
+                monster_level_variation = random.choice([-1, 0, 1])
+                levelchoice = base_monster_level + monster_level_variation
+                levelchoice = max(1, min(10, levelchoice))  # Clamp between 1 and 10
+                levelchoice = randomm.randint(1, 6)
+
+                # Select a random monster from the chosen level
+                monster = random.choice(monsters[levelchoice])
+
+                # Optionally, edit the searching message to indicate that a monster has been found
+                found_embed = discord.Embed(
+                    title=_("Monster Found!"),
+                    description=_("A Level {level} **{monster}** has appeared! Prepare to fight..").format(
+                        level=levelchoice, monster=monster["name"]
+                    ),
+                    color=self.bot.config.game.primary_colour,
+
+                )
+                await searching_message.edit(embed=found_embed)
+                await asyncio.sleep(4)
+
+            # Fetch the player's stats and classes
+            async with self.bot.pool.acquire() as conn:
+                user_id = ctx.author.id
+
+                luck_booster = await self.bot.get_booster(ctx.author, "luck")
+
+                # Fetch luck, health, stathp, and class
+                query = 'SELECT "luck", "health", "stathp", "class" FROM profile WHERE "user" = $1;'
+                result = await conn.fetchrow(query, user_id)
+                if result:
+                    luck_value = float(result['luck'])
+                    if luck_value <= 0.3:
+                        Luck = 20
+                    else:
+                        Luck = ((luck_value - 0.3) / (1.5 - 0.3)) * 80 + 20
+                    Luck = float(round(Luck, 2))
+
+                    if luck_booster:
+                        Luck += Luck * 0.25
+                        Luck = float(min(Luck, 100))
+
+                    base_health = 250
+                    health = result['health'] + base_health
+                    stathp = result['stathp'] * 50
+                    dmg, deff = await self.bot.get_raidstats(ctx.author, conn=conn)
+
+                    total_health = health + (player_level * 5)
+                    total_health += stathp
+
+                    # Fetch classes
+                    player_classes = result['class']
+                    if isinstance(player_classes, list):
+                        player_classes = player_classes
+                    else:
+                        player_classes = [player_classes]
+
+                    # Calculate class-based chances
+                    author_chance = 0
+                    lifestealauth = 0
+
+                    # Function to get Mage evolution level
+                    def get_mage_evolution(classes):
+                        max_evolution = None
+                        for class_name in classes:
+                            if class_name in mage_evolution_levels:
+                                level = mage_evolution_levels[class_name]
+                                if max_evolution is None or level > max_evolution:
+                                    max_evolution = level
+                        return max_evolution
+
+                    author_mage_evolution = get_mage_evolution(player_classes)
+                    for class_name in player_classes:
+                        if class_name in specified_words_values:
+                            author_chance += specified_words_values[class_name]
+                        if class_name in life_steal_values:
+                            lifestealauth += life_steal_values[class_name]
+
+                    # Initialize player stats
+                    player_stats = {
+                        "user": ctx.author,
+                        "hp": total_health,
+                        "max_hp": total_health,
+                        "armor": deff,
+                        "damage": dmg,
+                        "luck": Luck,
+                        "mage_evolution": author_mage_evolution,
+                        "lifesteal": lifestealauth,
+                        "element": None  # Will be set below
+                    }
+
+                    # Fetch player's equipped items to determine element
+                    highest_element = None
+                    try:
+                        highest_items = await conn.fetch(
+                            "SELECT ai.element FROM profile p JOIN allitems ai ON (p.user=ai.owner) JOIN"
+                            " inventory i ON (ai.id=i.item) WHERE i.equipped IS TRUE AND p.user=$1"
+                            " ORDER BY GREATEST(ai.damage, ai.armor) DESC;",
+                            user_id,
+                        )
+
+                        if highest_items:
+                            elements = [item["element"].capitalize() for item in highest_items]
+                            highest_element = elements[0]  # Choose the highest priority element
+                            player_stats["element"] = highest_element
+                    except Exception as e:
+                        await ctx.send(f"An error occurred while fetching player's element: {e}")
+
+                    # Optional: If players can have multiple elements, handle accordingly here
+                else:
+                    await ctx.send(_("Your profile could not be found."))
+                    return
+
+            # Initialize monster stats
+            monster_stats = {
+                "name": monster["name"],
+                "hp": monster["hp"],
+                "max_hp": monster["hp"],
+                "armor": monster["defense"],
+                "damage": monster["attack"],
+                "element": monster["element"]
+            }
+
+            # Function to calculate damage modifier based on elements
+            def calculate_damage_modifier(attacker_element, defender_element):
+                if attacker_element in element_strengths and element_strengths[attacker_element] == defender_element:
+                    return Decimal(round(randomm.uniform(0.1, 0.3), 1))  # Increase damage by 10-30%
+                elif defender_element in element_strengths and element_strengths[defender_element] == attacker_element:
+                    return Decimal(round(randomm.uniform(-0.3, -0.1), 1))  # Decrease damage by 10-30%
+                return Decimal('0')
+
+            # Calculate damage modifiers
+            damage_modifier_player = Decimal('0')
+            if player_stats["element"]:
+                damage_modifier_player = calculate_damage_modifier(player_stats["element"], monster_stats["element"])
+
+            # Function to create HP bar
+            def create_hp_bar(current_hp, max_hp, length=20):
+                ratio = current_hp / max_hp if max_hp > 0 else 0
+                ratio = max(0, min(1, ratio))  # Ensure ratio is between 0 and 1
+                filled_length = int(length * ratio)
+                bar = '█' * filled_length + '░' * (length - filled_length)
+                return bar
+
+            # Initialize cheat death flag
+            cheated = False
+
+            # Begin the battle
+            battle_log = deque(
+                [
+                    (
+                        0,
+                        _("You have encountered a Level {level} **{monster}**!").format(
+                            level=levelchoice, monster=monster["name"]
+                        ),
                     )
+                ],
+                maxlen=5,
+            )
+
+            # Create initial embed
+            embed = discord.Embed(
+                title=_("Raid Battle PvE"),
+                color=self.bot.config.game.primary_colour
+            )
+
+            # Initialize player stats in the embed
+            current_hp = max(0, round(player_stats["hp"], 2))
+            max_hp = player_stats["max_hp"]
+            hp_bar = create_hp_bar(current_hp, max_hp)
+            element_emoji = element_to_emoji.get(player_stats["element"], "❌") if player_stats["element"] else "❌"
+            field_name = f"{player_stats['user'].display_name} {element_emoji}"
+            field_value = f"HP: {current_hp}/{max_hp}\n{hp_bar}"
+            embed.add_field(name=field_name, value=field_value, inline=False)
+
+            # Initialize monster stats in the embed
+            monster_current_hp = max(0, round(monster_stats["hp"], 2))
+            monster_max_hp = monster_stats["max_hp"]
+            monster_hp_bar = create_hp_bar(monster_current_hp, monster_max_hp)
+            monster_element_emoji = element_to_emoji.get(monster_stats["element"], "❌")
+            monster_field_name = f"{monster_stats['name']} {monster_element_emoji}"
+            monster_field_value = f"HP: {monster_current_hp}/{monster_max_hp}\n{monster_hp_bar}"
+            embed.add_field(name=monster_field_name, value=monster_field_value, inline=False)
+
+            # Add initial battle log
+            embed.add_field(name=_("Battle Log"), value=battle_log[0][1], inline=False)
+
+            log_message = await ctx.send(embed=embed)
+            await asyncio.sleep(4)
+
+            start = datetime.datetime.utcnow()
+            player_turn = random.choice([True, False])
+
+            # Main battle loop
+            # Main battle loop
+            while (
+                    player_stats["hp"] > 0
+                    and monster_stats["hp"] > 0
+                    and datetime.datetime.utcnow() < start + datetime.timedelta(minutes=5)
+            ):
+                if player_turn:
+                    attacker = player_stats
+                    defender = monster_stats
+                    attacker_type = "player"
+                    defender_type = "monster"
+                else:
+                    attacker = monster_stats
+                    defender = player_stats
+                    attacker_type = "monster"
+                    defender_type = "player"
+
+                trickluck = float(random.randint(1, 100))
+
+                if player_turn:
+                    attacker_luck = attacker["luck"]
+                else:
+                    attacker_luck = 80  # Monsters have a fixed luck of 80
+
+                if trickluck < attacker_luck:
+                    # Attack hits
+                    if player_turn:
+                        # Player's turn
+                        # Check for Fireball ability before normal attack
+                        if attacker.get("mage_evolution") is not None:
+                            fireball_chance = random.randint(1, 100)
+                            if fireball_chance <= 40:
+                                # Fireball happens
+                                evolution_level = attacker["mage_evolution"]
+                                damage_multiplier = evolution_damage_multiplier.get(evolution_level, 1.0)
+                                dmg = (attacker["damage"] + Decimal(random.randint(0, 100)) - Decimal(
+                                    defender["armor"])) * Decimal(damage_multiplier)
+                                dmg = max(dmg, 1)
+                                dmg = round(dmg, 2)
+                                defender["hp"] -= dmg
+
+                                message = _("You cast Fireball! **{monster}** takes **{dmg} HP** damage.").format(
+                                    monster=defender["name"],
+                                    dmg=dmg
+                                )
+                            else:
+                                # Normal attack
+                                dmg = attacker["damage"] + Decimal(random.randint(0, 100)) - Decimal(defender["armor"])
+                                dmg = max(dmg, 1)
+                                dmg = round(dmg, 2)
+                                # Apply damage modifiers for player attacks
+                                if damage_modifier_player != 0:
+                                    dmg = dmg * (1 + damage_modifier_player)
+                                    dmg = round(dmg, 2)
+                                defender["hp"] -= dmg
+
+                                message = _("You attack! **{monster}** takes **{dmg} HP** damage.").format(
+                                    monster=defender["name"],
+                                    dmg=dmg,
+                                )
+
+                        else:
+                            # Normal attack if no mage evolution
+                            dmg = attacker["damage"] + Decimal(random.randint(0, 100)) - Decimal(defender["armor"])
+                            dmg = max(dmg, 1)
+                            dmg = round(dmg, 2)
+                            # Apply damage modifiers for player attacks
+                            if damage_modifier_player != 0:
+                                dmg = dmg * (1 + damage_modifier_player)
+                                dmg = round(dmg, 2)
+                            defender["hp"] -= dmg
+
+                            message = _("You attack! **{monster}** takes **{dmg} HP** damage.").format(
+                                monster=defender["name"],
+                                dmg=dmg,
+                            )
+
+                        # Handle lifesteal if applicable
+                        if attacker.get("lifesteal", 0) > 0:
+                            lifesteal_percentage = Decimal(attacker["lifesteal"]) / Decimal(100)
+                            heal = lifesteal_percentage * dmg
+                            heal = heal.quantize(Decimal('0.00'), rounding=ROUND_HALF_UP)
+                            attacker["hp"] += heal
+                            if attacker["hp"] > attacker["max_hp"]:
+                                attacker["hp"] = attacker["max_hp"]
+                            message += _(" Lifesteals: **{heal} HP**").format(heal=heal)
+
+                        # Check if defender is defeated
+                        if defender["hp"] <= 0:
+                            defender["hp"] = 0
+                            message += _(" **{monster}** is defeated!").format(
+                                monster=defender["name"]
+                            )
+
+                    else:
+                        # Monster's turn
+                        dmg = attacker["damage"] + Decimal(random.randint(0, 100)) - Decimal(defender["armor"])
+                        dmg = max(dmg, 1)
+                        dmg = round(dmg, 2)
+                        defender["hp"] -= dmg
+
+                        message = _("{monster} attacks! You take **{dmg} HP** damage.").format(
+                            monster=attacker["name"],
+                            dmg=dmg,
+                        )
+
+                        # Check if defender is defeated
+                        if defender["hp"] <= 0:
+                            defender["hp"] = 0
+                            # Handle Cheating Death for the player being attacked
+                            if not cheated:
+                                chance = author_chance
+                                random_number = random.randint(1, 100)
+                                if random_number <= chance:
+                                    defender["hp"] = 75
+                                    cheated = True
+                                    message += _(" You cheat death and survive with **75 HP**!")
+                                else:
+                                    message += _(" You are defeated!")
+                            else:
+                                message += _(" You are defeated!")
+
+                else:
+                    # Attack misses or attacker trips
+                    dmg = Decimal('10.00')
+                    attacker["hp"] -= dmg
+                    attacker["hp"] = max(attacker["hp"], 0)
+                    if player_turn:
+                        message = _("You tripped and took **{dmg} HP** damage. Bad luck!").format(
+                            dmg=dmg,
+                        )
+                    else:
+                        message = _("{monster} tripped and took **{dmg} HP** damage.").format(
+                            monster=attacker["name"],
+                            dmg=dmg,
+                        )
+
+                # Append message to battle log
+                battle_log.append(
+                    (
+                        battle_log[-1][0] + 1,
+                        message,
+                    )
+                )
+
+                # (Rest of your code to update the embed and continue the battle)
+
+                # Update the embed
+                embed = discord.Embed(
+                    title=_("Raid Battle PvE"),
+                    color=self.bot.config.game.primary_colour
+                )
+
+                # Update player stats in the embed
+                current_hp = max(0, round(player_stats["hp"], 2))
+                max_hp = player_stats["max_hp"]
+                hp_bar = create_hp_bar(current_hp, max_hp)
+                field_name = f"{player_stats['user'].display_name} {element_to_emoji.get(player_stats['element'], '❌') if player_stats['element'] else '❌'}"
+                field_value = f"HP: {current_hp}/{max_hp}\n{hp_bar}"
+                embed.add_field(name=field_name, value=field_value, inline=False)
+
+                # Update monster stats in the embed
+                monster_current_hp = max(0, round(monster_stats["hp"], 2))
+                monster_max_hp = monster_stats["max_hp"]
+                monster_hp_bar = create_hp_bar(monster_current_hp, monster_max_hp)
+                monster_field_name = f"{monster_stats['name']} {element_to_emoji.get(monster_stats['element'], '❌')}"
+                monster_field_value = f"HP: {monster_current_hp}/{monster_max_hp}\n{monster_hp_bar}"
+                embed.add_field(name=monster_field_name, value=monster_field_value, inline=False)
+
+                # Update battle log in the embed
+                battle_log_text = ''
+                for line in battle_log:
+                    battle_log_text += f"\n**Action #{line[0]}**\n{line[1]}\n"
+
+                embed.add_field(name=_("Battle Log"), value=battle_log_text, inline=False)
 
                 await log_message.edit(embed=embed)
                 await asyncio.sleep(4)
 
-                # Check if defender is defeated and break if so
-                if defender["hp"] <= 0:
+                # Check if battle has ended
+                if player_stats["hp"] <= 0 or monster_stats["hp"] <= 0:
                     break  # Battle ends
 
-                # Swap attacker for the next turn
-                attacker_is_player = not attacker_is_player
+                # Swap turn for the next round
+                player_turn = not player_turn
 
-            # Determine the winner
-            players = sorted(players, key=lambda x: x["hp"])
-            winner = players[1]["user"]
-            loser = players[0]["user"]
+            # Define the egg drop chance
+            egg_drop_chance = 0.05  # 5% chance
 
+            # Determine the outcome
+            if player_stats["hp"] > 0 and monster_stats["hp"] <= 0:
+                # Player wins
+
+                if levelchoice == 11:
+
+                    xp_gain = random.randint(75000,125000)  # Example: higher XP for legendary monsters
+                else:
+                    xp_gain = randint(levelchoice * 300, levelchoice * 1000)  # Example: 100 XP per level
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        'UPDATE profile SET "xp" = "xp" + $1 WHERE "user" = $2;',
+                        xp_gain,
+                        ctx.author.id,
+                    )
+                await ctx.send(
+                    _("You defeated the **{monster}** and gained **{xp} XP**!").format(
+                        monster=monster["name"],
+                        xp=xp_gain
+                    )
+                )
+                newlevel = rpgtools.xptolevel(player_xp + xp_gain)
+                if newlevel != player_level:
+                    await self.bot.process_levelup(ctx, newlevel, player_level)
+
+                if levelchoice < 6:
+                    if randomm.random() < egg_drop_chance:
+
+                        async with self.bot.pool.acquire() as conn:
+                            pet_and_egg_count = await conn.fetchval(
+                                """
+                                SELECT COUNT(*) 
+                                FROM (
+                                    SELECT id FROM monster_pets WHERE user_id = $1
+                                    UNION ALL
+                                    SELECT id FROM monster_eggs WHERE user_id = $1 AND hatched = FALSE
+                                ) AS combined
+                                """,
+                                ctx.author.id
+                            )
+
+                        if pet_and_egg_count >= 5:
+                            await ctx.send(
+                                _("You cannot have more than 5 pets or eggs. Please release a pet or wait for an egg to hatch."))
+                            return
+
+
+                        # Insert the egg into the database
+                        egg_hatch_time = datetime.datetime.utcnow() + datetime.timedelta(
+                            minutes=2160)  # Example: hatches in 24 hours
+                        async with self.bot.pool.acquire() as conn:
+                            await conn.execute(
+                                """
+                                INSERT INTO monster_eggs (user_id, egg_type, hp, attack, defense, element, url, hatch_time)
+                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
+                                """,
+                                ctx.author.id,
+                                monster["name"],
+                                monster["hp"],
+                                monster["attack"],
+                                monster["defense"],
+                                monster["element"],
+                                monster["url"],
+                                egg_hatch_time,
+                            )
+                        await ctx.send(
+                            _("You found a **{monster} Egg**! It will hatch in {time} hours.").format(monster=monster["name"], time=36)
+                        )
+
+
+                elif monster_stats["hp"] > 0 and player_stats["hp"] <= 0:
+                    # Player loses
+                    await ctx.send(
+                        _("You were defeated by the **{monster}**. Better luck next time!").format(
+                            monster=monster["name"]
+                        )
+                    )
+
+            # End of the command
         except Exception as e:
-            import traceback
-            error_message = f"An error occurred during the battle: {e}\n"
-            error_message += traceback.format_exc()
-            await ctx.send(error_message)
-            print(error_message)
+            await ctx.send(f"An error occurred: {e}")
 
-        # Update database and send final message
+    @pets.command(brief=_("Check your monster eggs"))
+    async def eggs(self, ctx):
         async with self.bot.pool.acquire() as conn:
+            eggs = await conn.fetch(
+                "SELECT * FROM monster_eggs WHERE user_id = $1 AND hatched = FALSE;",
+                ctx.author.id,
+            )
+            if not eggs:
+                await ctx.send(_("You don't have any eggs to incubate."))
+                return
+
+            embed = discord.Embed(title=_("Your Monster Eggs"), color=discord.Color.blue())
+            for egg in eggs:
+                time_left = egg["hatch_time"] - datetime.datetime.utcnow()
+                time_left_str = str(time_left).split('.')[0]  # Remove microseconds
+                embed.add_field(
+                    name=egg["egg_type"],
+                    value=f"ID: {egg['id']}\nElement: {egg['element']}\nHP: {egg['hp']}\nAttack: {egg['attack']}\nDefense: {egg['defense']}\nHatches in: {time_left_str}",
+                    inline=False,
+                )
+            await ctx.send(embed=embed)
+
+    @tasks.loop(minutes=1)
+    async def check_egg_hatches(self):
+        async with self.bot.pool.acquire() as conn:
+            # Fetch eggs that are ready to hatch
+            eggs = await conn.fetch(
+                "SELECT * FROM monster_eggs WHERE hatched = FALSE AND hatch_time <= NOW();"
+            )
+            for egg in eggs:
+                # Mark the egg as hatched
+                await conn.execute(
+                    "UPDATE monster_eggs SET hatched = TRUE WHERE id = $1;", egg["id"]
+                )
+
+                # Insert the hatched egg into monster_pets
+                await conn.execute(
+                    """
+                    INSERT INTO monster_pets (user_id, name, hp, attack, defense, element, url)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7);
+                    """,
+                    egg["user_id"],
+                    egg["egg_type"],  # Use egg name as pet name initially
+                    egg["hp"],
+                    egg["attack"],
+                    egg["defense"],
+                    egg["element"],
+                    egg["url"],
+                )
+
+                # Notify the user
+                user = self.bot.get_user(egg["user_id"])
+                if user:
+                    await user.send(
+                        _("Your **{monster} Egg** has hatched into a pet! Check your pet menu to see it.").format(
+                            monster=egg["egg_type"]
+                        )
+                    )
+
+    import datetime
+
+
+    @tasks.loop(minutes=1)
+    async def check_pet_growth(self):
+
+        growth_stages = {
+            1: {"stage": "baby", "growth_time": 2, "stat_multiplier": 0.25, "hunger_modifier": 1.0},
+            2: {"stage": "juvenile", "growth_time": 2, "stat_multiplier": 0.50, "hunger_modifier": 0.8},
+            3: {"stage": "young", "growth_time": 1, "stat_multiplier": 0.75, "hunger_modifier": 0.6},
+            4: {"stage": "adult", "growth_time": None, "stat_multiplier": 1.0, "hunger_modifier": 0.0},
+            # Self-sufficient
+        }
+
+        try:
+            async with self.bot.pool.acquire() as conn:
+                # Fetch pets that are ready to grow
+                pets = await conn.fetch(
+                    "SELECT * FROM monster_pets WHERE growth_time <= NOW() AND growth_stage != 'adult';"
+                )
+                for pet in pets:
+                    next_stage_index = pet["growth_index"] + 1
+                    if next_stage_index in growth_stages:
+                        stage_data = growth_stages[next_stage_index]
+
+                        # Compute the interval as a timedelta object
+                        if stage_data["growth_time"] is not None:
+                            growth_time_interval = datetime.timedelta(days=stage_data["growth_time"])
+                        else:
+                            growth_time_interval = None
+
+                        # Execute the appropriate query
+                        if growth_time_interval is not None:
+                            await conn.execute(
+                                """
+                                UPDATE monster_pets
+                                SET growth_stage = $1,
+                                    growth_time = NOW() + $2,
+                                    hp = ROUND(hp * $3),
+                                    attack = ROUND(attack * $3),
+                                    defense = ROUND(defense * $3),
+                                    growth_index = $4
+                                WHERE id = $5;
+                                """,
+                                stage_data["stage"],
+                                growth_time_interval,
+                                stage_data["stat_multiplier"],
+                                next_stage_index,
+                                pet["id"],
+                            )
+                        else:
+                            await conn.execute(
+                                """
+                                UPDATE monster_pets
+                                SET growth_stage = $1,
+                                    growth_time = NULL,
+                                    hp = ROUND(hp * $2),
+                                    attack = ROUND(attack * $2),
+                                    defense = ROUND(defense * $2),
+                                    growth_index = $3
+                                WHERE id = $4;
+                                """,
+                                stage_data["stage"],
+                                stage_data["stat_multiplier"],
+                                next_stage_index,
+                                pet["id"],
+                            )
+
+                        # Notify the user about the growth
+                        user = self.bot.get_user(pet["user_id"])
+                        if user:
+                            await user.send(
+                                f"Your pet **{pet['name']}** has grown into a {stage_data['stage']}!"
+                            )
+        except Exception as e:
+            user = self.bot.get_user(295173706496475136)
+            await user.send(f"An error occurred during pet growth update: {e}")
+            # Optionally, include traceback for detailed debugging
+            import traceback
+            traceback_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+            await user.send(f"Traceback:\n{traceback_str}")
+
+    @user_cooldown(300)
+    @pets.command(brief=_("Feed your pet"))
+    async def feed(self, ctx, id: int):
+
+        growth_stages = {
+            1: {"stage": "baby", "growth_time": 2, "stat_multiplier": 0.25, "hunger_modifier": 1.0},
+            2: {"stage": "juvenile", "growth_time": 2, "stat_multiplier": 0.50, "hunger_modifier": 0.8},
+            3: {"stage": "young", "growth_time": 1, "stat_multiplier": 0.75, "hunger_modifier": 0.6},
+            4: {"stage": "adult", "growth_time": None, "stat_multiplier": 1.0, "hunger_modifier": 0.0},
+            # Self-sufficient
+        }
+
+        async with self.bot.pool.acquire() as conn:
+            pet = await conn.fetchrow("SELECT * FROM monster_pets WHERE user_id = $1 AND monster_pets.id = $2;", ctx.author.id,
+                                      id)
+            if not pet:
+                await ctx.send(f"You don't have a pet named {id}.")
+                await self.bot.reset_cooldown(ctx)
+                return
+            pet_name =pet['name']
+
+            # Check if the pet is an adult
+            if pet["growth_stage"] == "adult":
+                await ctx.send(f"Your pet is an adult and no longer needs feeding!")
+                await self.bot.reset_cooldown(ctx)
+                return
+
+            # Apply feeding logic
+            hunger_modifier = growth_stages[pet["growth_index"]]["hunger_modifier"]
             await conn.execute(
-                'UPDATE profile SET "money"="money"+$1, "pvpwins"="pvpwins"+1 WHERE'
-                ' "user"=$2;',
-                money * 2,
-                winner.id,
+                """
+                UPDATE monster_pets
+                SET hunger = 100, happiness = 100
+                WHERE id = $1;
+                """,
+                pet["id"],
             )
-            await self.bot.log_transaction(
-                ctx,
-                from_=loser.id,
-                to=winner.id,
-                subject="RaidBattle Bet",
-                data={"Gold": money},
-                conn=conn,
+
+            await ctx.send(f"You fed {pet_name}, and it looks happy!")
+
+
+    @tasks.loop(hours=12)
+    async def decrease_pet_stats(self):
+        """Background task to decrease hunger and happiness every 4 hours."""
+        async with self.bot.pool.acquire() as conn:
+            # Fetch all pets that are not adults (since adults are self-sufficient)
+            pets = await conn.fetch(
+                "SELECT * FROM monster_pets WHERE growth_stage != 'adult';"
             )
-        await ctx.send(
-            _("{p1} won the raidbattle vs {p2}! Congratulations!").format(
-                p1=winner.mention, p2=loser.mention
-            )
+
+            for pet in pets:
+                user_id = pet['user_id']
+                pet_id = pet['id']
+                pet_name = pet['name']
+                growth_stage = pet['growth_stage']
+                growth_index = pet['growth_index']
+
+                # Define how much to decrease based on growth stage
+                # You can adjust these values as needed
+                if growth_stage == 'baby':
+                    hunger_decrease = 10  # Example value
+                    happiness_decrease = 5
+                elif growth_stage == 'juvenile':
+                    hunger_decrease = 8
+                    happiness_decrease = 4
+                elif growth_stage == 'young':
+                    hunger_decrease = 6
+                    happiness_decrease = 3
+                else:
+                    hunger_decrease = 0
+                    happiness_decrease = 0
+
+                # Update hunger and happiness
+                await conn.execute(
+                    """
+                    UPDATE monster_pets
+                    SET hunger = GREATEST(hunger - $1, 0),
+                        happiness = GREATEST(happiness - $2, 0)
+                    WHERE id = $3;
+                    """,
+                    hunger_decrease,
+                    happiness_decrease,
+                    pet_id
+                )
+
+                # Check if hunger or happiness has reached 0
+                updated_pet = await conn.fetchrow(
+                    "SELECT hunger, happiness FROM monster_pets WHERE id = $1;",
+                    pet_id
+                )
+
+                if updated_pet['hunger'] == 0:
+                    # Pet dies from starvation
+                    await self.handle_pet_death(conn, user_id, pet_id, pet_name)
+                elif updated_pet['happiness'] == 0:
+                    # Pet runs away due to unhappiness
+                    await self.handle_pet_runaway(conn, user_id, pet_id, pet_name)
+
+    @decrease_pet_stats.before_loop
+    async def before_decrease_pet_stats(self):
+        """Wait until the bot is ready before starting the task."""
+        await self.bot.wait_until_ready()
+
+    async def handle_pet_death(self, conn, user_id, pet_id, pet_name):
+        """Handles pet death due to starvation."""
+        # Delete the pet from the database
+        await conn.execute(
+            "DELETE FROM monster_pets WHERE id = $1;",
+            pet_id
         )
+
+        # Attempt to fetch the user
+        user = self.bot.get_user(user_id)
+        if user:
+            try:
+                await user.send(
+                    f"😢 Your pet **{pet_name}** has died from starvation. Please take better care next time."
+                )
+            except discord.Forbidden:
+                # User has DMs disabled
+                pass
+
+    async def handle_pet_runaway(self, conn, user_id, pet_id, pet_name):
+        """Handles pet running away due to unhappiness."""
+        # Delete the pet from the database
+        await conn.execute(
+            "DELETE FROM monster_pets WHERE id = $1;",
+            pet_id
+        )
+
+        # Attempt to fetch the user
+        user = self.bot.get_user(user_id)
+        if user:
+            try:
+                await user.send(
+                    f"😞 Your pet **{pet_name}** has run away due to unhappiness. Make sure to keep your pet happy!"
+                )
+            except discord.Forbidden:
+                # User has DMs disabled
+                pass
+
+    @user_cooldown(120)
+    @pets.command(brief=_("Rename your pet or reset its name to the default"))
+    async def rename(self, ctx, id: int, *, nickname: str = None):
+        """
+        Rename a pet or reset its name to the default.
+        - If `nickname` is provided, sets the pet's name to the given nickname.
+        - If `nickname` is omitted, resets the pet's name to the default.
+        """
+        async with self.bot.pool.acquire() as conn:
+            # Fetch the pet from the database
+            pet = await conn.fetchrow("SELECT * FROM monster_pets WHERE user_id = $1 AND id = $2;", ctx.author.id, id)
+
+            if not pet:
+                await ctx.send(_("❌ No pet with ID `{id}` found in your collection.").format(id=id))
+                return
+
+            # Check if resetting or renaming
+            if nickname:
+                if len(nickname) > 50:  # Limit nickname length to 20 characters
+                    await ctx.send(_("❌ Nickname cannot exceed 50 characters."))
+                    return
+
+                # Update the pet's nickname in the database
+                await conn.execute("UPDATE monster_pets SET name = $1 WHERE id = $2;", nickname, id)
+                await ctx.send(_("✅ Successfully renamed your pet to **{nickname}**!").format(nickname=nickname))
+            else:
+                # Reset the pet's nickname to the default name
+                default_name = pet['default_name']
+                await conn.execute("UPDATE monster_pets SET name = NULL WHERE id = $1;", id)
+                await ctx.send(_("✅ Pet's name has been reset to its default: **{default_name}**.").format(
+                    default_name=default_name))
 
     @has_char()
     @user_cooldown(600)
