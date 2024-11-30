@@ -658,24 +658,15 @@ class Marriage(commands.Cog):
             await self.bot.reset_cooldown(ctx)
             return await ctx.send(_("You don't have kids yet."))
         target = random.choice(children)
-        if ctx.character_data["money"] > 10000000:
-            event = random.choice(
-                ["death"]
-                + ["age"] * 5
-                + ["namechange"] * 5
-                + ["crate"] * 2
-                + ["moneylose"] * 5
-                + ["moneygain"] * 2
-            )
-        else:
-            event = random.choice(
-                ["death"]
-                + ["age"] * 6
-                + ["namechange"] * 4
-                + ["crate"] * 2
-                + ["moneylose"] * 5
-                + ["moneygain"] * 5
-            )
+
+        event = random.choice(
+            ["death"]
+            + ["age"] * 6
+            + ["namechange"] * 6
+            + ["crate"] * 2
+            + ["moneylose"] * 4
+            + ["moneygain"] * 4
+        )
         if event == "death":
             cause = random.choice(
                 [

@@ -33,6 +33,7 @@ from discord.enums import ButtonStyle
 from discord.ext import commands, tasks
 from discord.ui.button import Button
 
+from classes import logger
 from classes.classes import Ranger, Reaper
 from classes.classes import from_string as class_from_string
 from classes.converters import IntGreaterThan
@@ -133,9 +134,9 @@ class PetPaginator(View):
 
         stage_data = growth_stages.get(pet["growth_index"], growth_stages[1])  # Default to 'baby' stage
         stat_multiplier = stage_data["stat_multiplier"]
-        hp = round(pet["hp"] * stat_multiplier)
-        attack = round(pet["attack"] * stat_multiplier)
-        defense = round(pet["defense"] * stat_multiplier)
+        hp = round(pet["hp"])
+        attack = round(pet["attack"] )
+        defense = round(pet["defense"])
 
         # Calculate growth time left
         growth_time_left = None
@@ -145,6 +146,7 @@ class PetPaginator(View):
                 growth_time_left = str(time_left).split('.')[0] if time_left.total_seconds() > 0 else "Ready to grow!"
 
         petid = pet['id']
+        iv = pet['IV']
 
         # Improved embed design
         if pet['growth_stage'] == "baby":
@@ -167,6 +169,7 @@ class PetPaginator(View):
         embed.add_field(
             name="✨ **Stats**",
             value=(
+                f"**IV** {iv}%\n"
                 f"**HP:** {hp}\n"
                 f"**Attack:** {attack}\n"
                 f"**Defense:** {defense}"
@@ -774,9 +777,9 @@ class Battles(commands.Cog):
                     await interaction.response.defer()  # Acknowledge interaction to prevent timeout
                     async with self.bot.pool.acquire() as conn:
                         if pet:
-                            await conn.execute("DELETE FROM monster_pets WHERE id = $1;", id)
+                            await conn.execute("DELETE FROM monster_pets WHERE id = $1 AND user_id = $2;", id)
                         elif egg:
-                            await conn.execute("DELETE FROM monster_eggs WHERE id = $1;", id)
+                            await conn.execute("DELETE FROM monster_eggs WHERE id = $1 AND user_id = $2;", id)
 
                     farewell_message = story.format(name=item_name)
                     await interaction.followup.send(farewell_message)
@@ -3488,7 +3491,7 @@ class Battles(commands.Cog):
                         # Check if target is defeated
                         if target["hp"] <= 0:
 
-                            if target["user"] == ctx.author:
+                            if target["user"] == ctx.author and not target.get("is_pet"):
                                 #await ctx.send(author_chance)
                                 target["hp"] = 0
                                 # Handle Cheating Death for the player being attacked
@@ -3551,7 +3554,7 @@ class Battles(commands.Cog):
                             await log_message.edit(embed=embed)
                             await asyncio.sleep(4)  # Allow players to see the final attack
 
-                            if target["user"] == ctx.author:
+                            if target["user"] == ctx.author and not target.get("is_pet"):
                                 if target["hp"] <= 0:
                                     break
 
@@ -3790,8 +3793,10 @@ class Battles(commands.Cog):
 
                             try:
                                 msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                                choice = msg.content.lower()
                             except asyncio.TimeoutError:
-                                await ctx.send('You took too long to decide. The chests remain unopened.')
+                                choice = random.choice(["left", "right"])
+                                await ctx.send('You took too long to decide. The chest will be chosen at random.')
                                 await ctx.send(f'You have advanced to floor: {new_level}')
                                 await connection.execute('UPDATE battletower SET level = level + 1 WHERE id = $1',
                                                          ctx.author.id)
@@ -3799,9 +3804,9 @@ class Battles(commands.Cog):
                                     await self.remove_player_from_fight(ctx.author.id)
                                 except Exception as e:
                                     pass
-                                return
 
-                            choice = msg.content.lower()
+
+
 
                             if choice == 'left':
                                 if left_reward_type == 'crate':
@@ -3872,9 +3877,11 @@ class Battles(commands.Cog):
 
                         try:
                             msg = await self.bot.wait_for('message', check=check, timeout=120.0)
+                            choice = msg.content.lower()
                         except asyncio.TimeoutError:
                             newlevel = level + 1
-                            await ctx.send('You took too long to decide. The chests remain unopened.')
+                            choice = random.choice(["left", "right"])
+                            await ctx.send('You took too long to decide. The chest will be chosen at random.')
                             await ctx.send(f'You have advanced to floor: {newlevel}')
                             async with self.bot.pool.acquire() as connection:
                                 await connection.execute('UPDATE battletower SET level = level + 1 WHERE id = $1',
@@ -3883,10 +3890,10 @@ class Battles(commands.Cog):
                                     await self.remove_player_from_fight(ctx.author.id)
                                 except Exception as e:
                                     pass
-                                return
-                        else:
+
+                        if choice is not None:
                             newlevel = level + 1
-                            if msg.content.lower() == 'left':
+                            if choice == 'left':
                                 await ctx.send(
                                     'You open the chest on the left and find: <:F_rare:1139514880517484666> A '
                                     'rare Crate!')
@@ -4088,8 +4095,10 @@ class Battles(commands.Cog):
 
                             try:
                                 msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                                choice = msg.content.lower()
                             except asyncio.TimeoutError:
-                                await ctx.send('You took too long to decide. The chests remain unopened.')
+                                choice = random.choice(["left", "right"])
+                                await ctx.send('You took too long to decide. The chest will be chosen at random.')
                                 await ctx.send(f'You have advanced to floor: {new_level}')
                                 await connection.execute('UPDATE battletower SET level = level + 1 WHERE id = $1',
                                                          ctx.author.id)
@@ -4097,9 +4106,9 @@ class Battles(commands.Cog):
                                     await self.remove_player_from_fight(ctx.author.id)
                                 except Exception as e:
                                     pass
-                                return
 
-                            choice = msg.content.lower()
+
+
 
                             if choice == 'left':
                                 if left_reward_type == 'crate':
@@ -4168,9 +4177,11 @@ class Battles(commands.Cog):
                     else:
                         try:
                             msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                            choice = msg.content.lower()
                         except asyncio.TimeoutError:
                             new_level = level + 1
-                            await ctx.send('You took too long to decide. The chests remain unopened.')
+                            choice = random.choice(["left", "right"])
+                            await ctx.send('You took too long to decide. The chest will be chosen at random.')
                             await ctx.send(f'You have advanced to floor: {new_level}')
                             async with self.bot.pool.acquire() as connection:
                                 await connection.execute('UPDATE battletower SET level = level + 1 WHERE id = $1',
@@ -4179,11 +4190,11 @@ class Battles(commands.Cog):
                                     await self.remove_player_from_fight(ctx.author.id)
                                 except Exception as e:
                                     pass
-                                return
-                        else:
+
+                        if choice is not None:
 
                             new_level = level + 1
-                            if msg.content.lower() == 'left':
+                            if choice == 'left':
                                 await ctx.send(
                                     'You open the chest on the left and find: <:F_Magic:1139514865174720532> 2 '
                                     'Magic Crates!')
@@ -4381,8 +4392,10 @@ class Battles(commands.Cog):
 
                             try:
                                 msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                                choice = msg.content.lower()
                             except asyncio.TimeoutError:
-                                await ctx.send('You took too long to decide. The chests remain unopened.')
+                                choice = random.choice(["left", "right"])
+                                await ctx.send('You took too long to decide. The chest will be chosen at random.')
                                 await ctx.send(f'You have advanced to floor: {new_level}')
                                 await connection.execute('UPDATE battletower SET level = level + 1 WHERE id = $1',
                                                          ctx.author.id)
@@ -4390,9 +4403,9 @@ class Battles(commands.Cog):
                                     await self.remove_player_from_fight(ctx.author.id)
                                 except Exception as e:
                                     pass
-                                return
 
-                            choice = msg.content.lower()
+
+
 
                             if choice == 'left':
                                 if left_reward_type == 'crate':
@@ -4462,9 +4475,11 @@ class Battles(commands.Cog):
 
                         try:
                             msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                            choice = msg.content.lower()
                         except asyncio.TimeoutError:
                             newlevel = level + 1
-                            await ctx.send('You took too long to decide. The chests remain unopened.')
+                            choice = random.choice(["left", "right"])
+                            await ctx.send('You took too long to decide. The chest will be chosen at random.')
                             await ctx.send(f'You have advanced to floor: {newlevel}')
                             async with self.bot.pool.acquire() as connection:
                                 await connection.execute('UPDATE battletower SET level = level + 1 WHERE id = $1',
@@ -4473,10 +4488,10 @@ class Battles(commands.Cog):
                                     await self.remove_player_from_fight(ctx.author.id)
                                 except Exception as e:
                                     pass
-                                return
-                        else:
+
+                        if choice is not None:
                             newlevel = level + 1
-                            if msg.content.lower() == 'left':
+                            if choice == 'left':
                                 if legran == 1:
                                     await ctx.send('You open the chest on the left and find: Nothing, bad luck!')
                                     await ctx.send(f'You have advanced to floor: {newlevel}')
@@ -4603,8 +4618,10 @@ class Battles(commands.Cog):
 
                             try:
                                 msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                                choice = msg.content.lower()
                             except asyncio.TimeoutError:
-                                await ctx.send('You took too long to decide. The chests remain unopened.')
+                                choice = random.choice(["left", "right"])
+                                await ctx.send('You took too long to decide. The chest will be chosen at random.')
                                 await ctx.send(f'You have advanced to floor: {new_level}')
                                 await connection.execute('UPDATE battletower SET level = level + 1 WHERE id = $1',
                                                          ctx.author.id)
@@ -4612,9 +4629,9 @@ class Battles(commands.Cog):
                                     await self.remove_player_from_fight(ctx.author.id)
                                 except Exception as e:
                                     pass
-                                return
 
-                            choice = msg.content.lower()
+
+
 
                             if choice == 'left':
                                 if left_reward_type == 'crate':
@@ -4683,9 +4700,11 @@ class Battles(commands.Cog):
                     else:
                         try:
                             msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                            choice = msg.content.lower()
                         except asyncio.TimeoutError:
                             newlevel = level + 1
-                            await ctx.send('You took too long to decide. The chests remain unopened.')
+                            choice = random.choice(["left", "right"])
+                            await ctx.send('You took too long to decide. The chest will be chosen at random.')
                             await ctx.send(f'You have advanced to floor: {newlevel}')
                             async with self.bot.pool.acquire() as connection:
                                 await connection.execute('UPDATE battletower SET level = level + 1 WHERE id = $1',
@@ -4694,10 +4713,10 @@ class Battles(commands.Cog):
                                     await self.remove_player_from_fight(ctx.author.id)
                                 except Exception as e:
                                     pass
-                                return
-                        else:
+
+                        if choice is not None:
                             newlevel = level + 1
-                            if msg.content.lower() == 'left':
+                            if choice == 'left':
                                 await ctx.send(
                                     'You open the chest on the left and find: <:F_Magic:1139514865174720532> 2 '
                                     'Magic Crates!')
@@ -4862,8 +4881,11 @@ class Battles(commands.Cog):
 
                             try:
                                 msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                                choice = msg.content.lower()
+
                             except asyncio.TimeoutError:
-                                await ctx.send('You took too long to decide. The chests remain unopened.')
+                                choice = random.choice(["left", "right"])
+                                await ctx.send('You took too long to decide. The chest will be chosen at random.')
                                 await ctx.send(f'You have advanced to floor: {new_level}')
                                 await connection.execute('UPDATE battletower SET level = level + 1 WHERE id = $1',
                                                          ctx.author.id)
@@ -4871,9 +4893,8 @@ class Battles(commands.Cog):
                                     await self.remove_player_from_fight(ctx.author.id)
                                 except Exception as e:
                                     pass
-                                return
 
-                            choice = msg.content.lower()
+
 
                             if choice == 'left':
                                 if left_reward_type == 'crate':
@@ -4941,9 +4962,11 @@ class Battles(commands.Cog):
                     else:
                         try:
                             msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                            choice = msg.content.lower()
                         except asyncio.TimeoutError:
                             newlevel = level + 1
-                            await ctx.send('You took too long to decide. The chests remain unopened.')
+                            choice = random.choice(["left", "right"])
+                            await ctx.send('You took too long to decide. The chest will be chosen at random.')
                             await ctx.send(f'You have advanced to floor: {newlevel}')
                             async with self.bot.pool.acquire() as connection:
                                 await connection.execute('UPDATE battletower SET level = level + 1 WHERE id = $1',
@@ -4952,10 +4975,10 @@ class Battles(commands.Cog):
                                     await self.remove_player_from_fight(ctx.author.id)
                                 except Exception as e:
                                     pass
-                                return
-                        else:
+
+                        if choice is not None:
                             newlevel = level + 1
-                            if msg.content.lower() == 'left':
+                            if choice == 'left':
                                 await ctx.send(
                                     'You open the chest on the left and find: <:f_money:1146593710516224090> 1 '
                                     'Fortune Crate!')
@@ -5187,8 +5210,10 @@ class Battles(commands.Cog):
 
                             try:
                                 msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                                choice = msg.content.lower()
                             except asyncio.TimeoutError:
-                                await ctx.send('You took too long to decide. The chests remain unopened.')
+                                choice = random.choice(["left", "right"])
+                                await ctx.send('You took too long to decide. The chest will be chosen at random.')
                                 await ctx.send(f'You have advanced to floor: {new_level}')
                                 await connection.execute('UPDATE battletower SET level = level + 1 WHERE id = $1',
                                                          ctx.author.id)
@@ -5196,9 +5221,9 @@ class Battles(commands.Cog):
                                     await self.remove_player_from_fight(ctx.author.id)
                                 except Exception as e:
                                     pass
-                                return
 
-                            choice = msg.content.lower()
+
+
 
                             if choice == 'left':
                                 if left_reward_type == 'crate':
@@ -5266,9 +5291,11 @@ class Battles(commands.Cog):
                     else:
                         try:
                             msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                            choice = msg.content.lower()
                         except asyncio.TimeoutError:
                             newlevel = level + 1
-                            await ctx.send('You took too long to decide. The chests remain unopened.')
+                            choice = random.choice(["left", "right"])
+                            await ctx.send('You took too long to decide. The chest will be chosen at random.')
                             await ctx.send(f'You have advanced to floor: {newlevel}')
                             async with self.bot.pool.acquire() as connection:
                                 await connection.execute('UPDATE battletower SET level = level + 1 WHERE id = $1',
@@ -5277,10 +5304,10 @@ class Battles(commands.Cog):
                                     await self.remove_player_from_fight(ctx.author.id)
                                 except Exception as e:
                                     pass
-                                return
-                        else:
+
+                        if choice is not None:
                             newlevel = level + 1
-                            if msg.content.lower() == 'left':
+                            if choice == 'left':
                                 await ctx.send(
                                     'You open the chest on the left and find: <:F_Common:1139514874016309260> 3 '
                                     'Common Crates!')
@@ -5423,8 +5450,10 @@ class Battles(commands.Cog):
 
                             try:
                                 msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                                choice = msg.content.lower()
                             except asyncio.TimeoutError:
-                                await ctx.send('You took too long to decide. The chests remain unopened.')
+                                choice = random.choice(["left", "right"])
+                                await ctx.send('You took too long to decide. The chest will be chosen at random.')
                                 await ctx.send(f'You have advanced to floor: {new_level}')
                                 await connection.execute('UPDATE battletower SET level = level + 1 WHERE id = $1',
                                                          ctx.author.id)
@@ -5432,9 +5461,9 @@ class Battles(commands.Cog):
                                     await self.remove_player_from_fight(ctx.author.id)
                                 except Exception as e:
                                     pass
-                                return
 
-                            choice = msg.content.lower()
+
+
 
                             if choice == 'left':
                                 if left_reward_type == 'crate':
@@ -5501,9 +5530,11 @@ class Battles(commands.Cog):
                     else:
                         try:
                             msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                            choice = msg.content.lower()
                         except asyncio.TimeoutError:
                             newlevel = level + 1
-                            await ctx.send('You took too long to decide. The chests remain unopened.')
+                            choice = random.choice(["left", "right"])
+                            await ctx.send('You took too long to decide. The chest will be chosen at random.')
                             await ctx.send(f'You have advanced to floor: {newlevel}')
                             async with self.bot.pool.acquire() as connection:
                                 await connection.execute('UPDATE battletower SET level = level + 1 WHERE id = $1',
@@ -5513,10 +5544,10 @@ class Battles(commands.Cog):
                                     await self.remove_player_from_fight(ctx.author.id)
                                 except Exception as e:
                                     pass
-                                return
+
                         else:
                             newlevel = level + 1
-                            if msg.content.lower() == 'left':
+                            if choice == 'left':
                                 await ctx.send(
                                     'You open the chest on the left and find: <:F_common:1139514874016309260> 3 '
                                     'Common Crates!')
@@ -6834,9 +6865,6 @@ class Battles(commands.Cog):
         await ctx.send(embed=embed)
 
 
-    # Initialize the bot with the desired prefix
-    #Function to format the monsters data
-
 
     @has_char()
     @commands.command(brief=_("Battle against a monster and gain XP"), hidden=True)
@@ -7004,8 +7032,8 @@ class Battles(commands.Cog):
                 {"name": "Blessed Deer", "hp": 280, "attack": 275, "defense": 265, "element": "Light", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BlessedDeer-removebg-preview.png"},
                 {"name": "Chaos Sphinx", "hp": 320, "attack": 290, "defense": 275, "element": "Corrupted", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaopsSpinx.png"},
                 {"name": "Inferno Dracolion", "hp": 290, "attack": 285, "defense": 270, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614284328.png"},
-                {"name": "Wind Cyclone", "hp": 310, "attack": 290, "defense": 280, "element": "Wind", "url": ""},
-                {"name": "Dwakel Blaster", "hp": 305, "attack": 295, "defense": 285, "element": "Electric", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Bubble.png"},
+                {"name": "Wind Cyclone", "hp": 310, "attack": 290, "defense": 280, "element": "Wind", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_WindElemental-removebg-preview.png"},
+                {"name": "Mr Cuddles", "hp": 305, "attack": 295, "defense": 285, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_mrcuddles-removebg-preview.png"},
                 {"name": "Infernal Fiend", "hp": 295, "attack": 285, "defense": 270, "element": "Fire", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614284328.png"},
                 {"name": "Dark Mukai", "hp": 285, "attack": 275, "defense": 265, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614826889.png"},
                 {"name": "Undead Berserker", "hp": 330, "attack": 285, "defense": 275, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614863579.png"},
@@ -7029,7 +7057,7 @@ class Battles(commands.Cog):
                 {"name": "Zorbak", "hp": 410, "attack": 390, "defense": 380, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Zorbak-removebg-preview.png"},
                 {"name": "Dwakel Rocketman", "hp": 405, "attack": 395, "defense": 385, "element": "Electric", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DwarkalRock-removebg-preview.png"},
                 {"name": "Kathool", "hp": 395, "attack": 385, "defense": 370, "element": "Water", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Kathool-removebg-preview.png"},
-                {"name": "Celestial Honud", "hp": 385, "attack": 375, "defense": 365, "element": "Light", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_CelestialHound-removebg-preview.png"},
+                {"name": "Celestial Hound", "hp": 385, "attack": 375, "defense": 365, "element": "Light", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_CelestialHound-removebg-preview.png"},
                 {"name": "Undead Raxgore", "hp": 430, "attack": 385, "defense": 375, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Raxfore-removebg-preview_1.png"},
                 {"name": "Droognax", "hp": 415, "attack": 380, "defense": 370, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Droognax-removebg-preview.png"},
                 {"name": "Corrupted Boar", "hp": 425, "attack": 385, "defense": 375, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Corrupted_Bear-removebg-preview.png"},
@@ -7044,48 +7072,48 @@ class Battles(commands.Cog):
                 {"name": "Argo", "hp": 440, "attack": 380, "defense": 375, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Argo-removebg-preview.png"},
             ],
             6: [
-                {"name": "Ultra Chaos Dragon", "hp": 500, "attack": 470, "defense": 460, "element": "Corrupted", "url":""},
-                {"name": "Earth Titan Golem", "hp": 480, "attack": 465, "defense": 455, "element": "Earth", "url":""},
-                {"name": "Water Titan Kraken", "hp": 520, "attack": 475, "defense": 460, "element": "Water", "url":""},
-                {"name": "Shadow Lord Sepulchure", "hp": 490, "attack": 470, "defense": 455, "element": "Dark", "url":""},
-                {"name": "Wind Elemental Titan", "hp": 510, "attack": 475, "defense": 465, "element": "Wind", "url":""},
-                {"name": "Dwakel Mecha", "hp": 505, "attack": 480, "defense": 470, "element": "Electric", "url":""},
-                {"name": "Infernal Warlord", "hp": 495, "attack": 470, "defense": 455, "element": "Fire", "url":""},
-                {"name": "Divine Guardian", "hp": 485, "attack": 465, "defense": 455, "element": "Light", "url":""},
-                {"name": "Undead Legion Overlord", "hp": 530, "attack": 475, "defense": 460, "element": "Dark", "url":""},
-                {"name": "Chaos Vordred", "hp": 515, "attack": 470, "defense": 455, "element": "Corrupted", "url":""},
-                {"name": "Dire Mammoth", "hp": 525, "attack": 475, "defense": 460, "element": "Nature", "url":""},
-                {"name": "Storm Titan Lord", "hp": 540, "attack": 480, "defense": 470, "element": "Electric", "url":""},
-                {"name": "Leviathan", "hp": 520, "attack": 475, "defense": 460, "element": "Water", "url":""},
-                {"name": "Earth Elemental Lord", "hp": 535, "attack": 475, "defense": 465, "element": "Earth", "url":""},
-                {"name": "Shadow Beast King", "hp": 500, "attack": 470, "defense": 455, "element": "Dark", "url":""},
-                {"name": "Blazing Inferno Dragon", "hp": 510, "attack": 475, "defense": 460, "element": "Fire", "url":""},
-                {"name": "Obsidian Colossus", "hp": 525, "attack": 465, "defense": 475, "element": "Earth", "url":""},
-                {"name": "Tempest Dragon", "hp": 515, "attack": 460, "defense": 470, "element": "Wind", "url":""},
-                {"name": "Chaos Beast Kathool", "hp": 530, "attack": 475, "defense": 460, "element": "Corrupted", "url":""},
-                {"name": "Great Treeant", "hp": 540, "attack": 470, "defense": 455, "element": "Nature", "url":""},
+                {"name": "Ultra Cuddles", "hp": 500, "attack": 470, "defense": 460, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ultracuddles-removebg-preview.png"},
+                {"name": "General Pollution", "hp": 480, "attack": 465, "defense": 455, "element": "Earth", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_genpol-removebg-preview.png"},
+                {"name": "Manslayer Fiend", "hp": 520, "attack": 475, "defense": 460, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_manlsayer-removebg-preview.png"},
+                {"name": "The Hushed", "hp": 490, "attack": 470, "defense": 455, "element": "Light", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_hushed-removebg-preview.png"},
+                {"name": "The Jailer", "hp": 510, "attack": 475, "defense": 465, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_jailer-removebg-preview.png"},
+                {"name": "Thriller", "hp": 505, "attack": 480, "defense": 470, "element": "Electric", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Thriller-removebg-preview.png"},
+                {"name": "Dire Razorclaw", "hp": 495, "attack": 470, "defense": 455, "element": "Fire", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file.png"},
+                {"name": "Dollageddon", "hp": 485, "attack": 465, "defense": 455, "element": "Light", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Dollageddon-removebg-preview.png"},
+                {"name": "Gold Werewolf", "hp": 530, "attack": 475, "defense": 460, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Gold_Werewolf-removebg-preview.png"},
+                {"name": "FlameMane", "hp": 515, "attack": 470, "defense": 455, "element": "Fire", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FlameMane-removebg-preview.png"},
+                {"name": "Specimen 66", "hp": 525, "attack": 475, "defense": 460, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Specimen_66-removebg-preview.png"},
+                {"name": "Frank", "hp": 540, "attack": 480, "defense": 470, "element": "Electric", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Frank-removebg-preview.png"},
+                {"name": "French Horned ToadDragon", "hp": 520, "attack": 475, "defense": 460, "element": "Water", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file__1_-removebg-preview.png"},
+                {"name": "Mog Zard", "hp": 535, "attack": 475, "defense": 465, "element": "Earth", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_MogZard-removebg-preview.png"},
+                {"name": "Mo-Zard", "hp": 500, "attack": 470, "defense": 455, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file__2_-removebg-preview.png"},
+                {"name": "Nulgath", "hp": 510, "attack": 475, "defense": 460, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Nulgath-removebg-preview.png"},
+                {"name": "Proto Champion", "hp": 525, "attack": 465, "defense": 475, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file_3.png"},
+                {"name": "Trash Can", "hp": 515, "attack": 460, "defense": 470, "element": "Light", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_TrashCan-removebg-preview.png"},
+                {"name": "Turdragon", "hp": 530, "attack": 475, "defense": 460, "element": "Nature", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Turagon-removebg-preview.png"},
+                {"name": "Unending Avatar", "hp": 540, "attack": 470, "defense": 455, "element": "Nature", "url":" https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file_4.png"},
             ],
             7: [
-                {"name": "Ultra Chaos Vordred", "hp": 600, "attack": 570, "defense": 560, "element": "Corrupted", "url":""},
-                {"name": "Earth Colossus", "hp": 580, "attack": 565, "defense": 555, "element": "Earth", "url":""},
-                {"name": "Water Titan Leviathan Prime", "hp": 620, "attack": 575, "defense": 560, "element": "Water", "url":""},
-                {"name": "Shadow Lord Alteon", "hp": 590, "attack": 570, "defense": 555, "element": "Dark", "url":""},
-                {"name": "Wind Titan Zephyr", "hp": 610, "attack": 575, "defense": 565, "element": "Wind", "url":""},
-                {"name": "Dwakel Mecha Prime", "hp": 605, "attack": 580, "defense": 570, "element": "Electric", "url":""},
-                {"name": "Infernal Dragon", "hp": 595, "attack": 570, "defense": 555, "element": "Fire", "url":""},
-                {"name": "Divine Light Elemental", "hp": 585, "attack": 565, "defense": 555, "element": "Light", "url":""},
-                {"name": "Undead Legion Titan", "hp": 630, "attack": 575, "defense": 560, "element": "Dark", "url":""},
-                {"name": "Chaos Beast Escherion", "hp": 615, "attack": 570, "defense": 555, "element": "Corrupted", "url":""},
-                {"name": "Dire Bear", "hp": 625, "attack": 575, "defense": 560, "element": "Nature", "url":""},
-                {"name": "Storm Emperor", "hp": 640, "attack": 580, "defense": 570, "element": "Electric", "url":""},
-                {"name": "Kraken", "hp": 620, "attack": 575, "defense": 560, "element": "Water", "url":""},
-                {"name": "Earth Elemental Prime", "hp": 635, "attack": 575, "defense": 565, "element": "Earth", "url":""},
-                {"name": "Shadow King", "hp": 600, "attack": 570, "defense": 555, "element": "Dark", "url":""},
-                {"name": "Blazing Inferno Titan", "hp": 610, "attack": 575, "defense": 560, "element": "Fire", "url":""},
-                {"name": "Obsidian Titan", "hp": 625, "attack": 565, "defense": 575, "element": "Earth", "url":""},
-                {"name": "Tempest Dragon Prime", "hp": 615, "attack": 560, "defense": 570, "element": "Wind", "url":""},
-                {"name": "Chaos Beast Ledgermayne", "hp": 630, "attack": 575, "defense": 560, "element": "Corrupted", "url":""},
-                {"name": "Ancient Treeant", "hp": 640, "attack": 570, "defense": 555, "element": "Nature", "url":""},
+                {"name": "Astral Dragon", "hp": 600, "attack": 570, "defense": 560, "element": "Light", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_AstralDragon.png"},
+                {"name": "Eise Horror", "hp": 580, "attack": 565, "defense": 555, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Elise_Horror-removebg-preview.png"},
+                {"name": "Asbane", "hp": 620, "attack": 575, "defense": 560, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Adbane.png"},
+                {"name": "Apephyryx", "hp": 590, "attack": 570, "defense": 555, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Apephryx-removebg-preview.png"},
+                {"name": "Enchantress", "hp": 610, "attack": 575, "defense": 565, "element": "Nature", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Enchantress-removebg-preview.png"},
+                {"name": "Queen of Monsters", "hp": 605, "attack": 580, "defense": 570, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_QueenOfMonsters-removebg-preview.png"},
+                {"name": "Krykan", "hp": 595, "attack": 570, "defense": 555, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove_background_project.png"},
+                {"name": "Painadin Overlord", "hp": 585, "attack": 565, "defense": 555, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Painadin_Overlord-removebg-preview.png"},
+                {"name": "EL-Blender", "hp": 630, "attack": 575, "defense": 560, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_EbilBlender-removebg-preview.png"},
+                {"name": "Key of Sholemoh", "hp": 615, "attack": 570, "defense": 555, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Key_of_Sholemoh-removebg-preview.png"},
+                {"name": "Specimen 30", "hp": 625, "attack": 575, "defense": 560, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Specimen_30.png"},
+                {"name": "Pinky", "hp": 640, "attack": 580, "defense": 570, "element": "Electric", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Pinky-removebg-preview.png"},
+                {"name": "Monster Cake", "hp": 620, "attack": 575, "defense": 560, "element": "Nature", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Monster_Cake-removebg-preview.png"},
+                {"name": "Angyler Fish", "hp": 635, "attack": 575, "defense": 565, "element": "Water", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Angyler_Fish-removebg-preview.png"},
+                {"name": "Big Bad Ancient.. Goose?", "hp": 600, "attack": 570, "defense": 555, "element": "Light", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BigBadAncientGoose-removebg-preview.png"},
+                {"name": "Barlot Field", "hp": 610, "attack": 575, "defense": 560, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Barlot_Fiend-removebg-preview.png"},
+                {"name": "Barghest", "hp": 625, "attack": 565, "defense": 575, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Barghest-removebg-preview.png"},
+                {"name": "Yuzil", "hp": 615, "attack": 560, "defense": 570, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Yuzil.png"},
+                {"name": "Azkorath", "hp": 630, "attack": 575, "defense": 560, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Azkorath-removebg-preview.png"},
+                {"name": "Boto", "hp": 640, "attack": 570, "defense": 555, "element": "Water", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Boto.png"},
             ],
             8: [
                 {"name": "Ultra Chaos Beast", "hp": 700, "attack": 680, "defense": 670, "element": "Corrupted", "url":""},
@@ -7191,7 +7219,7 @@ class Battles(commands.Cog):
             searching_message = await ctx.send(embed=searching_embed)
 
             # Simulate searching time
-            await asyncio.sleep(randomm.randint(3, 7))  # Adjust the sleep time as desired
+            await asyncio.sleep(randomm.randint(3, 8))  # Adjust the sleep time as desired
 
             # Determine if a legendary monster (level 11) should spawn
             legendary_spawn_chance = 0.01 # 1% chance
@@ -7630,7 +7658,7 @@ class Battles(commands.Cog):
                 if newlevel != player_level:
                     await self.bot.process_levelup(ctx, newlevel, player_level)
 
-                if levelchoice < 6:
+                if levelchoice < 8:
                     if randomm.random() < egg_drop_chance:
 
                         async with self.bot.pool.acquire() as conn:
@@ -7651,28 +7679,92 @@ class Battles(commands.Cog):
                                 _("You cannot have more than 5 pets or eggs. Please release a pet or wait for an egg to hatch."))
                             return
 
+                        # Generate a random IV percentage between 50% and 100%
+                        iv_percentage = randomm.uniform(10, 1000)
+
+                        if iv_percentage < 20:
+                            iv_percentage = randomm.uniform(90, 100)
+                        elif iv_percentage < 70:
+                            iv_percentage = randomm.uniform(80, 90)
+                        elif iv_percentage < 150:
+                            iv_percentage = randomm.uniform(70, 80)
+                        elif iv_percentage < 350:
+                            iv_percentage = randomm.uniform(60, 70)
+                        elif iv_percentage < 700:
+                            iv_percentage = randomm.uniform(50, 60)
+                        else:
+                            iv_percentage = randomm.uniform(30, 50)
+
+                        # Calculate total IV points (100% IV corresponds to 200 points)
+                        total_iv_points = (iv_percentage / 100) * 200
+
+                        def allocate_iv_points(total_points):
+                            # Generate three random numbers
+                            a = randomm.random()
+                            b = randomm.random()
+                            c = randomm.random()
+                            total = a + b + c
+                            # Normalize so that the sum is equal to total_points
+                            hp_iv = total_points * (a / total)
+                            attack_iv = total_points * (b / total)
+                            defense_iv = total_points * (c / total)
+                            # Round the IV points
+                            hp_iv = int(round(hp_iv))
+                            attack_iv = int(round(attack_iv))
+                            defense_iv = int(round(defense_iv))
+                            # Adjust if rounding errors cause total to deviate
+                            iv_sum = hp_iv + attack_iv + defense_iv
+                            if iv_sum != int(round(total_points)):
+                                diff = int(round(total_points)) - iv_sum
+                                # Adjust the largest IV by the difference
+                                max_iv = max(hp_iv, attack_iv, defense_iv)
+                                if hp_iv == max_iv:
+                                    hp_iv += diff
+                                elif attack_iv == max_iv:
+                                    attack_iv += diff
+                                else:
+                                    defense_iv += diff
+                            return hp_iv, attack_iv, defense_iv
+
+                        hp_iv, attack_iv, defense_iv = allocate_iv_points(total_iv_points)
+
+                        hp = monster["hp"] + hp_iv
+                        attack = monster["attack"] + attack_iv
+                        defense = monster["defense"] + defense_iv
+
 
                         # Insert the egg into the database
                         egg_hatch_time = datetime.datetime.utcnow() + datetime.timedelta(
                             minutes=2160)  # Example: hatches in 24 hours
-                        async with self.bot.pool.acquire() as conn:
-                            await conn.execute(
-                                """
-                                INSERT INTO monster_eggs (user_id, egg_type, hp, attack, defense, element, url, hatch_time)
-                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
-                                """,
-                                ctx.author.id,
-                                monster["name"],
-                                monster["hp"],
-                                monster["attack"],
-                                monster["defense"],
-                                monster["element"],
-                                monster["url"],
-                                egg_hatch_time,
+                        try:
+                            async with self.bot.pool.acquire() as conn:
+                                await conn.execute(
+                                    """
+                                    INSERT INTO monster_eggs (
+                                        user_id, egg_type, hp, attack, defense, element, url, hatch_time,
+                                        "IV", hp_iv, attack_iv, defense_iv
+                                    )
+                                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);
+                                    """,
+                                    ctx.author.id,
+                                    monster["name"],
+                                    hp,
+                                    attack,
+                                    defense,
+                                    monster["element"],
+                                    monster["url"],
+                                    egg_hatch_time,
+                                    iv_percentage,
+                                    hp_iv,
+                                    attack_iv,
+                                    defense_iv
+                                )
+
+                            await ctx.send(
+                                f"You found a **{monster['name']} Egg** with an IV of {iv_percentage:.2f}%! It will hatch in 36 hours."
                             )
-                        await ctx.send(
-                            _("You found a **{monster} Egg**! It will hatch in {time} hours.").format(monster=monster["name"], time=36)
-                        )
+                        except Exception as e:
+                            await ctx.send(e)
 
 
                 elif monster_stats["hp"] > 0 and player_stats["hp"] <= 0:
@@ -7709,45 +7801,79 @@ class Battles(commands.Cog):
                 )
             await ctx.send(embed=embed)
 
-    @tasks.loop(minutes=1)
-    async def check_egg_hatches(self):
-        async with self.bot.pool.acquire() as conn:
-            # Fetch eggs that are ready to hatch
-            eggs = await conn.fetch(
-                "SELECT * FROM monster_eggs WHERE hatched = FALSE AND hatch_time <= NOW();"
-            )
-            for egg in eggs:
-                # Mark the egg as hatched
-                await conn.execute(
-                    "UPDATE monster_eggs SET hatched = TRUE WHERE id = $1;", egg["id"]
-                )
-
-                # Insert the hatched egg into monster_pets
-                await conn.execute(
-                    """
-                    INSERT INTO monster_pets (user_id, name, hp, attack, defense, element, url)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7);
-                    """,
-                    egg["user_id"],
-                    egg["egg_type"],  # Use egg name as pet name initially
-                    egg["hp"],
-                    egg["attack"],
-                    egg["defense"],
-                    egg["element"],
-                    egg["url"],
-                )
-
-                # Notify the user
-                user = self.bot.get_user(egg["user_id"])
-                if user:
-                    await user.send(
-                        _("Your **{monster} Egg** has hatched into a pet! Check your pet menu to see it.").format(
-                            monster=egg["egg_type"]
-                        )
-                    )
-
     import datetime
 
+    @tasks.loop(minutes=1)
+    async def check_egg_hatches(self):
+        # Define the growth stages
+        growth_stages = {
+            1: {"stage": "baby", "growth_time": 2, "stat_multiplier": 0.25, "hunger_modifier": 1.0},
+            2: {"stage": "juvenile", "growth_time": 2, "stat_multiplier": 0.50, "hunger_modifier": 0.8},
+            3: {"stage": "young", "growth_time": 1, "stat_multiplier": 0.75, "hunger_modifier": 0.6},
+            4: {"stage": "adult", "growth_time": None, "stat_multiplier": 1.0, "hunger_modifier": 0.0},
+        }
+
+        try:
+            async with self.bot.pool.acquire() as conn:
+                # Fetch eggs that are ready to hatch
+                eggs = await conn.fetch(
+                    "SELECT * FROM monster_eggs WHERE hatched = FALSE AND hatch_time <= NOW();"
+                )
+                for egg in eggs:
+                    # Mark the egg as hatched
+                    await conn.execute(
+                        "UPDATE monster_eggs SET hatched = TRUE WHERE id = $1;", egg["id"]
+                    )
+
+                    # Get the baby stage data
+                    baby_stage = growth_stages[1]
+                    stat_multiplier = baby_stage["stat_multiplier"]
+                    growth_time_interval = datetime.timedelta(days=baby_stage["growth_time"])
+                    growth_time = datetime.datetime.utcnow() + growth_time_interval
+
+                    # Adjust the stats
+                    hp = round(egg["hp"] * stat_multiplier)
+                    attack = round(egg["attack"] * stat_multiplier)
+                    defense = round(egg["defense"] * stat_multiplier)
+
+                    iv_value = egg.get("IV") or egg.get("iv")
+                    if iv_value is None:
+                        iv_value = 0  # Set a default value or handle as needed
+
+                    # Insert the hatched egg into monster_pets
+                    await conn.execute(
+                        """
+                        INSERT INTO monster_pets (
+                            user_id, name, default_name, hp, attack, defense, element, url,
+                            growth_stage, growth_index, growth_time, "IV"
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);
+                        """,
+                        egg["user_id"],
+                        egg["egg_type"],  # Set initial pet name to the default name
+                        egg["egg_type"],  # Store the default species name
+                        hp,
+                        attack,
+                        defense,
+                        egg["element"],
+                        egg["url"],
+                        baby_stage["stage"],  # 'baby'
+                        1,  # growth_index
+                        growth_time,
+                        iv_value,
+                    )
+
+                    # Notify the user
+                    user = self.bot.get_user(egg["user_id"])
+                    if user:
+                        await user.send(
+                            f"Your **Egg** has hatched into a pet named **{egg['egg_type']}**! Check your pet menu to see it."
+                        )
+        except Exception as e:
+            print(f"Error in check_egg_hatches: {e}")
+            user = self.bot.get_user(295173706496475136)
+            if user:
+                await user.send(f"Error in check_egg_hatches: {e}")
 
     @tasks.loop(minutes=1)
     async def check_pet_growth(self):
@@ -7777,6 +7903,11 @@ class Battles(commands.Cog):
                         else:
                             growth_time_interval = None
 
+                        # Calculate the multiplier ratio
+                        old_multiplier = growth_stages[pet["growth_index"]]["stat_multiplier"]
+                        new_multiplier = stage_data["stat_multiplier"]
+                        multiplier_ratio = new_multiplier / old_multiplier
+
                         # Execute the appropriate query
                         if growth_time_interval is not None:
                             await conn.execute(
@@ -7792,7 +7923,7 @@ class Battles(commands.Cog):
                                 """,
                                 stage_data["stage"],
                                 growth_time_interval,
-                                stage_data["stat_multiplier"],
+                                multiplier_ratio,
                                 next_stage_index,
                                 pet["id"],
                             )
@@ -7809,7 +7940,7 @@ class Battles(commands.Cog):
                                 WHERE id = $4;
                                 """,
                                 stage_data["stage"],
-                                stage_data["stat_multiplier"],
+                                multiplier_ratio,
                                 next_stage_index,
                                 pet["id"],
                             )
@@ -7821,12 +7952,7 @@ class Battles(commands.Cog):
                                 f"Your pet **{pet['name']}** has grown into a {stage_data['stage']}!"
                             )
         except Exception as e:
-            user = self.bot.get_user(295173706496475136)
-            await user.send(f"An error occurred during pet growth update: {e}")
-            # Optionally, include traceback for detailed debugging
-            import traceback
-            traceback_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
-            await user.send(f"Traceback:\n{traceback_str}")
+            print(f"Error in check_pet_growth: {e}")
 
     @user_cooldown(300)
     @pets.command(brief=_("Feed your pet"))
