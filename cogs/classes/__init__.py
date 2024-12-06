@@ -762,7 +762,7 @@ class Classes(commands.Cog):
     @update_pet()
     @is_class(Ranger)
     @has_char()
-    @next_day_cooldown()
+    @user_cooldown(21600)
     @pet.command(brief=_("Let your pet hunt a weapon"))
     @locale_doc
     async def hunt(self, ctx):
