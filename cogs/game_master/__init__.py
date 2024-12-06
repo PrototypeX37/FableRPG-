@@ -591,7 +591,7 @@ class GameMaster(commands.Cog):
         item_type = ItemType.from_string(item_type)
         if item_type is None:
             return await ctx.send(_("Invalid item type."))
-        if not 0 <= stat <= 201:
+        if not -100 <= stat <= 201:
             return await ctx.send(_("Invalid stat."))
         try:
             hand = item_type.get_hand().value
@@ -716,6 +716,625 @@ class GameMaster(commands.Cog):
                 self.bot.config.game.gm_log_channel,
                 params=params,
             )
+
+    import random
+    @is_gm()
+    @commands.command()
+    async def gmiv(self, ctx, monster_id: int):
+        """Generate IVs for an existing monster using its ID."""
+        # Fetch the monster from the database
+        try:
+            await ctx.send("hi")
+            async with self.bot.pool.acquire() as conn:
+                monster = await conn.fetchrow(
+                    """
+                    SELECT * FROM monster_pets WHERE "id" = $1;
+                    """,
+                    monster_id
+                )
+
+
+            if not monster:
+                await ctx.send(f"No monster found with ID {monster_id}.")
+                return
+            import random
+
+            iv_percentage = random.uniform(10, 1000)
+
+            if iv_percentage < 20:
+                iv_percentage = random.uniform(90, 100)
+            elif iv_percentage < 70:
+                iv_percentage = random.uniform(80, 90)
+            elif iv_percentage < 150:
+                iv_percentage = random.uniform(70, 80)
+            elif iv_percentage < 350:
+                iv_percentage = random.uniform(60, 70)
+            elif iv_percentage < 700:
+                iv_percentage = random.uniform(50, 60)
+            else:
+                iv_percentage = random.uniform(30, 50)
+
+            # Calculate total IV points (100% IV corresponds to 200 points)
+            total_iv_points = (iv_percentage / 100) * 200
+
+            def allocate_iv_points(total_points):
+                # Generate three random numbers
+                import random
+                a = random.random()
+                b = random.random()
+                c = random.random()
+                total = a + b + c
+                # Normalize so that the sum is equal to total_points
+                hp_iv = total_points * (a / total)
+                attack_iv = total_points * (b / total)
+                defense_iv = total_points * (c / total)
+                # Round the IV points
+                hp_iv = int(round(hp_iv))
+                attack_iv = int(round(attack_iv))
+                defense_iv = int(round(defense_iv))
+                # Adjust if rounding errors cause total to deviate
+                iv_sum = hp_iv + attack_iv + defense_iv
+                if iv_sum != int(round(total_points)):
+                    diff = int(round(total_points)) - iv_sum
+                    # Adjust the largest IV by the difference
+                    max_iv = max(hp_iv, attack_iv, defense_iv)
+                    if hp_iv == max_iv:
+                        hp_iv += diff
+                    elif attack_iv == max_iv:
+                        attack_iv += diff
+                    else:
+                        defense_iv += diff
+                return hp_iv, attack_iv, defense_iv
+
+            hp_iv, attack_iv, defense_iv = allocate_iv_points(total_iv_points)
+        except Exception as e:
+            await ctx.send(e)
+
+        # Calculate the final stats
+        base_hp = monster['hp']
+        base_attack = monster['attack']
+        base_defense = monster['defense']
+
+        hp_total = base_hp + hp_iv
+        attack_total = base_attack + attack_iv
+        defense_total = base_defense + defense_iv
+
+
+
+        # Update the monster's IVs and total stats in the database
+        try:
+            async with self.bot.pool.acquire() as conn:
+                await conn.execute(
+                    'UPDATE monster_pets SET "IV" = $1, hp = $2, attack = $3, defense = $4 WHERE "id" = $5;',
+                    iv_percentage,
+                    hp_total,
+                    attack_total,
+                    defense_total,
+                    monster_id
+                )
+
+
+            await ctx.send(
+                f"Monster with ID {monster_id} has been assigned an IV of {iv_percentage:.2f}% "
+                f"(HP IV: {hp_iv}, Attack IV: {attack_iv}, Defense IV: {defense_iv}). "
+                f"Total stats updated."
+            )
+        except Exception as e:
+            await ctx.send(f"An error occurred: {e}")
+
+    @is_gm()
+    @commands.command()
+    async def gmegg(self, ctx, member: discord.Member, *, monster_name: str):
+        """Generate an egg for a user with a specified monster."""
+        # Check if the monster exists
+        monster = None
+
+        monsters = {
+            1: [
+                {"name": "Sneevil", "hp": 100, "attack": 95, "defense": 100, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Sneevil-removebg-preview.png"},
+                {"name": "Slime", "hp": 120, "attack": 100, "defense": 105, "element": "Water",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_slime.png"},
+                {"name": "Frogzard", "hp": 120, "attack": 90, "defense": 95, "element": "Nature",
+                 "url": "https://static.wikia.nocookie.net/aqwikia/images/d/d6/Frogzard.png"},
+                {"name": "Rat", "hp": 90, "attack": 100, "defense": 90, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Rat-removebg-preview.png"},
+                {"name": "Bat", "hp": 150, "attack": 95, "defense": 85, "element": "Wind",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Bat-removebg-preview.png"},
+                {"name": "Skeleton", "hp": 190, "attack": 105, "defense": 100, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Skelly-removebg-preview.png"},
+                {"name": "Imp", "hp": 180, "attack": 95, "defense": 85, "element": "Fire",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zZquzlh-removebg-preview.png"},
+                {"name": "Pixie", "hp": 100, "attack": 90, "defense": 80, "element": "Light",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_pixie-removebg-preview.png"},
+                {"name": "Zombie", "hp": 170, "attack": 100, "defense": 95, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zombie-removebg-preview.png"},
+                {"name": "Spiderling", "hp": 220, "attack": 95, "defense": 90, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_spider-removebg-preview.png"},
+                {"name": "Spiderling", "hp": 220, "attack": 95, "defense": 90, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_spider-removebg-preview.png"},
+                {"name": "Moglin", "hp": 200, "attack": 90, "defense": 85, "element": "Light",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Moglin.png"},
+                {"name": "Red Ant", "hp": 140, "attack": 105, "defense": 100, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_redant-removebg-preview.png"},
+                {"name": "Chickencow", "hp": 300, "attack": 150, "defense": 90, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChickenCow-removebg-preview.png"},
+                {"name": "Tog", "hp": 380, "attack": 105, "defense": 95, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Tog-removebg-preview.png"},
+                {"name": "Lemurphant", "hp": 340, "attack": 95, "defense": 80, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Lemurphant-removebg-preview.png"},
+                {"name": "Fire Imp", "hp": 200, "attack": 100, "defense": 90, "element": "Fire",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zZquzlh-removebg-preview.png"},
+                {"name": "Zardman", "hp": 300, "attack": 95, "defense": 100, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Zardman-removebg-preview.png"},
+                {"name": "Wind Elemental", "hp": 165, "attack": 90, "defense": 85, "element": "Wind",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_WindElemental-removebg-preview.png"},
+                {"name": "Dark Wolf", "hp": 200, "attack": 100, "defense": 90, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DarkWolf-removebg-preview.png"},
+                {"name": "Treeant", "hp": 205, "attack": 105, "defense": 95, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Treeant-removebg-preview.png"},
+            ],
+            2: [
+                {"name": "Cyclops Warlord", "hp": 230, "attack": 160, "defense": 155, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_CR-removebg-preview.png"},
+                {"name": "Fishman Soldier", "hp": 200, "attack": 165, "defense": 160, "element": "Water",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Fisherman-removebg-preview.png"},
+                {"name": "Fire Elemental", "hp": 215, "attack": 150, "defense": 145, "element": "Fire",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_fire_elemental-removebg-preview.png"},
+                {"name": "Vampire Bat", "hp": 200, "attack": 170, "defense": 160, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_viO2oSJ-removebg-preview.png"},
+                {"name": "Blood Eagle", "hp": 195, "attack": 165, "defense": 150, "element": "Wind",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BloodEagle-removebg-preview.png"},
+                {"name": "Earth Elemental", "hp": 190, "attack": 175, "defense": 160, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Earth_Elemental-removebg-preview.png"},
+                {"name": "Fire Mage", "hp": 200, "attack": 160, "defense": 140, "element": "Fire",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireMage-removebg-preview.png"},
+                {"name": "Dready Bear", "hp": 230, "attack": 155, "defense": 150, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_dreddy-removebg-preview.png"},
+                {"name": "Undead Soldier", "hp": 280, "attack": 160, "defense": 155, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_UndeadSoldier-removebg-preview.png"},
+                {"name": "Skeleton Warrior", "hp": 330, "attack": 155, "defense": 150, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SkeelyWarrior-removebg-preview.png"},
+                {"name": "Giant Spider", "hp": 350, "attack": 160, "defense": 145, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DreadSpider-removebg-preview.png"},
+                {"name": "Castle spider", "hp": 310, "attack": 170, "defense": 160, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Castle-removebg-preview.png"},
+                {"name": "ConRot", "hp": 210, "attack": 165, "defense": 155, "element": "Water",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ConRot-removebg-preview.png"},
+                {"name": "Horc Warrior", "hp": 270, "attack": 175, "defense": 170, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_HorcWarrior-removebg-preview.png"},
+                {"name": "Shadow Hound", "hp": 300, "attack": 160, "defense": 150, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Hound-removebg-preview.png"},
+                {"name": "Fire Sprite", "hp": 290, "attack": 165, "defense": 155, "element": "Fire",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireSprite-removebg-preview.png"},
+                {"name": "Rock Elemental", "hp": 300, "attack": 160, "defense": 165, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Earth_Elemental-removebg-preview.png"},
+                {"name": "Shadow Serpent", "hp": 335, "attack": 155, "defense": 150, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadowSerpant-removebg-preview.png"},
+                {"name": "Dark Elemental", "hp": 340, "attack": 165, "defense": 155, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DarkEle-Photoroom.png"},
+                {"name": "Forest Guardian", "hp": 500, "attack": 250, "defense": 250, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ForestGuardian-removebg-preview.png"},
+            ],
+            3: [
+                {"name": "Mana Golem", "hp": 200, "attack": 220, "defense": 210, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_managolum-removebg-preview.png"},
+                {"name": "Karok the Fallen", "hp": 180, "attack": 215, "defense": 205, "element": "Ice",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_VIMs8un-removebg-preview.png"},
+                {"name": "Water Draconian", "hp": 220, "attack": 225, "defense": 200, "element": "Water",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_waterdrag-removebg-preview.png"},
+                {"name": "Shadow Creeper", "hp": 190, "attack": 220, "defense": 205, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_shadowcreep-removebg-preview.png"},
+                {"name": "Wind Djinn", "hp": 210, "attack": 225, "defense": 215, "element": "Wind",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_djinn-removebg-preview.png"},
+                {"name": "Autunm Fox", "hp": 205, "attack": 230, "defense": 220, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Autumn_Fox-removebg-preview.png"},
+                {"name": "Dark Draconian", "hp": 195, "attack": 220, "defense": 200, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_darkdom-removebg-preview.png"},
+                {"name": "Light Elemental", "hp": 185, "attack": 215, "defense": 210, "element": "Light",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_LightELemental-removebg-preview.png"},
+                {"name": "Undead Giant", "hp": 230, "attack": 220, "defense": 210, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_UndGiant-removebg-preview.png"},
+                {"name": "Chaos Spider", "hp": 215, "attack": 215, "defense": 205, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosSpider-removebg-preview.png"},
+                {"name": "Seed Spitter", "hp": 225, "attack": 220, "defense": 200, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SeedSpitter-removebg-preview.png"},
+                {"name": "Beach Werewolf", "hp": 240, "attack": 230, "defense": 220, "element": "Water",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BeachWerewold-removebg-preview.png"},
+                {"name": "Boss Dummy", "hp": 220, "attack": 225, "defense": 210, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BossDummy-removebg-preview.png"},
+                {"name": "Rock", "hp": 235, "attack": 225, "defense": 215, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Rock-removebg-preview.png"},
+                {"name": "Shadow Serpent", "hp": 200, "attack": 220, "defense": 205, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadoeSerpant-removebg-preview.png"},
+                {"name": "Flame Elemental", "hp": 210, "attack": 225, "defense": 210, "element": "Fire",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireElemental-removebg-preview.png"},
+                {"name": "Bear", "hp": 225, "attack": 215, "defense": 220, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732611726453.png"},
+                {"name": "Chair", "hp": 215, "attack": 210, "defense": 215, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_chair-removebg-preview.png"},
+                {"name": "Chaos Serpant", "hp": 230, "attack": 220, "defense": 205, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosSerp-removebg-preview.png"},
+                {"name": "Gorillaphant", "hp": 240, "attack": 225, "defense": 210, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_gorillaserpant-removebg-preview.png"},
+            ],
+            4: [
+                {"name": "Hydra Head", "hp": 300, "attack": 280, "defense": 270, "element": "Water",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_hydra.png"},
+                {"name": "Blessed Deer", "hp": 280, "attack": 275, "defense": 265, "element": "Light",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BlessedDeer-removebg-preview.png"},
+                {"name": "Chaos Sphinx", "hp": 320, "attack": 290, "defense": 275, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaopsSpinx.png"},
+                {"name": "Inferno Dracolion", "hp": 290, "attack": 285, "defense": 270, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614284328.png"},
+                {"name": "Wind Cyclone", "hp": 310, "attack": 290, "defense": 280, "element": "Wind",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_WindElemental-removebg-preview.png"},
+                {"name": "Dwakel Blaster", "hp": 305, "attack": 295, "defense": 285, "element": "Electric",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Bubble.png"},
+                {"name": "Infernal Fiend", "hp": 295, "attack": 285, "defense": 270, "element": "Fire",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614284328.png"},
+                {"name": "Dark Mukai", "hp": 285, "attack": 275, "defense": 265, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614826889.png"},
+                {"name": "Undead Berserker", "hp": 330, "attack": 285, "defense": 275, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614863579.png"},
+                {"name": "Chaos Warrior", "hp": 315, "attack": 280, "defense": 270, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosWarrior-removebg-preview.png"},
+                {"name": "Dire Wolf", "hp": 325, "attack": 285, "defense": 275, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DireWolf-removebg-preview.png"},
+                {"name": "Skye Warrior", "hp": 340, "attack": 295, "defense": 285, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SkyeWarrior-removebg-preview.png"},
+                {"name": "Death On Wings", "hp": 320, "attack": 290, "defense": 275, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DeathonWings-removebg-preview.png"},
+                {"name": "Chaorruption", "hp": 335, "attack": 295, "defense": 285, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Chaorruption-removebg-preview.png"},
+                {"name": "Shadow Beast", "hp": 300, "attack": 285, "defense": 270, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadowBeast-removebg-preview.png"},
+                {"name": "Hootbear", "hp": 310, "attack": 290, "defense": 275, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_HootBear-removebg-preview.png"},
+                {"name": "Anxiety", "hp": 325, "attack": 280, "defense": 290, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_anxiety-removebg-preview.png"},
+                {"name": "Twilly", "hp": 315, "attack": 275, "defense": 285, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Twilly-removebg-preview.png"},
+                {"name": "Black Cat", "hp": 330, "attack": 285, "defense": 270, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_QJsLMnk-removebg-preview.png"},
+                {"name": "Forest Guardian", "hp": 340, "attack": 290, "defense": 275, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ForestGuardian-removebg-preview.png"},
+            ],
+            5: [
+                {"name": "Chaos Dragon", "hp": 400, "attack": 380, "defense": 370, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosDragon-removebg-preview.png"},
+                {"name": "Wooden Door", "hp": 380, "attack": 375, "defense": 365, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_WoodenDoor-removebg-preview.png"},
+                {"name": "Garvodeus", "hp": 420, "attack": 390, "defense": 375, "element": "Water",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Garvodeus-removebg-preview.png"},
+                {"name": "Shadow Lich", "hp": 390, "attack": 385, "defense": 370, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadowLich-removebg-preview.png"},
+                {"name": "Zorbak", "hp": 410, "attack": 390, "defense": 380, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Zorbak-removebg-preview.png"},
+                {"name": "Dwakel Rocketman", "hp": 405, "attack": 395, "defense": 385, "element": "Electric",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DwarkalRock-removebg-preview.png"},
+                {"name": "Kathool", "hp": 395, "attack": 385, "defense": 370, "element": "Water",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Kathool-removebg-preview.png"},
+                {"name": "Celestial Hound", "hp": 385, "attack": 375, "defense": 365, "element": "Light",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_CelestialHound-removebg-preview.png"},
+                {"name": "Undead Raxgore", "hp": 430, "attack": 385, "defense": 375, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Raxfore-removebg-preview_1.png"},
+                {"name": "Droognax", "hp": 415, "attack": 380, "defense": 370, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Droognax-removebg-preview.png"},
+                {"name": "Corrupted Boar", "hp": 425, "attack": 385, "defense": 375, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Corrupted_Bear-removebg-preview.png"},
+                {"name": "Fressa", "hp": 440, "attack": 395, "defense": 385, "element": "Water",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Fressa-removebg-preview.png"},
+                {"name": "Grimskull", "hp": 420, "attack": 390, "defense": 375, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Grimskull-removebg-preview.png"},
+                {"name": "Chaotic Chicken", "hp": 435, "attack": 385, "defense": 380, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaoticChicken-removebg-preview.png"},
+                {"name": "Baelgar", "hp": 400, "attack": 385, "defense": 370, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Baelgar-removebg-preview.png"},
+                {"name": "Blood Dragon", "hp": 410, "attack": 390, "defense": 375, "element": "Fire",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BloodDragon-removebg-preview.png"},
+                {"name": "Avatar of Desolich", "hp": 425, "attack": 380, "defense": 390, "element": "Fire",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732696555786.png"},
+                {"name": "Piggy Drake", "hp": 415, "attack": 375, "defense": 385, "element": "Wind",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732696596976.png"},
+                {"name": "Chaos Alteon", "hp": 430, "attack": 385, "defense": 370, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Chaos_Alteon-removebg-preview.png"},
+                {"name": "Argo", "hp": 440, "attack": 380, "defense": 375, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Argo-removebg-preview.png"},
+            ],
+            6: [
+                {"name": "Ultra Chaos Dragon", "hp": 500, "attack": 470, "defense": 460, "element": "Corrupted",
+                 "url": ""},
+                {"name": "Earth Titan Golem", "hp": 480, "attack": 465, "defense": 455, "element": "Earth", "url": ""},
+                {"name": "Water Titan Kraken", "hp": 520, "attack": 475, "defense": 460, "element": "Water", "url": ""},
+                {"name": "Shadow Lord Sepulchure", "hp": 490, "attack": 470, "defense": 455, "element": "Dark",
+                 "url": ""},
+                {"name": "Wind Elemental Titan", "hp": 510, "attack": 475, "defense": 465, "element": "Wind",
+                 "url": ""},
+                {"name": "Dwakel Mecha", "hp": 505, "attack": 480, "defense": 470, "element": "Electric", "url": ""},
+                {"name": "Infernal Warlord", "hp": 495, "attack": 470, "defense": 455, "element": "Fire", "url": ""},
+                {"name": "Divine Guardian", "hp": 485, "attack": 465, "defense": 455, "element": "Light", "url": ""},
+                {"name": "Undead Legion Overlord", "hp": 530, "attack": 475, "defense": 460, "element": "Dark",
+                 "url": ""},
+                {"name": "Chaos Vordred", "hp": 515, "attack": 470, "defense": 455, "element": "Corrupted", "url": ""},
+                {"name": "Dire Mammoth", "hp": 525, "attack": 475, "defense": 460, "element": "Nature", "url": ""},
+                {"name": "Storm Titan Lord", "hp": 540, "attack": 480, "defense": 470, "element": "Electric",
+                 "url": ""},
+                {"name": "Leviathan", "hp": 520, "attack": 475, "defense": 460, "element": "Water", "url": ""},
+                {"name": "Earth Elemental Lord", "hp": 535, "attack": 475, "defense": 465, "element": "Earth",
+                 "url": ""},
+                {"name": "Shadow Beast King", "hp": 500, "attack": 470, "defense": 455, "element": "Dark", "url": ""},
+                {"name": "Blazing Inferno Dragon", "hp": 510, "attack": 475, "defense": 460, "element": "Fire",
+                 "url": ""},
+                {"name": "Obsidian Colossus", "hp": 525, "attack": 465, "defense": 475, "element": "Earth", "url": ""},
+                {"name": "Tempest Dragon", "hp": 515, "attack": 460, "defense": 470, "element": "Wind", "url": ""},
+                {"name": "Chaos Beast Kathool", "hp": 530, "attack": 475, "defense": 460, "element": "Corrupted",
+                 "url": ""},
+                {"name": "Great Treeant", "hp": 540, "attack": 470, "defense": 455, "element": "Nature", "url": ""},
+            ],
+            7: [
+                {"name": "Ultra Chaos Vordred", "hp": 600, "attack": 570, "defense": 560, "element": "Corrupted",
+                 "url": ""},
+                {"name": "Earth Colossus", "hp": 580, "attack": 565, "defense": 555, "element": "Earth", "url": ""},
+                {"name": "Water Titan Leviathan Prime", "hp": 620, "attack": 575, "defense": 560, "element": "Water",
+                 "url": ""},
+                {"name": "Shadow Lord Alteon", "hp": 590, "attack": 570, "defense": 555, "element": "Dark", "url": ""},
+                {"name": "Wind Titan Zephyr", "hp": 610, "attack": 575, "defense": 565, "element": "Wind", "url": ""},
+                {"name": "Dwakel Mecha Prime", "hp": 605, "attack": 580, "defense": 570, "element": "Electric",
+                 "url": ""},
+                {"name": "Infernal Dragon", "hp": 595, "attack": 570, "defense": 555, "element": "Fire", "url": ""},
+                {"name": "Divine Light Elemental", "hp": 585, "attack": 565, "defense": 555, "element": "Light",
+                 "url": ""},
+                {"name": "Undead Legion Titan", "hp": 630, "attack": 575, "defense": 560, "element": "Dark", "url": ""},
+                {"name": "Chaos Beast Escherion", "hp": 615, "attack": 570, "defense": 555, "element": "Corrupted",
+                 "url": ""},
+                {"name": "Dire Bear", "hp": 625, "attack": 575, "defense": 560, "element": "Nature", "url": ""},
+                {"name": "Storm Emperor", "hp": 640, "attack": 580, "defense": 570, "element": "Electric", "url": ""},
+                {"name": "Kraken", "hp": 620, "attack": 575, "defense": 560, "element": "Water", "url": ""},
+                {"name": "Earth Elemental Prime", "hp": 635, "attack": 575, "defense": 565, "element": "Earth",
+                 "url": ""},
+                {"name": "Shadow King", "hp": 600, "attack": 570, "defense": 555, "element": "Dark", "url": ""},
+                {"name": "Blazing Inferno Titan", "hp": 610, "attack": 575, "defense": 560, "element": "Fire",
+                 "url": ""},
+                {"name": "Obsidian Titan", "hp": 625, "attack": 565, "defense": 575, "element": "Earth", "url": ""},
+                {"name": "Tempest Dragon Prime", "hp": 615, "attack": 560, "defense": 570, "element": "Wind",
+                 "url": ""},
+                {"name": "Chaos Beast Ledgermayne", "hp": 630, "attack": 575, "defense": 560, "element": "Corrupted",
+                 "url": ""},
+                {"name": "Ancient Treeant", "hp": 640, "attack": 570, "defense": 555, "element": "Nature", "url": ""},
+            ],
+            8: [
+                {"name": "Ultra Chaos Beast", "hp": 700, "attack": 680, "defense": 670, "element": "Corrupted",
+                 "url": ""},
+                {"name": "Earth Colossus Prime", "hp": 680, "attack": 675, "defense": 665, "element": "Earth",
+                 "url": ""},
+                {"name": "Water Lord Leviathan", "hp": 720, "attack": 690, "defense": 675, "element": "Water",
+                 "url": ""},
+                {"name": "Shadow Dragon", "hp": 690, "attack": 680, "defense": 665, "element": "Dark", "url": ""},
+                {"name": "Wind Titan Lord", "hp": 710, "attack": 685, "defense": 675, "element": "Wind", "url": ""},
+                {"name": "Dwakel Ultimate Mecha", "hp": 705, "attack": 690, "defense": 680, "element": "Electric",
+                 "url": ""},
+                {"name": "Infernal Warlord Prime", "hp": 695, "attack": 680, "defense": 665, "element": "Fire",
+                 "url": ""},
+                {"name": "Divine Lightbringer", "hp": 685, "attack": 675, "defense": 665, "element": "Light",
+                 "url": ""},
+                {"name": "Undead Legion Overlord", "hp": 730, "attack": 680, "defense": 670, "element": "Dark",
+                 "url": ""},
+                {"name": "Chaos Beast Wolfwing", "hp": 715, "attack": 675, "defense": 665, "element": "Corrupted",
+                 "url": ""},
+                {"name": "Dire Lion", "hp": 725, "attack": 690, "defense": 675, "element": "Nature", "url": ""},
+                {"name": "Storm King Prime", "hp": 740, "attack": 695, "defense": 685, "element": "Electric",
+                 "url": ""},
+                {"name": "Leviathan Prime", "hp": 720, "attack": 680, "defense": 670, "element": "Water", "url": ""},
+                {"name": "Earth Elemental King", "hp": 735, "attack": 675, "defense": 680, "element": "Earth",
+                 "url": ""},
+                {"name": "Shadow Lord Prime", "hp": 700, "attack": 680, "defense": 665, "element": "Dark", "url": ""},
+                {"name": "Blazing Inferno Dragon Prime", "hp": 710, "attack": 685, "defense": 670, "element": "Fire",
+                 "url": ""},
+                {"name": "Obsidian Colossus Prime", "hp": 725, "attack": 675, "defense": 680, "element": "Earth",
+                 "url": ""},
+                {"name": "Tempest Dragon Lord", "hp": 715, "attack": 670, "defense": 680, "element": "Wind", "url": ""},
+                {"name": "Chaos Beast Kimberly", "hp": 730, "attack": 680, "defense": 665, "element": "Corrupted",
+                 "url": ""},
+                {"name": "Elder Treeant", "hp": 740, "attack": 675, "defense": 660, "element": "Nature", "url": ""},
+            ],
+            9: [
+                {"name": "Ultra Kathool", "hp": 800, "attack": 780, "defense": 770, "element": "Corrupted", "url": ""},
+                {"name": "Earth Titan Overlord", "hp": 780, "attack": 775, "defense": 765, "element": "Earth",
+                 "url": ""},
+                {"name": "Water Lord Leviathan Prime", "hp": 820, "attack": 790, "defense": 775, "element": "Water",
+                 "url": ""},
+                {"name": "Shadow Lord Alteon Prime", "hp": 790, "attack": 780, "defense": 765, "element": "Dark",
+                 "url": ""},
+                {"name": "Wind Titan Emperor", "hp": 810, "attack": 785, "defense": 775, "element": "Wind", "url": ""},
+                {"name": "Dwakel Ultimate Mecha Prime", "hp": 805, "attack": 790, "defense": 780,
+                 "element": "Electric", "url": ""},
+                {"name": "Infernal Warlord Supreme", "hp": 795, "attack": 780, "defense": 765, "element": "Fire",
+                 "url": ""},
+                {"name": "Divine Light Guardian", "hp": 785, "attack": 775, "defense": 765, "element": "Light",
+                 "url": ""},
+                {"name": "Undead Legion DoomKnight", "hp": 830, "attack": 780, "defense": 770, "element": "Dark",
+                 "url": ""},
+                {"name": "Chaos Beast Tibicenas", "hp": 815, "attack": 775, "defense": 765, "element": "Corrupted",
+                 "url": ""},
+                {"name": "Dire Mammoth Prime", "hp": 825, "attack": 790, "defense": 775, "element": "Nature",
+                 "url": ""},
+                {"name": "Storm Emperor Prime", "hp": 840, "attack": 795, "defense": 785, "element": "Electric",
+                 "url": ""},
+                {"name": "Kraken Supreme", "hp": 820, "attack": 780, "defense": 770, "element": "Water", "url": ""},
+                {"name": "Earth Elemental Overlord", "hp": 835, "attack": 775, "defense": 780, "element": "Earth",
+                 "url": ""},
+                {"name": "Shadow Dragon Prime", "hp": 800, "attack": 780, "defense": 765, "element": "Dark", "url": ""},
+                {"name": "Blazing Inferno Titan Prime", "hp": 810, "attack": 785, "defense": 770, "element": "Fire",
+                 "url": ""},
+                {"name": "Obsidian Titan Supreme", "hp": 825, "attack": 775, "defense": 785, "element": "Earth",
+                 "url": ""},
+                {"name": "Tempest Dragon Emperor", "hp": 815, "attack": 770, "defense": 785, "element": "Wind",
+                 "url": ""},
+                {"name": "Chaos Beast Iadoa", "hp": 830, "attack": 780, "defense": 765, "element": "Corrupted",
+                 "url": ""},
+                {"name": "Ancient Guardian Treeant", "hp": 840, "attack": 775, "defense": 760, "element": "Nature",
+                 "url": ""},
+            ],
+            10: [
+                {"name": "Ultra Chaos Vordred", "hp": 1200, "attack": 600, "defense": 600, "element": "Corrupted",
+                 "url": ""},
+                {"name": "Shadow Guardian", "hp": 1180, "attack": 595, "defense": 600, "element": "Dark", "url": ""},
+                {"name": "Ultra Kathool", "hp": 1250, "attack": 605, "defense": 595, "element": "Corrupted", "url": ""},
+                {"name": "Elemental Dragon of Time", "hp": 1220, "attack": 600, "defense": 590, "element": "Electric",
+                 "url": ""},
+                {"name": "Celestial Dragon", "hp": 1240, "attack": 595, "defense": 595, "element": "Light", "url": ""},
+                {"name": "Infernal Warlord Nulgath", "hp": 1230, "attack": 600, "defense": 585, "element": "Fire",
+                 "url": ""},
+                {"name": "Obsidian Colossus Supreme", "hp": 1260, "attack": 605, "defense": 580, "element": "Earth",
+                 "url": ""},
+                {"name": "Tempest Dragon King", "hp": 1210, "attack": 600, "defense": 600, "element": "Wind",
+                 "url": ""},
+                {"name": "Chaos Lord Xiang", "hp": 1250, "attack": 605, "defense": 575, "element": "Corrupted",
+                 "url": ""},
+                {"name": "Dark Spirit Orbs", "hp": 1190, "attack": 595, "defense": 605, "element": "Dark", "url": ""},
+                {"name": "Electric Titan", "hp": 1230, "attack": 600, "defense": 590, "element": "Electric", "url": ""},
+                {"name": "Light Elemental Lord", "hp": 1240, "attack": 595, "defense": 595, "element": "Light",
+                 "url": ""},
+                {"name": "Flame Dragon", "hp": 1220, "attack": 605, "defense": 585, "element": "Fire", "url": ""},
+                {"name": "ShadowFlame Dragon", "hp": 1200, "attack": 600, "defense": 600, "element": "Dark", "url": ""},
+                {"name": "Chaos Beast Mana Golem", "hp": 1250, "attack": 605, "defense": 575, "element": "Corrupted",
+                 "url": ""},
+                {"name": "Electric Phoenix", "hp": 1230, "attack": 600, "defense": 590, "element": "Electric",
+                 "url": ""},
+                {"name": "Light Bringer", "hp": 1240, "attack": 595, "defense": 595, "element": "Light", "url": ""},
+                {"name": "Void Dragon", "hp": 1260, "attack": 605, "defense": 580, "element": "Corrupted", "url": ""},
+                {"name": "Elemental Titan", "hp": 1210, "attack": 600, "defense": 600, "element": "Electric",
+                 "url": ""},
+                {"name": "Celestial Guardian Dragon", "hp": 1250, "attack": 605, "defense": 580, "element": "Light",
+                 "url": ""},
+            ],
+            11: [
+                {"name": "Drakath", "hp": 2500, "attack": 1022, "defense": 648, "element": "Corrupted", "url": ""},
+                {"name": "Astraea", "hp": 3100, "attack": 723, "defense": 733, "element": "Light", "url": ""},
+                {"name": "Sepulchure", "hp": 2310, "attack": 690, "defense": 866, "element": "Dark", "url": ""},
+            ]
+        }
+        for level_monsters in monsters.values():
+            for m in level_monsters:
+                if m["name"].lower() == monster_name.lower():
+                    monster = m
+                    break
+            if monster:
+                break
+
+        if not monster:
+            await ctx.send(f"Monster '{monster_name}' not found.")
+            return
+
+        # Check the user's current pet and egg count
+        async with self.bot.pool.acquire() as conn:
+            pet_and_egg_count = await conn.fetchval(
+                """
+                SELECT COUNT(*) 
+                FROM (
+                    SELECT id FROM monster_pets WHERE user_id = $1
+                    UNION ALL
+                    SELECT id FROM monster_eggs WHERE user_id = $1 AND hatched = FALSE
+                ) AS combined
+                """,
+                member.id
+            )
+
+        if pet_and_egg_count >= 5:
+            await ctx.send(
+                f"{member.display_name} cannot have more than 5 pets or eggs. Please release a pet or wait for an egg to hatch.")
+            return
+
+        import random
+
+        # Generate a random IV percentage with weighted probabilities
+        iv_percentage = random.uniform(10, 1000)
+
+        if iv_percentage < 20:
+            iv_percentage = random.uniform(90, 100)
+        elif iv_percentage < 70:
+            iv_percentage = random.uniform(80, 90)
+        elif iv_percentage < 150:
+            iv_percentage = random.uniform(70, 80)
+        elif iv_percentage < 350:
+            iv_percentage = random.uniform(60, 70)
+        elif iv_percentage < 700:
+            iv_percentage = random.uniform(50, 60)
+        else:
+            iv_percentage = random.uniform(30, 50)
+
+        # Calculate total IV points (100% IV corresponds to 200 points)
+        total_iv_points = (iv_percentage / 100) * 200
+
+        def allocate_iv_points(total_points):
+            # Generate three random numbers
+            a = random.random()
+            b = random.random()
+            c = random.random()
+            total = a + b + c
+            # Normalize so that the sum is equal to total_points
+            hp_iv = total_points * (a / total)
+            attack_iv = total_points * (b / total)
+            defense_iv = total_points * (c / total)
+            # Round the IV points
+            hp_iv = int(round(hp_iv))
+            attack_iv = int(round(attack_iv))
+            defense_iv = int(round(defense_iv))
+            # Adjust if rounding errors cause total to deviate
+            iv_sum = hp_iv + attack_iv + defense_iv
+            if iv_sum != int(round(total_points)):
+                diff = int(round(total_points)) - iv_sum
+                # Adjust the largest IV by the difference
+                max_iv = max(hp_iv, attack_iv, defense_iv)
+                if hp_iv == max_iv:
+                    hp_iv += diff
+                elif attack_iv == max_iv:
+                    attack_iv += diff
+                else:
+                    defense_iv += diff
+            return hp_iv, attack_iv, defense_iv
+
+        hp_iv, attack_iv, defense_iv = allocate_iv_points(total_iv_points)
+
+        # Calculate the final stats
+        hp = monster["hp"] + hp_iv
+        attack = monster["attack"] + attack_iv
+        defense = monster["defense"] + defense_iv
+
+        import datetime
+
+        # Set the egg hatch time to 90 days from now
+        egg_hatch_time = datetime.datetime.utcnow() + datetime.timedelta(hours=36)
+        try:
+            async with self.bot.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO monster_eggs (
+                        user_id, egg_type, hp, attack, defense, element, url, hatch_time,
+                        "IV", hp_iv, attack_iv, defense_iv
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);
+                    """,
+                    member.id,
+                    monster["name"],
+                    hp,
+                    attack,
+                    defense,
+                    monster["element"],
+                    monster["url"],
+                    egg_hatch_time,
+                    iv_percentage,
+                    hp_iv,
+                    attack_iv,
+                    defense_iv
+                )
+
+            await ctx.send(
+                f"{member.mention} has received a **{monster['name']} Egg** with an IV of {iv_percentage:.2f}%! It will hatch in 36 hours."
+            )
+        except Exception as e:
+            await ctx.send(f"An error occurred: {e}")
 
     @is_gm()
     @commands.command(hidden=True)
