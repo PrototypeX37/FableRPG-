@@ -525,6 +525,7 @@ class Adventure(commands.Cog):
     )
     @locale_doc
     async def adventures(self, ctx):
+        await ctx.send("Calculating please wait...")
         damage, defense = await self.bot.get_damage_armor_for(ctx.author)
         level = rpgtools.xptolevel(ctx.character_data["xp"])
         luck_booster = await self.bot.get_booster(ctx.author, "luck")
@@ -534,21 +535,50 @@ class Adventure(commands.Cog):
         level_count = 1
 
         while level_count <= 100:
-            embed = discord.Embed(title="Adventure Success Chances")
+            embed = discord.Embed(
+                title="Adventure Success Chances",
+                description=(
+                    "The success chance is calculated based on your stats, "
+                    "luck, and the difficulty of each adventure level. "
+                    "If your chance is 100%, you will definitely succeed!"
+                ),
+            )
             for _ in range(levels_per_page):
                 if level_count >= 101:
                     break
-                success = rpgtools.calcchance(
-                    damage,
-                    defense,
-                    level_count,
-                    int(level),
-                    ctx.character_data["luck"],
-                    booster=luck_booster,
-                    returnsuccess=False,
+
+                # Simulate 1000 runs to calculate actual success rate
+                success_count = 0
+                simulations = 5000  # Increase simulation count for better precision
+                for _ in range(simulations):
+                    if rpgtools.calcchance(
+                            damage,
+                            defense,
+                            level_count,
+                            int(level),
+                            ctx.character_data["luck"],
+                            booster=luck_booster,
+                            returnsuccess=True,
+                    ):
+                        success_count += 1
+
+                # Calculate the true success percentage
+                true_success_rate = round((success_count / simulations) * 100)
+
+                # Guarantee 100% only when all simulations succeed
+                if success_count == simulations:
+                    true_success_rate = 100
+                elif success_count == 0:
+                    true_success_rate = 0
+
+                # Add the success rate to the embed
+                embed.add_field(
+                    name=f"Level {level_count}",
+                    value=f"**Success Chance:** {true_success_rate}%",
+                    inline=False,
                 )
-                embed.add_field(name=f"Level {level_count}", value=f"Success Chance: {success}%", inline=False)
                 level_count += 1
+
             embeds.append(embed)
 
         # Use your paginator to display the list of embeds
@@ -618,11 +648,11 @@ class Adventure(commands.Cog):
                     conn=conn,
                 )
 
-    @has_char()
-    @user_cooldown(7200)
-    @commands.command(aliases=["aa"], brief=_("Go out on an active adventure."))
-    @locale_doc
-    async def activeadventure(self, ctx):
+    #@has_char()
+    #@user_cooldown(7200)
+    #@commands.command(aliases=["aa"], brief=_("Go out on an active adventure."))
+    #@locale_doc
+    async def activeadventureeeeee(self, ctx):
         _(
             # xgettext: no-python-format
             """Active adventures will put you into a randomly generated maze. You will begin in the top left corner and your goal is to find the exit in the bottom right corner.
@@ -667,35 +697,37 @@ class Adventure(commands.Cog):
         ttl = await self.bot.redis.ttl(str(user_id))
         return ttl
 
+    from utils.i18n import use_current_gettext
+
     @has_char()
     @commands.command(aliases=["isblessed"], brief=_("check your bless"))
     @locale_doc
     async def checkbless(self, ctx, user: discord.Member = None):
-        _(
-            """Check the blessing value of a user. If no user is mentioned, check the command caller."""
-        )
+        try:
 
-        # If no user is mentioned, check the command caller.
-        if not user:
-            user = ctx.author
 
-        # Get the blessing value
-        value = await self.get_blessed_value(user.id)
-        ttl = await self.get_blessing_ttl(user.id)
+            # If no user is mentioned, check the command caller.
+            if not user:
+                user = ctx.author
 
-        # Convert the TTL into hours and minutes
-        hours, remainder = divmod(ttl, 3600)
-        minutes, _ = divmod(remainder, 60)
+            # Get the blessing value
+            value = await self.get_blessed_value(user.id)
+            ttl = await self.get_blessing_ttl(user.id)
 
-        if value == 1:
-            await ctx.send(f"{user.name} has no current blessing.")
-        else:
-            if ttl > 0:
-                await ctx.send(
-                    f"{user.name} is blessed with a value of {value} for the next {hours} hours and {minutes} minutes!")
-            else:
+            # Convert the TTL into hours and minutes
+            hours, remainder = divmod(ttl, 3600)
+            minutes, _ = divmod(remainder, 60)
+
+            if value == 1:
                 await ctx.send(f"{user.name} has no current blessing.")
-
+            else:
+                if ttl > 0:
+                    await ctx.send(
+                        f"{user.name} is blessed with a value of {value} for the next {hours} hours and {minutes} minutes!")
+                else:
+                    await ctx.send(f"{user.name} has no current blessing.")
+        except Exception as e:
+            await ctx.send(e)
     @is_class(Paladin)
     @has_char()
     @user_cooldown(86400)
