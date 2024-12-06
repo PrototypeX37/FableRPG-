@@ -218,12 +218,13 @@ class Profile(commands.Cog):
             async with self.bot.pool.acquire() as primary_conn:
                 async with primary_conn.transaction():
                     await primary_conn.execute(
-                        'INSERT INTO profile ("user", name, xp, money, statpoints) VALUES ($1, $2, $3, $4, $5);',
+                        'INSERT INTO profile ("user", name, xp, money, statpoints, resetpotion) VALUES ($1, $2, $3, $4, $5, $6);',
                         user_id,  # Integer
                         name,
                         xp,
                         money,
                         Statpoints,
+                        1,
                     )
                     await self.bot.create_item(
                         name=_("Starter Sword"),
@@ -2031,7 +2032,7 @@ class Profile(commands.Cog):
     @commands.command(brief=_("Give someone money"))
     @locale_doc
     async def give(
-            self, ctx, money: IntFromTo(1, 100_000_000), other: MemberWithCharacter
+            self, ctx, money, other: MemberWithCharacter
     ):
         _(
             """`<money>` - The amount of money to give to the other person, cannot exceed 100,000,000
@@ -2039,6 +2040,17 @@ class Profile(commands.Cog):
 
             Gift money! It will be removed from you and added to the other person."""
         )
+
+        if money == "all":
+            money = int(ctx.character_data["money"])
+
+        else:
+            try:
+                money = int(money)
+            except Exception as e:
+                return await ctx.send("You used a malformed argument!")
+        if money < 1:
+            return await ctx.send("The supplied number must be greater than 0.")
 
         if ctx.author.id == 823030177025753100 and other.id == 295173706496475136:
             return await ctx.send(_("Nice try bish!"))
