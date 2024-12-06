@@ -341,11 +341,12 @@ class Errorhandler(commands.Cog):
                     )
                 )
             elif isinstance(error.original, LookupError):
+                tb = "\n".join(traceback.format_tb(error.original.__traceback__))
                 await ctx.send(
                     _(
                         "The languages have been reloaded while you were using a"
                         " command. The execution therefore had to be stopped. Please"
-                        " try again."
+                        f" try again.  {tb}"
                     )
                 )
             if not self.SENTRY_SUPPORT:
