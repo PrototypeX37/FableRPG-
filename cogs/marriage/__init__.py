@@ -1125,6 +1125,7 @@ class Marriage(commands.Cog):
 
             name = None
             while not name:
+                await self.bot.set_cooldown(ctx, 1800)
                 await ctx.send(
                     _(
                         "{name} can be renamed! Within 30 seconds, enter a new"
@@ -1168,7 +1169,7 @@ class Marriage(commands.Cog):
                             )
                         )
                         name = None
-                        await self.bot.set_cooldown(ctx, 1800)
+
                 except self.bot.paginator.NoChoice:
                     await ctx.send(_("You didn't confirm."))
                     name = None

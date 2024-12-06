@@ -39,7 +39,7 @@ class Gods(commands.Cog):
 
     @has_god()
     @has_char()
-    @user_cooldown(180, identifier="sacrificeexchange")
+    @user_cooldown(180)
     @commands.command(brief=_("Sacrifice loot for favor"))
     @locale_doc
     async def sacrifice(self, ctx, *loot_ids: int):
@@ -78,6 +78,7 @@ class Gods(commands.Cog):
                 )
 
                 if not count:
+                    await self.bot.reset_cooldown(ctx)
                     return await ctx.send(
                         _(
                             "You don't own any loot items with the IDs: {itemids}"
