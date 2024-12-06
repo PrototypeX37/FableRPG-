@@ -2567,262 +2567,269 @@ The hamburger will be vulnerable in 15 Minutes
     @commands.command(hidden=True, brief=_("Start a Drakath raid"))
     async def chaosspawn(self, ctx, boss_hp: IntGreaterThan(0)):
         """[Drakath only] Starts a raid."""
-        await self.set_raid_timer()
+        try:
+            await self.set_raid_timer()
 
-        # Define the channels where the raid messages will be sent
-        channels = [
-            self.bot.get_channel(1154244627822551060),  # This is the current channel where the command was invoked
-            self.bot.get_channel(1199300319256006746),  # Replace with the actual channel ID
-        ]
+            # Define the channels where the raid messages will be sent
+            channels = [
+                self.bot.get_channel(1154244627822551060),  # This is the current channel where the command was invoked
+                self.bot.get_channel(1199300319256006746),  # Replace with the actual channel ID
+            ]
 
-        async def send_to_channels(embed=None, content=None, view=None):
-            """Helper function to send a message to all channels."""
-            for channel in channels:
-                await channel.send(embed=embed, content=content, view=view)
+            async def send_to_channels(embed=None, content=None, view=None):
+                """Helper function to send a message to all channels."""
+                for channel in channels:
+                    await channel.send(embed=embed, content=content, view=view)
 
-        view = JoinView(
-            Button(style=ButtonStyle.primary, label="Join the raid!"),
-            message=_("You joined the raid."),
-            timeout=60 * 15,
-        )
+            view = JoinView(
+                Button(style=ButtonStyle.primary, label="Join the raid!"),
+                message=_("You joined the raid."),
+                timeout=60 * 15,
+            )
 
-        channel1 = self.bot.get_channel(1154244627822551060)
-        channel2 = self.bot.get_channel(1199300319256006746)
-        role_id1 = 1153880715419717672
-        role_id2 = 1199302687083204649
+            channel1 = self.bot.get_channel(1154244627822551060)
+            channel2 = self.bot.get_channel(1199300319256006746)
+            role_id1 = 1153880715419717672
+            role_id2 = 1199302687083204649
 
-        if channel1:
-            role1 = ctx.guild.get_role(role_id1)
-            if role1:
-                await channel1.send(content=f"{role1.mention}", allowed_mentions=discord.AllowedMentions(roles=True))
+            if channel1:
+                role1 = ctx.guild.get_role(role_id1)
+                if role1:
+                    await channel1.send(content=f"{role1.mention}", allowed_mentions=discord.AllowedMentions(roles=True))
 
-        if channel2:
-            role2 = ctx.guild.get_role(role_id2)
-            if role2:
-                await channel2.send(content=f"{role2.mention}", allowed_mentions=discord.AllowedMentions(roles=True))
+            if channel2:
+                role2 = ctx.guild.get_role(role_id2)
+                if role2:
+                    await channel2.send(content=f"{role2.mention}", allowed_mentions=discord.AllowedMentions(roles=True))
 
-        em = discord.Embed(
-            title="Raid the Void",
-            description=f"""
-    In Drakath's name, unleash the storm,
-    Raiders of chaos, in shadows swarm.
-    No order, no restraint, just untamed glee,
-    Drakath's chaos shall set us free.
+            em = discord.Embed(
+                title="Raid the Void",
+                description=f"""
+        In Drakath's name, unleash the storm,
+        Raiders of chaos, in shadows swarm.
+        No order, no restraint, just untamed glee,
+        Drakath's chaos shall set us free.
+    
+        Eclipse the Void Conqueror has {boss_hp} HP and will be vulnerable in 15 Minutes
+    
+        **Only followers of Drakath may join.**""",
+                color=0xFFB900,
+            )
+            em.set_image(url="https://i.imgur.com/YoszTlc.png")
 
-    Eclipse the Void Conqueror has {boss_hp} HP and will be vulnerable in 15 Minutes
-
-    **Only followers of Drakath may join.**""",
-            color=0xFFB900,
-        )
-        em.set_image(url="https://i.imgur.com/YoszTlc.png")
-
-        # Send the initial raid message and join button to both channels
-        await send_to_channels(embed=em, view=view)
+            # Send the initial raid message and join button to both channels
+            await send_to_channels(embed=em, view=view)
 
 
-        if not self.bot.config.bot.is_beta:
-            await asyncio.sleep(300)
-            await send_to_channels(content="**The raid on the void will start in 10 minutes**")
-            await asyncio.sleep(300)
-            await send_to_channels(content="**The raid on the void will start in 5 minutes**")
-            await asyncio.sleep(180)
-            await send_to_channels(content="**The raid on the void will start in 2 minutes**")
-            await asyncio.sleep(60)
-            await send_to_channels(content="**The raid on the void will start in 1 minute**")
-            await asyncio.sleep(30)
-            await send_to_channels(content="**The raid on the void will start in 30 seconds**")
-            await asyncio.sleep(20)
-            await send_to_channels(content="**The raid on the void will start in 10 seconds**")
-        else:
-            await asyncio.sleep(300)
-            await send_to_channels(content="**The raid on the void will start in 10 minutes**")
-            await asyncio.sleep(300)
-            await send_to_channels(content="**The raid on the void will start in 5 minutes**")
-            await asyncio.sleep(180)
-            await send_to_channels(content="**The raid on the void will start in 2 minutes**")
-            await asyncio.sleep(60)
-            await send_to_channels(content="**The raid on the void will start in 1 minute**")
-            await asyncio.sleep(30)
-            await send_to_channels(content="**The raid on the void will start in 30 seconds**")
-            await asyncio.sleep(20)
-            await send_to_channels(content="**The raid on the void will start in 10 seconds**")
-
-        view.stop()
-
-        await send_to_channels(content="**The raid on the facility started! Fetching participant data... Hang on!**")
-
-        async with self.bot.pool.acquire() as conn:
-            raid = {}
-            for u in view.joined:
-                if (
-                        not (
-                                profile := await conn.fetchrow(
-                                    'SELECT * FROM profile WHERE "user"=$1;', u.id
-                                )
-                        )
-                        or profile["god"] != "Drakath"
-                ):
-                    continue
-                raid[u] = 250
-
-        await send_to_channels(content="**Done getting data!**")
-
-        start = datetime.datetime.utcnow()
-
-        while (
-                boss_hp > 0
-                and len(raid) > 0
-                and datetime.datetime.utcnow() < start + datetime.timedelta(minutes=45)
-        ):
-            target = random.choice(list(raid.keys()))
-            dmg = random.randint(100, 300)
-            raid[target] -= dmg
-            if raid[target] > 0:
-                em = discord.Embed(
-                    title="Eclipse attacks!",
-                    description=f"{target} now has {raid[target]} HP!",
-                    colour=0xFFB900,
-                )
+            if not self.bot.config.bot.is_beta:
+                await asyncio.sleep(300)
+                await send_to_channels(content="**The raid on the void will start in 10 minutes**")
+                await asyncio.sleep(300)
+                await send_to_channels(content="**The raid on the void will start in 5 minutes**")
+                await asyncio.sleep(180)
+                await send_to_channels(content="**The raid on the void will start in 2 minutes**")
+                await asyncio.sleep(60)
+                await send_to_channels(content="**The raid on the void will start in 1 minute**")
+                await asyncio.sleep(30)
+                await send_to_channels(content="**The raid on the void will start in 30 seconds**")
+                await asyncio.sleep(20)
+                await send_to_channels(content="**The raid on the void will start in 10 seconds**")
             else:
-                em = discord.Embed(
-                    title="Eclipse hits critical!",
-                    description=f"{target} died!",
-                    colour=0xFFB900,
-                )
-            em.add_field(name="Damage", value=dmg)
-            em.set_author(name=str(target), icon_url=target.display_avatar.url)
-            em.set_thumbnail(url="https://i.imgur.com/YS4A6R7.png")
-            await send_to_channels(embed=em)
-            if raid[target] <= 0:
-                del raid[target]
-                if len(raid) == 0:
-                    break
+                await asyncio.sleep(300)
+                await send_to_channels(content="**The raid on the void will start in 10 minutes**")
+                await asyncio.sleep(300)
+                await send_to_channels(content="**The raid on the void will start in 5 minutes**")
+                await asyncio.sleep(180)
+                await send_to_channels(content="**The raid on the void will start in 2 minutes**")
+                await asyncio.sleep(60)
+                await send_to_channels(content="**The raid on the void will start in 1 minute**")
+                await asyncio.sleep(30)
+                await send_to_channels(content="**The raid on the void will start in 30 seconds**")
+                await asyncio.sleep(20)
+                await send_to_channels(content="**The raid on the void will start in 10 seconds**")
 
-            if random.randint(1, 5) == 1:
-                await asyncio.sleep(4)
+            view.stop()
+
+            await send_to_channels(content="**The raid on the facility started! Fetching participant data... Hang on!**")
+
+            async with self.bot.pool.acquire() as conn:
+                raid = {}
+                for u in view.joined:
+                    if (
+                            not (
+                                    profile := await conn.fetchrow(
+                                        'SELECT * FROM profile WHERE "user"=$1;', u.id
+                                    )
+                            )
+                            or profile["god"] != "Drakath"
+                    ):
+                        continue
+                    raid[u] = 250
+
+            await send_to_channels(content="**Done getting data!**")
+
+            start = datetime.datetime.utcnow()
+
+            while (
+                    boss_hp > 0
+                    and len(raid) > 0
+                    and datetime.datetime.utcnow() < start + datetime.timedelta(minutes=45)
+            ):
                 target = random.choice(list(raid.keys()))
-                raid[target] += 100
-                em = discord.Embed(
-                    title=f"{target} uses Chaos Restore!",
-                    description=f"It's super effective!\n{target} now has {raid[target]} HP!",
-                    colour=0xFFB900,
-                )
-                em.set_author(name=str(target), icon_url=target.display_avatar.url)
-                em.set_thumbnail(url="https://i.imgur.com/md5dWFk.png")
-                await send_to_channels(embed=em)
-
-            if random.randint(1, 5) == 1:
-                await asyncio.sleep(4)
-                if len(raid) >= 3:
-                    targets = random.sample(list(raid.keys()), 3)
-                else:
-                    targets = list(raid.keys())
-                for target in targets:
-                    raid[target] -= 100
-                    if raid[target] <= 0:
-                        del raid[target]
-                em = discord.Embed(
-                    title="Eclipse prepares a void pulse!",
-                    description=f"It's super effective!\n{', '.join(str(u) for u in targets)} take 100 damage!",
-                    colour=0xFFB900,
-                )
-                em.set_thumbnail(url="https://i.imgur.com/lDqNHua.png")
-                await send_to_channels(embed=em)
-
-            dmg_to_take = sum(
-                25 if random.randint(1, 10) != 10 else random.randint(75, 100)
-                for u in raid
-            )
-            boss_hp -= dmg_to_take
-            await asyncio.sleep(4)
-            em = discord.Embed(
-                title="The power of Drakath's Followers attacks Eclipse!", colour=0xFF5C00
-            )
-            em.set_thumbnail(url="https://i.imgur.com/kf3zcLs.png")
-            em.add_field(name="Damage", value=dmg_to_take)
-            if boss_hp > 0:
-                em.add_field(name="HP left", value=boss_hp)
-            else:
-                em.add_field(name="HP left", value="Dead!")
-            await send_to_channels(embed=em)
-            await asyncio.sleep(4)
-
-        if boss_hp > 1 and len(raid) > 0:
-            em = discord.Embed(
-                title="Defeat",
-                description="As Drakath's malevolent laughter echoes through the shattered realm, his followers stand "
-                            "defeated before the overwhelming might of their vanquished foe, a stark reminder of "
-                            "chaos's unyielding and capricious nature.",
-                color=0xFFB900,
-            )
-            em.set_image(url="https://i.imgur.com/s5tvHMd.png")
-            await send_to_channels(embed=em)
-            await self.clear_raid_timer()
-        elif len(raid) == 0:
-            em = discord.Embed(
-                title="Defeat",
-                description="Amidst the smoldering ruins and the mocking whispers of the chaotic winds, Drakath's "
-                            "followers find themselves humbled by the boss's insurmountable power, their hopes dashed "
-                            "like shattered illusions in the wake of their failure.",
-                color=0xFFB900,
-            )
-            em.set_image(url="https://i.imgur.com/UpWW3fF.png")
-            await send_to_channels(embed=em)
-            await self.clear_raid_timer()
-        else:
-            winner = random.choice(list(raid.keys()))
-            try:
-                async with self.bot.pool.acquire() as conn:
-                    luck_query = await conn.fetchval(
-                        'SELECT luck FROM profile WHERE "user" = $1;',
-                        winner.id,
+                dmg = random.randint(100, 300)
+                raid[target] -= dmg
+                if raid[target] > 0:
+                    em = discord.Embed(
+                        title="Eclipse attacks!",
+                        description=f"{target} now has {raid[target]} HP!",
+                        colour=0xFFB900,
                     )
+                else:
+                    em = discord.Embed(
+                        title="Eclipse hits critical!",
+                        description=f"{target} died!",
+                        colour=0xFFB900,
+                    )
+                em.add_field(name="Damage", value=dmg)
+                em.set_author(name=str(target), icon_url=target.display_avatar.url)
+                em.set_thumbnail(url="https://i.imgur.com/YS4A6R7.png")
+                await send_to_channels(embed=em)
+                if raid[target] <= 0:
+                    del raid[target]
+                    if len(raid) == 0:
+                        break
 
-                luck_query_float = float(luck_query)
-                weightdivine = 0.20 * luck_query_float
-                rounded_weightdivine = round(weightdivine, 3)
+                if random.randint(1, 5) == 1:
+                    await asyncio.sleep(4)
+                    target = random.choice(list(raid.keys()))
+                    raid[target] += 100
+                    em = discord.Embed(
+                        title=f"{target} uses Chaos Restore!",
+                        description=f"It's super effective!\n{target} now has {raid[target]} HP!",
+                        colour=0xFFB900,
+                    )
+                    em.set_author(name=str(target), icon_url=target.display_avatar.url)
+                    em.set_thumbnail(url="https://i.imgur.com/md5dWFk.png")
+                    await send_to_channels(embed=em)
 
-                options = ['legendary', 'fortune', 'divine']
-                weights = [0.40, 0.40, rounded_weightdivine]
+                if random.randint(1, 5) == 1:
+                    await asyncio.sleep(4)
+                    if len(raid) >= 3:
+                        targets = random.sample(list(raid.keys()), 3)
+                    else:
+                        targets = list(raid.keys())
+                    for target in targets:
+                        raid[target] -= 100
+                        if raid[target] <= 0:
+                            del raid[target]
+                    em = discord.Embed(
+                        title="Eclipse prepares a void pulse!",
+                        description=f"It's super effective!\n{', '.join(str(u) for u in targets)} take 100 damage!",
+                        colour=0xFFB900,
+                    )
+                    em.set_thumbnail(url="https://i.imgur.com/lDqNHua.png")
+                    await send_to_channels(embed=em)
 
-                crate = randomm.choices(options, weights=weights)[0]
+                dmg_to_take = sum(
+                    25 if random.randint(1, 10) != 10 else random.randint(75, 100)
+                    for u in raid
+                )
+                boss_hp -= dmg_to_take
+                await asyncio.sleep(4)
+                em = discord.Embed(
+                    title="The power of Drakath's Followers attacks Eclipse!", colour=0xFF5C00
+                )
+                em.set_thumbnail(url="https://i.imgur.com/kf3zcLs.png")
+                em.add_field(name="Damage", value=dmg_to_take)
+                if boss_hp > 0:
+                    em.add_field(name="HP left", value=boss_hp)
+                else:
+                    em.add_field(name="HP left", value="Dead!")
+                await send_to_channels(embed=em)
+                await asyncio.sleep(4)
 
+            if boss_hp > 1 and len(raid) > 0:
+                em = discord.Embed(
+                    title="Defeat",
+                    description="As Drakath's malevolent laughter echoes through the shattered realm, his followers stand "
+                                "defeated before the overwhelming might of their vanquished foe, a stark reminder of "
+                                "chaos's unyielding and capricious nature.",
+                    color=0xFFB900,
+                )
+                em.set_image(url="https://i.imgur.com/s5tvHMd.png")
+                await send_to_channels(embed=em)
+                await self.clear_raid_timer()
+            elif len(raid) == 0:
+                em = discord.Embed(
+                    title="Defeat",
+                    description="Amidst the smoldering ruins and the mocking whispers of the chaotic winds, Drakath's "
+                                "followers find themselves humbled by the boss's insurmountable power, their hopes dashed "
+                                "like shattered illusions in the wake of their failure.",
+                    color=0xFFB900,
+                )
+                em.set_image(url="https://i.imgur.com/UpWW3fF.png")
+                await send_to_channels(embed=em)
+                await self.clear_raid_timer()
+            else:
+                winner = random.choice(list(raid.keys()))
                 try:
                     async with self.bot.pool.acquire() as conn:
-                        await conn.execute(
-                            f'UPDATE profile SET "crates_{crate}" = "crates_{crate}" + 1 WHERE "user" = $1;',
+                        luck_query = await conn.fetchval(
+                            'SELECT luck FROM profile WHERE "user" = $1;',
                             winner.id,
                         )
 
-                except Exception as e:
-                    print(f"An error occurred: {e}")
+                    luck_query_float = float(luck_query)
+                    weightdivine = 0.20 * luck_query_float
+                    rounded_weightdivine = round(weightdivine, 3)
 
-                em = discord.Embed(
-                    title="Win!",
-                    description=f"The forces aligned with Drakath have triumphed over Eclipse, wresting victory from the "
-                                f"clutches of chaos itself!\n{winner.mention} emerges as a true champion of anarchy, "
-                                f"earning a {crate}) crate from Drakath as a token of recognition for their unrivaled "
-                                f"prowess!",
-                    color=0xFFB900,
-                )
-                em.set_thumbnail(url="https://i.imgur.com/3pg9Msj.png")
-                em.set_image(url="https://i.imgur.com/s5tvHMd.png")
-                em.add_field(name="Crate Found", value=crate)
-                await send_to_channels(embed=em)
-                await self.clear_raid_timer()
-            except Exception:
-                em = discord.Embed(
-                    title="Win!",
-                    description=f"The forces aligned with Drakath have triumphed over Eclipse, wresting victory from the "
-                                f"clutches of chaos itself!\n{winner.mention} emerges as a true champion of anarchy, "
-                                f"earning a {crate}) crate from Drakath as a token of recognition for their unrivaled "
-                                f"prowess!",
-                    color=0xFFB900,
-                )
-                em.set_thumbnail(url="https://i.imgur.com/3pg9Msj.png")
-                em.set_image(url="https://i.imgur.com/s5tvHMd.png")
-                await send_to_channels(embed=em)
-                await self.clear_raid_timer()
+                    options = ['legendary', 'fortune', 'divine']
+                    weights = [0.40, 0.40, rounded_weightdivine]
+
+                    crate = randomm.choices(options, weights=weights)[0]
+
+                    try:
+                        async with self.bot.pool.acquire() as conn:
+                            await conn.execute(
+                                f'UPDATE profile SET "crates_{crate}" = "crates_{crate}" + 1 WHERE "user" = $1;',
+                                winner.id,
+                            )
+
+                    except Exception as e:
+                        print(f"An error occurred: {e}")
+
+                    em = discord.Embed(
+                        title="Win!",
+                        description=f"The forces aligned with Drakath have triumphed over Eclipse, wresting victory from the "
+                                    f"clutches of chaos itself!\n{winner.mention} emerges as a true champion of anarchy, "
+                                    f"earning a {crate}) crate from Drakath as a token of recognition for their unrivaled "
+                                    f"prowess!",
+                        color=0xFFB900,
+                    )
+                    em.set_thumbnail(url="https://i.imgur.com/3pg9Msj.png")
+                    em.set_image(url="https://i.imgur.com/s5tvHMd.png")
+                    em.add_field(name="Crate Found", value=crate)
+                    await send_to_channels(embed=em)
+                    await self.clear_raid_timer()
+                except Exception:
+                    em = discord.Embed(
+                        title="Win!",
+                        description=f"The forces aligned with Drakath have triumphed over Eclipse, wresting victory from the "
+                                    f"clutches of chaos itself!\n{winner.mention} emerges as a true champion of anarchy, "
+                                    f"earning a {crate}) crate from Drakath as a token of recognition for their unrivaled "
+                                    f"prowess!",
+                        color=0xFFB900,
+                    )
+                    em.set_thumbnail(url="https://i.imgur.com/3pg9Msj.png")
+                    em.set_image(url="https://i.imgur.com/s5tvHMd.png")
+                    await send_to_channels(embed=em)
+                    await self.clear_raid_timer()
+        except Exception as e:
+            import traceback
+            error_message = f"Error occurred: {e}\n"
+            error_message += traceback.format_exc()
+            await ctx.send(error_message)
+            print(error_message)
 
     @commands.command()
     async def joinraid(self, ctx):
@@ -3877,4 +3884,11 @@ Atheistus will be vulnerable in 15 Minutes
 
 
 async def setup(bot):
-    await bot.add_cog(Raid(bot))
+    designated_shard_id = 0  # Choose shard 0 as the primary
+
+    # Check if shard 0 is among the bot's shard IDs
+    if designated_shard_id in bot.shard_ids:
+        await bot.add_cog(Raid(bot))
+        print(f"Raid loaded on shard {designated_shard_id}")
+
+

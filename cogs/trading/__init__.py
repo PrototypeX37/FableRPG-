@@ -1184,7 +1184,19 @@ class Trading(commands.Cog):
     @has_char()
     @commands.cooldown(1, 300, commands.BucketType.user)
     @commands.command(brief=_("Buys an item or crate from the trader"))
+    @locale_doc
     async def trader(self, ctx):
+        _(
+            """Purchase items or crates from the trader.
+
+            Use this command to buy items or crates from the trader's current offers. The trader's offers refresh every 12 hours.
+
+            You will be presented with a list of available items and crates. Select the one you wish to purchase. Ensure you have enough money to make the purchase.
+
+            **Note:** This command has a cooldown of 5 minutes per user.
+            """
+        )
+
         try:
             player_id = ctx.author.id
 
@@ -1821,8 +1833,9 @@ class Trading(commands.Cog):
                 return level - 1
         return len(levels)
 
-    @commands.command(brief=_("View your pets"))
-    async def pets(self, ctx):
+    @is_gm()
+    @commands.command(brief=_("View your pets"), hidden=True)
+    async def petsold(self, ctx):
         try:
             async with self.bot.pool.acquire() as conn:
                 # Fetch the user's pets from the database

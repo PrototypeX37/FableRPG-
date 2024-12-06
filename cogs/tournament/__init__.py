@@ -176,17 +176,17 @@ class Tournament(commands.Cog):
                     emoji="\U00002694",
                 ),
                 message=_("You joined the tournament."),
-                timeout=60 * 2,
+                timeout=60 * 5,
             )
             view.joined.add(ctx.author)
             msg = await ctx.send(
                 _(
                     "{author} started a tournament! Free entries, prize is"
-                    " **${prize}**!"
+                    " **${prize}**. Starting in **5 Minutes!**"
                 ).format(author=ctx.author.mention, prize=prize),
                 view=view,
             )
-            await asyncio.sleep(60 * 10)
+            await asyncio.sleep(60 * 5)
             view.stop()
             participants = []
             async with self.bot.pool.acquire() as conn:
@@ -669,17 +669,17 @@ class Tournament(commands.Cog):
                 emoji="⚔️",
             ),
             message="You joined the Juggernaut game mode.",
-            timeout=180,  # 3 minutes timeout
+            timeout=300,  # 3 minutes timeout
         )
 
         view.joined.add(ctx.author)
 
         # Start the join phase
         initial_message = await ctx.send(
-            f"{ctx.author.mention} started a Juggernaut game mode! Free entries, prize pool is **${prize}**! The game starts in 3 minutes!",
+            f"{ctx.author.mention} started a Juggernaut game mode! Free entries, prize pool is **${prize}**! The game starts in 5 minutes!",
             view=view,
         )
-        await asyncio.sleep(180)  # Wait for 3 minutes
+        await asyncio.sleep(300)  # Wait for 3 minutes
         view.stop()
 
         # Gather valid participants from the database
