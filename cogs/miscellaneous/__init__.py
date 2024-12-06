@@ -195,12 +195,13 @@ class Miscellaneous(commands.Cog):
                                 await ctx.send(_("You need to be a Thief to use the steal command."))
                         else:
                             # Invoke the command and set the new cooldown
-                            tasks.append(ctx.invoke(command))
                             await ctx.bot.redis.execute_command(
                                 "SET", f"cd:{ctx.author.id}:{command.qualified_name}",
                                 command.qualified_name,
                                 "EX", cooldown_duration
                             )
+                            tasks.append(ctx.invoke(command))
+
                     else:
                         # Inform the user that the command is on cooldown
                         await ctx.send(
@@ -369,6 +370,260 @@ class Miscellaneous(commands.Cog):
             challenges = file.readlines()
         return [challenge.strip() for challenge in challenges]  # Strip newline characters
 
+    def format_monsters(self, monsters):
+        formatted = ""
+        for level, monster_list in sorted(monsters.items()):
+            # Assign a color based on the level
+            if level == 1:
+                level_color = "🟢"
+            elif level == 2:
+                level_color = "🟡"
+            elif level == 3:
+                level_color = "🔴"
+            elif level == 4:
+                level_color = "🔵"
+            else:
+                level_color = "⚪"
+
+            # Add level heading
+            formatted += f"**{level_color} Level {level}**\n\n"
+
+            for monster in monster_list:
+                name = monster["name"]
+                url = monster.get("url", "")
+                if url:
+                    monster_entry = f"- **{name}**\n  [![{name}]({url})]({url})\n\n"
+                else:
+                    monster_entry = f"- **{name}**\n  *No image available.*\n\n"
+                formatted += monster_entry
+
+            # Add a separator between levels
+            formatted += "---\n\n"
+        return formatted
+
+    # Function to split the formatted text into chunks <=2000 characters
+    def split_into_chunks(self, text, max_length=2000):
+        chunks = []
+        while len(text) > max_length:
+            # Find the last newline within the limit
+            split_pos = text.rfind('\n', 0, max_length)
+            if split_pos == -1:
+                # If no newline found, force split
+                split_pos = max_length
+            chunks.append(text[:split_pos])
+            text = text[split_pos:].lstrip('\n')
+        chunks.append(text)
+        return chunks
+
+
+    @commands.command()
+    async def choose(self, ctx, *, args: str):
+        """
+        Chooses between two options provided by the user.
+        Handles input like "$choose heads tails" or "$choose heads or tails".
+        """
+        # Split the input by "or" or whitespace
+        if " or " in args:
+            options = [option.strip() for option in args.split(" or ")]
+        else:
+            options = args.split()
+
+        # Ensure there are exactly two options
+        if len(options) != 2:
+            await ctx.send("Please provide exactly two options, separated by a space or 'or'.")
+            return
+
+        # Randomly select between the two options
+        result = random.choice(options)
+        await ctx.send(f"{result}")
+
+    # Command to send monsters
+    @commands.command(name='sendmonsters')
+    async def send_monsters(self, ctx):
+
+        monsters = {
+            1: [
+                {"name": "Sneevil", "hp": 100, "attack": 95, "defense": 100, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Sneevil-removebg-preview.png"},
+                {"name": "Slime", "hp": 120, "attack": 100, "defense": 105, "element": "Water",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_slime.png"},
+                {"name": "Frogzard", "hp": 120, "attack": 90, "defense": 95, "element": "Nature",
+                 "url": "https://static.wikia.nocookie.net/aqwikia/images/d/d6/Frogzard.png"},
+                {"name": "Rat", "hp": 90, "attack": 100, "defense": 90, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Rat-removebg-preview.png"},
+                {"name": "Bat", "hp": 150, "attack": 95, "defense": 85, "element": "Wind",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Bat-removebg-preview.png"},
+                {"name": "Skeleton", "hp": 190, "attack": 105, "defense": 100, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Skelly-removebg-preview.png"},
+                {"name": "Imp", "hp": 180, "attack": 95, "defense": 85, "element": "Fire",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zZquzlh-removebg-preview.png"},
+                {"name": "Pixie", "hp": 100, "attack": 90, "defense": 80, "element": "Light",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_pixie-removebg-preview.png"},
+                {"name": "Zombie", "hp": 170, "attack": 100, "defense": 95, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zombie-removebg-preview.png"},
+                {"name": "Spiderling", "hp": 220, "attack": 95, "defense": 90, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_spider-removebg-preview.png"},
+                {"name": "Spiderling", "hp": 220, "attack": 95, "defense": 90, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_spider-removebg-preview.png"},
+                {"name": "Moglin", "hp": 200, "attack": 90, "defense": 85, "element": "Light",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Moglin.png"},
+                {"name": "Red Ant", "hp": 140, "attack": 105, "defense": 100, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_redant-removebg-preview.png"},
+                {"name": "Chickencow", "hp": 300, "attack": 150, "defense": 90, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChickenCow-removebg-preview.png"},
+                {"name": "Tog", "hp": 380, "attack": 105, "defense": 95, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Tog-removebg-preview.png"},
+                {"name": "Lemurphant", "hp": 340, "attack": 95, "defense": 80, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Lemurphant-removebg-preview.png"},
+                {"name": "Fire Imp", "hp": 200, "attack": 100, "defense": 90, "element": "Fire",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zZquzlh-removebg-preview.png"},
+                {"name": "Zardman", "hp": 300, "attack": 95, "defense": 100, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Zardman-removebg-preview.png"},
+                {"name": "Wind Elemental", "hp": 165, "attack": 90, "defense": 85, "element": "Wind",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_WindElemental-removebg-preview.png"},
+                {"name": "Dark Wolf", "hp": 200, "attack": 100, "defense": 90, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DarkWolf-removebg-preview.png"},
+                {"name": "Treeant", "hp": 205, "attack": 105, "defense": 95, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Treeant-removebg-preview.png"},
+            ],
+            2: [
+                {"name": "Cyclops Warlord", "hp": 230, "attack": 160, "defense": 155, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_CR-removebg-preview.png"},
+                {"name": "Fishman Soldier", "hp": 200, "attack": 165, "defense": 160, "element": "Water",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Fisherman-removebg-preview.png"},
+                {"name": "Fire Elemental", "hp": 215, "attack": 150, "defense": 145, "element": "Fire",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_fire_elemental-removebg-preview.png"},
+                {"name": "Vampire Bat", "hp": 200, "attack": 170, "defense": 160, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_viO2oSJ-removebg-preview.png"},
+                {"name": "Blood Eagle", "hp": 195, "attack": 165, "defense": 150, "element": "Wind",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BloodEagle-removebg-preview.png"},
+                {"name": "Earth Elemental", "hp": 190, "attack": 175, "defense": 160, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Earth_Elemental-removebg-preview.png"},
+                {"name": "Fire Mage", "hp": 200, "attack": 160, "defense": 140, "element": "Fire",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireMage-removebg-preview.png"},
+                {"name": "Dready Bear", "hp": 230, "attack": 155, "defense": 150, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_dreddy-removebg-preview.png"},
+                {"name": "Undead Soldier", "hp": 280, "attack": 160, "defense": 155, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_UndeadSoldier-removebg-preview.png"},
+                {"name": "Skeleton Warrior", "hp": 330, "attack": 155, "defense": 150, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SkeelyWarrior-removebg-preview.png"},
+                {"name": "Giant Spider", "hp": 350, "attack": 160, "defense": 145, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DreadSpider-removebg-preview.png"},
+                {"name": "Castle spider", "hp": 310, "attack": 170, "defense": 160, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Castle-removebg-preview.png"},
+                {"name": "ConRot", "hp": 210, "attack": 165, "defense": 155, "element": "Water",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ConRot-removebg-preview.png"},
+                {"name": "Horc Warrior", "hp": 270, "attack": 175, "defense": 170, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_HorcWarrior-removebg-preview.png"},
+                {"name": "Shadow Hound", "hp": 300, "attack": 160, "defense": 150, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Hound-removebg-preview.png"},
+                {"name": "Fire Sprite", "hp": 290, "attack": 165, "defense": 155, "element": "Fire",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireSprite-removebg-preview.png"},
+                {"name": "Rock Elemental", "hp": 300, "attack": 160, "defense": 165, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Earth_Elemental-removebg-preview.png"},
+                {"name": "Shadow Serpent", "hp": 335, "attack": 155, "defense": 150, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadowSerpant-removebg-preview.png"},
+                {"name": "Dark Elemental", "hp": 340, "attack": 165, "defense": 155, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DarkEle-Photoroom.png"},
+                {"name": "Forest Guardian", "hp": 500, "attack": 250, "defense": 250, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ForestGuardian-removebg-preview.png"},
+            ],
+            3: [
+                {"name": "Mana Golem", "hp": 200, "attack": 220, "defense": 210, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_managolum-removebg-preview.png"},
+                {"name": "Karok the Fallen", "hp": 180, "attack": 215, "defense": 205, "element": "Ice",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_VIMs8un-removebg-preview.png"},
+                {"name": "Water Draconian", "hp": 220, "attack": 225, "defense": 200, "element": "Water",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_waterdrag-removebg-preview.png"},
+                {"name": "Shadow Creeper", "hp": 190, "attack": 220, "defense": 205, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_shadowcreep-removebg-preview.png"},
+                {"name": "Wind Djinn", "hp": 210, "attack": 225, "defense": 215, "element": "Wind",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_djinn-removebg-preview.png"},
+                {"name": "Autunm Fox", "hp": 205, "attack": 230, "defense": 220, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Autumn_Fox-removebg-preview.png"},
+                {"name": "Dark Draconian", "hp": 195, "attack": 220, "defense": 200, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_darkdom-removebg-preview.png"},
+                {"name": "Light Elemental", "hp": 185, "attack": 215, "defense": 210, "element": "Light",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_LightELemental-removebg-preview.png"},
+                {"name": "Undead Giant", "hp": 230, "attack": 220, "defense": 210, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_UndGiant-removebg-preview.png"},
+                {"name": "Chaos Spider", "hp": 215, "attack": 215, "defense": 205, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosSpider-removebg-preview.png"},
+                {"name": "Seed Spitter", "hp": 225, "attack": 220, "defense": 200, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SeedSpitter-removebg-preview.png"},
+                {"name": "Beach Werewolf", "hp": 240, "attack": 230, "defense": 220, "element": "Water",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BeachWerewold-removebg-preview.png"},
+                {"name": "Boss Dummy", "hp": 220, "attack": 225, "defense": 210, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BossDummy-removebg-preview.png"},
+                {"name": "Rock", "hp": 235, "attack": 225, "defense": 215, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Rock-removebg-preview.png"},
+                {"name": "Shadow Serpent", "hp": 200, "attack": 220, "defense": 205, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadoeSerpant-removebg-preview.png"},
+                {"name": "Flame Elemental", "hp": 210, "attack": 225, "defense": 210, "element": "Fire",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireElemental-removebg-preview.png"},
+                {"name": "Bear", "hp": 225, "attack": 215, "defense": 220, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732611726453.png"},
+                {"name": "Chair", "hp": 215, "attack": 210, "defense": 215, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_chair-removebg-preview.png"},
+                {"name": "Chaos Serpant", "hp": 230, "attack": 220, "defense": 205, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosSerp-removebg-preview.png"},
+                {"name": "Gorillaphant", "hp": 240, "attack": 225, "defense": 210, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_gorillaserpant-removebg-preview.png"},
+            ],
+            4: [
+                {"name": "Hydra Head", "hp": 300, "attack": 280, "defense": 270, "element": "Water",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_hydra.png"},
+                {"name": "Blessed Deer", "hp": 280, "attack": 275, "defense": 265, "element": "Light",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BlessedDeer-removebg-preview.png"},
+                {"name": "Chaos Sphinx", "hp": 320, "attack": 290, "defense": 275, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaopsSpinx.png"},
+                {"name": "Inferno Dracolion", "hp": 290, "attack": 285, "defense": 270, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614284328.png"},
+                {"name": "Wind Cyclone", "hp": 310, "attack": 290, "defense": 280, "element": "Wind", "url": ""},
+                {"name": "Dwakel Blaster", "hp": 305, "attack": 295, "defense": 285, "element": "Electric",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Bubble.png"},
+                {"name": "Infernal Fiend", "hp": 295, "attack": 285, "defense": 270, "element": "Fire",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614284328.png"},
+                {"name": "Dark Mukai", "hp": 285, "attack": 275, "defense": 265, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614826889.png"},
+                {"name": "Undead Berserker", "hp": 330, "attack": 285, "defense": 275, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614863579.png"},
+                {"name": "Chaos Warrior", "hp": 315, "attack": 280, "defense": 270, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosWarrior-removebg-preview.png"},
+                {"name": "Dire Wolf", "hp": 325, "attack": 285, "defense": 275, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DireWolf-removebg-preview.png"},
+                {"name": "Skye Warrior", "hp": 340, "attack": 295, "defense": 285, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SkyeWarrior-removebg-preview.png"},
+                {"name": "Death On Wings", "hp": 320, "attack": 290, "defense": 275, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DeathonWings-removebg-preview.png"},
+                {"name": "Chaorruption", "hp": 335, "attack": 295, "defense": 285, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Chaorruption-removebg-preview.png"},
+                {"name": "Shadow Beast", "hp": 300, "attack": 285, "defense": 270, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadowBeast-removebg-preview.png"},
+                {"name": "Hootbear", "hp": 310, "attack": 290, "defense": 275, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_HootBear-removebg-preview.png"},
+                {"name": "Anxiety", "hp": 325, "attack": 280, "defense": 290, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_anxiety-removebg-preview.png"},
+                {"name": "Twilly", "hp": 315, "attack": 275, "defense": 285, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Twilly-removebg-preview.png"},
+                {"name": "Black Cat", "hp": 330, "attack": 285, "defense": 270, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_QJsLMnk-removebg-preview.png"},
+                {"name": "Forest Guardian", "hp": 340, "attack": 290, "defense": 275, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ForestGuardian-removebg-preview.png"},
+            ],
+        }
+        try:
+            formatted_text = self.format_monsters(monsters)
+            chunks = self.split_into_chunks(formatted_text)
+
+            for chunk in chunks:
+                await ctx.send(chunk)
+
+            await ctx.send("All monsters have been sent!")
+        except Exception as e:
+            await ctx.send(e)
+
+
 
     @is_gm()
     @commands.command(hidden=True, name="challenges")
@@ -467,7 +722,49 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
-    
+
+    @user_cooldown(5)
+    @commands.command(brief="Bonk someone with a funny GIF!")
+    @locale_doc
+    async def bonk(self, ctx, user: discord.Member):
+        _(
+            """`<user>` - The member to bonk.
+
+        Give someone a virtual bonk! This command displays a random bonk GIF from a predefined list, along with a message mentioning both you and the user.
+
+        Usage:
+          `$bonk @username`
+
+        Note:
+        - You cannot bonk yourself.
+        - This command has a cooldown of 5 seconds."""
+        )
+
+        try:
+            if user == ctx.author:
+                await ctx.send("Bonking yourself? That must hurt...")
+                return
+
+            # List of predefined bonk GIFs
+            gif_urls = [
+                "https://media0.giphy.com/media/HmgnQQjEMbMz0oLpqn/giphy.gif?cid=49e4d7b557ooon5bnhtiz3j1n2gp2og8b0qronyhl9njvkcg&ep=v1_gifs_search&rid=giphy.gif&ct=g",
+                "https://media1.tenor.com/m/oHjfWJorYB8AAAAd/bonk.gif",
+                "https://media1.tenor.com/m/tfgcD7qcy1cAAAAd/bonk.gif",
+                "https://media1.tenor.com/m/wHRCrBup3JgAAAAd/bonk-piggies.gif",
+                "https://media1.tenor.com/m/kWNnhhNd5WQAAAAd/bonk.gif",
+                "https://media1.tenor.com/m/yGk_Te0sywsAAAAd/spongebob-meme-bonk.gif"
+            ]
+
+            # Randomly select a GIF from the list
+            gif_url = random.choice(gif_urls)
+
+            # Create and send the embed message
+            embed = discord.Embed(description=f"{ctx.author.mention} bonks {user.mention} 🔨")
+            embed.set_image(url=gif_url)
+            await ctx.send(embed=embed)
+        except Exception as e:
+            await ctx.send(f"An error occurred: {e}")
+
     @user_cooldown(5)
     @commands.command(brief="Pat someone with a cute GIF!")
     @locale_doc
@@ -1039,6 +1336,8 @@ Even $1 can help us.
         _("""Displays all available commands categorized by their cogs, excluding commands with the @is_gm() decorator.""")
         # Assuming static prefix '$'
         prefix = '$'
+        if ctx.author.id == 764904008833171478:
+            await ctx.send(f"{ctx.author.mention} your access to `allcommands` has automatically been revoked due to the reason: Automod Spam")
         try:
             await ctx.send("Please wait while I gather that information for you..")
             # Initialize a dictionary to store commands by cog
@@ -1244,13 +1543,9 @@ Average hours of work: **{hours}**"""
         - This command has a cooldown of 60 seconds."""
         )
 
-        if ctx.author.id != 295173706496475136:
-            if ctx.author.id != 698612238549778493:
 
-                if ctx.guild.id != 969741725931298857:
-                    return
         creditss = ctx.character_data["imagecredits"]
-        freecredits = ctx.character_data["freeimage"]
+        freecredits = 0
         # await ctx.send(f"{credits}")
 
         if ctx.author.id == 295173706496475136:
@@ -1372,7 +1667,8 @@ Average hours of work: **{hours}**"""
         except Exception as e:
             await ctx.send(f"An error has occurred")
 
-    
+
+
     @commands.command(name='talk', help='Ask ChatGPT a question!')
     @locale_doc
     async def talk(self, ctx, *, question):
