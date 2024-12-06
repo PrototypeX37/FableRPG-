@@ -21,6 +21,8 @@ import datetime
 import decimal
 import math
 
+import asyncpg
+
 import utils.misc as rpgtools
 from collections import deque
 from collections import deque
@@ -58,29 +60,34 @@ from discord.ui import View, Button
 from discord import Interaction
 import asyncio
 
-class TradeConfirmationView(View):
-    def __init__(self, initiator: discord.User, receiver: discord.User, timeout=120):
+class SellConfirmationView(View):
+    def __init__(self, initiator: discord.Member, receiver: discord.Member, price: int, timeout=120):
         super().__init__(timeout=timeout)
         self.initiator = initiator
         self.receiver = receiver
+        self.price = price
         self.value = None  # Will store True (accepted) or False (declined)
 
-    @discord.ui.button(label="Accept Trade", style=discord.ButtonStyle.success, emoji="✅")
+    @discord.ui.button(label="Accept Sale", style=ButtonStyle.success, emoji="✅")
     async def accept(self, interaction: Interaction, button: Button):
         if interaction.user != self.receiver:
-            await interaction.response.send_message("❌ You are not authorized to respond to this trade.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ You are not authorized to respond to this sale.", ephemeral=True
+            )
             return
         self.value = True
-        await interaction.response.send_message("✅ Trade accepted.", ephemeral=True)
+        await interaction.response.send_message("✅ Sale accepted.", ephemeral=True)
         self.stop()
 
-    @discord.ui.button(label="Decline Trade", style=discord.ButtonStyle.danger, emoji="❌")
+    @discord.ui.button(label="Decline Sale", style=ButtonStyle.danger, emoji="❌")
     async def decline(self, interaction: Interaction, button: Button):
         if interaction.user != self.receiver:
-            await interaction.response.send_message("❌ You are not authorized to respond to this trade.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ You are not authorized to respond to this sale.", ephemeral=True
+            )
             return
         self.value = False
-        await interaction.response.send_message("❌ Trade declined.", ephemeral=True)
+        await interaction.response.send_message("❌ Sale declined.", ephemeral=True)
         self.stop()
 
 
@@ -109,6 +116,32 @@ class SellConfirmationView(View):
         self.value = False
         await interaction.response.send_message("❌ Sale declined.", ephemeral=True)
         self.stop()
+
+class TradeConfirmationView(View):
+    def __init__(self, initiator: discord.User, receiver: discord.User, timeout=120):
+        super().__init__(timeout=timeout)
+        self.initiator = initiator
+        self.receiver = receiver
+        self.value = None  # Will store True (accepted) or False (declined)
+
+    @discord.ui.button(label="Accept Trade", style=ButtonStyle.success, emoji="✅")
+    async def accept(self, interaction: Interaction, button: Button):
+        if interaction.user.id != self.receiver.id:
+            await interaction.response.send_message("❌ You are not authorized to respond to this trade.", ephemeral=True)
+            return
+        self.value = True
+        await interaction.response.send_message("✅ Trade accepted.", ephemeral=True)
+        self.stop()
+
+    @discord.ui.button(label="Decline Trade", style=ButtonStyle.danger, emoji="❌")
+    async def decline(self, interaction: Interaction, button: Button):
+        if interaction.user.id != self.receiver.id:
+            await interaction.response.send_message("❌ You are not authorized to respond to this trade.", ephemeral=True)
+            return
+        self.value = False
+        await interaction.response.send_message("❌ Trade declined.", ephemeral=True)
+        self.stop()
+
 
 
 
@@ -161,9 +194,9 @@ class PetPaginator(View):
         embed = Embed(
             title=f"🐾 Your Pet: {pet['name']}",
             color=discord.Color.green(),
-            description=f"**Stage:** {pet['growth_stage'].capitalize()} {stage_icon}\n**ID:** {petid}"
+            description=f"**Stage:** {pet['growth_stage'].capitalize()} {stage_icon}\n**ID:** {petid}\n**Equipped:** {pet['equipped']}"
             if pet['growth_stage'] != "baby"
-            else f"**Stage:** {pet['growth_stage'].capitalize()} {stage_icon}\n**ID:** {petid}"
+            else f"**Stage:** {pet['growth_stage'].capitalize()} {stage_icon}\n**ID:** {petid}\n**Equipped:** {pet['equipped']}"
         )
 
         embed.add_field(
@@ -244,6 +277,7 @@ class PetPaginator(View):
 class Battles(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.softlanding = False
         if not self.decrease_pet_stats.is_running():
             self.decrease_pet_stats.start()
         if not self.check_egg_hatches.is_running():
@@ -521,157 +555,460 @@ class Battles(commands.Cog):
         embed = view.get_embed()
         view.message = await ctx.send(embed=embed, view=view)
 
-    @has_char()
-    @pets.command(brief=_("Trade your pet with another user's pet"))
-    async def trade(self, ctx, your_pet_id: int, their_pet_id: int):
+    @user_cooldown(600)
+    @pets.command(brief="Trade your pet or egg with another user's pet or egg")
+    @has_char()  # Assuming this is a custom check
+    async def trade(self, ctx,
+                    your_type: str, your_item_id: int,
+                    their_type: str, their_item_id: int):
+        # Normalize type inputs
+        your_type = your_type.lower()
+        their_type = their_type.lower()
+
+        valid_types = ['pet', 'egg']
+        if your_type not in valid_types or their_type not in valid_types:
+            await ctx.send("❌ Invalid type specified. Use `pet` or `egg`.")
+            await self.bot.reset_cooldown(ctx)
+            return
+
         async with self.bot.pool.acquire() as conn:
-            # Fetch your pet
-            your_pet = await conn.fetchrow(
-                "SELECT * FROM monster_pets WHERE user_id = $1 AND id = $2;",
-                ctx.author.id,
-                your_pet_id
-            )
-            if not your_pet:
-                await ctx.send(f"❌ You don't have a pet with ID `{your_pet_id}`.")
+            # Fetch your item
+            if your_type == 'pet':
+                your_item = await conn.fetchrow(
+                    "SELECT * FROM monster_pets WHERE user_id = $1 AND id = $2;",
+                    ctx.author.id,
+                    your_item_id
+                )
+                your_table = 'monster_pets'
+            else:  # egg
+                your_item = await conn.fetchrow(
+                    "SELECT * FROM monster_eggs WHERE user_id = $1 AND id = $2;",
+                    ctx.author.id,
+                    your_item_id
+                )
+                your_table = 'monster_eggs'
+
+            if not your_item:
+                await ctx.send(f"❌ You don't have a {your_type} with ID `{your_item_id}`.")
+                await self.bot.reset_cooldown(ctx)
                 return
 
-            # Fetch their pet
-            their_pet = await conn.fetchrow(
-                "SELECT * FROM monster_pets WHERE id = $1;",
-                their_pet_id
-            )
-            if not their_pet:
-                await ctx.send(f"❌ No pet found with ID `{their_pet_id}`.")
+            # Fetch their item
+            if their_type == 'pet':
+                their_item = await conn.fetchrow(
+                    "SELECT * FROM monster_pets WHERE id = $1;",
+                    their_item_id
+                )
+                their_table = 'monster_pets'
+            else:  # egg
+                their_item = await conn.fetchrow(
+                    "SELECT * FROM monster_eggs WHERE id = $1;",
+                    their_item_id
+                )
+                their_table = 'monster_eggs'
+
+            if not their_item:
+                await ctx.send(f"❌ No {their_type} found with ID `{their_item_id}`.")
+                await self.bot.reset_cooldown(ctx)
                 return
 
-            their_user_id = their_pet['user_id']
+            their_user_id = their_item['user_id']
             if their_user_id == ctx.author.id:
-                await ctx.send("❌ You cannot trade with your own pets.")
+                await ctx.send("❌ You cannot trade with your own items.")
+                await self.bot.reset_cooldown(ctx)
                 return
 
             # Fetch the receiver user
             their_user = self.bot.get_user(their_user_id)
             if not their_user:
-                await ctx.send("❌ Could not find the user who owns the pet.")
+                await ctx.send("❌ Could not find the user who owns the item.")
+                await self.bot.reset_cooldown(ctx)
                 return
 
-            # Check if the receiver has not blocked the bot
+            # Optionally, check if the receiver has not blocked the bot here
+            # Example:
+            # if your_user_has_blocked_bot or their_user_has_blocked_bot:
+            #     await ctx.send("❌ Trade cannot be completed because one of the users has blocked the bot.")
+            #     return
 
+            # Create embeds for both items
+            your_item_embed = self.create_item_embed(ctx.author, your_type, your_item, your_item_id)
+            their_item_embed = self.create_item_embed(their_user, their_type, their_item, their_item_id)
 
-            # Create and send the confirmation view
+            # Create the confirmation view
             view = TradeConfirmationView(ctx.author, their_user)
-            try:
-                await their_user.send(
-                    f"{their_user.mention}, {ctx.author.mention} wants to trade their pet **{your_pet['name']}** (ID: {your_pet_id}) with your pet **{their_pet['name']}** (ID: {their_pet_id}). Do you accept?", view=view)
-            except discord.Forbidden:
-                await ctx.send(f"❌ Cannot send a DM to {their_user.mention}. They might have DMs disabled.")
-                return
+
+            # Send the trade proposal in the channel
+            trade_embed = Embed(
+                title="🐾 Pet/Egg Trade Proposal",
+                description=f"{ctx.author.mention} wants to trade their {your_type} with {their_user.mention}'s {their_type}.",
+                color=discord.Color.blue()
+            )
+            if your_type == "pet":
+                trade_embed.add_field(
+                    name=f"{ctx.author.name}'s {your_type.capitalize()}",
+                    value=f"**{your_item['name']}** (ID: `{your_item_id}`)\n"
+                          f"**Attack:** {your_item['attack']}\n"
+                          f"**HP:** {your_item['hp']}\n"
+                          f"**Defense:** {your_item['defense']}\n"
+                          f"**IV:** {your_item['IV']}%",
+                    inline=True
+                )
+
+                yourname = your_item['name']
+            else:
+                trade_embed.add_field(
+                    name=f"{ctx.author.name}'s {your_type.capitalize()}",
+                    value=f"**{your_item['egg_type']}** (ID: `{your_item_id}`)\n"
+                          f"**Attack:** {your_item['attack']}\n"
+                          f"**HP:** {your_item['hp']}\n"
+                          f"**Defense:** {your_item['defense']}\n"
+                          f"**IV:** {your_item['IV']}%",
+                    inline=True
+                )
+                yourname = your_item['egg_type']
+            if their_type == "pet":
+                trade_embed.add_field(
+                    name=f"{their_user.name}'s {their_type.capitalize()}",
+                    value=f"**{their_item['name']}** (ID: `{their_item_id}`)\n"
+                          f"**Attack:** {their_item['attack']}\n"
+                          f"**HP:** {their_item['hp']}\n"
+                          f"**Defense:** {their_item['defense']}\n"
+                          f"**IV:** {their_item['IV']}%",
+                    inline=True
+                )
+                theirname = their_item['name']
+            else:
+                trade_embed.add_field(
+                    name=f"{their_user.name}'s {their_type.capitalize()}",
+                    value=f"**{their_item['egg_type']}** (ID: `{their_item_id}`)\n"
+                          f"**Attack:** {their_item['attack']}\n"
+                          f"**HP:** {their_item['hp']}\n"
+                          f"**Defense:** {their_item['defense']}\n"
+                          f"**IV:** {their_item['IV']}%",
+                    inline=True
+                )
+                theirname = their_item['egg_type']
+            trade_embed.set_footer(text="React below to accept or decline the trade.")
+
+            message = await ctx.send(embed=trade_embed, view=view)
 
             await view.wait()
 
             if view.value is True:
+                async with self.bot.pool.acquire() as conn:
+                    # Fetch your item
+                    if your_type == 'pet':
+                        your_item = await conn.fetchrow(
+                            "SELECT * FROM monster_pets WHERE user_id = $1 AND id = $2;",
+                            ctx.author.id,
+                            your_item_id
+                        )
+                        your_table = 'monster_pets'
+                    else:  # egg
+                        your_item = await conn.fetchrow(
+                            "SELECT * FROM monster_eggs WHERE user_id = $1 AND id = $2;",
+                            ctx.author.id,
+                            your_item_id
+                        )
+                        your_table = 'monster_eggs'
+
+                    if not your_item:
+                        await ctx.send(f"❌ You don't have a {your_type} with ID `{your_item_id}`.")
+                        await self.bot.reset_cooldown(ctx)
+                        return
+
+                    # Fetch their item
+                    if their_type == 'pet':
+                        their_item = await conn.fetchrow(
+                            "SELECT * FROM monster_pets WHERE id = $1;",
+                            their_item_id
+                        )
+                        their_table = 'monster_pets'
+                    else:  # egg
+                        their_item = await conn.fetchrow(
+                            "SELECT * FROM monster_eggs WHERE id = $1;",
+                            their_item_id
+                        )
+                        their_table = 'monster_eggs'
+
+                    if not their_item:
+                        await ctx.send(f"❌ No {their_type} found with ID `{their_item_id}`.")
+                        await self.bot.reset_cooldown(ctx)
+                        return
+
+                    their_user_id = their_item['user_id']
+                    if their_user_id == ctx.author.id:
+                        await ctx.send("❌ You cannot trade with your own items.")
+                        await self.bot.reset_cooldown(ctx)
+                        return
                 # Perform the trade within a transaction
-                async with conn.transaction():
-                    await conn.execute(
-                        "UPDATE monster_pets SET user_id = $1 WHERE id = $2;",
-                        their_user_id,
-                        your_pet_id
+                try:
+                    async with self.bot.pool.acquire() as conn:
+                        # Update initiator's item to belong to the receiver
+                        await conn.execute(
+                            f"UPDATE {your_table} SET user_id = $1 WHERE id = $2;",
+                            their_user_id,
+                            your_item_id
+                        )
+                        # Update receiver's item to belong to the initiator
+                        await conn.execute(
+                            f"UPDATE {their_table} SET user_id = $1 WHERE id = $2;",
+                            ctx.author.id,
+                            their_item_id
+                        )
+                    success_embed = Embed(
+                        title="✅ Trade Successful!",
+                        description=f"{ctx.author.mention} traded their **{your_type}** **{yourname}** with {their_user.mention}'s **{their_type}** **{theirname}**.",
+                        color=discord.Color.green()
                     )
-                    await conn.execute(
-                        "UPDATE monster_pets SET user_id = $1 WHERE id = $2;",
-                        ctx.author.id,
-                        their_pet_id
+                    await ctx.send(embed=success_embed)
+                except Exception as e:
+                    error_embed = Embed(
+                        title="❌ Trade Failed",
+                        description=f"An error occurred during the trade: {str(e)}",
+                        color=discord.Color.red()
                     )
-                await ctx.send(
-                    f"✅ Trade successful! You traded **{your_pet['name']}** with {their_user.mention}'s **{their_pet['name']}**.")
+                    await ctx.send(embed=error_embed)
             elif view.value is False:
-                await ctx.send(f"❌ Trade declined by {their_user.mention}.")
+                decline_embed = Embed(
+                    title="❌ Trade Declined",
+                    description=f"{their_user.mention} has declined the trade request from {ctx.author.mention}.",
+                    color=discord.Color.red()
+                )
+                await ctx.send(embed=decline_embed)
+                await self.bot.reset_cooldown(ctx)
             else:
                 # Timeout
-                await ctx.send(f"⌛ Trade request to {their_user.mention} timed out. No changes were made.")
+                timeout_embed = Embed(
+                    title="⌛ Trade Timed Out",
+                    description=f"The trade request to {their_user.mention} timed out. No changes were made.",
+                    color=discord.Color.orange()
+                )
+                await ctx.send(embed=timeout_embed)
+                await self.bot.reset_cooldown(ctx)
 
+    def create_item_embed(self, user: discord.User, item_type: str, item: asyncpg.Record, item_id: int) -> Embed:
+        """
+        Creates an embed for the given item with its stats.
+        """
+        # Add debug info to the embed description
+        debug_info = f"Debug - Type: {item_type} | Item Keys: {item.keys()}"
+
+        # Normalize item type to be safe
+        item_type = item_type.lower()
+
+        try:
+            # First get the name based on type
+            if item_type == "pet":
+                item_name = item['name']
+            else:  # egg
+                item_name = item['egg_type']
+
+            # Create the embed with the determined name and debug info
+            embed = Embed(
+                title=f"{user.name}'s {item_type.capitalize()}",
+                description=f"{debug_info}\n\n**Name:** {item_name}\n**ID:** `{item_id}`",
+                color=discord.Color.blue()
+            )
+
+            # Add stats
+            attack = item.get('attack', 0)
+            hp = item.get('hp', 0)
+            defense = item.get('defense', 0)
+            iv = item.get('IV', 0)
+
+            embed.add_field(name="📊 Stats", value=(
+                f"**Attack:** {attack}\n"
+                f"**HP:** {hp}\n"
+                f"**Defense:** {defense}\n"
+                f"**IV:** {iv}%"
+            ), inline=False)
+
+            return embed
+
+        except Exception as e:
+            # If there's an error, return an embed with the error info
+            error_embed = Embed(
+                title="Error in create_item_embed",
+                description=f"Debug Info:\n{debug_info}\n\nError: {str(e)}",
+                color=discord.Color.red()
+            )
+            return error_embed
+
+    @user_cooldown(600)
+    @pets.command(brief="Sell your pet or egg to another user for in-game money")
     @has_char()
-    @pets.command(brief=_("Sell your pet to another user for in-game money"))
-    async def sell(self, ctx, your_pet_id: int, buyer: discord.Member, price: int):
+    async def sell(self, ctx,
+                   item_type: str, your_item_id: int,
+                   buyer: discord.Member, price: int):
+        """
+        Sell your pet or egg to another user for in-game money.
+        """
+        # Normalize type inputs
+        item_type = item_type.lower()
+
+        valid_types = ['pet', 'egg']
+        if item_type not in valid_types:
+            await ctx.send("❌ Invalid type specified. Use `pet` or `egg`.")
+            await self.bot.reset_cooldown(ctx)
+            return
+
         if price <= 0:
             await ctx.send("❌ The price must be a positive integer.")
+            await self.bot.reset_cooldown(ctx)
+            return
+
+        if buyer.id == ctx.author.id:
+            await ctx.send("❌ You cannot sell an item to yourself.")
+            await self.bot.reset_cooldown(ctx)
             return
 
         async with self.bot.pool.acquire() as conn:
-            # Fetch your pet
-            your_pet = await conn.fetchrow(
-                "SELECT * FROM monster_pets WHERE user_id = $1 AND id = $2;",
-                ctx.author.id,
-                your_pet_id
-            )
-            if not your_pet:
-                await ctx.send(f"❌ You don't have a pet with ID `{your_pet_id}`.")
+            # Fetch your item
+            if item_type == 'pet':
+                your_item = await conn.fetchrow(
+                    "SELECT * FROM monster_pets WHERE user_id = $1 AND id = $2;",
+                    ctx.author.id,
+                    your_item_id
+                )
+                your_table = 'monster_pets'
+            else:  # egg
+                your_item = await conn.fetchrow(
+                    "SELECT * FROM monster_eggs WHERE user_id = $1 AND id = $2;",
+                    ctx.author.id,
+                    your_item_id
+                )
+                your_table = 'monster_eggs'
+
+            if not your_item:
+                await ctx.send(f"❌ You don't have a {item_type} with ID `{your_item_id}`.")
+                await self.bot.reset_cooldown(ctx)
                 return
 
-            # Check if the pet is equipped
-            if your_pet['equipped']:
-                await ctx.send(
-                    f"❌ You cannot sell **{your_pet['name']}** while it is equipped. Please unequip it first.")
-                return
-
-            # Check if the buyer is valid and not the seller
-            if buyer.id == ctx.author.id:
-                await ctx.send("❌ You cannot sell a pet to yourself.")
-                return
-
-            # Check if the buyer has enough money
+            # Check if buyer has money
             buyer_money = await conn.fetchval(
                 'SELECT "money" FROM profile WHERE "user" = $1;',
                 buyer.id
             )
             if buyer_money is None:
                 await ctx.send("❌ The buyer does not have a profile.")
+                await self.bot.reset_cooldown(ctx)
                 return
             if buyer_money < price:
-                await ctx.send(f"❌ {buyer.mention} does not have enough money to buy the pet.")
+                await ctx.send(f"❌ {buyer.mention} does not have enough money to buy the item.")
+                await self.bot.reset_cooldown(ctx)
                 return
 
-            # Send a DM to the buyer
+            # Create the sale embed directly here
+            sale_embed = Embed(
+                title="💰 Item Sale Proposal",
+                description=f"{ctx.author.mention} is offering to sell their {item_type} to {buyer.mention} for **${price}**.",
+                color=discord.Color.gold()
+            )
 
+            # Add item details based on type
+            if item_type == "pet":
+                sale_embed.add_field(
+                    name=f"{ctx.author.name}'s Pet",
+                    value=(
+                        f"**{your_item['name']}** (ID: `{your_item_id}`)\n"
+                        f"**Attack:** {your_item['attack']}\n"
+                        f"**HP:** {your_item['hp']}\n"
+                        f"**Defense:** {your_item['defense']}\n"
+                        f"**IV:** {your_item['IV']}%"
+                    ),
+                    inline=True
+                )
+                item_name = your_item['name']
+            else:
+                sale_embed.add_field(
+                    name=f"{ctx.author.name}'s Egg",
+                    value=(
+                        f"**{your_item['egg_type']}** (ID: `{your_item_id}`)\n"
+                        f"**Attack:** {your_item['attack']}\n"
+                        f"**HP:** {your_item['hp']}\n"
+                        f"**Defense:** {your_item['defense']}\n"
+                        f"**IV:** {your_item['IV']}%"
+                    ),
+                    inline=True
+                )
+                item_name = your_item['egg_type']
 
-            # Create and send the confirmation view
+            sale_embed.set_footer(text="React below to accept or decline the sale.")
+
+            # Create and send view
             view = SellConfirmationView(ctx.author, buyer, price)
-            try:
-                await ctx.send(
-                    f"{buyer.mention}, {ctx.author.mention} is offering to sell their pet **{your_pet['name']}** (ID: {your_pet_id}) for **${price}**. Do you accept?", view=view)
-            except discord.Forbidden:
-                await ctx.send(f"❌ Cannot send a DM to {buyer.mention}. They might have DMs disabled.")
-                return
+            message = await ctx.send(embed=sale_embed, view=view)
 
             await view.wait()
 
             if view.value is True:
-                # Perform the sale within a transaction
-                async with conn.transaction():
-                    # Transfer the pet to the buyer
-                    await conn.execute(
-                        "UPDATE monster_pets SET user_id = $1 WHERE id = $2;",
-                        buyer.id,
-                        your_pet_id
+                # Check buyer's money again
+                buyer_money = await conn.fetchval(
+                    'SELECT "money" FROM profile WHERE "user" = $1;',
+                    buyer.id
+                )
+                if buyer_money < price:
+                    await ctx.send(f"❌ {buyer.mention} does not have enough money to buy the item.")
+                    await self.bot.reset_cooldown(ctx)
+                    return
+
+                try:
+                    async with conn.transaction():
+                        # Transfer the item
+                        await conn.execute(
+                            f"UPDATE {your_table} SET user_id = $1 WHERE id = $2;",
+                            buyer.id,
+                            your_item_id
+                        )
+                        # Transfer money
+                        await conn.execute(
+                            "UPDATE profile SET money = money - $1 WHERE \"user\" = $2;",
+                            price,
+                            buyer.id
+                        )
+                        await conn.execute(
+                            "UPDATE profile SET money = money + $1 WHERE \"user\" = $2;",
+                            price,
+                            ctx.author.id
+                        )
+
+                    success_embed = Embed(
+                        title="✅ Sale Successful!",
+                        description=(
+                            f"**{item_name}** has been sold to {buyer.mention} for **${price}**.\n"
+                            f"{ctx.author.mention} has received **${price}**."
+                        ),
+                        color=discord.Color.green()
                     )
-                    # Deduct money from buyer
-                    await conn.execute(
-                        "UPDATE profile SET money = money - $1 WHERE profile.user = $2;",
-                        price,
-                        buyer.id
+                    await ctx.send(embed=success_embed)
+
+                except Exception as e:
+                    error_embed = Embed(
+                        title="❌ Sale Failed",
+                        description=f"An error occurred during the sale: {str(e)}",
+                        color=discord.Color.red()
                     )
-                    # Add money to seller
-                    await conn.execute(
-                        "UPDATE profile SET money = money + $1 WHERE profile.user = $2;",
-                        price,
-                        ctx.author.id
-                    )
-                await ctx.send(f"✅ **{your_pet['name']}** has been sold to {buyer.mention} for **${price}**.")
+                    await ctx.send(embed=error_embed)
+                    await self.bot.reset_cooldown(ctx)
+
             elif view.value is False:
-                await ctx.send(f"❌ {buyer.mention} declined the sale.")
+                decline_embed = Embed(
+                    title="❌ Sale Declined",
+                    description=f"{buyer.mention} has declined the sale offer from {ctx.author.mention}.",
+                    color=discord.Color.red()
+                )
+                await ctx.send(embed=decline_embed)
+                await self.bot.reset_cooldown(ctx)
             else:
-                # Timeout
-                await ctx.send(f"⌛ Sale request to {buyer.mention} timed out. No changes were made.")
+                timeout_embed = Embed(
+                    title="⌛ Sale Timed Out",
+                    description=f"The sale offer to {buyer.mention} timed out. No changes were made.",
+                    color=discord.Color.orange()
+                )
+                await ctx.send(embed=timeout_embed)
+                await self.bot.reset_cooldown(ctx)
 
     @pets.command(brief=_("Release a pet or an egg with a sad farewell"))
     async def release(self, ctx, id: int):
@@ -729,89 +1066,103 @@ class Battles(commands.Cog):
 
         # Combine all stories with weights
         # Standard: 60%, Extra: 30%, Extra-Extra: 10%
-        pet_all_stories = (
-                pet_stories_standard * 6 +  # 5 stories * 6 = 30
-                pet_stories_extra * 3 +  # 5 stories * 3 = 15
-                pet_stories_extra_extra * 1  # 5 stories * 1 = 5
-        )
-
-        egg_all_stories = (
-                egg_stories_standard * 6 +
-                egg_stories_extra * 3 +
-                egg_stories_extra_extra * 1
-        )
-
-        async with self.bot.pool.acquire() as conn:
-            # Check if the ID corresponds to a pet or an egg
-            pet = await conn.fetchrow("SELECT * FROM monster_pets WHERE user_id = $1 AND id = $2;", ctx.author.id, id)
-            egg = await conn.fetchrow("SELECT * FROM monster_eggs WHERE user_id = $1 AND id = $2;", ctx.author.id, id)
-
-            if not pet and not egg:
-                await ctx.send(_("❌ No pet or egg with ID `{id}` found in your collection.").format(id=id))
-                return
-
-            # Determine the name and type (pet or egg)
-            item_name = pet['name'] if pet else egg['egg_type']
-            # Select a random story based on type
-            if pet:
-                story = random.choice(pet_all_stories)
-            else:
-                story = random.choice(egg_all_stories)
-
-            # Confirmation prompt
-            confirmation_message = await ctx.send(
-                _("⚠️ Are you sure you want to release your **{item_name}**? This action cannot be undone.").format(
-                    item_name=item_name)
+        try:
+            pet_all_stories = (
+                    pet_stories_standard * 6 +  # 5 stories * 6 = 30
+                    pet_stories_extra * 3 +  # 5 stories * 3 = 15
+                    pet_stories_extra_extra * 1  # 5 stories * 1 = 5
             )
 
-            # Add buttons for confirmation
-            confirm_view = View()
+            egg_all_stories = (
+                    egg_stories_standard * 6 +
+                    egg_stories_extra * 3 +
+                    egg_stories_extra_extra * 1
+            )
 
-            async def confirm_callback(interaction):
-                try:
+            async with self.bot.pool.acquire() as conn:
+                # Check if the ID corresponds to a pet or an egg
+                pet = await conn.fetchrow("SELECT * FROM monster_pets WHERE user_id = $1 AND id = $2;", ctx.author.id, id)
+                egg = await conn.fetchrow("SELECT * FROM monster_eggs WHERE user_id = $1 AND id = $2;", ctx.author.id, id)
+
+                if not pet and not egg:
+                    await ctx.send(_("❌ No pet or egg with ID `{id}` found in your collection.").format(id=id))
+                    return
+
+                # Determine the name and type (pet or egg)
+                item_name = pet['name'] if pet else egg['egg_type']
+                # Select a random story based on type
+                if pet:
+                    story = random.choice(pet_all_stories)
+                else:
+                    story = random.choice(egg_all_stories)
+
+                # Confirmation prompt
+                confirmation_message = await ctx.send(
+                    _("⚠️ Are you sure you want to release your **{item_name}**? This action cannot be undone.").format(
+                        item_name=item_name)
+                )
+
+                # Add buttons for confirmation
+                confirm_view = View()
+
+                async def confirm_callback(interaction):
+                    try:
+                        if interaction.user != ctx.author:
+                            await interaction.response.send_message(
+                                _("❌ You are not authorized to respond to this release."),
+                                ephemeral=True)
+                            return
+                        await interaction.response.defer()  # Acknowledge interaction to prevent timeout
+                        async with self.bot.pool.acquire() as conn:
+                            # Check if the ID corresponds to a pet or an egg
+                            pet = await conn.fetchrow("SELECT * FROM monster_pets WHERE user_id = $1 AND id = $2;",
+                                                      ctx.author.id, id)
+                            egg = await conn.fetchrow("SELECT * FROM monster_eggs WHERE user_id = $1 AND id = $2;",
+                                                      ctx.author.id, id)
+
+                            if not pet and not egg:
+                                await ctx.send(
+                                    _("❌ No pet or egg with ID `{id}` found in your collection.").format(id=id))
+                                return
+                        async with self.bot.pool.acquire() as conn:
+                            if pet:
+                                await conn.execute("DELETE FROM monster_pets WHERE id = $1 AND user_id = $2;", id, ctx.author.id)
+                            elif egg:
+                                await conn.execute("DELETE FROM monster_eggs WHERE id = $1 AND user_id = $2;", id, ctx.author.id)
+
+                        farewell_message = story.format(name=item_name)
+                        await interaction.followup.send(farewell_message)
+
+                        for child in confirm_view.children:
+                            child.disabled = True
+                        await confirmation_message.edit(view=confirm_view)
+                    except Exception as e:
+                        print(e)
+
+
+
+                async def cancel_callback(interaction):
                     if interaction.user != ctx.author:
-                        await interaction.response.send_message(
-                            _("❌ You are not authorized to respond to this release."),
-                            ephemeral=True)
+                        await interaction.response.send_message(_("❌ You are not authorized to cancel this release."),
+                                                                ephemeral=True)
                         return
-                    await interaction.response.defer()  # Acknowledge interaction to prevent timeout
-                    async with self.bot.pool.acquire() as conn:
-                        if pet:
-                            await conn.execute("DELETE FROM monster_pets WHERE id = $1 AND user_id = $2;", id)
-                        elif egg:
-                            await conn.execute("DELETE FROM monster_eggs WHERE id = $1 AND user_id = $2;", id)
-
-                    farewell_message = story.format(name=item_name)
-                    await interaction.followup.send(farewell_message)
-
+                    await interaction.response.send_message(_("✅ Release action cancelled."), ephemeral=True)
+                    # Disable buttons after cancellation
                     for child in confirm_view.children:
                         child.disabled = True
                     await confirmation_message.edit(view=confirm_view)
-                except Exception as e:
-                    print(e)
 
+                confirm_button = Button(label=_("Confirm Release"), style=discord.ButtonStyle.red, emoji="💔")
+                confirm_button.callback = confirm_callback
+                cancel_button = Button(label=_("Cancel"), style=discord.ButtonStyle.grey, emoji="❌")
+                cancel_button.callback = cancel_callback
 
+                confirm_view.add_item(confirm_button)
+                confirm_view.add_item(cancel_button)
 
-            async def cancel_callback(interaction):
-                if interaction.user != ctx.author:
-                    await interaction.response.send_message(_("❌ You are not authorized to cancel this release."),
-                                                            ephemeral=True)
-                    return
-                await interaction.response.send_message(_("✅ Release action cancelled."), ephemeral=True)
-                # Disable buttons after cancellation
-                for child in confirm_view.children:
-                    child.disabled = True
                 await confirmation_message.edit(view=confirm_view)
-
-            confirm_button = Button(label=_("Confirm Release"), style=discord.ButtonStyle.red, emoji="💔")
-            confirm_button.callback = confirm_callback
-            cancel_button = Button(label=_("Cancel"), style=discord.ButtonStyle.grey, emoji="❌")
-            cancel_button.callback = cancel_callback
-
-            confirm_view.add_item(confirm_button)
-            confirm_view.add_item(cancel_button)
-
-            await confirmation_message.edit(view=confirm_view)
+        except Exception as e:
+            await ctx.send(e)
 
 
 
@@ -1592,13 +1943,72 @@ class Battles(commands.Cog):
             self.fighting_players[player_id].release()
             del self.fighting_players[player_id]
 
+    """
+    @has_char()
+    @user_cooldown(21600)
+    @pets.command(brief=_("Let your pet hunt a weapon"))
+    @locale_doc
+    async def hunt(self, ctx, petid):
+        
+
+
+        query = " # Triple " here
+            SELECT * 
+            FROM monster_pets 
+            WHERE id = $1 AND growth_stage IN ('juvenile', 'adult');
+            " # Triple " here
+        async with self.bot.pool.acquire() as conn:
+            pet_data = await conn.fetchrow(query, petid)
+
+        if not pet_data:
+            return await ctx.send(_("Invalid pet ID or your pet is not eligible to hunt."))
+
+        minstat = round(petlvl * 3 * luck_multiply * joy_multiply)
+        maxstat = round(petlvl * 6 * luck_multiply * joy_multiply)
+        if minstat < 1 or maxstat < 1:
+            return await ctx.send(
+                _("Your pet is not happy enough to hunt an item. Try making it joyful!")
+            )
+        item = await self.bot.create_random_item(
+            minstat=minstat if minstat < 30 else 30,
+            maxstat=maxstat if maxstat < 30 else 30,
+            minvalue=1,
+            maxvalue=250,
+            owner=ctx.author,
+        )
+        embed = discord.Embed(
+            title=_("You gained an item!"),
+            description=_("Your pet found an item!"),
+            color=0xFF0000,
+        )
+        embed.set_thumbnail(url=ctx.author.display_avatar.url)
+        embed.add_field(name=_("ID"), value=item["id"], inline=False)
+        embed.add_field(name=_("Name"), value=item["name"], inline=False)
+        embed.add_field(name=_("Type"), value=item["type"], inline=False)
+        if item["type"] == "Shield":
+            embed.add_field(name=_("Armor"), value=item["armor"], inline=True)
+        else:
+            embed.add_field(name=_("Damage"), value=item["damage"], inline=True)
+        embed.add_field(name=_("Value"), value=f"${item['value']}", inline=False)
+        embed.set_footer(text=_("Your pet needs to recover, wait a day to retry"))
+        await ctx.send(embed=embed)
+        await self.bot.log_transaction(
+            ctx,
+            from_=1,
+            to=ctx.author.id,
+            subject="Pet Item Fetch",
+            data={"Name": item["name"], "Value": item["value"]},
+        )
+    """
+
+
     @has_char()
     @user_cooldown(600)
     @battletower.command(brief=_("Battle against the floors protectors for amazing rewards (includes raidstats)"))
     @locale_doc
     async def fight(self, ctx):
-
         authorchance = 0
+        fireball_shot = False
         enemychance = 0
         cheated = False
         level = rpgtools.xptolevel(ctx.character_data["xp"])
@@ -1625,10 +2035,7 @@ class Battles(commands.Cog):
             "divine": "<:f_divine:1169412814612471869>"
         }
 
-        # Check if a lock exists for the player
-        if await self.is_player_in_fight(ctx.author.id):
-            await ctx.send("You are already in a battle.")
-            return
+
 
 
 
@@ -3124,7 +3531,7 @@ class Battles(commands.Cog):
             try:
 
 
-                def select_target(targets, player_prob=0.75, pet_prob=0.25):
+                def select_target(targets, player_prob=0.60, pet_prob=0.40):
                     """
                     Selects a target from the given list based on provided probabilities.
                     - player_prob: Probability of selecting the player.
@@ -3157,13 +3564,24 @@ class Battles(commands.Cog):
                 action_number = 1
 
                 # Fetch level data (assuming level_data is defined elsewhere)
+                if level == 16:
+                    async with self.bot.pool.acquire() as conn:
+                        minion1atk, minion1def = await self.bot.get_raidstats(random_user_object_1, conn=conn)
+                        minion2atk, minion2def = await self.bot.get_raidstats(random_user_object_2, conn=conn)
 
-                minion1_name = level_data["minion1_name"]
-                minion2_name = level_data["minion2_name"]
-                boss_name = level_data["boss_name"]
-                minion1_stats = level_data["minion1"]
-                minion2_stats = level_data["minion2"]
-                boss_stats = level_data["boss"]
+                    minion1_name = random_user_object_1.display_name
+                    minion2_name = random_user_object_2.display_name
+                    boss_name = level_data["boss_name"]
+                    boss_stats = level_data["boss"]
+
+                else:
+
+                    minion1_name = level_data["minion1_name"]
+                    minion2_name = level_data["minion2_name"]
+                    boss_name = level_data["boss_name"]
+                    minion1_stats = level_data["minion1"]
+                    minion2_stats = level_data["minion2"]
+                    boss_stats = level_data["boss"]
 
                 async with self.bot.pool.acquire() as conn:
                     current_player = ctx.author  # Fixed: Assign ctx.author directly instead of iterating
@@ -3196,6 +3614,15 @@ class Battles(commands.Cog):
                             "Warlock": 4,
                             "Dark Caster": 5,
                             "White Sorcerer": 6,
+                        }
+
+                        evolution_damage_multiplier = {
+                            1: 1.10,  # 110%
+                            2: 1.20,  # 120%
+                            3: 1.30,  # 130%
+                            4: 1.50,  # 150%
+                            5: 1.75,  # 175%
+                            6: 2.00,  # 200%
                         }
 
                         user_id = current_player.id
@@ -3338,40 +3765,70 @@ class Battles(commands.Cog):
                     prestige_multiplierhp = 1
 
                 # Initialize opponents with prestige multipliers
-                # Initialize opponents with prestige multipliers (unchanged)
-                opponents = [
-                    {
-                        "user": minion1_name,
-                        "hp": int(round(minion1_stats["hp"] * prestige_multiplierhp)),
-                        "max_hp": int(round(minion1_stats["hp"] * prestige_multiplierhp)),
-                        "armor": int(round(minion1_stats["armor"] * prestige_multiplierhp)),
-                        "damage": int(round(minion1_stats["damage"] * prestige_multiplier)),
-                        "is_pet": False,
-                        "element": minion1_stats.get("element", "unknown")  # Ensure 'element' key exists
-                    },
-                    {
-                        "user": minion2_name,
-                        "hp": int(round(minion2_stats["hp"] * prestige_multiplierhp)),
-                        "max_hp": int(round(minion2_stats["hp"] * prestige_multiplierhp)),
-                        "armor": int(round(minion2_stats["armor"] * prestige_multiplierhp)),
-                        "damage": int(round(minion2_stats["damage"] * prestige_multiplier)),
-                        "is_pet": False,
-                        "element": minion2_stats.get("element", "unknown")
-                    },
-                    {
-                        "user": boss_name,
-                        "hp": int(round(boss_stats["hp"] * prestige_multiplierhp)),
-                        "max_hp": int(round(boss_stats["hp"] * prestige_multiplierhp)),
-                        "armor": int(round(boss_stats["armor"] * prestige_multiplierhp)),
-                        "damage": int(round(boss_stats["damage"] * prestige_multiplier)),
-                        "is_pet": False,
-                        "element": boss_stats.get("element", "unknown")
-                    },
-                ]
+                if level == 16:
+                    opponents = [
+                        {
+                            "user": minion1_name,
+                            "hp": int(round(float(250) * prestige_multiplierhp)),
+                            "max_hp": int(round(float(250) * prestige_multiplierhp)),
+                            "armor": int(round(float(minion1def) * prestige_multiplierhp)),
+                            "damage": int(round(float(minion1atk) * prestige_multiplier)),
+                            "is_pet": False,
+                            "element": "unknown"  # Ensure 'element' key exists
+                        },
+                        {
+                            "user": minion2_name,
+                            "hp": int(round(float(150) * prestige_multiplierhp)),
+                            "max_hp": int(round(float(150) * prestige_multiplierhp)),
+                            "armor": int(round(float(minion2def) * prestige_multiplierhp)),
+                            "damage": int(round(float(minion2atk) * prestige_multiplier)),
+                            "is_pet": False,
+                            "element": "unknown"
+                        },
+                        {
+                            "user": boss_name,
+                            "hp": int(round(float(boss_stats["hp"]) * prestige_multiplierhp)),
+                            "max_hp": int(round(float(boss_stats["hp"]) * prestige_multiplierhp)),
+                            "armor": int(round(float(boss_stats["armor"]) * prestige_multiplierhp)),
+                            "damage": int(round(float(boss_stats["damage"]) * prestige_multiplier)),
+                            "is_pet": False,
+                            "element": boss_stats.get("element", "unknown")
+                        },
+                    ]
 
-                # ... [Previous code for fetching data and initializing opponents remains unchanged] ...
+                else:
+                    opponents = [
+                        {
+                            "user": minion1_name,
+                            "hp": int(round(minion1_stats["hp"] * prestige_multiplierhp)),
+                            "max_hp": int(round(minion1_stats["hp"] * prestige_multiplierhp)),
+                            "armor": int(round(minion1_stats["armor"] * prestige_multiplierhp)),
+                            "damage": int(round(minion1_stats["damage"] * prestige_multiplier)),
+                            "is_pet": False,
+                            "element": minion1_stats.get("element", "unknown")  # Ensure 'element' key exists
+                        },
+                        {
+                            "user": minion2_name,
+                            "hp": int(round(minion2_stats["hp"] * prestige_multiplierhp)),
+                            "max_hp": int(round(minion2_stats["hp"] * prestige_multiplierhp)),
+                            "armor": int(round(minion2_stats["armor"] * prestige_multiplierhp)),
+                            "damage": int(round(minion2_stats["damage"] * prestige_multiplier)),
+                            "is_pet": False,
+                            "element": minion2_stats.get("element", "unknown")
+                        },
+                        {
+                            "user": boss_name,
+                            "hp": int(round(boss_stats["hp"] * prestige_multiplierhp)),
+                            "max_hp": int(round(boss_stats["hp"] * prestige_multiplierhp)),
+                            "armor": int(round(boss_stats["armor"] * prestige_multiplierhp)),
+                            "damage": int(round(boss_stats["damage"] * prestige_multiplier)),
+                            "is_pet": False,
+                            "element": boss_stats.get("element", "unknown")
+                        },
+                    ]
 
-                await self.add_player_to_fight(ctx.author.id)
+
+              
 
                 # Initialize 'winner' to None
                 winner = None
@@ -3425,7 +3882,8 @@ class Battles(commands.Cog):
                 battle_ongoing = True
                 opponent_index = 0  # Track current opponent
                 current_turn = 0  # Start turn tracker
-                action_number = 1  # Initialize action counter
+                action_number = 1  # Initialize action counter.
+                fireball_chance = 100
 
                 turn_order_options = [
                     [player_combatant, pet_combatant],  # Team A
@@ -3454,17 +3912,71 @@ class Battles(commands.Cog):
                     else:
                         target = select_target(
                             [c for c in [player_combatant, pet_combatant] if c and c["hp"] > 0],
-                            player_prob=0.75,
-                            pet_prob=0.25
+                            player_prob=0.60,
+                            pet_prob=0.40
                         )  # Opponent's turn: attack player or pet
 
                     if target is not None:
                         # Calculate damage
                         damage_variance = randomm.randint(0, 100) if not combatant.get("is_pet") else randomm.randint(0,
                                                                                                                       50)
-                        dmg = round(max(combatant["damage"] + damage_variance - target["armor"], 1), 3)
-                        target["hp"] -= dmg
-                        target["hp"] = max(target["hp"], 0)
+                        fireball_shot = False
+
+                        if not combatant.get("is_pet") and combatant["user"] == ctx.author:
+
+                            if target["user"] != ctx.author:
+
+                                if combatant.get("mage_evolution") is not None:
+                                    fireball_chance = randomm.randint(1, 100)
+                                    if fireball_chance <= 30:
+                                        # Fireball happens
+                                        evolution_level = combatant["mage_evolution"]
+                                        damage_multiplier = evolution_damage_multiplier.get(evolution_level, 1.0)
+
+                                        # Calculate damage using Decimals for precision
+                                        base_damage = Decimal(combatant["damage"])
+                                        random_damage = Decimal(randomm.randint(0, 100))
+                                        target_armor = Decimal(target["armor"])
+                                        damage_mult = Decimal(damage_multiplier)
+
+                                        dmg_decimal = (base_damage + random_damage - target_armor) * damage_mult
+                                        dmg_decimal = max(dmg_decimal, Decimal('1'))
+
+                                        # Convert Decimal to float for compatibility with lifesteal
+                                        dmg = float(round(dmg_decimal, 2))
+
+                                        # Subtract damage from target's HP
+                                        target["hp"] -= dmg
+
+                                        # Format the Fireball message
+                                        message = _(
+                                            "You cast Fireball! **{monster}** takes **{dmg} HP** damage.").format(
+                                            monster=target["user"],
+                                            dmg=dmg
+                                        )
+                                        fireball_shot = True
+                                    else:
+                                        # Regular attack without Fireball
+                                        dmg = round(max(combatant["damage"] + damage_variance - target["armor"], 1), 3)
+                                        target["hp"] -= dmg
+                                        target["hp"] = max(target["hp"], 0)
+                                else:
+                                    # Regular attack without Fireball
+                                    dmg = round(max(combatant["damage"] + damage_variance - target["armor"], 1), 3)
+                                    target["hp"] -= dmg
+                                    target["hp"] = max(target["hp"], 0)
+
+                            else:
+                                # Regular attack if not the author's turn or if it's a pet
+                                dmg = round(max(combatant["damage"] + damage_variance - target["armor"], 1), 3)
+                                target["hp"] -= dmg
+                                target["hp"] = max(target["hp"], 0)
+
+                        else:
+                            dmg = round(max(combatant["damage"] + damage_variance - target["armor"], 1), 3)
+                            target["hp"] -= dmg
+                            target["hp"] = max(target["hp"], 0)
+
 
                         # Build attack message
                         if combatant.get("is_pet"):
@@ -3479,7 +3991,8 @@ class Battles(commands.Cog):
                             target_name = target['user'].mention if isinstance(target['user'], discord.User) else \
                             target['user']
 
-                        message = f"{attacker_name} attacks! {target_name} takes **{dmg:.1f}HP** damage."
+                        if fireball_shot == False:
+                            message = f"{attacker_name} attacks! {target_name} takes **{dmg:.1f}HP** damage."
 
                         # Handle lifesteal if applicable
                         if not combatant.get("is_pet") and combatant["user"] == ctx.author and lifestealauth != 0:
@@ -3672,6 +4185,7 @@ class Battles(commands.Cog):
                 if winner == ctx.author:
                     await ctx.send(
                             f"**Congratulations {ctx.author.display_name}! You have defeated all opponents!**")
+
                 else:
                     await ctx.send(f"**{ctx.author.mention}**, you have been defeated. Better luck next time!")
                     await self.remove_player_from_fight(ctx.author.id)
@@ -3687,7 +4201,6 @@ class Battles(commands.Cog):
                 await ctx.send(error_message)
                 print(error_message)
 
-            # Rest of your code continues...
 
 
             if victory_description:
@@ -4259,6 +4772,7 @@ class Battles(commands.Cog):
                     await ctx.send(f'You have advanced to floor: {newlevel}')
 
                 if level == 16:
+
                     victory_embed = discord.Embed(
                         title="Master Puppeteer Defeated!",
                         description=(
@@ -5955,8 +6469,8 @@ class Battles(commands.Cog):
                         opponent_user = ctx.author
 
                     # Combatant attacks
-                    target = self.select_target(opponent_combatant, opponent_pet_combatant, player_prob=0.25,
-                                                pet_prob=0.75)
+                    target = self.select_target(opponent_combatant, opponent_pet_combatant, player_prob=0.60,
+                                                pet_prob=0.40)
                     if target is not None:
                         # Calculate damage
                         if combatant.get("is_pet"):
@@ -6241,7 +6755,7 @@ class Battles(commands.Cog):
         bar = '█' * filled_length + '░' * (length - filled_length)
         return bar
 
-    def select_target(self, player_combatant, pet_combatant, player_prob=0.25, pet_prob=0.75):
+    def select_target(self, player_combatant, pet_combatant, player_prob=0.60, pet_prob=0.40):
         targets = []
         weights = []
         if player_combatant and player_combatant['hp'] > 0:
@@ -6717,7 +7231,7 @@ class Battles(commands.Cog):
 
 
 
-            await ctx.send(f"You have equipped {petname} successfully!")
+            await ctx.send(f"You have unequipped {petname} successfully!")
 
     @pets.command(brief=_("Learn how to use the pet system"))
     async def help(self, ctx):
@@ -6809,7 +7323,7 @@ class Battles(commands.Cog):
         )
 
         embed.add_field(
-            name=_("🔄 `$pets trade <your_pet_id> <their_pet_id>`"),
+            name=_("🔄 `$pets trade <type> <your_pet_id> <type> <their_pet_id>`"),
             value=_(
                 "Initiate a **trade** with another user by exchanging pets.\n"
                 "Both users must agree to the trade within **2 minutes**, or the pets will remain with their original owners."
@@ -6824,7 +7338,21 @@ class Battles(commands.Cog):
         )
 
         embed.add_field(
-            name=_("💰 `$pets sell <id> <@user> <amount>`"),
+            name=_("✏️ `$pets rename <id> <name>`"),
+            value=_(
+                "Rename your pet. Leaving the name field blank will default it to the orignal name."
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="\u200b",  # Invisible spacer field
+            value="\u200b",
+            inline=False,
+        )
+
+        embed.add_field(
+            name=_("💰 `$pets sell <type> <id> <@user> <amount>`"),
             value=_(
                 "Sell one of your pets to another user for an agreed price.\n"
                 "The transaction must be completed within **2 minutes**, or the pet and money will return to their owners."
@@ -6868,7 +7396,7 @@ class Battles(commands.Cog):
 
     @has_char()
     @commands.command(brief=_("Battle against a monster and gain XP"), hidden=True)
-    @user_cooldown(3600)  # 5-minute cooldown
+    @user_cooldown(1800)  # 5-minute cooldown
     @locale_doc
     async def pve(self, ctx):
         _(
@@ -7254,7 +7782,7 @@ class Battles(commands.Cog):
                 monster_level_variation = random.choice([-1, 0, 1])
                 levelchoice = base_monster_level + monster_level_variation
                 levelchoice = max(1, min(10, levelchoice))  # Clamp between 1 and 10
-                levelchoice = randomm.randint(1, 6)
+                levelchoice = randomm.randint(1, 7)
 
                 # Select a random monster from the chosen level
                 monster = random.choice(monsters[levelchoice])
@@ -7631,7 +8159,7 @@ class Battles(commands.Cog):
                 player_turn = not player_turn
 
             # Define the egg drop chance
-            egg_drop_chance = 0.05  # 5% chance
+            egg_drop_chance = 0.10 # 5% chance
 
             # Determine the outcome
             if player_stats["hp"] > 0 and monster_stats["hp"] <= 0:
@@ -7674,9 +8202,9 @@ class Battles(commands.Cog):
                                 ctx.author.id
                             )
 
-                        if pet_and_egg_count >= 5:
+                        if pet_and_egg_count >= 10:
                             await ctx.send(
-                                _("You cannot have more than 5 pets or eggs. Please release a pet or wait for an egg to hatch."))
+                                _("You cannot have more than 10 pets or eggs. Please release a pet or wait for an egg to hatch."))
                             return
 
                         # Generate a random IV percentage between 50% and 100%
@@ -7735,7 +8263,7 @@ class Battles(commands.Cog):
 
                         # Insert the egg into the database
                         egg_hatch_time = datetime.datetime.utcnow() + datetime.timedelta(
-                            minutes=2160)  # Example: hatches in 24 hours
+                            minutes=2160)  # Example: hatches in 36 hours
                         try:
                             async with self.bot.pool.acquire() as conn:
                                 await conn.execute(
@@ -7796,7 +8324,7 @@ class Battles(commands.Cog):
                 time_left_str = str(time_left).split('.')[0]  # Remove microseconds
                 embed.add_field(
                     name=egg["egg_type"],
-                    value=f"ID: {egg['id']}\nElement: {egg['element']}\nHP: {egg['hp']}\nAttack: {egg['attack']}\nDefense: {egg['defense']}\nHatches in: {time_left_str}",
+                    value=f"**ID:** {egg['id']}\n**IV:** {egg['IV']}%\n**Element:** {egg['element']}\n**HP:** {egg['hp']}\n**Attack:** {egg['attack']}\n**Defense:** {egg['defense']}\n**Hatches in:** {time_left_str}",
                     inline=False,
                 )
             await ctx.send(embed=embed)
@@ -7908,42 +8436,60 @@ class Battles(commands.Cog):
                         new_multiplier = stage_data["stat_multiplier"]
                         multiplier_ratio = new_multiplier / old_multiplier
 
+                        newhp = pet["hp"] * multiplier_ratio
+                        newattack = pet["attack"] * multiplier_ratio
+                        newdefense = pet["defense"] * multiplier_ratio
+
+
                         # Execute the appropriate query
                         if growth_time_interval is not None:
-                            await conn.execute(
+                            result = await conn.fetchrow(
                                 """
                                 UPDATE monster_pets
-                                SET growth_stage = $1,
+                                SET 
+                                    growth_stage = $1,
                                     growth_time = NOW() + $2,
-                                    hp = ROUND(hp * $3),
-                                    attack = ROUND(attack * $3),
-                                    defense = ROUND(defense * $3),
-                                    growth_index = $4
-                                WHERE id = $5;
+                                    hp = $3,
+                                    attack = $4,
+                                    defense = $5,
+                                    growth_index = $6
+                                WHERE 
+                                    "id" = $7
+                                RETURNING hp, attack, defense;
                                 """,
                                 stage_data["stage"],
                                 growth_time_interval,
-                                multiplier_ratio,
+                                newhp,
+                                newattack,
+                                newdefense,
                                 next_stage_index,
                                 pet["id"],
                             )
+
+
                         else:
-                            await conn.execute(
+                            result = await conn.fetchrow(
                                 """
                                 UPDATE monster_pets
-                                SET growth_stage = $1,
+                                SET 
+                                    growth_stage = $1,
                                     growth_time = NULL,
-                                    hp = ROUND(hp * $2),
-                                    attack = ROUND(attack * $2),
-                                    defense = ROUND(defense * $2),
-                                    growth_index = $3
-                                WHERE id = $4;
+                                    hp = $2,
+                                    attack = $3,
+                                    defense = $4,
+                                    growth_index = $5
+                                WHERE 
+                                    "id" = $6
+                                RETURNING hp, attack, defense;
                                 """,
                                 stage_data["stage"],
-                                multiplier_ratio,
+                                newhp,
+                                newattack,
+                                newdefense,
                                 next_stage_index,
                                 pet["id"],
                             )
+
 
                         # Notify the user about the growth
                         user = self.bot.get_user(pet["user_id"])
@@ -7954,9 +8500,10 @@ class Battles(commands.Cog):
         except Exception as e:
             print(f"Error in check_pet_growth: {e}")
 
+
     @user_cooldown(300)
     @pets.command(brief=_("Feed your pet"))
-    async def feed(self, ctx, id: int):
+    async def feed(self, ctx):
 
         growth_stages = {
             1: {"stage": "baby", "growth_time": 2, "stat_multiplier": 0.25, "hunger_modifier": 1.0},
@@ -7967,90 +8514,88 @@ class Battles(commands.Cog):
         }
 
         async with self.bot.pool.acquire() as conn:
-            pet = await conn.fetchrow("SELECT * FROM monster_pets WHERE user_id = $1 AND monster_pets.id = $2;", ctx.author.id,
-                                      id)
-            if not pet:
-                await ctx.send(f"You don't have a pet named {id}.")
-                await self.bot.reset_cooldown(ctx)
-                return
-            pet_name =pet['name']
+            # Fetch all pets owned by the user
+            pets = await conn.fetch(
+                "SELECT * FROM monster_pets WHERE user_id = $1",
+                ctx.author.id
+            )
 
-            # Check if the pet is an adult
-            if pet["growth_stage"] == "adult":
-                await ctx.send(f"Your pet is an adult and no longer needs feeding!")
+            if not pets:
+                await ctx.send("You don't have any pets to feed.")
                 await self.bot.reset_cooldown(ctx)
                 return
 
-            # Apply feeding logic
-            hunger_modifier = growth_stages[pet["growth_index"]]["hunger_modifier"]
+            # Update hunger and happiness for all pets owned by the user
             await conn.execute(
                 """
                 UPDATE monster_pets
                 SET hunger = 100, happiness = 100
-                WHERE id = $1;
+                WHERE user_id = $1;
                 """,
-                pet["id"],
+                ctx.author.id
             )
 
-            await ctx.send(f"You fed {pet_name}, and it looks happy!")
-
+            await ctx.send("You fed all your pets, and they look happy!")
 
     @tasks.loop(hours=12)
     async def decrease_pet_stats(self):
         """Background task to decrease hunger and happiness every 4 hours."""
-        async with self.bot.pool.acquire() as conn:
-            # Fetch all pets that are not adults (since adults are self-sufficient)
-            pets = await conn.fetch(
-                "SELECT * FROM monster_pets WHERE growth_stage != 'adult';"
-            )
-
-            for pet in pets:
-                user_id = pet['user_id']
-                pet_id = pet['id']
-                pet_name = pet['name']
-                growth_stage = pet['growth_stage']
-                growth_index = pet['growth_index']
-
-                # Define how much to decrease based on growth stage
-                # You can adjust these values as needed
-                if growth_stage == 'baby':
-                    hunger_decrease = 10  # Example value
-                    happiness_decrease = 5
-                elif growth_stage == 'juvenile':
-                    hunger_decrease = 8
-                    happiness_decrease = 4
-                elif growth_stage == 'young':
-                    hunger_decrease = 6
-                    happiness_decrease = 3
-                else:
-                    hunger_decrease = 0
-                    happiness_decrease = 0
-
-                # Update hunger and happiness
-                await conn.execute(
-                    """
-                    UPDATE monster_pets
-                    SET hunger = GREATEST(hunger - $1, 0),
-                        happiness = GREATEST(happiness - $2, 0)
-                    WHERE id = $3;
-                    """,
-                    hunger_decrease,
-                    happiness_decrease,
-                    pet_id
+        if self.softlanding == True:
+            async with self.bot.pool.acquire() as conn:
+                # Fetch all pets that are not adults (since adults are self-sufficient)
+                pets = await conn.fetch(
+                    "SELECT * FROM monster_pets WHERE growth_stage != 'adult';"
                 )
 
-                # Check if hunger or happiness has reached 0
-                updated_pet = await conn.fetchrow(
-                    "SELECT hunger, happiness FROM monster_pets WHERE id = $1;",
-                    pet_id
-                )
+                for pet in pets:
+                    user_id = pet['user_id']
+                    pet_id = pet['id']
+                    pet_name = pet['name']
+                    growth_stage = pet['growth_stage']
+                    growth_index = pet['growth_index']
 
-                if updated_pet['hunger'] == 0:
-                    # Pet dies from starvation
-                    await self.handle_pet_death(conn, user_id, pet_id, pet_name)
-                elif updated_pet['happiness'] == 0:
-                    # Pet runs away due to unhappiness
-                    await self.handle_pet_runaway(conn, user_id, pet_id, pet_name)
+                    # Define how much to decrease based on growth stage
+                    # You can adjust these values as needed
+                    if growth_stage == 'baby':
+                        hunger_decrease = 10  # Example value
+                        happiness_decrease = 5
+                    elif growth_stage == 'juvenile':
+                        hunger_decrease = 8
+                        happiness_decrease = 4
+                    elif growth_stage == 'young':
+                        hunger_decrease = 6
+                        happiness_decrease = 3
+                    else:
+                        hunger_decrease = 0
+                        happiness_decrease = 0
+
+                    # Update hunger and happiness
+                    await conn.execute(
+                        """
+                        UPDATE monster_pets
+                        SET hunger = GREATEST(hunger - $1, 0),
+                            happiness = GREATEST(happiness - $2, 0)
+                        WHERE id = $3;
+                        """,
+                        hunger_decrease,
+                        happiness_decrease,
+                        pet_id
+                    )
+
+                    # Check if hunger or happiness has reached 0
+                    updated_pet = await conn.fetchrow(
+                        "SELECT hunger, happiness FROM monster_pets WHERE id = $1;",
+                        pet_id
+                    )
+
+                    if updated_pet['hunger'] == 0:
+                        # Pet dies from starvation
+                        await self.handle_pet_death(conn, user_id, pet_id, pet_name)
+                    elif updated_pet['happiness'] == 0:
+                        # Pet runs away due to unhappiness
+                        await self.handle_pet_runaway(conn, user_id, pet_id, pet_name)
+        else:
+            self.softlanding = True
 
     @decrease_pet_stats.before_loop
     async def before_decrease_pet_stats(self):
