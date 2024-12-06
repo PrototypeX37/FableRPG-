@@ -1679,7 +1679,7 @@ This command is in an alpha-stage, which means bugs are likely to happen. Play a
             ctx,
             side: CoinSide | None = "heads",
             *,
-            amount: IntFromTo(0, 1_000_000) = 0,
+            amount = str(0),
     ):
         _(
             """`[side]` - The coin side to bet on, can be heads or tails; defaults to heads
@@ -1690,6 +1690,19 @@ This command is in an alpha-stage, which means bugs are likely to happen. Play a
             If the coin lands on the side you bet on, you will receive the amount in cash. If it's the other side, you lose that amount.
             (This command has a cooldown of 5 seconds.)"""
         )
+
+        if amount == "all":
+            amount = int(ctx.character_data["money"])
+            if amount > 250000:
+                amount = int(250000)
+        else:
+            try:
+                amount = int(amount)
+            except Exception as e:
+                return await ctx.send("You used a malformed argument!")
+        if amount < 0:
+            await ctx.send("The supplied number must be or greater than 0.")
+            return
         if amount > 250000:
             return await ctx.send("The supplied number must be in range of 0 to 250000.")
         if ctx.character_data["money"] < amount:
