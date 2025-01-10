@@ -767,72 +767,136 @@ class Gambling(commands.Cog):
             await ctx.send(f"Sorry, there was an error processing your request: {e}")
 
     def analyze_hand(self, hand):
+            # Map emoji representation to card names
+            card_emojis = [self.pokercards[card] for card in hand]
 
-        # Map emoji representation to card names
-        card_emojis = [self.pokercards[card] for card in hand]
+            ranks = []
+            suits = []
+            for card in hand:
+                parts = card.split("_")
+                rank = parts[0]
+                if rank[1:].isdigit():
+                    ranks.append(int(rank[1:]))
+                elif rank[0].isdigit():
+                    ranks.append(int(rank[0]))
+                else:
+                    face_cards = {"a": 14, "k": 13, "q": 12, "j": 11}
+                    ranks.append(face_cards[rank[0].lower()])
+                suit = parts[-1]
+                suits.append(suit)
 
-        ranks = []
-        suits = []
-        for card in hand:  # Use the original card names here
-            parts = card.split("_")
-            rank = parts[0]  # The rank is the first part of the card name
-            if rank[1:].isdigit():
-                ranks.append(int(rank[1:]))
-            elif rank[0].isdigit():
-                ranks.append(int(rank[0]))
-            else:
-                face_cards = {"a": 14, "k": 13, "q": 12, "j": 11}
-                ranks.append(face_cards[rank[0]])
-            suit = parts[-1]  # The suit is the second part of the card name
-            suits.append(suit)
+            # Sort ranks in descending order
+            ranks.sort(reverse=True)
 
-        # Count occurrences of each card rank
-        card_ranks = {}
-        for rank in ranks:
-            card_ranks[rank] = card_ranks.get(rank, 0) + 1
+            # Count occurrences of each rank
+            rank_counts = {}
+            for rank in ranks:
+                rank_counts[rank] = rank_counts.get(rank, 0) + 1
 
-        # Check if all cards have the same rank
-        if len(card_ranks) == 1:
-            return "Tie - All cards have the same rank", None, suits[0]
+            # Get kickers (cards not in main combination)
+            kickers = sorted([r for r in ranks if rank_counts[r] == 1], reverse=True)
 
-        # Check for flush
-        is_flush = len(set(suits)) == 1
+            # Check for flush
+            is_flush = len(set(suits)) == 1
 
-        # Check for straight
-        sorted_ranks = sorted(card_ranks.keys())
-        is_straight = len(sorted_ranks) == 5 and sorted_ranks[-1] - sorted_ranks[0] == 4
+            # Check for straight
+            is_straight = False
+            if len(set(ranks)) == 5:  # All ranks must be different
+                if max(ranks) - min(ranks) == 4:
+                    is_straight = True
+                # Check Ace-low straight (A,2,3,4,5)
+                elif sorted(ranks) == [14, 5, 4, 3, 2]:
+                    is_straight = True
+                    ranks = [5, 4, 3, 2, 1]  # Treat Ace as 1 in this case
 
-        # Determine hand type
-        if is_straight and is_flush:
-            if sorted_ranks[-1] == 14:  # Ace is the highest card
-                return "Royal Flush", None, suits[0]
-            else:
-                return "Straight Flush", None, suits[0]
-        elif 4 in card_ranks.values():
-            for rank, count in card_ranks.items():
-                if count == 4:
-                    return "Four of a Kind", rank, suits[ranks.index(rank)]
-        elif sorted(card_ranks.values()) == [2, 3]:
-            for rank, count in card_ranks.items():
-                if count == 3:
-                    return "Full House", rank, suits[ranks.index(rank)]
-        elif is_flush:
-            return "Flush", None, suits[0]
-        elif is_straight:
-            return "Straight", None, None  # No need to specify suit for straight
-        elif 3 in card_ranks.values():
-            for rank, count in card_ranks.items():
-                if count == 3:
-                    return "Three of a Kind", rank, suits[ranks.index(rank)]
-        elif list(card_ranks.values()).count(2) == 2:
-            pairs = [rank for rank, count in card_ranks.items() if count == 2]
-            return "Two Pair", max(pairs), None  # No need to specify suit for two pairs
-        elif list(card_ranks.values()).count(2) == 1:
-            for rank, count in card_ranks.items():
-                if count == 2:
-                    return "One Pair", rank, suits[ranks.index(rank)]
-        else:
-            return "High Card", max(ranks), suits[ranks.index(max(ranks))]
+            # Return format: (hand_type, hand_value, kickers)
+            # hand_type is string name of hand
+            # hand_value is primary value for comparison
+            # kickers is list of remaining card values in order
+
+            # Royal Flush and Straight Flush
+            if is_straight and is_flush:
+                if ranks[0] == 14 and ranks[1] == 13:
+                    return ("Royal Flush", 14, ranks[1:])
+                return ("Straight Flush", max(ranks), ranks[1:])
+
+            # Four of a Kind
+            if 4 in rank_counts.values():
+                quads_rank = next(r for r, count in rank_counts.items() if count == 4)
+                kicker = next(r for r, count in rank_counts.items() if count == 1)
+                return ("Four of a Kind", quads_rank, [kicker])
+
+            # Full House
+            if sorted(rank_counts.values()) == [2, 3]:
+                trips_rank = next(r for r, count in rank_counts.items() if count == 3)
+                pair_rank = next(r for r, count in rank_counts.items() if count == 2)
+                return ("Full House", trips_rank, [pair_rank])
+
+            # Flush
+            if is_flush:
+                return ("Flush", ranks[0], ranks[1:])
+
+            # Straight
+            if is_straight:
+                return ("Straight", max(ranks), ranks[1:])
+
+            # Three of a Kind
+            if 3 in rank_counts.values():
+                trips_rank = next(r for r, count in rank_counts.items() if count == 3)
+                return ("Three of a Kind", trips_rank, kickers)
+
+            # Two Pair
+            pairs = sorted([r for r, count in rank_counts.items() if count == 2], reverse=True)
+            if len(pairs) == 2:
+                kicker = next(r for r in ranks if rank_counts[r] == 1)
+                return ("Two Pair", max(pairs), [min(pairs), kicker])
+
+            # One Pair
+            if len(pairs) == 1:
+                pair_rank = pairs[0]
+                kickers = sorted([r for r in ranks if rank_counts[r] == 1], reverse=True)
+                return ("One Pair", pair_rank, kickers)
+
+            # High Card
+            return ("High Card", ranks[0], ranks[1:])
+
+    def compare_hands(self, hand1_result, hand2_result):
+        """Compare two poker hands and return:
+           1 if hand1 wins
+           -1 if hand2 wins
+           0 if it's a tie"""
+
+        hand_ranks = {
+            "High Card": 0,
+            "One Pair": 1,
+            "Two Pair": 2,
+            "Three of a Kind": 3,
+            "Straight": 4,
+            "Flush": 5,
+            "Full House": 6,
+            "Four of a Kind": 7,
+            "Straight Flush": 8,
+            "Royal Flush": 9
+        }
+
+        hand1_type, hand1_value, hand1_kickers = hand1_result
+        hand2_type, hand2_value, hand2_kickers = hand2_result
+
+        # First compare hand types
+        if hand_ranks[hand1_type] != hand_ranks[hand2_type]:
+            return 1 if hand_ranks[hand1_type] > hand_ranks[hand2_type] else -1
+
+        # If same hand type, compare primary values
+        if hand1_value != hand2_value:
+            return 1 if hand1_value > hand2_value else -1
+
+        # If primary values are equal, compare kickers in order
+        for k1, k2 in zip(hand1_kickers, hand2_kickers):
+            if k1 != k2:
+                return 1 if k1 > k2 else -1
+
+        # If everything is equal, it's a tie
+        return 0
 
     async def send_hand(self, ctx, mention, card_messages):
         await ctx.send(f"{mention}, your hand:")
@@ -862,7 +926,6 @@ class Gambling(commands.Cog):
         )
 
         try:
-
             if enemy == ctx.author:
                 return await ctx.send(_("You can't poker draw with yourself."))
             if ctx.character_data["money"] < money:
@@ -922,142 +985,74 @@ class Gambling(commands.Cog):
                 'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;', money, enemy_.id
             )
             enemy_member = ctx.guild.get_member(enemy_.id)
-            selected_cards_1 = random.sample(list(self.pokercards), 5)
-            selected_cards_2 = random.sample(list(self.pokercards), 5)
+
+            # Draw cards from a single deck to prevent duplicates
+            deck = list(self.pokercards)
+            selected_cards_1 = random.sample(deck, 5)
+            # Remove selected cards from deck before drawing second hand
+            for card in selected_cards_1:
+                deck.remove(card)
+            selected_cards_2 = random.sample(deck, 5)
 
             card_messages_1 = [self.pokercards[card] for card in selected_cards_1]
             card_messages_2 = [self.pokercards[card] for card in selected_cards_2]
             player1_cards = " ".join(card_messages_1)
             player2_cards = " ".join(card_messages_2)
 
-            hand_rank_1, max_card_author, suite_author = self.analyze_hand(selected_cards_1)
-            hand_rank_2, max_card_enemy, suite_enemy = self.analyze_hand(selected_cards_2)
+            # Send hands to players
+            await self.send_hand(ctx, ctx.author.mention, card_messages_1)
+            await self.send_hand(ctx, enemy_member.mention, card_messages_2)
 
-            # Send the messages
-            await ctx.send(f"{ctx.author.mention}, your hand:")
-            await ctx.send(player1_cards)  # Send player 1's hand
+            # Analyze hands and compare
+            hand1_result = self.analyze_hand(selected_cards_1)
+            hand2_result = self.analyze_hand(selected_cards_2)
+            comparison = self.compare_hands(hand1_result, hand2_result)
 
-            await ctx.send("_ _")  # Separator for clarity
-
-            await ctx.send(f"{enemy_member.mention}, your hand:")
-            await ctx.send(player2_cards)  # Send player 2's hand
-
-            await ctx.send("_ _")  # Separator for clarity
-
-            # Define a dictionary to map hand ranks to their corresponding values
-            hand_rank_values = {
-                "High Card": 0,
-                "One Pair": 1,
-                "Two Pair": 2,
-                "Three of a Kind": 3,
-                "Straight": 4,
-                "Flush": 5,
-                "Full House": 6,
-                "Four of a Kind": 7,
-                "Straight Flush": 8,
-                "Royal Flush": 9
-            }
-
-            # Set winner to None initially
-            winner = None
-
-            # Determine winner based on hand ranks
-            if hand_rank_1 != hand_rank_2:
-                # If hand ranks are different, the player with the higher rank wins
-                if hand_rank_values[hand_rank_1] > hand_rank_values[hand_rank_2]:
-                    winner = ctx.author
-                    loser = enemy_member
-                else:
-                    winner = enemy_member
-                    loser = ctx.author
-
-            # If hand ranks are equal, compare additional criteria
-            elif hand_rank_1 in ["One Pair", "Two Pair", "Three of a Kind", "Four of a Kind", "High Card"]:
-                # Compare the max cards directly
-                if max_card_author == max_card_enemy:
-
-                    async with self.bot.pool.acquire() as conn:
-                        await conn.execute(
-                            'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
-                            money,
-                            ctx.author.id,
-                        )
-
-                        # Update the profile for enemy
-                        await conn.execute(
-                            'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
-                            money,
-                            enemy_.id,
-                        )
-
-                    return await ctx.send("It's a draw!")
-                elif max_card_author > max_card_enemy:
-                    winner = ctx.author
-                    loser = enemy_member
-                else:
-                    winner = enemy_member
-                    loser = ctx.author
-
-            if winner == ctx.author:
-                winning_hand_rank = hand_rank_1
-                async with self.bot.pool.acquire() as conn:
-                    await conn.execute(
-                        'UPDATE profile SET "money"="money"+$1 WHERE'
-                        ' "user"=$2;',
-                        money * 2,
-                        winner.id,
-                    )
-                    await self.bot.log_transaction(
-                        ctx,
-                        from_=loser.id,
-                        to=winner.id,
-                        subject="Battle Bet",
-                        data={"Gold": money},
-                        conn=conn,
-                    )
-
+            if comparison > 0:
+                winner = ctx.author
+                loser = enemy_member
+                winning_hand = hand1_result[0]
+            elif comparison < 0:
+                winner = enemy_member
+                loser = ctx.author
+                winning_hand = hand2_result[0]
             else:
-                winning_hand_rank = hand_rank_2
-                async with self.bot.pool.acquire() as conn:
-                    await conn.execute(
-                        'UPDATE profile SET "money"="money"+$1 WHERE'
-                        ' "user"=$2;',
-                        money * 2,
-                        enemy_.id,
-                    )
-                    await self.bot.log_transaction(
-                        ctx,
-                        from_=loser.id,
-                        to=winner.id,
-                        subject="Battle Bet",
-                        data={"Gold": money},
-                        conn=conn,
-                    )
-
-            # Check if winner is determined
-            if winner:
-                if winning_hand_rank == "One Pair":
-                    return await ctx.send(
-                        f"{winner.mention} won the poker draw with {winning_hand_rank} against {loser.mention}! Congratulations!")
-                else:
-                    return await ctx.send(
-                        f"{winner.mention} won the poker draw with a {winning_hand_rank} against {loser.mention}! Congratulations!")
-            else:
+                # It's a tie - return money to both players
                 async with self.bot.pool.acquire() as conn:
                     await conn.execute(
                         'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
                         money,
                         ctx.author.id,
                     )
-
-                    # Update the profile for enemy
                     await conn.execute(
                         'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
                         money,
                         enemy_.id,
                     )
-
                 return await ctx.send("It's a draw!")
+
+            # Handle winner
+            async with self.bot.pool.acquire() as conn:
+                await conn.execute(
+                    'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                    money * 2,
+                    winner.id,
+                )
+                await self.bot.log_transaction(
+                    ctx,
+                    from_=loser.id,
+                    to=winner.id,
+                    subject="Battle Bet",
+                    data={"Gold": money},
+                    conn=conn,
+                )
+
+            if winning_hand == "One Pair":
+                return await ctx.send(
+                    f"{winner.mention} won the poker draw with {winning_hand} against {loser.mention}! Congratulations!")
+            else:
+                return await ctx.send(
+                    f"{winner.mention} won the poker draw with a {winning_hand} against {loser.mention}! Congratulations!")
 
         except Exception as e:
             import traceback
@@ -1065,6 +1060,7 @@ class Gambling(commands.Cog):
             error_message += traceback.format_exc()
             await ctx.send(error_message)
             print(error_message)
+
 
     @has_char()
     @commands.cooldown(1, 5, commands.BucketType.user)
@@ -1616,10 +1612,10 @@ class Gambling(commands.Cog):
         invoke_without_command=True,
         brief=_("Play a game of French Roulette"),
     )
-    
+    @locale_doc
     async def roulette(self, ctx, money: IntFromTo(0, 100000), *, bid: str):
         _(
-            """`<money>` - A whole number from 0 to 100
+            """`<money>` - A whole number from 0 to 100,000 (Outside Red & Black limited to $25,000)
 `<bid>` - What to bid on, see below for details
 
 Play a game of French Roulette.
