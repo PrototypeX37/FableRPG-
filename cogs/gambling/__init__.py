@@ -2022,6 +2022,7 @@ This command is in an alpha-stage, which means bugs are likely to happen. Play a
                 # Define a list of the four ace card filenames
                 ace_cards = ['ace_of_spades.webp', 'ace_of_hearts.webp', 'ace_of_diamonds.webp', 'ace_of_clubs.webp']
 
+
                 if ctx.author.id == 295173706496475136:
                     author_card = random.choice(ace_cards)
 
