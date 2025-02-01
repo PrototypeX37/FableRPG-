@@ -1508,7 +1508,7 @@ Average hours of work: **{hours}**"""
         Note:
         - This command uses image credits. You have a limited number of free images per day, after which generating images will cost in-game currency.
         - The prompt should not exceed 120 characters.
-        - This command has a cooldown of 60 seconds.""" "not in use"
+        - This command has a cooldown of 60 seconds."""
         )
 
 
@@ -1538,7 +1538,7 @@ Average hours of work: **{hours}**"""
                     if len(prompt) > 120:
                         return await ctx.send("The prompt cannot exceed 120 characters.")
             await ctx.send("Generating image, please wait. (This can take up to 2 minutes.)")
-
+            client = AsyncOpenAI()
             response = await client.images.generate(
                 model="dall-e-3",
                 prompt=prompt,
@@ -1610,7 +1610,7 @@ Average hours of work: **{hours}**"""
                     if len(prompt) > 120:
                         return await ctx.send("The prompt cannot exceed 120 characters.")
             await ctx.send("Generating HD image, please wait. (This can take up to 2 minutes.)")
-
+            client = AsyncOpenAI()
             response = await client.images.generate(
                 model="dall-e-3",
                 prompt=prompt,
