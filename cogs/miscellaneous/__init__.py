@@ -19,6 +19,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import asyncio
 import datetime
 import json
+
+
 import requests
 from io import BytesIO
 
@@ -26,7 +28,6 @@ from discord.ext.commands import CommandError
 
 from classes.classes import from_string as class_from_string
 
-from moviepy.editor import AudioFileClip, ImageClip
 import pytesseract
 import os
 import platform
@@ -48,7 +49,6 @@ import discord
 import distro
 import humanize
 import pkg_resources as pkg
-import psutil
 import requests
 
 from discord.ext import commands
@@ -70,6 +70,61 @@ def load_whitelist():
 def save_whitelist(data):
     with open('whitelist.json', 'w') as file:
         json.dump(data, file, indent=4)
+
+class PaginatorView(discord.ui.View):
+    def __init__(self, ctx, pages, start_page=0, timeout=60):
+        super().__init__(timeout=timeout)
+        self.ctx = ctx
+        self.pages = pages
+        self.current_page = start_page
+        self.message = None  # we will set this after sending
+
+    async def on_timeout(self):
+        """
+        Called when the View times out (no interaction for `timeout` seconds).
+        We'll disable all buttons here.
+        """
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            await self.message.edit(view=self)
+
+    # --------------------------------------------------------------------------
+    # Button callbacks
+    # --------------------------------------------------------------------------
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.blurple)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Ensure only the command invoker can use buttons
+        if interaction.user != self.ctx.author:
+            return await interaction.response.send_message(
+                "This button isn't for you!", ephemeral=True
+            )
+
+        self.current_page = (self.current_page - 1) % len(self.pages)
+        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.red)
+    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Ensure only the command invoker can use buttons
+        if interaction.user != self.ctx.author:
+            return await interaction.response.send_message(
+                "This button isn't for you!", ephemeral=True
+            )
+
+        await interaction.message.delete()
+        self.stop()  # end the interaction to clean up
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.blurple)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Ensure only the command invoker can use buttons
+        if interaction.user != self.ctx.author:
+            return await interaction.response.send_message(
+                "This button isn't for you!", ephemeral=True
+            )
+
+        self.current_page = (self.current_page + 1) % len(self.pages)
+        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
 
 
 class Miscellaneous(commands.Cog):
@@ -99,121 +154,112 @@ class Miscellaneous(commands.Cog):
                 raise ImgurUploadError()
         return short_url
 
-    async def generate_and_send_speech(self, interaction, text, voice):
-        url = "https://api.openai.com/v1/audio/speech"
-        OPENAI_KEY = self.bot.config.external.openai
-
-        headers = {
-            "Authorization": f"Bearer {OPENAI_KEY}",
-            "Content-Type": "application/json"
-        }
-        data = {
-            "model": "tts-1-hd",
-            "input": text,
-            "voice": voice.lower()
-        }
-
-        response = requests.post(url, headers=headers, json=data)
-        if response.status_code == 200:
-            audio_bytes = BytesIO(response.content)
-            audio_file_path = 'output_audio.mp3'
-            with open(audio_file_path, 'wb') as f:
-                f.write(audio_bytes.getbuffer())
-
-            audio_clip = AudioFileClip(audio_file_path)
-            image_clip = ImageClip('black_image.png', duration=audio_clip.duration)
-            video = image_clip.set_audio(audio_clip)
-            video_file_path = 'output_video.mp4'
-            video.write_videofile(video_file_path, codec="libx264", fps=24)
-
-            await interaction.followup.send(file=discord.File(video_file_path))
-        else:
-            await interaction.followup.send(f"Error: {response.status_code} - {response.text}")
-
+    @commands.command()
+    async def wiki(self, ctx):
+        await ctx.send("https://wiki.fablerpg.xyz")
 
     @has_char()
     @user_cooldown(1)
-    @commands.command()
+    @commands.hybrid_command()
     @locale_doc
     async def all(self, ctx):
-        _(
-            """Automatically invokes several daily commands for you.
+        _("""Automatically invokes several daily commands for you.
 
-        This command will attempt to run several of your daily or periodic commands such as `vote`, `daily`, `donatordaily`, `steal`, `date`, `pray`, and `familyevent` in one go, if they are not on cooldown.
+        This command will attempt to run several of your daily or periodic commands 
+        such as `vote`, `daily`, `donatordaily`, `steal`, `date`, `pray`, and 
+        `familyevent` in one go, if they are not on cooldown.
 
         Usage:
           `$all`
 
         Note:
-        - Commands that are on cooldown will be skipped, and you'll be notified when you can use them again.
-        - If you are a Thief class, it will attempt to use `steal` as well.
-        - This command itself has a cooldown of 1 second."""
+        - Commands that are on cooldown will be skipped
+        - If you are a Thief class, it will attempt to use `steal` as well
+        - This command itself has a cooldown of 1 second""")
+
+        # Check tier access
+        character_data = await ctx.bot.pool.fetchrow(
+            'SELECT tier, class FROM profile WHERE "user"=$1;', ctx.author.id
         )
+        if not character_data or character_data["tier"] < 1:
+            return await ctx.send(_("You do not have access to this command."))
 
-        try:
-            # Define the commands and their respective cooldowns (in seconds)
-            cooldowns = {
-                'vote': 12 * 3600,  # 12 hours
-                'daily': self.time_until_midnight(),  # Daily reset
-                'donatordaily': self.time_until_midnight(),  # Daily reset
-                'steal': 60 * 60,  # 1 hour
-                'date': 12 * 3600,  # 12 hours
-                'pray': self.time_until_midnight(),  # Daily reset
-                'familyevent': 30 * 60,  # 30 minutes
-            }
+        # Define commands and their cooldowns
+        command_config = {
+            'cratesdaily': {'cooldown': 12 * 3600},  # 12 hours
+            'daily': {'cooldown': self.time_until_midnight()},
+            'boosterdaily': {'cooldown': self.time_until_midnight()},
+            'steal': {
+                'cooldown': 60 * 60,  # 1 hour
+                'class_requirement': 'Thief'
+            },
+            'date': {'cooldown': 12 * 3600},  # 12 hours
+            'pray': {'cooldown': self.time_until_midnight()},
+            'familyevent': {'cooldown': 30 * 60}  # 30 minutes
+        }
 
-            character_data = await ctx.bot.pool.fetchrow(
-                'SELECT * FROM profile WHERE "user"=$1;', ctx.author.id
+        # Get all cooldowns in one Redis pipeline
+        async with ctx.bot.redis.pipeline() as pipe:
+            for cmd_name in command_config:
+                pipe.ttl(f"cd:{ctx.author.id}:{cmd_name}")
+            cooldowns = await pipe.execute()
+
+        # Process user classes once
+        user_classes = {
+            type(c).__name__
+            for c in map(class_from_string, character_data["class"])
+        } if character_data["class"] else set()
+
+        tasks = []
+        status_messages = []
+
+        for (cmd_name, config), current_cooldown in zip(command_config.items(), cooldowns):
+            command = self.bot.get_command(cmd_name)
+            if not command:
+                continue
+
+            # Check if command is available
+            if current_cooldown != -2:  # Cooldown exists
+                remaining = self.format_time(current_cooldown)
+                status_messages.append(f"`{cmd_name}`: {remaining} cooldown remaining")
+                continue
+
+            # Check class requirement if any
+            if class_req := config.get('class_requirement'):
+                if class_req not in user_classes:
+                    status_messages.append(
+                        f"`{cmd_name}`: Requires {class_req} class"
+                    )
+                    continue
+
+            # Add command to task list and set cooldown
+            tasks.append(ctx.invoke(command))
+            await ctx.bot.redis.set(
+                f"cd:{ctx.author.id}:{command.qualified_name}",
+                command.qualified_name,
+                ex=config['cooldown']
             )
 
-            if character_data["tier"] < 1:
-                await ctx.send("You do not have access to this command.")
+        # Execute all commands concurrently
+        if tasks:
+            try:
+                await asyncio.gather(*tasks)
+            except Exception as e:
+                await ctx.send(f"An error occurred: {str(e)}")
                 return
 
-            tasks = []  # To gather tasks for concurrent execution
-
-            for command_name, cooldown_duration in cooldowns.items():
-                command = self.bot.get_command(command_name)
-
-                if command is not None:
-                    command_ttl = await ctx.bot.redis.execute_command(
-                        "TTL", f"cd:{ctx.author.id}:{command.qualified_name}"
-                    )
-
-                    if command_ttl == -2:  # No cooldown exists
-                        if command_name == 'steal':
-                            # Check if the user is a Thief
-                            user_classes = [class_from_string(c) for c in character_data["class"]]
-                            if any(type(c).__name__ == 'Thief' for c in user_classes):
-                                tasks.append(ctx.invoke(command))
-                                await ctx.bot.redis.execute_command(
-                                    "SET", f"cd:{ctx.author.id}:{command.qualified_name}",
-                                    command.qualified_name,
-                                    "EX", cooldown_duration
-                                )
-                            else:
-                                await ctx.send(_("You need to be a Thief to use the steal command."))
-                        else:
-                            # Invoke the command and set the new cooldown
-                            await ctx.bot.redis.execute_command(
-                                "SET", f"cd:{ctx.author.id}:{command.qualified_name}",
-                                command.qualified_name,
-                                "EX", cooldown_duration
-                            )
-                            tasks.append(ctx.invoke(command))
-
-                    else:
-                        # Inform the user that the command is on cooldown
-                        await ctx.send(
-                            f"{command_name} is on cooldown. Try again in {self.format_time(command_ttl)}."
-                        )
-
-            # Execute all the tasks concurrently
-            if tasks:  # Only gather if there are tasks
-                await asyncio.gather(*tasks)
-
-        except Exception as e:
-            await ctx.send(str(e))
+        # Send status report
+        if status_messages:
+            status_report = "\n".join(status_messages)
+            await ctx.send(
+                _("Status Report:\n{status_report}").format(
+                    status_report=status_report
+                )
+            )
+        try:
+            await self.bot.reset_cooldown(ctx)
+        except Exception:
+            pass
 
     def format_time(self, seconds):
         """Convert seconds to HH:MM:SS format."""
@@ -225,10 +271,9 @@ class Miscellaneous(commands.Cog):
         """Calculate the number of seconds until the next midnight UTC."""
         return int(86400 - (time.time() % 86400))
 
-    
     @has_char()
     @next_day_cooldown()
-    @commands.command(brief=_("Get your daily reward"))
+    @commands.hybrid_command(brief=_("Get your daily reward"))
     @locale_doc
     async def daily(self, ctx):
         _(
@@ -237,37 +282,47 @@ class Miscellaneous(commands.Cog):
             After ten days, your rewards will reset. Day 11 and day 1 have the same rewards.
             The rewards will either be money (2/3 chance) or crates (1/3 chance).
 
-            The possible rewards are:
+            Special milestone rewards:
+            Day 50: 1 Legendary Crate + 100,000 gold
+            Day 100: 1 Fortune Crate + 150,000 gold
+            Day 200: 100 Mystery Crates + 200,000 gold
+            Day 300: 1 Divine Crate + 300,000 gold
+            Day 400: 3 Fortune Crates + 400,000 gold
+            Day 500: 2 Divine Crates + 500,000 gold
+            
+            **These milestones cycle every 500 days**
 
-              __Day 1__
-              $50 or 1-6 common crates
 
-              __Day 2__
-              $100 or 1-5 common crates
+            Regular rewards:
+            __Day 1__
+            $50 or 1-6 common crates
 
-              __Day 3__
-              $200 or 1-4 common (99%) or uncommon (1%) crates
+            __Day 2__
+            $100 or 1-5 common crates
 
-              __Day 4__
-              $400 or 1-4 common (99%) or uncommon (1%) crates
+            __Day 3__
+            $200 or 1-4 common (99%) or uncommon (1%) crates
 
-              __Day 5__
-              $800 or 1-4 common (99%) or uncommon (1%) crates
+            __Day 4__
+            $400 or 1-4 common (99%) or uncommon (1%) crates
 
-              __Day 6__
-              $1,600 or 1-3 common (80%), uncommon (19%) or rare (1%) crates
+            __Day 5__
+            $800 or 1-4 common (99%) or uncommon (1%) crates
 
-              __Day 7__
-              $3,200 or 1-2 uncommon (80%), rare (19%) or magic (1%) crates
+            __Day 6__
+            $1,600 or 1-3 common (80%), uncommon (19%) or rare (1%) crates
 
-              __Day 8__
-              $6,400 or 1-2 uncommon (80%), rare (19%) or magic (1%) crates
+            __Day 7__
+            $3,200 or 1-2 uncommon (80%), rare (19%) or magic (1%) crates
 
-              __Day 9__
-              $12,800 or 1-2 uncommon (80%), rare (19%) or magic (1%) crates
+            __Day 8__
+            $6,400 or 1-2 uncommon (80%), rare (19%) or magic (1%) crates
 
-              __Day 10__
-              $25,600 or 1 rare (80%), magic (19%) or legendary (1%) crate
+            __Day 9__
+            $12,800 or 1-2 uncommon (80%), rare (19%) or magic (1%) crates
+
+            __Day 10__
+            $25,600 or 1 rare (80%), magic (19%) or legendary (1%) crate
 
             If you don't use this command up to 48 hours after the first use, you will lose your streak.
 
@@ -281,67 +336,116 @@ class Miscellaneous(commands.Cog):
             await self.bot.redis.execute_command(
                 "EXPIRE", f"idle:daily:{ctx.author.id}", 48 * 60 * 60
             )  # 48h: after 2 days, they missed it
-            money = 2 ** ((streak + 9) % 10) * 50
-            # Either money or crates
-            if random.randint(0, 2) > 0:
-                money = 2 ** ((streak + 9) % 10) * 50
-                # Silver = 1.5x
-                if await user_is_patron(self.bot, ctx.author, "silver"):
-                    money = round(money * 1.5)
 
-                result = await self.bot.pool.fetchval('SELECT tier FROM profile WHERE "user" = $1;', ctx.author.id)
+            # Handle milestone rewards
+            milestone_rewards = {
+                50: ("legendary", 1, 100000),
+                100: ("fortune", 1, 150000),
+                200: ("mystery", 100, 200000),
+                300: ("divine", 1, 300000),
+                400: ("fortune", 3, 400000),
+                500: ("divine", 2, 500000),
+                550: ("fortune", 2, 100000),
+                600: ("divine", 1, 150000),
+                700: ("mystery", 100, 200000),
+                800: ("fortune", 3, 300000),
+                900: ("divine", 4, 400000),
+                1000: ("divine", 4, 500000),
+            }
 
-                if result >= 3:
-                    money = round(money * 3)
-
+            if streak in milestone_rewards:
+                crate_type, crate_amount, bonus_money = milestone_rewards[streak]
                 async with self.bot.pool.acquire() as conn:
+                    # Add crates
+                    await conn.execute(
+                        f'UPDATE profile SET "crates_{crate_type}"="crates_{crate_type}"+$1 WHERE "user"=$2;',
+                        crate_amount,
+                        ctx.author.id,
+                    )
+                    # Add bonus money
                     await conn.execute(
                         'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
-                        money,
+                        bonus_money,
                         ctx.author.id,
                     )
-
+                    # Log transactions
                     await self.bot.log_transaction(
                         ctx,
                         from_=1,
                         to=ctx.author.id,
-                        subject="daily",
-                        data={"Gold": money},
+                        subject="milestone_crates",
+                        data={"Rarity": crate_type, "Amount": crate_amount},
                         conn=conn,
                     )
-                txt = f"**${money}**"
+                    await self.bot.log_transaction(
+                        ctx,
+                        from_=1,
+                        to=ctx.author.id,
+                        subject="milestone_money",
+                        data={"Gold": bonus_money},
+                        conn=conn,
+                    )
+                txt = f"**{crate_amount}** {getattr(self.bot.cogs['Crates'].emotes, crate_type)} and **${bonus_money}**"
             else:
-                num = round(((streak + 9) % 10 + 1) / 2)
-                amt = random.randint(1, 6 - num)
-                types = [
-                    "common",
-                    "uncommon",
-                    "rare",
-                    "magic",
-                    "legendary",
-                    "common",
-                    "common",
-                    "common",
-                ]  # Trick for -1
-                type_ = random.choice(
-                    [types[num - 3]] * 80 + [types[num - 2]] * 19 + [types[num - 1]] * 1
-                )
-                async with self.bot.pool.acquire() as conn:
-                    await conn.execute(
-                        f'UPDATE profile SET "crates_{type_}"="crates_{type_}"+$1 WHERE'
-                        ' "user"=$2;',
-                        amt,
-                        ctx.author.id,
+                # Regular daily rewards logic
+                money = 2 ** ((streak + 9) % 10) * 50
+                if random.randint(0, 2) > 0:
+                    money = 2 ** ((streak + 9) % 10) * 50
+                    # Silver = 1.5x
+                    if await user_is_patron(self.bot, ctx.author, "silver"):
+                        money = round(money * 1.5)
+
+                    result = await self.bot.pool.fetchval('SELECT tier FROM profile WHERE "user" = $1;', ctx.author.id)
+
+                    if result >= 3:
+                        money = round(money * 3)
+
+                    async with self.bot.pool.acquire() as conn:
+                        await conn.execute(
+                            'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                            money,
+                            ctx.author.id,
+                        )
+                        await self.bot.log_transaction(
+                            ctx,
+                            from_=1,
+                            to=ctx.author.id,
+                            subject="daily",
+                            data={"Gold": money},
+                            conn=conn,
+                        )
+                    txt = f"**${money}**"
+                else:
+                    num = round(((streak + 9) % 10 + 1) / 2)
+                    amt = random.randint(1, 6 - num)
+                    types = [
+                        "common",
+                        "uncommon",
+                        "rare",
+                        "magic",
+                        "legendary",
+                        "common",
+                        "common",
+                        "common",
+                    ]  # Trick for -1
+                    type_ = random.choice(
+                        [types[num - 3]] * 80 + [types[num - 2]] * 19 + [types[num - 1]] * 1
                     )
-                    await self.bot.log_transaction(
-                        ctx,
-                        from_=1,
-                        to=ctx.author.id,
-                        subject="crates",
-                        data={"Rarity": type_, "Amount": amt},
-                        conn=conn,
-                    )
-                txt = f"**{amt}** {getattr(self.bot.cogs['Crates'].emotes, type_)}"
+                    async with self.bot.pool.acquire() as conn:
+                        await conn.execute(
+                            f'UPDATE profile SET "crates_{type_}"="crates_{type_}"+$1 WHERE "user"=$2;',
+                            amt,
+                            ctx.author.id,
+                        )
+                        await self.bot.log_transaction(
+                            ctx,
+                            from_=1,
+                            to=ctx.author.id,
+                            subject="crates",
+                            data={"Rarity": type_, "Amount": amt},
+                            conn=conn,
+                        )
+                    txt = f"**{amt}** {getattr(self.bot.cogs['Crates'].emotes, type_)}"
 
             if ctx.guild == 969741725931298857:
                 async with self.bot.pool.acquire() as conn:
@@ -356,7 +460,7 @@ class Miscellaneous(commands.Cog):
                     "You received your daily {txt}!\nYou are on a streak of **{streak}**"
                     " days!\n*Tip: `{prefix}vote` every 12 hours to get an up to legendary"
                     " crate with possibly rare items!*"
-                ).format(txt=txt, money=money, streak=streak, prefix=ctx.clean_prefix)
+                ).format(txt=txt, streak=streak, prefix=ctx.clean_prefix)
             )
         except Exception as e:
             import traceback
@@ -416,7 +520,7 @@ class Miscellaneous(commands.Cog):
         return chunks
 
 
-    @commands.command()
+    @commands.hybrid_command()
     async def choose(self, ctx, *, args: str):
         """
         Chooses between two options provided by the user.
@@ -437,196 +541,11 @@ class Miscellaneous(commands.Cog):
         result = random.choice(options)
         await ctx.send(f"{result}")
 
-    # Command to send monsters
-    @commands.command(name='sendmonsters')
-    async def send_monsters(self, ctx):
-
-        monsters = {
-            1: [
-                {"name": "Sneevil", "hp": 100, "attack": 95, "defense": 100, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Sneevil-removebg-preview.png"},
-                {"name": "Slime", "hp": 120, "attack": 100, "defense": 105, "element": "Water",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_slime.png"},
-                {"name": "Frogzard", "hp": 120, "attack": 90, "defense": 95, "element": "Nature",
-                 "url": "https://static.wikia.nocookie.net/aqwikia/images/d/d6/Frogzard.png"},
-                {"name": "Rat", "hp": 90, "attack": 100, "defense": 90, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Rat-removebg-preview.png"},
-                {"name": "Bat", "hp": 150, "attack": 95, "defense": 85, "element": "Wind",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Bat-removebg-preview.png"},
-                {"name": "Skeleton", "hp": 190, "attack": 105, "defense": 100, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Skelly-removebg-preview.png"},
-                {"name": "Imp", "hp": 180, "attack": 95, "defense": 85, "element": "Fire",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zZquzlh-removebg-preview.png"},
-                {"name": "Pixie", "hp": 100, "attack": 90, "defense": 80, "element": "Light",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_pixie-removebg-preview.png"},
-                {"name": "Zombie", "hp": 170, "attack": 100, "defense": 95, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zombie-removebg-preview.png"},
-                {"name": "Spiderling", "hp": 220, "attack": 95, "defense": 90, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_spider-removebg-preview.png"},
-                {"name": "Spiderling", "hp": 220, "attack": 95, "defense": 90, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_spider-removebg-preview.png"},
-                {"name": "Moglin", "hp": 200, "attack": 90, "defense": 85, "element": "Light",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Moglin.png"},
-                {"name": "Red Ant", "hp": 140, "attack": 105, "defense": 100, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_redant-removebg-preview.png"},
-                {"name": "Chickencow", "hp": 300, "attack": 150, "defense": 90, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChickenCow-removebg-preview.png"},
-                {"name": "Tog", "hp": 380, "attack": 105, "defense": 95, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Tog-removebg-preview.png"},
-                {"name": "Lemurphant", "hp": 340, "attack": 95, "defense": 80, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Lemurphant-removebg-preview.png"},
-                {"name": "Fire Imp", "hp": 200, "attack": 100, "defense": 90, "element": "Fire",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zZquzlh-removebg-preview.png"},
-                {"name": "Zardman", "hp": 300, "attack": 95, "defense": 100, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Zardman-removebg-preview.png"},
-                {"name": "Wind Elemental", "hp": 165, "attack": 90, "defense": 85, "element": "Wind",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_WindElemental-removebg-preview.png"},
-                {"name": "Dark Wolf", "hp": 200, "attack": 100, "defense": 90, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DarkWolf-removebg-preview.png"},
-                {"name": "Treeant", "hp": 205, "attack": 105, "defense": 95, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Treeant-removebg-preview.png"},
-            ],
-            2: [
-                {"name": "Cyclops Warlord", "hp": 230, "attack": 160, "defense": 155, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_CR-removebg-preview.png"},
-                {"name": "Fishman Soldier", "hp": 200, "attack": 165, "defense": 160, "element": "Water",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Fisherman-removebg-preview.png"},
-                {"name": "Fire Elemental", "hp": 215, "attack": 150, "defense": 145, "element": "Fire",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_fire_elemental-removebg-preview.png"},
-                {"name": "Vampire Bat", "hp": 200, "attack": 170, "defense": 160, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_viO2oSJ-removebg-preview.png"},
-                {"name": "Blood Eagle", "hp": 195, "attack": 165, "defense": 150, "element": "Wind",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BloodEagle-removebg-preview.png"},
-                {"name": "Earth Elemental", "hp": 190, "attack": 175, "defense": 160, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Earth_Elemental-removebg-preview.png"},
-                {"name": "Fire Mage", "hp": 200, "attack": 160, "defense": 140, "element": "Fire",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireMage-removebg-preview.png"},
-                {"name": "Dready Bear", "hp": 230, "attack": 155, "defense": 150, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_dreddy-removebg-preview.png"},
-                {"name": "Undead Soldier", "hp": 280, "attack": 160, "defense": 155, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_UndeadSoldier-removebg-preview.png"},
-                {"name": "Skeleton Warrior", "hp": 330, "attack": 155, "defense": 150, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SkeelyWarrior-removebg-preview.png"},
-                {"name": "Giant Spider", "hp": 350, "attack": 160, "defense": 145, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DreadSpider-removebg-preview.png"},
-                {"name": "Castle spider", "hp": 310, "attack": 170, "defense": 160, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Castle-removebg-preview.png"},
-                {"name": "ConRot", "hp": 210, "attack": 165, "defense": 155, "element": "Water",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ConRot-removebg-preview.png"},
-                {"name": "Horc Warrior", "hp": 270, "attack": 175, "defense": 170, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_HorcWarrior-removebg-preview.png"},
-                {"name": "Shadow Hound", "hp": 300, "attack": 160, "defense": 150, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Hound-removebg-preview.png"},
-                {"name": "Fire Sprite", "hp": 290, "attack": 165, "defense": 155, "element": "Fire",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireSprite-removebg-preview.png"},
-                {"name": "Rock Elemental", "hp": 300, "attack": 160, "defense": 165, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Earth_Elemental-removebg-preview.png"},
-                {"name": "Shadow Serpent", "hp": 335, "attack": 155, "defense": 150, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadowSerpant-removebg-preview.png"},
-                {"name": "Dark Elemental", "hp": 340, "attack": 165, "defense": 155, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DarkEle-Photoroom.png"},
-                {"name": "Forest Guardian", "hp": 500, "attack": 250, "defense": 250, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ForestGuardian-removebg-preview.png"},
-            ],
-            3: [
-                {"name": "Mana Golem", "hp": 200, "attack": 220, "defense": 210, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_managolum-removebg-preview.png"},
-                {"name": "Karok the Fallen", "hp": 180, "attack": 215, "defense": 205, "element": "Ice",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_VIMs8un-removebg-preview.png"},
-                {"name": "Water Draconian", "hp": 220, "attack": 225, "defense": 200, "element": "Water",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_waterdrag-removebg-preview.png"},
-                {"name": "Shadow Creeper", "hp": 190, "attack": 220, "defense": 205, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_shadowcreep-removebg-preview.png"},
-                {"name": "Wind Djinn", "hp": 210, "attack": 225, "defense": 215, "element": "Wind",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_djinn-removebg-preview.png"},
-                {"name": "Autunm Fox", "hp": 205, "attack": 230, "defense": 220, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Autumn_Fox-removebg-preview.png"},
-                {"name": "Dark Draconian", "hp": 195, "attack": 220, "defense": 200, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_darkdom-removebg-preview.png"},
-                {"name": "Light Elemental", "hp": 185, "attack": 215, "defense": 210, "element": "Light",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_LightELemental-removebg-preview.png"},
-                {"name": "Undead Giant", "hp": 230, "attack": 220, "defense": 210, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_UndGiant-removebg-preview.png"},
-                {"name": "Chaos Spider", "hp": 215, "attack": 215, "defense": 205, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosSpider-removebg-preview.png"},
-                {"name": "Seed Spitter", "hp": 225, "attack": 220, "defense": 200, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SeedSpitter-removebg-preview.png"},
-                {"name": "Beach Werewolf", "hp": 240, "attack": 230, "defense": 220, "element": "Water",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BeachWerewold-removebg-preview.png"},
-                {"name": "Boss Dummy", "hp": 220, "attack": 225, "defense": 210, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BossDummy-removebg-preview.png"},
-                {"name": "Rock", "hp": 235, "attack": 225, "defense": 215, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Rock-removebg-preview.png"},
-                {"name": "Shadow Serpent", "hp": 200, "attack": 220, "defense": 205, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadoeSerpant-removebg-preview.png"},
-                {"name": "Flame Elemental", "hp": 210, "attack": 225, "defense": 210, "element": "Fire",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireElemental-removebg-preview.png"},
-                {"name": "Bear", "hp": 225, "attack": 215, "defense": 220, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732611726453.png"},
-                {"name": "Chair", "hp": 215, "attack": 210, "defense": 215, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_chair-removebg-preview.png"},
-                {"name": "Chaos Serpant", "hp": 230, "attack": 220, "defense": 205, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosSerp-removebg-preview.png"},
-                {"name": "Gorillaphant", "hp": 240, "attack": 225, "defense": 210, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_gorillaserpant-removebg-preview.png"},
-            ],
-            4: [
-                {"name": "Hydra Head", "hp": 300, "attack": 280, "defense": 270, "element": "Water",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_hydra.png"},
-                {"name": "Blessed Deer", "hp": 280, "attack": 275, "defense": 265, "element": "Light",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BlessedDeer-removebg-preview.png"},
-                {"name": "Chaos Sphinx", "hp": 320, "attack": 290, "defense": 275, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaopsSpinx.png"},
-                {"name": "Inferno Dracolion", "hp": 290, "attack": 285, "defense": 270, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614284328.png"},
-                {"name": "Wind Cyclone", "hp": 310, "attack": 290, "defense": 280, "element": "Wind", "url": ""},
-                {"name": "Dwakel Blaster", "hp": 305, "attack": 295, "defense": 285, "element": "Electric",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Bubble.png"},
-                {"name": "Infernal Fiend", "hp": 295, "attack": 285, "defense": 270, "element": "Fire",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614284328.png"},
-                {"name": "Dark Mukai", "hp": 285, "attack": 275, "defense": 265, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614826889.png"},
-                {"name": "Undead Berserker", "hp": 330, "attack": 285, "defense": 275, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614863579.png"},
-                {"name": "Chaos Warrior", "hp": 315, "attack": 280, "defense": 270, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosWarrior-removebg-preview.png"},
-                {"name": "Dire Wolf", "hp": 325, "attack": 285, "defense": 275, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DireWolf-removebg-preview.png"},
-                {"name": "Skye Warrior", "hp": 340, "attack": 295, "defense": 285, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SkyeWarrior-removebg-preview.png"},
-                {"name": "Death On Wings", "hp": 320, "attack": 290, "defense": 275, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DeathonWings-removebg-preview.png"},
-                {"name": "Chaorruption", "hp": 335, "attack": 295, "defense": 285, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Chaorruption-removebg-preview.png"},
-                {"name": "Shadow Beast", "hp": 300, "attack": 285, "defense": 270, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadowBeast-removebg-preview.png"},
-                {"name": "Hootbear", "hp": 310, "attack": 290, "defense": 275, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_HootBear-removebg-preview.png"},
-                {"name": "Anxiety", "hp": 325, "attack": 280, "defense": 290, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_anxiety-removebg-preview.png"},
-                {"name": "Twilly", "hp": 315, "attack": 275, "defense": 285, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Twilly-removebg-preview.png"},
-                {"name": "Black Cat", "hp": 330, "attack": 285, "defense": 270, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_QJsLMnk-removebg-preview.png"},
-                {"name": "Forest Guardian", "hp": 340, "attack": 290, "defense": 275, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ForestGuardian-removebg-preview.png"},
-            ],
-        }
-        try:
-            formatted_text = self.format_monsters(monsters)
-            chunks = self.split_into_chunks(formatted_text)
-
-            for chunk in chunks:
-                await ctx.send(chunk)
-
-            await ctx.send("All monsters have been sent!")
-        except Exception as e:
-            await ctx.send(e)
 
 
 
     @is_gm()
-    @commands.command(hidden=True, name="challenges")
+    @commands.hybrid_command(hidden=True, name="challenges")
     @locale_doc
     async def send_challenges(self, ctx):
         try:
@@ -638,9 +557,9 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
-    
+
     @user_cooldown(5)
-    @commands.command(brief="Hug someone with a cute GIF!")
+    @commands.hybrid_command(brief="Hug someone with a cute GIF!")
     @locale_doc
     async def hug(self, ctx, user: discord.Member):
         _(
@@ -681,9 +600,9 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
-    
+
     @user_cooldown(5)
-    @commands.command(brief="Kiss someone with a cute GIF!")
+    @commands.hybrid_command(brief="Kiss someone with a cute GIF!")
     @locale_doc
     async def kiss(self, ctx, user: discord.Member):
         _(
@@ -724,7 +643,7 @@ class Miscellaneous(commands.Cog):
 
 
     @user_cooldown(5)
-    @commands.command(brief="Bonk someone with a funny GIF!")
+    @commands.hybrid_command(brief="Bonk someone with a funny GIF!")
     @locale_doc
     async def bonk(self, ctx, user: discord.Member):
         _(
@@ -766,7 +685,7 @@ class Miscellaneous(commands.Cog):
             await ctx.send(f"An error occurred: {e}")
 
     @user_cooldown(5)
-    @commands.command(brief="Pat someone with a cute GIF!")
+    @commands.hybrid_command(brief="Pat someone with a cute GIF!")
     @locale_doc
     async def pat(self, ctx, user: discord.Member):
         _(
@@ -805,9 +724,9 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
-    
+
     @user_cooldown(5)
-    @commands.command(brief="Slap someone with a GIF!")
+    @commands.hybrid_command(brief="Slap someone with a GIF!")
     @locale_doc
     async def slap(self, ctx, user: discord.Member):
         _(
@@ -846,9 +765,9 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
-    
+
     @user_cooldown(5)
-    @commands.command(brief="Give someone a high five!")
+    @commands.hybrid_command(brief="Give someone a high five!")
     @locale_doc
     async def highfive(self, ctx, user: discord.Member):
         _(
@@ -887,9 +806,9 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
-    
+
     @user_cooldown(5)
-    @commands.command(brief="Wave at someone with a GIF!")
+    @commands.hybrid_command(brief="Wave at someone with a GIF!")
     @locale_doc
     async def wave(self, ctx, user: discord.Member):
         _(
@@ -928,9 +847,9 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
-    
+
     @user_cooldown(5)
-    @commands.command(brief="Cuddle someone with a cute GIF!")
+    @commands.hybrid_command(brief="Cuddle someone with a cute GIF!")
     @locale_doc
     async def cuddle(self, ctx, user: discord.Member):
         _(
@@ -969,9 +888,9 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
-    
+
     @user_cooldown(5)
-    @commands.command(brief="Poke someone gently with a cute GIF!")
+    @commands.hybrid_command(brief="Poke someone gently with a cute GIF!")
     @locale_doc
     async def poke(self, ctx, user: discord.Member):
         _(
@@ -1010,9 +929,9 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
-    
+
     @user_cooldown(5)
-    @commands.command(brief="Bite someone gently with a playful GIF!")
+    @commands.hybrid_command(brief="Bite someone gently with a playful GIF!")
     @locale_doc
     async def bite(self, ctx, user: discord.Member):
         _(
@@ -1051,9 +970,9 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
-    
+
     @user_cooldown(5)
-    @commands.command(brief="Tickle someone with a GIF!")
+    @commands.hybrid_command(brief="Tickle someone with a GIF!")
     @locale_doc
     async def tickle(self, ctx, user: discord.Member):
         _(
@@ -1092,9 +1011,9 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
-    
+
     @user_cooldown(5)
-    @commands.command(brief="Nuzzle someone affectionately!")
+    @commands.hybrid_command(brief="Nuzzle someone affectionately!")
     @locale_doc
     async def nuzzle(self, ctx, user: discord.Member):
         _(
@@ -1133,9 +1052,9 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
-    
+
     @user_cooldown(5)
-    @commands.command(brief="Lick someone!")
+    @commands.hybrid_command(brief="Lick someone!")
     @locale_doc
     async def lick(self, ctx, user: discord.Member):
         _(
@@ -1174,9 +1093,9 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
-    
+
     @user_cooldown(5)
-    @commands.command(brief="Punch someone with a GIF!")
+    @commands.hybrid_command(brief="Punch someone with a GIF!")
     @locale_doc
     async def punch(self, ctx, user: discord.Member):
         _(
@@ -1215,9 +1134,9 @@ class Miscellaneous(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
-    
+
     @has_char()
-    @commands.command(brief=_("Roll"))
+    @commands.hybrid_command(brief=_("Roll"))
     @locale_doc
     async def roll(self, ctx):
         _(
@@ -1234,9 +1153,9 @@ class Miscellaneous(commands.Cog):
 
         await ctx.send("🥖")
 
-    
+
     @has_char()
-    @commands.command(brief=_("View your current streak"))
+    @commands.hybrid_command(brief=_("View your current streak"))
     @locale_doc
     async def streak(self, ctx):
         _(
@@ -1258,8 +1177,8 @@ class Miscellaneous(commands.Cog):
             )
         )
 
-    
-    @commands.command(aliases=["donate"], brief=_("Support the bot financially"))
+
+    @commands.hybrid_command(aliases=["donate"], brief=_("Support the bot financially"))
     @locale_doc
     async def patreon(self, ctx):
         _(
@@ -1289,8 +1208,8 @@ Even $1 can help us.
             ).format(guild_count=guild_count)
         )
 
-    
-    @commands.command(
+
+    @commands.hybrid_command(
         aliases=["license"], brief=_("Shows the source code and license.")
     )
     @locale_doc
@@ -1302,8 +1221,8 @@ Even $1 can help us.
 
         await ctx.send("Fable - AGPLv3+\nhttps://github.com/prototypeX37/FableRPG-")
 
-    
-    @commands.command(brief=_("Invite the bot to your server."))
+
+    @commands.hybrid_command(brief=_("Invite the bot to your server."))
     @locale_doc
     async def invite(self, ctx):
         _(
@@ -1321,69 +1240,137 @@ Even $1 can help us.
         )
 
 
-    def is_gm_predicate(self):
-        """Utility function to identify the is_gm check."""
 
-        async def predicate(ctx):
-            raise CommandError("is_gm check")
 
-        return predicate
+    async def paginate_embeds(self, ctx, pages, timeout=60):
+        """
+        Given a list of discord.Embed objects, paginate them in the channel with
+        reaction controls: ◀️, ❌, ▶️
 
-    
+        :param ctx: The command context
+        :param pages: A list of discord.Embed objects
+        :param timeout: Timeout in seconds for reaction waiting
+        """
+        if not pages:
+            await ctx.send("No pages to display.")
+            return
+
+        current_page = 0
+        message = await ctx.send(embed=pages[current_page])
+
+        # Add reactions for navigation
+        reactions = ["◀️", "❌", "▶️"]
+        for r in reactions:
+            await message.add_reaction(r)
+
+        def check(reaction, user):
+            return (
+                    user == ctx.author
+                    and reaction.message.id == message.id
+                    and str(reaction.emoji) in reactions
+            )
+
+        while True:
+            try:
+                reaction, user = await ctx.bot.wait_for(
+                    "reaction_add",
+                    timeout=timeout,
+                    check=check
+                )
+            except:
+                # Timed out, remove the reactions and break
+                try:
+                    await message.clear_reactions()
+                except discord.Forbidden:
+                    pass
+                break
+
+            # Remove the user's reaction
+            try:
+                await message.remove_reaction(reaction.emoji, user)
+            except discord.Forbidden:
+                pass
+
+            if str(reaction.emoji) == "◀️":
+                # Go to previous page
+                current_page = (current_page - 1) % len(pages)
+                await message.edit(embed=pages[current_page])
+            elif str(reaction.emoji) == "▶️":
+                # Go to next page
+                current_page = (current_page + 1) % len(pages)
+                await message.edit(embed=pages[current_page])
+            elif str(reaction.emoji) == "❌":
+                # Close the pagination
+                await message.delete()
+                break
+
     @commands.command()
-    @locale_doc
     async def allcommands(self, ctx):
-        _("""Displays all available commands categorized by their cogs, excluding commands with the @is_gm() decorator.""")
-        # Assuming static prefix '$'
-        prefix = '$'
+        """Displays all available commands categorized by their cogs, excluding @is_gm() commands."""
+
+        # Example check for blacklisted user
         if ctx.author.id == 764904008833171478:
-            await ctx.send(f"{ctx.author.mention} your access to `allcommands` has automatically been revoked due to the reason: Automod Spam")
+            return await ctx.send(
+                f"{ctx.author.mention} your access to `allcommands` has automatically been revoked due to the reason: Automod Spam"
+            )
+
+        loading_message = await ctx.send("Please wait while I gather that information for you...")
+
         try:
-            await ctx.send("Please wait while I gather that information for you..")
-            # Initialize a dictionary to store commands by cog
             cog_commands = {}
-
-            # Iterate over all commands in the bot
+            # Gather all commands, excluding hidden commands and those with @is_gm() checks
             for cmd in self.bot.commands:
-                if not cmd.hidden and all(
-                        pred.__name__ != "is_gm" for pred in cmd.checks):  # Exclude commands with is_gm check
-                    # Get the cog name or categorize as 'No Category' if not in a cog
-                    cog_name = cmd.cog_name or "No Category"
-                    if cog_name == "GameMaster":
-                        continue
+                if cmd.hidden:
+                    continue
+                # Exclude commands that have a `is_gm` check
+                if any(pred.__name__ == "is_gm" for pred in cmd.checks):
+                    continue
 
-                    if cog_name not in cog_commands:
-                        cog_commands[cog_name] = []
+                cog_name = cmd.cog_name or "No Category"
+                # Optionally exclude a "GameMaster" cog entirely
+                if cog_name == "GameMaster":
+                    continue
 
-                    # Add the command to the appropriate cog category
-                    cog_commands[cog_name].append(f"{prefix}{cmd.name}")
+                if cog_name not in cog_commands:
+                    cog_commands[cog_name] = []
 
-            # Define the maximum length of a message accounting for markdown characters
-            max_length = 2000 - len("```\n```")  # Deduct the length of markdown characters used for formatting
+                cog_commands[cog_name].append(cmd.name)
 
-            # Iterate over each cog and its commands, and send them in chunks
-            for cog, commands in cog_commands.items():
-                chunk = f"**{cog}**\n"  # Start with the cog name
+            # Create pages (embeds)
+            pages = []
+            prefix = "$"  # change as needed
 
-                for command in commands:
-                    # Check if adding this command will exceed the max length
-                    if len(chunk) + len(command) + 1 > max_length:  # +1 for newline character
-                        # Send the current chunk and reset it
-                        await ctx.send(f"```\n{chunk}\n```")
-                        chunk = f"**{cog}**\n"  # Reset with the cog name
+            for cog_name, commands_list in cog_commands.items():
+                embed = discord.Embed(
+                    title=f"{cog_name} Commands",
+                    description=f"Commands in **{cog_name}** category.",
+                    color=discord.Color.blue()
+                )
 
-                    # Add the command to the chunk
-                    chunk += f"{command}\n"
+                cmd_text = "\n".join(f"`{prefix}{cmd_name}`" for cmd_name in commands_list)
+                embed.add_field(name="Commands", value=cmd_text, inline=False)
 
-                # Send any remaining commands in the last chunk
-                if chunk.strip():
-                    await ctx.send(f"```\n{chunk}\n```")
+                pages.append(embed)
+
+            # If we never found any commands
+            if not pages:
+                return await loading_message.edit(content="No commands found.")
+
+            # Remove "Please wait..."
+            await loading_message.delete()
+
+            # Create the PaginatorView
+            view = PaginatorView(ctx, pages, start_page=0, timeout=60)
+            # Send the first page with the view
+            message = await ctx.send(embed=pages[0], view=view)
+            # Store reference to the message in the view (so we can edit on timeout)
+            view.message = message
 
         except Exception as e:
-            await ctx.send(f"An error occurred: {str(e)}")
+            await ctx.send(e)
 
-    
-    @commands.command(brief=_("Shows statistics about the bot"))
+
+    @commands.hybrid_command(brief=_("Shows statistics about the bot"))
     @locale_doc
     async def stats(self, ctx):
         _(
@@ -1393,9 +1380,6 @@ Even $1 can help us.
             characters = await conn.fetchval("SELECT COUNT(*) FROM profile;")
             items = await conn.fetchval("SELECT COUNT(*) FROM allitems;")
             pg_version = conn.get_server_version()
-        temps = psutil.sensors_temperatures()
-        temps = temps[list(temps.keys())[0]]
-        cpu_temp = statistics.mean(x.current for x in temps)
         pg_version = f"{pg_version.major}.{pg_version.micro} {pg_version.releaselevel}"
         d0 = self.bot.user.created_at
         d1 = datetime.datetime.now(datetime.timezone.utc)
@@ -1413,9 +1397,6 @@ Even $1 can help us.
                 "guild_count", self.bot.cluster_count
             )
         )
-        meminfo = psutil.virtual_memory()
-        cpu_freq = psutil.cpu_freq()
-        cpu_name = await get_cpu_name()
         compiler = re.search(r".*\[(.*)\]", sys.version)[1]
 
         embed = discord.Embed(
@@ -1423,12 +1404,12 @@ Even $1 can help us.
             colour=0xB8BBFF,
             url=self.bot.BASE_URL,
             description=_(
-                "Official Support Server Invite: Coming Soon"
+                "Official Support Server Invite: https://discord.com/fablerpg"
             ),
         )
         embed.set_thumbnail(url=self.bot.user.display_avatar.url)
         embed.set_footer(
-            text=f"IdleRPG {self.bot.version} | By {owner}",
+            text=f"Fable {self.bot.version} | By {owner}",
             icon_url=self.bot.user.display_avatar.url,
         )
         embed.add_field(
@@ -1436,9 +1417,6 @@ Even $1 can help us.
             value=_(
                 """\
 CPU: **AMD Ryzen Threadripper PRO 7995WX**
-CPU Usage: **{cpu}%**, **96** cores/**192** threads @ **{freq}** GHz
-RAM Usage: **{ram}%** (Total: **127.1 GB**)
-CPU Temperature: **{cpu_temp}°C**
 Python Version **{python}** 
 discord.py Version **{dpy}**
 Compiler: **{compiler}**
@@ -1447,16 +1425,6 @@ Kernel Version: **{kernel}**
 PostgreSQL Version: **{pg_version}**
 Redis Version: **{redis_version}**"""
             ).format(
-                cpu_name=cpu_name,
-                cpu=psutil.cpu_percent(),
-                cores=psutil.cpu_count(logical=False),
-                threads=psutil.cpu_count(),
-                cpu_temp=round(cpu_temp, 2),
-                freq=cpu_freq.max / 1000
-                if cpu_freq.max
-                else round(cpu_freq.current / 1000, 2),
-                ram=meminfo.percent,
-                total_ram=humanize.naturalsize(meminfo.total),
                 python=platform.python_version(),
                 dpy=pkg.get_distribution("discord.py").version,
                 compiler=compiler,
@@ -1490,8 +1458,8 @@ Average hours of work: **{hours}**"""
         )
         await ctx.send(embed=embed)
 
-    
-    @commands.command(brief=_("View the uptime"))
+
+    @commands.hybrid_command(brief=_("View the uptime"))
     @locale_doc
     async def uptime(self, ctx):
         _("""Shows how long the bot has been connected to Discord.""")
@@ -1501,8 +1469,8 @@ Average hours of work: **{hours}**"""
             )
         )
 
-    
-    @commands.command()
+
+    @commands.hybrid_command()
     @has_char()
     @locale_doc
     async def credits(self, ctx):
@@ -1523,8 +1491,8 @@ Average hours of work: **{hours}**"""
 
         await ctx.send(f"You have **{freecredits}** free images left and a balance of **${creditss}**.")
 
-    
-    @commands.command()
+
+    @commands.hybrid_command()
     @has_char()
     @user_cooldown(60)
     @locale_doc
@@ -1570,7 +1538,7 @@ Average hours of work: **{hours}**"""
                     if len(prompt) > 120:
                         return await ctx.send("The prompt cannot exceed 120 characters.")
             await ctx.send("Generating image, please wait. (This can take up to 2 minutes.)")
-            client = AsyncOpenAI(api_key="")
+            client = AsyncOpenAI(api_key="sk-G1a3w7MUIpNpxtj8bi61w_ivhoEcc8NS_yN7znm4gWT3BlbkFJ-VhLHDhIbQvxj1f6k8WY_FobnCx7tclZwr-I1E08UA")
             response = await client.images.generate(
                 model="dall-e-3",
                 prompt=prompt,
@@ -1602,8 +1570,8 @@ Average hours of work: **{hours}**"""
         except Exception as e:
             await ctx.send(f"An error has occurred")
 
-    
-    @commands.command()
+
+    @commands.hybrid_command()
     @user_cooldown(80)
     @has_char()
     @locale_doc
@@ -1642,7 +1610,7 @@ Average hours of work: **{hours}**"""
                     if len(prompt) > 120:
                         return await ctx.send("The prompt cannot exceed 120 characters.")
             await ctx.send("Generating HD image, please wait. (This can take up to 2 minutes.)")
-            client = AsyncOpenAI(api_key="")
+            client = AsyncOpenAI(api_key="sk-G1a3w7MUIpNpxtj8bi61w_ivhoEcc8NS_yN7znm4gWT3BlbkFJ-VhLHDhIbQvxj1f6k8WY_FobnCx7tclZwr-I1E08UA")
             response = await client.images.generate(
                 model="dall-e-3",
                 prompt=prompt,
@@ -1668,8 +1636,7 @@ Average hours of work: **{hours}**"""
             await ctx.send(f"An error has occurred")
 
 
-
-    @commands.command(name='talk', help='Ask ChatGPT a question!')
+    @commands.hybrid_command(name='talk', help='Ask ChatGPT a question!')
     @locale_doc
     async def talk(self, ctx, *, question):
         _(
@@ -1722,8 +1689,8 @@ Average hours of work: **{hours}**"""
         for chunk in self.split_message(response):
             await ctx.send(chunk)
 
-    
-    @commands.command()
+
+    @commands.hybrid_command()
     @locale_doc
     async def cookie(self, ctx, target_member: discord.Member):
         _(
@@ -1741,8 +1708,8 @@ Average hours of work: **{hours}**"""
         await ctx.send(
             f"**{target_member.display_name}**, you've been given a cookie by **{ctx.author.display_name}**. 🍪")
 
-    
-    @commands.command()
+
+    @commands.hybrid_command()
     @locale_doc
     async def ice(self, ctx, target_member: discord.Member):
         _(
@@ -1760,8 +1727,8 @@ Average hours of work: **{hours}**"""
         await ctx.send(
             f"{target_member.mention}, here is your ice: 🍨!")
 
-    
-    @commands.command(name='wipe', help='Clear your conversation history with the bot.')
+
+    @commands.hybrid_command(name='wipe', help='Clear your conversation history with the bot.')
     @locale_doc
     async def clear_memory(self, ctx):
         _(
@@ -1840,8 +1807,8 @@ Average hours of work: **{hours}**"""
         except Exception as e:
             return f"Unexpected error! Is the pipeline server running? {e}"
 
-    
-    @commands.command(
+
+    @commands.hybrid_command(
         aliases=["pages", "about"], brief=_("Info about the bot and related sites")
     )
     @locale_doc
@@ -1851,7 +1818,7 @@ Average hours of work: **{hours}**"""
             _(
                 # xgettext: no-python-format
                 """\
-**IdleRPG** is Discord's most advanced medieval RPG bot.
+**FableRPG** is Discord's most advanced medieval RPG bot.
 We aim to provide the perfect experience at RPG in Discord with minimum effort for the user.
 
 We are not collecting any data apart from your character information and our transaction logs.
@@ -1859,22 +1826,18 @@ The bot is 100% free to use and open source.
 This bot is developed by people who love to code for a good cause and improving your gameplay experience.
 
 **Links**
-<https://git.travitia.xyz/Kenvyra/IdleRPG> - Source Code
+<https://git.travitia.xyz/Kenvyra/IdleRPG> - Source Code (IdleRPG)
+<https://git.travitia.xyz/prototypeX37/FableRPG-> - Source Code (FableRPG)
 <https://git.travitia.xyz> - GitLab (Public)
-<https://idlerpg.xyz> - Bot Website
-<https://wiki.idlerpg.xyz> - IdleRPG wiki
-<https://travitia.xyz> - IdleRPG's next major upgrade
-<https://idlerpg.xyz> - Our forums
-<https://public-api.travitia.xyz> - Our public API
-<https://cloud.idlerpg.xyz> - VPS hosting by IdleRPG
-<https://github.com/Kenvyra> - Other IdleRPG related code
+<https://wiki.fablerpg.xyz> - FableRPG wiki
+<https://api.fablerpg.xyz> - Our API
 <https://discord.com/terms> - Discord's ToS
 <https://www.ncpgambling.org/help-treatment/national-helpline-1-800-522-4700/> - Gambling Helpline"""
             )
         )
 
-    
-    @commands.command(brief=_("Show the rules again"))
+
+    @commands.hybrid_command(brief=_("Show the rules again"))
     @locale_doc
     async def rules(self, ctx):
         _(
@@ -1889,10 +1852,11 @@ This bot is developed by people who love to code for a good cause and improving 
 4) Trading in-game content for anything outside of the game is prohibited
 5) Giving or selling renamed items is forbidden
 
-IdleRPG is a global bot, your characters are valid everywhere"""
+FableRPG is a global bot, your characters are valid everywhere"""
             )
         )
 
 
 async def setup(bot):
     await bot.add_cog(Miscellaneous(bot))
+    await bot.tree.sync()

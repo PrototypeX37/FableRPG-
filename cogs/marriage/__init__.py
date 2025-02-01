@@ -1114,8 +1114,29 @@ class Marriage(commands.Cog):
                 )
             )
         elif event == "namechange":
+
+
             names = [c["name"] for c in children]
             names.remove(target["name"])
+            oldname = target["name"]
+
+            try:
+                if not await ctx.confirm(
+                        _(
+                            '{author} you can rename {old_name}! Would you like to rename them?'
+                        ).format(
+                            author=ctx.author.mention,
+                            old_name=target["name"],
+
+                        )
+                ):
+                    await self.bot.set_cooldown(ctx, 1800)
+                    return await ctx.send(_(f"You chose not to rename {oldname}."))
+
+
+            except self.bot.paginator.NoChoice:
+                await ctx.send(_("You didn't confirm."))
+                return
 
             def check(msg):
                 return (

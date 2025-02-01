@@ -1076,62 +1076,115 @@ class Guild(commands.Cog):
         )
 
     @is_guild_leader()
+    @guild_cooldown(60)
     @guild.command(brief=_("Upgrade your guild bank"))
     @locale_doc
     async def upgrade(self, ctx):
         _(
             """Upgrade your guild's bank, adding space for $250,000 each time.
 
-            Guilds can be upgraded 9 times which sets them to a maximum of $2,500,000.
-            Patrons will be able to upgrade their guild further:
-              - Silver donors can double their maximum bank space
-              - Gold donors can quintuple (x5) their maximum bank space
+            Guilds can be upgraded 9 times which sets them to a maximum base of $2,500,000.
 
-            The price to upgrade the guild bank is always half of the maximum.
+            The price to upgrade the guild bank is always half of the current bank limit.
 
-            Only guild leaders can use this command."""
+            If your guild was previously boosted by `updateguild` (Silver=2×, Gold=5×),
+            this upgrade will keep that multiplier. Only guild leaders can use this command.
+            """
         )
         async with self.bot.pool.acquire() as conn:
             guild = await conn.fetchrow(
                 'SELECT * FROM guild WHERE "id"=$1;', ctx.character_data["guild"]
             )
-            currentlimit = guild["banklimit"]
-            newlimit = (guild["upgrade"] + 1) * 250000
-            if guild["upgrade"] == 10:
+
+            current_limit = guild["banklimit"]  # e.g. 500000, 1000000, etc.
+            current_upgrades = guild["upgrade"]  # how many 250k base upgrades
+            guild_money = guild["money"]
+
+            # If we've done 10 base upgrades, that's the normal max (2,500,000 base).
+            # *But* you might allow patrons to exceed it via updateguild if you wish.
+            if current_upgrades >= 10:
                 return await ctx.send(
-                    _("Your guild already reached the maximum upgrade.")
-                )
-            if int(currentlimit / 2) > guild["money"]:
-                return await ctx.send(
-                    _(
-                        "Your guild is too poor, you got **${money}** but it costs"
-                        " **${price}** to upgrade."
-                    ).format(money=guild["money"], price=int(currentlimit / 2))
+                    _("Your guild already reached the maximum base upgrade.")
                 )
 
-            if not await ctx.confirm(
-                _(
-                    "This will upgrade your guild bank limit to **${newlimit}** for"
-                    " **${cost}**. Proceed?"
-                ).format(newlimit=newlimit, cost=int(currentlimit / 2))
-            ):
+            # 1) Figure out the old "base limit" before this upgrade
+            #    i.e. upgrade * 250,000. If we had 2 base upgrades => 2*250k=500k base
+            old_base = current_upgrades * 250_000
+            if old_base == 0:
+                # If guild["upgrade"] == 0, then the old base limit is 0, so ratio = 1 by default
+                # (meaning no multiplier)
+                old_multiplier = 1
+            else:
+                # If the user previously used `updateguild`, current_limit might be base * 2 or base * 5
+                # We'll detect that factor by integer division
+                old_multiplier = current_limit // old_base
+
+                # Ensure at least 1
+                if old_multiplier < 1:
+                    old_multiplier = 1
+
+            # 2) Compute the NEW base limit for the next upgrade
+            new_base = (current_upgrades + 1) * 250_000
+
+            # 3) Our final new limit should keep the old multiplier if it existed
+            new_final_limit = new_base * old_multiplier
+
+            # 4) The cost is always half of the current limit (which may be boosted)
+            cost = current_limit // 2
+            if guild_money < cost:
+                return await ctx.send(
+                    _("Your guild only has **${money}**, but needs **${cost}** to upgrade.").format(
+                        money=guild_money,
+                        cost=cost
+                    )
+                )
+
+            # Confirm with the user
+            confirm_text = _(
+                "Upgrading will increase your limit to **${new_final}**)"
+                " at the cost of **${cost}**. Proceed?"
+            ).format(new_base=new_base, new_final=new_final_limit, cost=cost)
+
+            if not await ctx.confirm(confirm_text):
                 return
+
+            guild_data = await conn.fetchrow(
+                'SELECT * FROM guild WHERE "id"=$1;',
+                ctx.character_data["guild"]
+            )
+            if guild_data["money"] < cost:
+                return await ctx.send(
+                    _(
+                        "Looks like the guild's money changed while you were confirming. "
+                        "Your guild now has only **${money}** and cannot afford the upgrade."
+                    ).format(money=guild_data["money"])
+                )
+
+            # 5) Deduct the cost, increment upgrade, and set new banklimit
             await conn.execute(
-                'UPDATE guild SET "banklimit"=$1, "upgrade"="upgrade"+$2,'
-                ' "money"="money"-$3 WHERE "id"=$4;',
-                newlimit,
-                1,
-                int(currentlimit / 2),
+                """
+                UPDATE guild
+                SET "banklimit"=$1,
+                    "money"="money"-$2,
+                    "upgrade"="upgrade"+1
+                WHERE "id"=$3;
+                """,
+                new_final_limit,
+                cost,
                 guild["id"],
             )
-        if guild["channel"]:
+
+        # 6) Optionally announce in the guild channel
+        channel_id = guild["channel"]
+        if channel_id:
+            from contextlib import suppress
             with suppress(discord.Forbidden, discord.HTTPException):
-                with handle_message_parameters(
-                    content=f"**{ctx.author}** upgraded the guild bank to **${newlimit}**"
-                ) as params:
-                    await self.bot.http.send_message(guild["channel"], params=params)
+                msg = f"**{ctx.author}** upgraded the guild bank to **${new_final_limit}**."
+                await self.bot.http.send_message(channel_id, content=msg)
+
+        # 7) Show the final new limit to the user
         await ctx.send(
-            _("Your new guild bank limit is now **${limit}**.").format(limit=newlimit)
+            _("Your new guild bank limit is now **${limit}**.").format(limit=new_final_limit)
         )
 
     @is_guild_officer()
@@ -1427,7 +1480,7 @@ class Guild(commands.Cog):
     @guild_cooldown(3600)
     @guild.command(brief=_("Start a guild adventure"))
     @locale_doc
-    async def adventure(self, ctx):
+    async def adventure(self, ctx, timer: int = 600):
         _(
             """Start a guild adventure. Guild adventures can happen alongside regular adventures.
 
@@ -1442,6 +1495,8 @@ class Guild(commands.Cog):
             (This command has a guild cooldown of 1 hour.)"""
         )
         try:
+            if timer > 86400:
+                return await ctx.send("Timer cannot exceed 1 day")
             # Check if the guild is already on an adventure
             if await self.bot.get_guild_adventure(ctx.character_data["guild"]):
                 await self.bot.reset_guild_cooldown(ctx)
@@ -1461,7 +1516,7 @@ class Guild(commands.Cog):
             view = JoinView(
                 Button(style=ButtonStyle.primary, label=_("Join the adventure!")),
                 message=_("You joined the adventure."),
-                timeout=60 * 10,
+                timeout=timer,
             )
 
             # Send the join message
@@ -1478,7 +1533,7 @@ class Guild(commands.Cog):
             difficulty = int(rpgtools.xptolevel(ctx.character_data["xp"]))
 
             # Wait for 10 minutes to gather participants
-            await asyncio.sleep(60 * 10)
+            await asyncio.sleep(timer)
 
             # Stop the view to prevent further interactions
             view.stop()
@@ -2029,19 +2084,31 @@ class Guild(commands.Cog):
                         color=discord.Color.green()
                     )
 
-                    # Add XP rewards summary as a field in the embed
+                    # Create a dedicated XP reward embed
+                    xp_embed = Embed(
+                        title="🎉 Guild Adventure XP Rewards 🎉",
+                        description="Congratulations to the guild members who participated in the adventure! Here are the XP rewards:",
+                        color=discord.Color.green()
+                    )
+
+                    # Ensure each field has 1024 or fewer characters
                     if xp_summary:
-                        xp_embed.add_field(
-                            name="XP Gains",
-                            value="\n".join(xp_summary),
-                            inline=False
-                        )
+                        # Split into chunks to ensure no field exceeds 1024 characters
+                        chunk_size = 1024
+                        chunks = [xp_summary[i:i + chunk_size] for i in range(0, len(xp_summary), chunk_size)]
+                        for i, chunk in enumerate(chunks, 1):
+                            xp_embed.add_field(
+                                name=f"XP Gains (Part {i})",
+                                value=chunk,
+                                inline=False
+                            )
                     else:
                         xp_embed.add_field(
                             name="XP Gains",
                             value="No XP gains to display.",
                             inline=False
                         )
+
 
                     # Set footer with adventure completion message
                     xp_embed.set_footer(text="Adventure completed! 🏆")
@@ -2094,7 +2161,7 @@ class Guild(commands.Cog):
             import traceback
             error_message = f"Error occurred: {e}\n"
             error_message += traceback.format_exc()
-            await ctx.send(error_message)
+
             print(error_message)
 
     @has_guild()

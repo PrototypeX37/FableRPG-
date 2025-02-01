@@ -29,7 +29,7 @@ import io
 import requests
 from cogs.shard_communication import user_on_cooldown as user_cooldown
 from utils.checks import has_char, is_gm
-from utils.i18n import locale_doc
+from utils.i18n import locale_doc, _
 
 
 class Slots(commands.Cog):
@@ -533,19 +533,28 @@ class Slots(commands.Cog):
 
                     if seat_info:
                         occupant_id = seat_info['occupant']
-                        occupant_name = "Seat free" if occupant_id is None else self.bot.get_user(occupant_id).name
+                        occupant_name = "Seat free" if occupant_id is None else await self.bot.fetch_user(occupant_id)
                         dragon_hp = seat_info['dragon']
                         player_hp = seat_info['player']
                         jackpot = seat_info['jackpot']
-
-                        embed.add_field(
-                            name=f"Seat #{seat_number}",
-                            value=f"Occupant: {occupant_name}\n"
-                                  f"Dragon HP: {dragon_hp} 🐉 \n"
-                                  f"Player HP: {player_hp} 👤 \n"
-                                  f"Jackpot: {jackpot} 💰",
-                            inline=False
-                        )
+                        if occupant_name == "Seat free":
+                            embed.add_field(
+                                name=f"Seat #{seat_number}",
+                                value=f"Occupant: Seat free \n"
+                                      f"Dragon HP: {dragon_hp} 🐉 \n"
+                                      f"Player HP: {player_hp} 👤 \n"
+                                      f"Jackpot: {jackpot} 💰",
+                                inline=False
+                            )
+                        else:
+                            embed.add_field(
+                                name=f"Seat #{seat_number}",
+                                value=f"Occupant: {occupant_name.display_name}\n"
+                                      f"Dragon HP: {dragon_hp} 🐉 \n"
+                                      f"Player HP: {player_hp} 👤 \n"
+                                      f"Jackpot: {jackpot} 💰",
+                                inline=False
+                            )
 
                 await ctx.send(embed=embed)
 
@@ -577,7 +586,7 @@ class Slots(commands.Cog):
                         await connection.execute(
                             "UPDATE dragonslots SET occupant = NULL, last_activity = NULL WHERE seat = $1", seat_number)
 
-                        user = self.bot.get_user(occupant_id)
+                        user = await self.bot.fetch_user(occupant_id)
                         if user:
                             try:
                                 await user.send(
@@ -591,7 +600,7 @@ class Slots(commands.Cog):
 
         except Exception as e:
             # Handle any errors that occur during execution
-            error_user = self.bot.get_user(295173706496475136)  # Replace with the ID of the user to notify
+            error_user = await self.bot.fetch_user(295173706496475136)  # Replace with the ID of the user to notify
             if error_user:
                 await error_user.send(f"An error occurred: {str(e)}")
             raise  # Re-raise the exception to allow it to propagate if needed
@@ -648,8 +657,8 @@ class Slots(commands.Cog):
                             await self.update_last_activity(ctx.author.id)
                         else:
                             # Seat is occupied
-                            occupant_name = self.bot.get_user(occupant_id).name
-                            await ctx.send(f"Sorry, seat #{seat_number} is already taken by {occupant_name}.")
+                            occupant_name = await self.bot.fetch_user(occupant_id)
+                            await ctx.send(f"Sorry, seat #{seat_number} is already taken by {occupant_name.display_name}.")
                             self.bot.reset_cooldown(ctx)
                     else:
                         await ctx.send(f"Seat #{seat_number} does not exist.")

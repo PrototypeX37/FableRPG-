@@ -766,99 +766,138 @@ class Gambling(commands.Cog):
         except Exception as e:
             await ctx.send(f"Sorry, there was an error processing your request: {e}")
 
+    def parse_card(self, card_str):
+        """
+        Parses a card string like 'q_hearts' or 'qhearts' or '10spades' and returns
+        (rank_value, suit).
+
+        rank_value is an int (11 for J, 12 for Q, 13 for K, 14 for A, etc.)
+        suit is one of 'clubs', 'diamonds', 'hearts', 'spades'.
+        """
+        card_str = card_str.lower().strip()
+        # Recognized suits
+        possible_suits = ["clubs", "diamonds", "hearts", "spades"]
+        # Face-card lookup
+        face_cards = {"a": 14, "k": 13, "q": 12, "j": 11}
+
+        # 1) If there's an underscore, try splitting
+        if "_" in card_str:
+            parts = card_str.split("_", maxsplit=1)
+            if len(parts) == 2:
+                rank_str, suit = parts
+            else:
+                raise ValueError(f"Invalid card format: {card_str}")
+        else:
+            # 2) No underscore: find which of the recognized suits is at the END
+            # Example: '10hearts' => rank_part='10', suit='hearts'
+            #          'qhearts'  => rank_part='q',  suit='hearts'
+            # We look for a suffix that matches one of the suits in possible_suits.
+            suit = None
+            for s in possible_suits:
+                if card_str.endswith(s):
+                    suit = s
+                    rank_str = card_str[: -len(s)]  # everything up to the start of suit
+                    break
+            if not suit:
+                raise ValueError(f"Invalid card string (no recognized suit): {card_str}")
+
+        # Clean up possible trailing underscores/spaces from rank_str
+        rank_str = rank_str.strip("_").strip()
+
+        # Convert rank_str to an integer or face card
+        if rank_str in face_cards:
+            rank_val = face_cards[rank_str]
+        else:
+            # For '2'-'10'
+            rank_val = int(rank_str)  # may raise ValueError if invalid
+
+        return (rank_val, suit)
+
     def analyze_hand(self, hand):
-            # Map emoji representation to card names
-            card_emojis = [self.pokercards[card] for card in hand]
+        ranks = []
+        suits = []
 
-            ranks = []
-            suits = []
-            for card in hand:
-                parts = card.split("_")
-                rank = parts[0]
-                if rank[1:].isdigit():
-                    ranks.append(int(rank[1:]))
-                elif rank[0].isdigit():
-                    ranks.append(int(rank[0]))
-                else:
-                    face_cards = {"a": 14, "k": 13, "q": 12, "j": 11}
-                    ranks.append(face_cards[rank[0].lower()])
-                suit = parts[-1]
-                suits.append(suit)
+        for card in hand:
+            rank_val, suit_str = self.parse_card(card)
+            ranks.append(rank_val)
+            suits.append(suit_str)
 
-            # Sort ranks in descending order
-            ranks.sort(reverse=True)
+        # Sort ranks in descending order
+        ranks.sort(reverse=True)
 
-            # Count occurrences of each rank
-            rank_counts = {}
-            for rank in ranks:
-                rank_counts[rank] = rank_counts.get(rank, 0) + 1
+        # Count occurrences of each rank
+        rank_counts = {}
+        for rank in ranks:
+            rank_counts[rank] = rank_counts.get(rank, 0) + 1
 
-            # Get kickers (cards not in main combination)
+        # Identify the singletons (kickers)
+        kickers = [r for r in ranks if rank_counts[r] == 1]
+        kickers.sort(reverse=True)
+
+        # Check for flush
+        is_flush = (len(set(suits)) == 1)
+
+        # Check for straight
+        is_straight = False
+        if len(set(ranks)) == 5:  # all distinct
+            if max(ranks) - min(ranks) == 4:
+                is_straight = True
+            # Ace-low straight check (A, 2, 3, 4, 5)
+            elif sorted(ranks) == [2, 3, 4, 5, 14]:
+                is_straight = True
+                # Evaluate Ace as 1 in A-2-3-4-5
+                ranks = [5, 4, 3, 2, 1]
+
+        # Return format: (hand_type, primary_value, kickers)
+
+        # Straight / Royal / Straight Flush
+        if is_straight and is_flush:
+            if ranks[0] == 14 and ranks[1] == 13:
+                return ("Royal Flush", 14, ranks[1:])
+            return ("Straight Flush", max(ranks), ranks[1:])
+
+        # Four of a Kind
+        if 4 in rank_counts.values():
+            quads_rank = next(r for r, c in rank_counts.items() if c == 4)
+            kicker = next(r for r, c in rank_counts.items() if c == 1)
+            return ("Four of a Kind", quads_rank, [kicker])
+
+        # Full House
+        if sorted(rank_counts.values()) == [2, 3]:
+            trips_rank = next(r for r, c in rank_counts.items() if c == 3)
+            pair_rank = next(r for r, c in rank_counts.items() if c == 2)
+            return ("Full House", trips_rank, [pair_rank])
+
+        # Flush
+        if is_flush:
+            return ("Flush", ranks[0], ranks[1:])
+
+        # Straight
+        if is_straight:
+            return ("Straight", max(ranks), ranks[1:])
+
+        # Three of a Kind
+        if 3 in rank_counts.values():
+            trips_rank = next(r for r, c in rank_counts.items() if c == 3)
+            return ("Three of a Kind", trips_rank, kickers)
+
+        # Two Pair
+        pairs = sorted([r for r, c in rank_counts.items() if c == 2], reverse=True)
+        if len(pairs) == 2:
+            # Highest pair is the primary value
+            # The kicker is the single leftover card
+            kicker = next(r for r, c in rank_counts.items() if c == 1)
+            return ("Two Pair", pairs[0], [pairs[1], kicker])
+
+        # One Pair
+        if len(pairs) == 1:
+            pair_rank = pairs[0]
+            # Rebuild the kicker list in descending order
             kickers = sorted([r for r in ranks if rank_counts[r] == 1], reverse=True)
+            return ("One Pair", pair_rank, kickers)
 
-            # Check for flush
-            is_flush = len(set(suits)) == 1
-
-            # Check for straight
-            is_straight = False
-            if len(set(ranks)) == 5:  # All ranks must be different
-                if max(ranks) - min(ranks) == 4:
-                    is_straight = True
-                # Check Ace-low straight (A,2,3,4,5)
-                elif sorted(ranks) == [14, 5, 4, 3, 2]:
-                    is_straight = True
-                    ranks = [5, 4, 3, 2, 1]  # Treat Ace as 1 in this case
-
-            # Return format: (hand_type, hand_value, kickers)
-            # hand_type is string name of hand
-            # hand_value is primary value for comparison
-            # kickers is list of remaining card values in order
-
-            # Royal Flush and Straight Flush
-            if is_straight and is_flush:
-                if ranks[0] == 14 and ranks[1] == 13:
-                    return ("Royal Flush", 14, ranks[1:])
-                return ("Straight Flush", max(ranks), ranks[1:])
-
-            # Four of a Kind
-            if 4 in rank_counts.values():
-                quads_rank = next(r for r, count in rank_counts.items() if count == 4)
-                kicker = next(r for r, count in rank_counts.items() if count == 1)
-                return ("Four of a Kind", quads_rank, [kicker])
-
-            # Full House
-            if sorted(rank_counts.values()) == [2, 3]:
-                trips_rank = next(r for r, count in rank_counts.items() if count == 3)
-                pair_rank = next(r for r, count in rank_counts.items() if count == 2)
-                return ("Full House", trips_rank, [pair_rank])
-
-            # Flush
-            if is_flush:
-                return ("Flush", ranks[0], ranks[1:])
-
-            # Straight
-            if is_straight:
-                return ("Straight", max(ranks), ranks[1:])
-
-            # Three of a Kind
-            if 3 in rank_counts.values():
-                trips_rank = next(r for r, count in rank_counts.items() if count == 3)
-                return ("Three of a Kind", trips_rank, kickers)
-
-            # Two Pair
-            pairs = sorted([r for r, count in rank_counts.items() if count == 2], reverse=True)
-            if len(pairs) == 2:
-                kicker = next(r for r in ranks if rank_counts[r] == 1)
-                return ("Two Pair", max(pairs), [min(pairs), kicker])
-
-            # One Pair
-            if len(pairs) == 1:
-                pair_rank = pairs[0]
-                kickers = sorted([r for r in ranks if rank_counts[r] == 1], reverse=True)
-                return ("One Pair", pair_rank, kickers)
-
-            # High Card
-            return ("High Card", ranks[0], ranks[1:])
+        # High Card
+        return ("High Card", ranks[0], ranks[1:])
 
     def compare_hands(self, hand1_result, hand2_result):
         """Compare two poker hands and return:
@@ -902,6 +941,8 @@ class Gambling(commands.Cog):
         await ctx.send(f"{mention}, your hand:")
         await ctx.send(" ".join(card_messages))
         await ctx.send("_ _")
+
+
 
     @has_char()
     @commands.cooldown(1, 10, commands.BucketType.user)

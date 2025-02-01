@@ -93,7 +93,7 @@ class Ranks(commands.Cog):
         )
         await ctx.send(embed=embed)
 
-    @commands.command(brief=_("Show the top 10 in horde"))
+    @commands.command(aliases=["hdlb"], brief=_("Show the top 10 in horde"))
     @locale_doc
     async def hordelb(self, ctx: Context) -> None:
         _("""The 10 top horde players in Fable.""")
@@ -155,7 +155,7 @@ class Ranks(commands.Cog):
         )
         await ctx.send(embed=embed)
 
-    @commands.command(brief=_("Show the top 10 in horde custom"))
+    @commands.command(aliases=["hdlb2"], brief=_("Show the top 10 in horde custom"))
     @locale_doc
     async def hordelb2(self, ctx: Context) -> None:
         _("""The 10 top horde players (Custom) in Fable.""")

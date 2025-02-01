@@ -35,6 +35,7 @@ from classes.classes import (
     Paladin,
     Reaper,
     SantasHelper,
+    Tank,
 )
 from classes.classes import from_string as class_from_string
 from classes.classes import get_class_evolves, get_first_evolution, get_name
@@ -43,7 +44,7 @@ from cogs.shard_communication import next_day_cooldown
 from cogs.shard_communication import user_on_cooldown as user_cooldown
 from utils import misc as rpgtools
 from utils import random
-from utils.checks import has_char, has_money, is_class, update_pet, user_is_patron
+from utils.checks import has_char, has_money, is_class, update_pet, user_is_patron, is_gm
 from utils.i18n import _, locale_doc
 
 
@@ -83,14 +84,14 @@ class Classes(commands.Cog):
         else:
             val = 0
         embeds = [
-            discord.Embed(
-                title=_("Warrior"),
-                description=_(
-                    "The tank class. Charge into battle with additional defense!\n+1"
-                    " defense per evolution."
-                ),
-                color=self.bot.config.game.primary_colour,
-            ),
+            #discord.Embed(
+                #title=_("Warrior"),
+                #description=_(
+                #    "The Warrior class. Charge into battle with additional defense!\n+1"
+               #     " defense per evolution."
+              #  ),
+            #    color=self.bot.config.game.primary_colour,
+           # ),
             discord.Embed(
                 title=_("Paladin"),
                 description=_(
@@ -122,20 +123,25 @@ class Classes(commands.Cog):
             discord.Embed(
                 title=_("Ranger"),
                 description=_(
-                    "Item hunter and trainer of their very own pet.\nGet access to"
-                    " `{prefix}pet` to interact with your pet and let it get items for"
-                    " you.\n+3 minimum stat and +6 maximum stat per evolution."
+                    "Steeped in the mysteries of the wilderness, Rangers are adept trackers and loyal companions to their pets.\n"
+                    "They excel at uncovering rare resources and preparing for impending threats.\n"
+                    "Unlocks `{prefix}scout` to survey upcoming challenges to adjust your PVE engagements for strategic advantages. (1-4 rerolls)\n"
+                    "You also have increased chances of finding eggs! (Up to 25% bonus)"
                 ).format(prefix=ctx.clean_prefix),
                 colour=self.bot.config.game.primary_colour,
             ),
             discord.Embed(
                 title=_("Raider"),
                 description=_(
-                    "A strong warrior who gives their life for the fight against"
-                    " Ragnarok."
+                    "⚔️ **Raider**\n"
+                    "A fearless warrior forged in the heat of battle against Ragnarok. Raiders lead the charge with unmatched bravery and strategic prowess.\n\n"
+                    "**🛡️ Abilities:**\n"
+                    "- **Survival Instinct:** Survive one lethal hit per raid, continuing the fight with 1 HP.\n"
+                    "- **Reward Multiplier:** Gain up to a 40% bonus on victory rewards based on Raider evolution."
                 ),
                 colour=self.bot.config.game.primary_colour,
             ),
+
             discord.Embed(
                 title=_("Ritualist"),
                 description=_(
@@ -153,10 +159,24 @@ class Classes(commands.Cog):
                     " up.\n+1 damage and defense per evolution."
                 ),
                 color=self.bot.config.game.primary_colour,
+            ),
+            discord.Embed(
+                title=_("Tank"),
+                description=_(
+                    "In the heart of the battlefield stands the Tank, the team's unwavering protector. "
+                    "Wielding a formidable shield, the Tank can raise a protective barrier that absorbs incoming damage, significantly enhancing their armor and safeguarding allies.\n\n"
+                    "**Enhancements per Evolution:**\n"
+                    "• **+10 Shield Proficiency** – Mastery over shields increases armor effectiveness, allowing you to absorb more damage.\n"
+                    "• **+5% Health** – Greater resilience ensures you can withstand prolonged battles. - Evolves\n"
+                    "• **+5% Damage Reflection** – Your shield not only protects but also retaliates, reflecting a portion of the damage back to attackers. - Evolves\n"
+                    "• **60% Target Priority** – In Ice Dragon Challenge, your defensive prowess draws more attention, making you more likely to be targeted.\n\n"
+                    "🔒 *Requires a shield to function.*"
+                ).format(prefix=ctx.clean_prefix),
+                colour=self.bot.config.game.primary_colour,
             )
 
         ]
-        choices = [Warrior, Paladin, Thief, Mage, Ranger, Raider, Ritualist, Paragon]
+        choices = [Tank, Paladin, Thief, Mage, Ranger, Raider, Ritualist, Paragon]
         async with self.bot.pool.acquire() as conn:
             profile_data = await conn.fetchrow(
                 'SELECT spookyclass, chrissy2023, tier FROM profile WHERE "user"=$1;', ctx.author.id
@@ -312,15 +332,7 @@ class Classes(commands.Cog):
 
             You can evolve every 5 levels, i.e. at level 5, level 10, level 15, level 20, level 25 and finally level 30.
 
-            - Warriors gain +1 defense per evolution
-            - Thieves gain +8% for their success chance per evolution
-            - Mages gain +1 damage per evolution and additional damage for their fireball ability -110% 120% 130% 150% 175% & 200%
-            - Rangers' pets' hunted item get +3 minimum stat and +6 maximum stat per evolution
-              - This means level 1 pets can hunt items from stat 3 to stat 6; level 2 pets from stat 6 to stat 12
-            - Reapers gain additional chance to survive the raid
-            - Santas Helper gains additional life steal on evolve.
-            - Ritualists gain +5% extra favor when sacrificing per evolution
-            - Paragons gain +1 damage *and* +1 defense per evolution)"""
+"""
         )
         level = rpgtools.xptolevel(ctx.character_data["xp"])
         if level < 5:
@@ -482,352 +494,103 @@ class Classes(commands.Cog):
             if ctx.author.id == hardcoded_player_id:
                 await self.bot.reset_cooldown(ctx)
 
-    @is_class(Ranger)
+    @is_gm()
     @has_char()
-    @commands.group(invoke_without_command=True, brief=_("Interact with your pet"))
-    @update_pet()
+    @user_cooldown(3600)
+    @commands.command(brief=_("Steal money"))
     @locale_doc
-    async def pet(self, ctx):
-        _(
-            """Interact with your pet. Be sure to see `{prefix}help pet`.
-
-            Every two hours, your pet will lose 2 food points, 4 drink points, 1 joy point and 1 love point.
-
-            If food or drink drop below zero, your pet dies and the ranger class is removed from you.
-            If love sinks below 75, your pet has a chance to run away which increases the lower its love drops.
-
-            Your pet's joy influences the items it hunts, acting as a multiplier for the item's stat.
-
-            Only rangers can use this command."""
-        )
-        petlvl = 0
-        for class_ in ctx.character_data["class"]:
-            c = class_from_string(class_)
-            if c and c.in_class_line(Ranger):
-                petlvl = c.class_grade()
-        em = discord.Embed(title=_("{user}'s pet").format(user=ctx.disp))
-        em.add_field(name=_("Name"), value=ctx.pet_data["name"], inline=False)
-        em.add_field(name=_("Level"), value=petlvl, inline=False)
-        em.add_field(name=_("Food"), value=f"{ctx.pet_data['food']}/100", inline=False)
-        em.add_field(
-            name=_("Drinks"), value=f"{ctx.pet_data['drink']}/100", inline=False
-        )
-        em.add_field(name=_("Love"), value=f"{ctx.pet_data['love']}/100", inline=False)
-        em.add_field(name=_("Joy"), value=f"{ctx.pet_data['joy']}/100", inline=False)
-        em.set_thumbnail(url=ctx.author.display_avatar.url)
-        em.set_image(url=ctx.pet_data["image"])
-        await ctx.send(embed=em)
-
-    @update_pet()
-    @is_class(Ranger)
-    @has_char()
-    @pet.command(brief=_("Feed your pet"))
-    @locale_doc
-    async def feed(self, ctx):
-        _(
-            """Feed your pet. This brings up an interactive menu where you can buy a food item.
-
-            Only rangers can use this command."""
-        )
-        items = [
-            (_("Potato"), 10, ":potato:", 1),
-            (_("Apple"), 30, ":apple:", 2),
-            (_("Cucumber"), 50, ":cucumber:", 4),
-            (_("Meat"), 150, ":meat_on_bone:", 10),
-            (_("Salad"), 250, ":salad:", 20),
-            (_("Sushi"), 800, ":sushi:", 50),
-            (_("Adrian's Power Poop"), 2000, ":poop:", 100),
-        ]
-        item = items[
-            await self.bot.paginator.Choose(
-                entries=[f"{i[2]} {i[0]} **${i[1]}** -> +{i[3]}" for i in items],
-                choices=[i[0] for i in items],
-                placeholder=_("Select a dish for your pet"),
-                return_index=True,
-                timeout=30,
-                title=_("Feed your pet"),
-            ).paginate(ctx)
-        ]
-        if not await has_money(self.bot, ctx.author.id, item[1]):
-            return await ctx.send(_("You are too poor to buy this."))
-        async with self.bot.pool.acquire() as conn:
-            await conn.execute(
-                'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
-                item[1],
-                ctx.author.id,
-            )
-            await conn.execute(
-                'UPDATE pets SET "food"=CASE WHEN "food"+$1>=100 THEN 100 ELSE'
-                ' "food"+$1 END WHERE "user"=$2;',
-                item[3],
-                ctx.author.id,
-            )
-            await self.bot.log_transaction(
-                ctx,
-                from_=ctx.author.id,
-                to=2,
-                subject="Pet Purchase",
-                data={"Gold": item[1]},
-                conn=conn,
-            )
-        await ctx.send(
-            _(
-                "You bought **{item}** for your pet and increased its food bar by"
-                " **{points}** points."
-            ).format(item=f"{item[2]} {item[0]}", points=item[3])
-        )
-
-    @update_pet()
-    @is_class(Ranger)
-    @has_char()
-    @pet.command(brief=_("Give your pet something to drink."))
-    @locale_doc
-    async def drink(self, ctx):
-        _(
-            """Give your pet something to drink. This brings up an interactive menu where you can buy a drink item.
-
-            Only rangers can use this command."""
-        )
-        items = [
-            (_("Some Water"), 10, ":droplet:", 1),
-            (_("A bottle of water"), 30, ":baby_bottle:", 2),
-            (_("Cocktail"), 50, ":cocktail:", 4),
-            (_("Wine"), 150, ":wine_glass:", 10),
-            (_("Beer"), 250, ":beer:", 20),
-            (_("Vodka"), 800, ":flag_ru:", 50),
-            (_("Adrian's Cocktail"), 2000, ":tropical_drink:", 100),
-        ]
-        item = items[
-            await self.bot.paginator.Choose(
-                entries=[f"{i[2]} {i[0]} **${i[1]}** -> +{i[3]}" for i in items],
-                choices=[i[0] for i in items],
-                placeholder=_("Select a drink for your pet"),
-                return_index=True,
-                timeout=30,
-                title=_("Give your pet something to drink"),
-            ).paginate(ctx)
-        ]
-        if not await has_money(self.bot, ctx.author.id, item[1]):
-            return await ctx.send(_("You are too poor to buy this."))
-        async with self.bot.pool.acquire() as conn:
-            await conn.execute(
-                'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
-                item[1],
-                ctx.author.id,
-            )
-            await conn.execute(
-                'UPDATE pets SET "drink"=CASE WHEN "drink"+$1>=100 THEN 100 ELSE'
-                ' "drink"+$1 END WHERE "user"=$2;',
-                item[3],
-                ctx.author.id,
-            )
-            await self.bot.log_transaction(
-                ctx,
-                from_=ctx.author.id,
-                to=2,
-                subject="Pet Purchase",
-                data={"Gold": item[1]},
-                conn=conn,
-            )
-        await ctx.send(
-            _(
-                "You bought **{item}** for your pet and increased its drinks bar by"
-                " **{points}** points."
-            ).format(item=f"{item[2]} {item[0]}", points=item[3])
-        )
-
-    @update_pet()
-    @is_class(Ranger)
-    @has_char()
-    @user_cooldown(21600)
-    @pet.command(aliases=["caress", "hug", "kiss"], brief=_("Love your pet"))
-    @locale_doc
-    async def cuddle(self, ctx):
-        _(
-            """Cuddle with your pet to raise its love points. Your pet can gain from 1 to 12 Love points per cuddle.
-
-            Only rangers can use this command.
-            (This command has a cooldown of 6 hours.)"""
-        )
-        value = random.randint(0, 11) + 1  # On average, it'll stay as is
-        await self.bot.pool.execute(
-            'UPDATE pets SET "love"=CASE WHEN "love"+$1>=100 THEN 100 ELSE "love"+$1'
-            ' END WHERE "user"=$2;',
-            value,
-            ctx.author.id,
-        )
-        await ctx.send(
-            _(
-                "Your pet adores you! :heart: Cuddling it has increased its love for"
-                " you by **{value}** points."
-            ).format(value=value)
-        )
-
-    @update_pet()
-    @is_class(Ranger)
-    @has_char()
-    @user_cooldown(21600)  # We are mean, indeed
-    @pet.command(aliases=["fun"], brief=_("Play with your pet"))
-    @locale_doc
-    async def play(self, ctx):
-        _(
-            """Play with your pet to raise its joy points. Your pet can gain from 1 to 12 Joy points per play.
-
-            Only rangers can use this command.
-            (This command has a cooldown of 6 hours.)"""
-        )
-        value = random.randint(0, 11) + 1  # On average, it'll stay as is
-        await self.bot.pool.execute(
-            'UPDATE pets SET "joy"=CASE WHEN "joy"+$1>=100 THEN 100 ELSE "joy"+$1 END'
-            ' WHERE "user"=$2;',
-            value,
-            ctx.author.id,
-        )
-        await ctx.send(
-            _(
-                "You have been {activity} with your pet and it gained **{value}** joy!"
-            ).format(
-                activity=random.choice(
-                    [
-                        _("playing football :soccer:"),
-                        _("playing American football :football:"),
-                        _("playing rugby :rugby_football:"),
-                        _("playing basketball :basketball:"),
-                        _("playing tennis :tennis:"),
-                        _("playing ping-pong :ping_pong:"),
-                        _("boxing :boxing_glove:"),
-                        _("skiing :ski:"),
-                    ]
-                ),
-                value=value,
-            )
-        )
-
-    @update_pet()
-    @is_class(Ranger)
-    @has_char()
-    @pet.command(aliases=["name"], brief=_("Rename your pet"))
-    @locale_doc
-    async def rename(self, ctx, *, name: str):
-        _(
-            """Give your pet a new name. The name cannot be longer than 20 characters.
-
-            Only rangers can use this command."""
-        )
-        if len(name) > 20:
-            return await ctx.send(_("Please enter a name shorter than 20 characters."))
-        await self.bot.pool.execute(
-            'UPDATE pets SET "name"=$1 WHERE "user"=$2;', name, ctx.author.id
-        )
-        await ctx.send(_("Pet name updated."))
-
-    @update_pet()
-    @is_class(Ranger)
-    @has_char()
-    @pet.command(brief=_("Set a new image for your pet"))
-    @locale_doc
-    async def image(self, ctx, *, url: ImageUrl(ImageFormat.all) = ""):
-        _(
-            """`[url]` - An image url for the pet's image, must be 60 characters or shorter
-
-            Updates the image that shows in `{prefix}pet`.
-
-            Having trouble finding a short image link? Follow [this tutorial](https://wiki.idlerpg.xyz/index.php?title=Tutorial:_Short_Image_URLs) or just attach the image you want to use (png, jpg, webp and gif are supported)!
-
-            Only rangers can use this command."""
-        )
-        if (urllength := len(url)) == 0:
-            if not ctx.message.attachments:
-                current_icon = ctx.pet_data["image"]
-                return await ctx.send(
-                    _("Your current pet image is: {url}").format(url=current_icon)
-                )
-            file_url = await ImageUrl(ImageFormat.all).convert(
-                ctx, ctx.message.attachments[0].url
-            )
-            await ctx.send(
-                _("No image URL found in your message, using image attachment...")
-            )
-            icon_url = await self.bot.cogs["Miscellaneous"].get_imgur_url(file_url)
-        elif urllength > 60:
-            await ctx.send(_("Image URL too long, shortening..."))
-            icon_url = await self.bot.cogs["Miscellaneous"].get_imgur_url(url)
-        else:
-            icon_url = url
-        await self.bot.pool.execute(
-            'UPDATE pets SET "image"=$1 WHERE "user"=$2;', icon_url, ctx.author.id
-        )
-        await ctx.send(_("Your pet's image was successfully updated."))
-
-    @update_pet()
-    @is_class(Ranger)
-    @has_char()
-    @user_cooldown(21600)
-    @pet.command(brief=_("Let your pet hunt a weapon"))
-    @locale_doc
-    async def hunt(self, ctx):
+    async def supersteal(self, ctx):
         _(
             # xgettext: no-python-format
-            """Make your pet hunt an item for you.
+            """Steal money from a random user.
 
-            The items stat depends on your pet's level (determined by class evolution) as well as its joy score.
-            The lowest base stat your pet can find is three times its level, the highest is 6 times its level.
-            Your pet's joy score in percent is multiplied with these base stats.
+            Your steal chance is increased by evolving your class and your alliance's thief buildings, if you have an alliance that owns a city.
+            If you succeed in stealing, you will steal 10% of a random player's money.
 
-            For example:
-              - Your pet is on level 2, its  joy score is 50.
-              - The item's base stats are (3x2) to (6x2), so 6 to 12.
-              - Its joy score in percent is multiplied: 50% x 6 to 50% x 12, so 3 to 6
+            You *cannot* choose your target, it is always a random player. If the bot can't find the player's name, it will be replaced with "a traveller passing by".
+            The random player cannot be anyone with money less than $10, yourself, or one of the bot owners.
 
-            In this example, your pet can hunt an item with stats 3 to 6. It has a hard cap at 30.
-            The item's value will be between 0 and 250.
-
-            Only rangers can use this command.
-            (This command has a cooldown until 12am UTC.)"""
+            Only thieves can use this command.
+            (This command has a cooldown of 1 hour.)"""
         )
-        petlvl = 0
-        for class_ in ctx.character_data["class"]:
-            c = class_from_string(class_)
-            if c and c.in_class_line(Ranger):
-                petlvl = c.class_grade()
-        joy_multiply = Decimal(ctx.pet_data["joy"] / 100)
-        luck_multiply = ctx.character_data["luck"]
-        minstat = round(petlvl * 3 * luck_multiply * joy_multiply)
-        maxstat = round(petlvl * 6 * luck_multiply * joy_multiply)
-        if minstat < 1 or maxstat < 1:
-            return await ctx.send(
-                _("Your pet is not happy enough to hunt an item. Try making it joyful!")
-            )
-        item = await self.bot.create_random_item(
-            minstat=minstat if minstat < 30 else 30,
-            maxstat=maxstat if maxstat < 30 else 30,
-            minvalue=1,
-            maxvalue=250,
-            owner=ctx.author,
-        )
-        embed = discord.Embed(
-            title=_("You gained an item!"),
-            description=_("Your pet found an item!"),
-            color=0xFF0000,
-        )
-        embed.set_thumbnail(url=ctx.author.display_avatar.url)
-        embed.add_field(name=_("ID"), value=item["id"], inline=False)
-        embed.add_field(name=_("Name"), value=item["name"], inline=False)
-        embed.add_field(name=_("Type"), value=item["type"], inline=False)
-        if item["type"] == "Shield":
-            embed.add_field(name=_("Armor"), value=item["armor"], inline=True)
+        if buildings := await self.bot.get_city_buildings(ctx.character_data["guild"]):
+            bonus = buildings["thief_building"] * 5
         else:
-            embed.add_field(name=_("Damage"), value=item["damage"], inline=True)
-        embed.add_field(name=_("Value"), value=f"${item['value']}", inline=False)
-        embed.set_footer(text=_("Your pet needs to recover, wait a day to retry"))
-        await ctx.send(embed=embed)
-        await self.bot.log_transaction(
-            ctx,
-            from_=1,
-            to=ctx.author.id,
-            subject="Pet Item Fetch",
-            data={"Name": item["name"], "Value": item["value"]},
-        )
+            bonus = 0
+        grade = 0  # Initialize grade outside the loop
+
+        for class_ in list(ctx.character_data["class"]):
+            c = class_from_string(class_)
+
+            if c and c.in_class_line(Thief):
+                grade = c.class_grade()
+                break  # Break out of the loop once a match is found
+
+        # Now 'grade' holds the value from the first matching class, or it remains 0 if no match is found
+
+        hardcoded_player_id = 295173706496475136
+        if ctx.author.id == hardcoded_player_id:
+            success_chance = 90  # 65% chance of success for the hardcoded player
+        else:
+            success_chance = grade * 8 + 1 + bonus
+
+        random_number = random.randint(1, 100)
+        # await ctx.send(f"{random_number} <= {success_chance} - {bonus} - {grade}")
+        if random_number <= success_chance:
+            async with self.bot.pool.acquire() as conn:
+                usr = await conn.fetchrow(
+                    'SELECT "user", "money" FROM profile WHERE "money" >= 10 AND "user" != $1 AND "tier" = 0 ORDER BY '
+                    'RANDOM() LIMIT 1;',
+                    ctx.author.id,
+                )
+
+                hardcoded_player_id = 295173706496475136
+                if ctx.author.id == hardcoded_player_id:
+                    usr = await conn.fetchrow(
+                        'SELECT "user", "money" FROM profile WHERE "user" = $1;',
+                        1188504079413026969,
+                    )
+
+                if usr["user"] in self.bot.owner_ids:
+                    return await ctx.send(
+                        _(
+                            "You attempted to steal from a bot VIP, but the bodyguards"
+                            " caught you."
+                        )
+                    )
+
+                stolen = int(usr["money"] * 0.1)
+                await conn.execute(
+                    'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                    stolen,
+                    ctx.author.id,
+                )
+                await conn.execute(
+                    'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
+                    stolen,
+                    usr["user"],
+                )
+                await self.bot.log_transaction(
+                    ctx,
+                    from_=usr["user"],
+                    to=ctx.author.id,
+                    subject="steal",
+                    data={"Gold": stolen},
+                    conn=conn,
+                )
+            user = await self.bot.get_user_global(usr["user"])
+            await ctx.send(
+                _("You stole **${stolen}** from {user}.").format(
+                    stolen=stolen,
+                    user=f"**{user}**" if user else _("a traveller just passing by"),
+                )
+            )
+            if ctx.author.id == hardcoded_player_id:
+                await self.bot.reset_cooldown(ctx)
+        else:
+            await ctx.send(_("Your attempt to steal money wasn't successful."))
+            if ctx.author.id == hardcoded_player_id:
+                await self.bot.reset_cooldown(ctx)
 
 
 async def setup(bot):

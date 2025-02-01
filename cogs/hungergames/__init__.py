@@ -28,6 +28,7 @@ from discord.ui.button import Button
 
 from cogs.help import chunks
 from utils import random
+import random as randomm
 from utils.checks import is_gm
 from utils.i18n import _, locale_doc
 from utils.joins import JoinView
@@ -257,7 +258,7 @@ class GameBase:
 
     async def send_cast(self):
         cast = copy.copy(self.players)
-        random.shuffle(cast)  # note: shuffle works in-place, no need to assign back to cast
+        randomm.shuffle(cast)  # note: shuffle works in-place, no need to assign back to cast
         cast = list(chunks(cast, 2))
         self.cast = cast
 

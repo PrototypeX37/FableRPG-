@@ -91,32 +91,6 @@ class SellConfirmationView(View):
         self.stop()
 
 
-class SellConfirmationView(View):
-    def __init__(self, initiator: discord.User, receiver: discord.User, price: int, timeout=120):
-        super().__init__(timeout=timeout)
-        self.initiator = initiator
-        self.receiver = receiver
-        self.price = price
-        self.value = None  # Will store True (accepted) or False (declined)
-
-    @discord.ui.button(label="Accept Sale", style=discord.ButtonStyle.success, emoji="✅")
-    async def accept(self, interaction: Interaction, button: Button):
-        if interaction.user != self.receiver:
-            await interaction.response.send_message("❌ You are not authorized to respond to this sale.", ephemeral=True)
-            return
-        self.value = True
-        await interaction.response.send_message("✅ Sale accepted.", ephemeral=True)
-        self.stop()
-
-    @discord.ui.button(label="Decline Sale", style=discord.ButtonStyle.danger, emoji="❌")
-    async def decline(self, interaction: Interaction, button: Button):
-        if interaction.user != self.receiver:
-            await interaction.response.send_message("❌ You are not authorized to respond to this sale.", ephemeral=True)
-            return
-        self.value = False
-        await interaction.response.send_message("❌ Sale declined.", ephemeral=True)
-        self.stop()
-
 class TradeConfirmationView(View):
     def __init__(self, initiator: discord.User, receiver: discord.User, timeout=120):
         super().__init__(timeout=timeout)
@@ -277,6 +251,7 @@ class PetPaginator(View):
 class Battles(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.forceleg = False
         self.softlanding = False
         if not self.decrease_pet_stats.is_running():
             self.decrease_pet_stats.start()
@@ -696,6 +671,8 @@ class Battles(commands.Cog):
             await view.wait()
 
             if view.value is True:
+
+
                 async with self.bot.pool.acquire() as conn:
                     # Fetch your item
                     if your_type == 'pet':
@@ -738,6 +715,45 @@ class Battles(commands.Cog):
                         return
 
                     their_user_id = their_item['user_id']
+
+                    pet_and_egg_count = await conn.fetchval(
+                        """
+                        SELECT COUNT(*) 
+                        FROM (
+                            SELECT id FROM monster_pets WHERE user_id = $1
+                            UNION ALL
+                            SELECT id FROM monster_eggs WHERE user_id = $1 AND hatched = FALSE
+                        ) AS combined
+                        """,
+                        their_user_id
+                    )
+
+                    if pet_and_egg_count >= 10:
+                        await ctx.send(
+                            _("They cannot have more than 10 pets or eggs. Please release a pet or wait for an egg to hatch."))
+                        return
+
+                    async with self.bot.pool.acquire() as conn:
+                        pet_and_egg_count = await conn.fetchval(
+                            """
+                            SELECT COUNT(*) 
+                            FROM (
+                                SELECT id FROM monster_pets WHERE user_id = $1
+                                UNION ALL
+                                SELECT id FROM monster_eggs WHERE user_id = $1 AND hatched = FALSE
+                            ) AS combined
+                            """,
+                            ctx.author.id
+                        )
+
+                    if pet_and_egg_count >= 10:
+                        await ctx.send(
+                            _("You cannot have more than 10 pets or eggs. Please release a pet or wait for an egg to hatch."))
+                        return
+
+
+
+
                     if their_user_id == ctx.author.id:
                         await ctx.send("❌ You cannot trade with your own items.")
                         await self.bot.reset_cooldown(ctx)
@@ -945,6 +961,30 @@ class Battles(commands.Cog):
 
             if view.value is True:
                 # Check buyer's money again
+                #await ctx.send(f"buyer id: {buyer.id}")
+                try:
+                    pet_and_egg_count = await conn.fetchval(
+                        """
+                        SELECT COUNT(*) 
+                        FROM (
+                            SELECT id FROM monster_pets WHERE user_id = $1
+                            UNION ALL
+                            SELECT id FROM monster_eggs WHERE user_id = $1 AND hatched = FALSE
+                        ) AS combined
+                        """,
+                        buyer.id
+                    )
+                except Exception as e:
+                    await ctx.send(_("An error occurred while checking pets and eggs. Please try again later."))
+                    # Optionally log the error for debugging
+                    self.bot.logger.error(f"Error checking pet and egg count: {e}")
+                    return
+
+                if pet_and_egg_count >= 10:
+                    await ctx.send(
+                        _("They cannot have more than 10 pets or eggs. Please release a pet or wait for an egg to hatch."))
+                    return
+
                 buyer_money = await conn.fetchval(
                     'SELECT "money" FROM profile WHERE "user" = $1;',
                     buyer.id
@@ -1295,17 +1335,16 @@ class Battles(commands.Cog):
 
     @is_gm()
     @commands.command(hidden=True)
-    async def setbtlevel(self, ctx, user_id: int, level: int):
+    async def setbtlevel(self, ctx, user_id: int, prestige: int, level: int):
         # Check if the user invoking the command is allowed
-        if ctx.author.id != 295173706496475136:
-            await ctx.send("You are not authorized to use this command.")
-            return
+
 
         try:
             async with self.bot.pool.acquire() as conn:
                 await conn.execute(
-                    'UPDATE battletower SET "level"=$1 WHERE "id"=$2;',
+                    'UPDATE battletower SET "level"=$1, prestige=$2 WHERE "id"=$3;',
                     level,
+                    prestige,
                     user_id,
                 )
             await ctx.send(f"Successfully updated level for user {user_id} to {level}.")
@@ -1726,27 +1765,21 @@ class Battles(commands.Cog):
                 except Exception as e:
                     await ctx.send(f"An error occurred: {e}")
 
-    # Usage within a command
-    @commands.command(aliases=["hd"], brief=_("Battle against players till you drop! (includes raidstats)"))
-    @user_cooldown(300)
-    @locale_doc
-    async def horde(self, ctx, modetype = "normal"):
-        _(
-            """
-        Initiates the 'Horde' mode where a player engages in battles against other players randomly until they are defeated.
-        The player's health points (HP) are retained after each battle, making it an endurance challenge.
-        """
-        )
-        try:
-            if modetype == "normal":
-                opponent = await self.find_opponent(ctx)
 
-            elif modetype == "custom":
-                opponent = await self.find_opponentcust(ctx)
-            else:
-                await self.bot.reset_cooldown(ctx)
-        except Exception as e:
-            await ctx.send(e)
+    @commands.group(aliases=["hd"], invoke_without_command=True)
+    @commands.cooldown(1, 300, commands.BucketType.user)
+    async def horde(self, ctx):
+        """Base 'horde' command (no direct usage)."""
+        opponent = await self.find_opponent(ctx)
+
+    # Usage within a command
+
+
+    @horde.command(name="custom")
+    @commands.cooldown(1, 300, commands.BucketType.user)
+    async def horde_custom(self, ctx):
+        """Horde in custom mode."""
+        opponent = await self.find_opponentcust(ctx)
 
     @battletower.command()
     async def start(self, ctx):
@@ -2001,6 +2034,25 @@ class Battles(commands.Cog):
         )
     """
 
+    @has_char()
+    @user_cooldown(5)
+    @commands.command(brief=_("Change preference of your Dialogue visability"))
+    @locale_doc
+    async def btdialogue(self, ctx):
+        try:
+            async with self.bot.pool.acquire() as connection:
+                dialoguetoggle = await connection.fetchval('SELECT dialoguetoggle FROM battletower WHERE "id" = $1',
+                                                           ctx.author.id)
+                if dialoguetoggle == True:
+                    await connection.execute('UPDATE battletower SET dialoguetoggle = FALSE WHERE "id" = $1',
+                                             ctx.author.id)
+                    await ctx.send("Starting dialogue for Batletowers is now **enabled.**")
+                else:
+                    await connection.execute('UPDATE battletower SET dialoguetoggle = TRUE WHERE "id" = $1',
+                                             ctx.author.id)
+                    await ctx.send("Starting dialogue for Batletowers is now **disabled.**")
+        except Exception as e:
+            await ctx.send(e)
 
     @has_char()
     @user_cooldown(600)
@@ -2057,6 +2109,7 @@ class Battles(commands.Cog):
                                                       ctx.author.id)
                 name_value = await connection.fetchval('SELECT name FROM profile WHERE "user" = $1',
                                                        ctx.author.id)
+                dialoguetoggle  = await connection.fetchval('SELECT dialoguetoggle FROM battletower WHERE id = $1', ctx.author.id)
 
             try:
                 level_data = self.levels[level]
@@ -2089,1272 +2142,1371 @@ class Battles(commands.Cog):
                     await self.bot.reset_cooldown(ctx)
                     await ctx.send("More coming soon.")
                     return
+            if dialoguetoggle == False:
+                if level == 2:
+                    level_data = self.levels[level]
+                    face_image_url = "https://i.ibb.co/G3V00YL/download-2.png"
+                    level_2_dialogue = [
+                        f"Vile Serpent: (Emerges from the shadows) You dare trespass upon the Shadowy Staircase, {name_value}? We, the Wraith and the Soul Eater, will be your tormentors.",
+                        f"{name_value}: (With unwavering determination) I've come to conquer this tower. What sadistic challenges do you have for me now?",
+                        "Wraith: (With a chilling whisper) Sadistic is an understatement. We're here to break your spirit, to watch you crumble.",
+                        f"Soul Eater: (With malevolence in its voice) Your bravery will be your undoing, {name_value}. We'll feast on your despair."
+                    ]
 
-            if level == 2:
-                level_data = self.levels[level]
-                face_image_url = "https://i.ibb.co/G3V00YL/download-2.png"
-                level_2_dialogue = [
-                    f"Vile Serpent: (Emerges from the shadows) You dare trespass upon the Shadowy Staircase, {name_value}? We, the Wraith and the Soul Eater, will be your tormentors.",
-                    f"{name_value}: (With unwavering determination) I've come to conquer this tower. What sadistic challenges do you have for me now?",
-                    "Wraith: (With a chilling whisper) Sadistic is an understatement. We're here to break your spirit, to watch you crumble.",
-                    f"Soul Eater: (With malevolence in its voice) Your bravery will be your undoing, {name_value}. We'll feast on your despair."
-                ]
+                    # Create an embed for the Abyssal Guardian's dialogue
+                    embed = discord.Embed(title="Vile Serpent", color=0x003366)
+                    embed.set_thumbnail(url=face_image_url)
 
-                # Create an embed for the Abyssal Guardian's dialogue
-                embed = discord.Embed(title="Vile Serpent", color=0x003366)
-                embed.set_thumbnail(url=face_image_url)
+                    # Function to create dialogue pages with specified titles, avatars, and thumbnails
+                    def create_dialogue_page(page):
+                        dialogue_embed = discord.Embed(
+                            title="Vile Serpent" if page == 0 else name_value if page == 1 else "Wraith" if page == 2 else "Soul Eater",
+                            color=0x003366,
+                            description=level_2_dialogue[page]
+                        )
 
-                # Function to create dialogue pages with specified titles, avatars, and thumbnails
-                def create_dialogue_page(page):
-                    dialogue_embed = discord.Embed(
-                        title="Vile Serpent" if page == 0 else name_value if page == 1 else "Wraith" if page == 2 else "Soul Eater",
-                        color=0x003366,
-                        description=level_2_dialogue[page]
-                    )
+                        # Set the Imp's thumbnail for the 4th dialogue
+                        if page == 0:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/LJcM38s/download-2.png")
+                        elif page == 1:
+                            if ctx.author.avatar is not None:
+                                dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                            else:
+                                dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
 
-                    # Set the Imp's thumbnail for the 4th dialogue
-                    if page == 0:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/LJcM38s/download-2.png")
-                    elif page == 1:
-                        if ctx.author.avatar is not None:
-                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        elif page == 2:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/NC2kHpz/download-3.png")
+                        elif page == 3:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/BchZsDh/download-7.png")
+
+                        return dialogue_embed
+
+                    pages = [create_dialogue_page(page) for page in range(len(level_2_dialogue))]
+
+                    current_page = 0
+                    dialogue_message = await ctx.send(embed=pages[current_page])
+
+                    # Define reactions for pagination
+                    reactions = ["⬅️", "➡️"]
+
+                    for reaction in reactions:
+                        await dialogue_message.add_reaction(reaction)
+
+                    def check(reaction, user):
+                        return user == ctx.author and str(reaction.emoji) in reactions
+
+                    while current_page < len(pages) - 1:  # Check the length of the 'pages' list
+                        try:
+                            reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
+
+                            if str(reaction.emoji) == "⬅️":
+                                current_page = max(0, current_page - 1)
+                            elif str(reaction.emoji) == "➡️":
+                                current_page = min(len(pages) - 1, current_page + 1)
+
+                            await dialogue_message.edit(embed=pages[current_page])
+                            if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
+                                await reaction.remove(user)
+
+                        except asyncio.TimeoutError:
+                            break
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 3:
+                    level_data = self.levels[level]
+                    face_image_url = "https://i.ibb.co/wLYrp17/download-8.png"
+                    level_3_dialogue = [
+                        f"Warlord Grakthar: (Roaring with fury) {name_value}, you've entered the Chamber of Whispers, but it is I, Warlord Grakthar, who commands this chamber. You will bow before me!",
+                        f"{name_value}: (Unyielding) I've come to conquer this tower. What twisted game are you playing, Warlord?",
+                        f"Goblin: (With a wicked cackle) Our game is one of torment and despair. You are our plaything, {name_value}.",
+                        f"Orc: (With a thunderous roar) Your strength won't save you from our might."
+                    ]
+
+                    # Create an embed for the Abyssal Guardian's dialogue
+                    embed = discord.Embed(title="Warlord Grakthar", color=0x003366)
+                    embed.set_thumbnail(url=face_image_url)
+
+                    # Function to create dialogue pages with specified titles, avatars, and thumbnails
+                    def create_dialogue_page(page):
+                        dialogue_embed = discord.Embed(
+                            title="Warlord Grakthar" if page == 0 else name_value if page == 1 else "Goblin" if page == 2 else "Orc",
+                            color=0x003366,
+                            description=level_3_dialogue[page]
+                        )
+
+                        # Set the Imp's thumbnail for the 4th dialogue
+                        if page == 0:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/wLYrp17/download-8.png")
+                        elif page == 1:
+                            if ctx.author.avatar is not None:
+                                dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                            else:
+                                dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
+                        elif page == 2:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/nfMcsry/download-10.png")
+                        elif page == 3:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/30HY5Jx/download-9.png")
+
+                        return dialogue_embed
+
+                    pages = [create_dialogue_page(page) for page in range(len(level_3_dialogue))]
+
+                    current_page = 0
+                    dialogue_message = await ctx.send(embed=pages[current_page])
+
+                    # Define reactions for pagination
+                    reactions = ["⬅️", "➡️"]
+
+                    for reaction in reactions:
+                        await dialogue_message.add_reaction(reaction)
+
+                    def check(reaction, user):
+                        return user == ctx.author and str(reaction.emoji) in reactions
+
+                    while current_page < len(pages) - 1:  # Check the length of the 'pages' list
+                        try:
+                            reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
+
+                            if str(reaction.emoji) == "⬅️":
+                                current_page = max(0, current_page - 1)
+                            elif str(reaction.emoji) == "➡️":
+                                current_page = min(len(pages) - 1, current_page + 1)
+
+                            await dialogue_message.edit(embed=pages[current_page])
+                            if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
+                                await reaction.remove(user)
+
+                        except asyncio.TimeoutError:
+                            break
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 4:
+                    level_data = self.levels[level]
+                    face_image_url = "https://i.ibb.co/wLYrp17/download-8.png"
+                    level_4_dialogue = [
+                        f"Necromancer Voss: (Raising his staff, emitting an eerie aura) Welcome to the Serpent's Lair, {name_value}. I am the Necromancer Voss, and this is my domain. Prepare for your doom.",
+                        f"{name_value}: (With unwavering resolve) I've come to conquer the tower. What relentless nightmare do you have in store, Voss?",
+                        f"Skeleton: (With a malevolent laugh) Nightmares are our specialty. You won't escape our grasp, {name_value}.",
+                        f"Zombie: (With an eerie moan) We will feast upon your despair."
+                    ]
+
+                    # Create an embed for the Abyssal Guardian's dialogue
+                    embed = discord.Embed(title="Necromancer Voss", color=0x003366)
+                    embed.set_thumbnail(url=face_image_url)
+
+                    # Function to create dialogue pages with specified titles, avatars, and thumbnails
+                    def create_dialogue_page(page):
+                        dialogue_embed = discord.Embed(
+                            title="Necromancer Voss" if page == 0 else name_value if page == 1 else "Skeleton" if page == 2 else "Zombie",
+                            color=0x003366,
+                            description=level_4_dialogue[page]
+                        )
+
+                        # Set the Imp's thumbnail for the 4th dialogue
+                        if page == 0:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/G5DrFfv/download-13.jpg")
+                        elif page == 1:
+                            if ctx.author.avatar is not None:
+                                dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                            else:
+                                dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
+                        elif page == 2:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/zS26jYD/download-12.jpg")
+                        elif page == 3:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/5L6V446/download-11.jpg")
+
+                        return dialogue_embed
+
+                    pages = [create_dialogue_page(page) for page in range(len(level_4_dialogue))]
+
+                    current_page = 0
+                    dialogue_message = await ctx.send(embed=pages[current_page])
+
+                    # Define reactions for pagination
+                    reactions = ["⬅️", "➡️"]
+
+                    for reaction in reactions:
+                        await dialogue_message.add_reaction(reaction)
+
+                    def check(reaction, user):
+                        return user == ctx.author and str(reaction.emoji) in reactions
+
+                    while current_page < len(pages) - 1:  # Check the length of the 'pages' list
+                        try:
+                            reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
+
+                            if str(reaction.emoji) == "⬅️":
+                                current_page = max(0, current_page - 1)
+                            elif str(reaction.emoji) == "➡️":
+                                current_page = min(len(pages) - 1, current_page + 1)
+
+                            await dialogue_message.edit(embed=pages[current_page])
+                            if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
+                                await reaction.remove(user)
+
+                        except asyncio.TimeoutError:
+                            break
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 5:
+                    level_data = self.levels[level]
+                    face_image_url = "https://i.ibb.co/wLYrp17/download-8.png"
+                    level_5_dialogue = [
+                        f"Blackblade Marauder: (Drawing a wicked blade) You've reached the Halls of Despair, {name_value}, but it is I, the Blackblade Marauder, who governs this realm. Prepare for annihilation.",
+                        f"{name_value}: (Unyielding) I've come this far, and I won't be deterred. What torment do you have for me, Marauder?",
+                        f"Bandit: (With a sinister laugh) Torment is our art. You'll crumble under our assault, {name_value}.",
+                        f"Highwayman: (With malevolence in his eyes) We'll break you, one way or another."
+                    ]
+
+                    # Create an embed for the Abyssal Guardian's dialogue
+                    embed = discord.Embed(title="Blackblade Marauder", color=0x003366)
+                    embed.set_thumbnail(url=face_image_url)
+
+                    # Function to create dialogue pages with specified titles, avatars, and thumbnails
+                    def create_dialogue_page(page):
+                        dialogue_embed = discord.Embed(
+                            title="Blackblade Marauder" if page == 0 else name_value if page == 1 else "Bandit" if page == 2 else "Highwayman",
+                            color=0x003366,
+                            description=level_5_dialogue[page]
+                        )
+
+                        # Set the Imp's thumbnail for the 4th dialogue
+                        if page == 0:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/0BdGZBn/download-14.jpg")
+                        elif page == 1:
+                            if ctx.author.avatar is not None:
+                                dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                            else:
+                                dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
+                        elif page == 2:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/gzsJR55/download-15.jpg")
+                        elif page == 3:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/zX0rXsP/download-18.jpg")
+
+                        return dialogue_embed
+
+                    pages = [create_dialogue_page(page) for page in range(len(level_5_dialogue))]
+
+                    current_page = 0
+                    dialogue_message = await ctx.send(embed=pages[current_page])
+
+                    # Define reactions for pagination
+                    reactions = ["⬅️", "➡️"]
+
+                    for reaction in reactions:
+                        await dialogue_message.add_reaction(reaction)
+
+                    def check(reaction, user):
+                        return user == ctx.author and str(reaction.emoji) in reactions
+
+                    while current_page < len(pages) - 1:  # Check the length of the 'pages' list
+                        try:
+                            reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
+
+                            if str(reaction.emoji) == "⬅️":
+                                current_page = max(0, current_page - 1)
+                            elif str(reaction.emoji) == "➡️":
+                                current_page = min(len(pages) - 1, current_page + 1)
+
+                            await dialogue_message.edit(embed=pages[current_page])
+                            if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
+                                await reaction.remove(user)
+
+                        except asyncio.TimeoutError:
+                            break
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 6:
+                    level_data = self.levels[level]
+                    face_image_url = "https://i.ibb.co/0rGtfC9/3d-illustration-dark-purple-spider-260nw-2191752107.png"
+                    level_6_dialogue = [
+                        f"Arachnok Queen: (Emerges from a web of silk) {name_value}, you have ventured into the Crimson Abyss. I am the Arachnok Queen, and this is my web. Tremble before my fangs.",
+                        f"{name_value}: (With unwavering determination) Enough of your games, Arachnok Queen. My journey continues, and I'll crush your illusions beneath my heel.",
+                        f"Spiderling: (With skittering legs) Illusions that shroud your path in darkness.",
+                        f"Venomous Arachnid: (With a poisonous hiss) We'll savor the moment your courage wanes."
+                    ]
+
+                    # Create an embed for the Abyssal Guardian's dialogue
+                    embed = discord.Embed(title="Arachnok Queen", color=0x003366)
+                    embed.set_thumbnail(url=face_image_url)
+
+                    # Function to create dialogue pages with specified titles, avatars, and thumbnails
+                    def create_dialogue_page(page):
+                        dialogue_embed = discord.Embed(
+                            title="Arachnok Queen" if page == 0 else name_value if page == 1 else "Spiderling" if page == 2 else "Venomous Arachnid",
+                            color=0x003366,
+                            description=level_6_dialogue[page]
+                        )
+
+                        # Set the Imp's thumbnail for the 4th dialogue
+                        if page == 0:
+                            dialogue_embed.set_thumbnail(
+                                url="https://i.ibb.co/0rGtfC9/3d-illustration-dark-purple-spider-260nw-2191752107.png")
+                        elif page == 1:
+                            if ctx.author.avatar is not None:
+                                dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                            else:
+                                dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
+                        elif page == 2:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/RDXvXcD/download-19.jpg")
+                        elif page == 3:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/XZPcqCY/download-20.jpg")
+
+                        return dialogue_embed
+
+                    pages = [create_dialogue_page(page) for page in range(len(level_6_dialogue))]
+
+                    current_page = 0
+                    dialogue_message = await ctx.send(embed=pages[current_page])
+
+                    # Define reactions for pagination
+                    reactions = ["⬅️", "➡️"]
+
+                    for reaction in reactions:
+                        await dialogue_message.add_reaction(reaction)
+
+                    def check(reaction, user):
+                        return user == ctx.author and str(reaction.emoji) in reactions
+
+                    while current_page < len(pages) - 1:  # Check the length of the 'pages' list
+                        try:
+                            reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
+
+                            if str(reaction.emoji) == "⬅️":
+                                current_page = max(0, current_page - 1)
+                            elif str(reaction.emoji) == "➡️":
+                                current_page = min(len(pages) - 1, current_page + 1)
+
+                            await dialogue_message.edit(embed=pages[current_page])
+                            if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
+                                await reaction.remove(user)
+
+                        except asyncio.TimeoutError:
+                            break
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 7:
+                    level_data = self.levels[level]
+                    face_image_url = "https://i.ibb.co/4jF6z29/download-22.jpg"
+                    level_7_dialogue = [
+                        f"Lich Lord Moros: (Rising from the ethereal mist) {name_value}, you stand upon the Forgotten Abyss. I am the Lich Lord Moros, and this realm is my spectral dominion. Your fate is sealed.",
+                        f"{name_value}: (With resolute determination) Your illusions won't deter me, Lich Lord Moros. I'll shatter your spectral veil and press on.",
+                        f"Wisp: (With a haunting glow) Veil of the forgotten and the lost.",
+                        f"Specter: (With an otherworldly presence) You'll become a forgotten memory."
+                    ]
+
+                    # Create an embed for the Abyssal Guardian's dialogue
+                    embed = discord.Embed(title="Arachnok Queen", color=0x003366)
+                    embed.set_thumbnail(url=face_image_url)
+
+                    # Function to create dialogue pages with specified titles, avatars, and thumbnails
+                    def create_dialogue_page(page):
+                        dialogue_embed = discord.Embed(
+                            title="Lich Lord Moros" if page == 0 else name_value if page == 1 else "Wisp" if page == 2 else "Specter",
+                            color=0x003366,
+                            description=level_7_dialogue[page]
+                        )
+
+                        # Set the Imp's thumbnail for the 4th dialogue
+                        if page == 0:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/4jF6z29/download-22.jpg")
+                        elif page == 1:
+                            if ctx.author.avatar is not None:
+                                dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                            else:
+                                dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
+                        elif page == 2:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/J3PJzPR/download-26.jpg")
+                        elif page == 3:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/XZPcqCY/download-20.jpg")
+
+                        return dialogue_embed
+
+                    pages = [create_dialogue_page(page) for page in range(len(level_7_dialogue))]
+
+                    current_page = 0
+                    dialogue_message = await ctx.send(embed=pages[current_page])
+
+                    # Define reactions for pagination
+                    reactions = ["⬅️", "➡️"]
+
+                    for reaction in reactions:
+                        await dialogue_message.add_reaction(reaction)
+
+                    def check(reaction, user):
+                        return user == ctx.author and str(reaction.emoji) in reactions
+
+                    while current_page < len(pages) - 1:  # Check the length of the 'pages' list
+                        try:
+                            reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
+
+                            if str(reaction.emoji) == "⬅️":
+                                current_page = max(0, current_page - 1)
+                            elif str(reaction.emoji) == "➡️":
+                                current_page = min(len(pages) - 1, current_page + 1)
+
+                            await dialogue_message.edit(embed=pages[current_page])
+                            if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
+                                await reaction.remove(user)
+
+                        except asyncio.TimeoutError:
+                            break
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 8:
+                    level_data = self.levels[level]
+                    face_image_url = "https://i.ibb.co/YWSkgYx/download-27.jpg"
+                    level_8_dialogue = [
+                        f"Frostfire Behemoth: (Rising from the molten core) {name_value}, you have entered the Dreadlord's Domain, my domain. I am the Frostfire Behemoth, and I shall incinerate your hopes.",
+                        f"{name_value}: (With fierce determination) You will find no mercy in the heart of the dreadlord, Frostfire Behemoth. Your flames won't consume me.",
+                        "Frost Imp: (With icy flames) Flames that burn with unrelenting fury.",
+                        "Ice Elemental: (With a frigid gaze) We'll snuff out your defiance."
+                    ]
+
+                    # Create an embed for the Abyssal Guardian's dialogue
+                    embed = discord.Embed(title="Frostfire Behemoth", color=0x003366)
+                    embed.set_thumbnail(url=face_image_url)
+
+                    # Function to create dialogue pages with specified titles, avatars, and thumbnails
+                    def create_dialogue_page(page):
+                        dialogue_embed = discord.Embed(
+                            title="Frostfire Behemoth" if page == 0 else name_value if page == 1 else "Frost Imp" if page == 2 else "Ice Elemental",
+                            color=0x003366,
+                            description=level_8_dialogue[page]
+                        )
+
+                        # Set the Imp's thumbnail for the 4th dialogue
+                        if page == 0:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/YWSkgYx/download-27.jpg")
+                        elif page == 1:
+                            if ctx.author.avatar is not None:
+                                dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                            else:
+                                dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
+                        elif page == 2:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/5M6zTB4/download-28.jpg")
+                        elif page == 3:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/ssLVKWv/download-29.jpg")
+
+                        return dialogue_embed
+
+                    pages = [create_dialogue_page(page) for page in range(len(level_8_dialogue))]
+
+                    current_page = 0
+                    dialogue_message = await ctx.send(embed=pages[current_page])
+
+                    # Define reactions for pagination
+                    reactions = ["⬅️", "➡️"]
+
+                    for reaction in reactions:
+                        await dialogue_message.add_reaction(reaction)
+
+                    def check(reaction, user):
+                        return user == ctx.author and str(reaction.emoji) in reactions
+
+                    while current_page < len(pages) - 1:  # Check the length of the 'pages' list
+                        try:
+                            reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
+
+                            if str(reaction.emoji) == "⬅️":
+                                current_page = max(0, current_page - 1)
+                            elif str(reaction.emoji) == "➡️":
+                                current_page = min(len(pages) - 1, current_page + 1)
+
+                            await dialogue_message.edit(embed=pages[current_page])
+                            if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
+                                await reaction.remove(user)
+
+                        except asyncio.TimeoutError:
+                            break
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 9:
+                    level_data = self.levels[level]
+                    face_image_url = "https://i.ibb.co/GC8V9cq/download-31.jpghttps://i.ibb.co/GC8V9cq/download-31.jpg"
+                    level_9_dialogue = [
+                        f"Dragonlord Zaldrak: (Emerging from the icy winds) {name_value}, you tread upon the Frozen Abyss. I am the Dragonlord Zaldrak, and your presence chills me to the bone.",
+                        f"{name_value}: (With steely resolve) I've come to conquer the tower. What frigid challenges lie ahead, Dragonlord Zaldrak?",
+                        f"Lizardman: (With reptilian cunning) Challenges as cold as the abyss itself. Will your spirit thaw in the face of despair?",
+                        f"Dragonkin: (With a fiery breath) We shall engulf you in frost and flame."
+                    ]
+
+                    # Create an embed for the Abyssal Guardian's dialogue
+                    embed = discord.Embed(title="Dragonlord Zaldrak", color=0x003366)
+                    embed.set_thumbnail(url=face_image_url)
+
+                    # Function to create dialogue pages with specified titles, avatars, and thumbnails
+                    def create_dialogue_page(page):
+                        dialogue_embed = discord.Embed(
+                            title="Dragonlord Zaldrak" if page == 0 else name_value if page == 1 else "Lizardman" if page == 2 else "Dragonkin",
+                            color=0x003366,
+                            description=level_9_dialogue[page]
+                        )
+
+                        # Set the Imp's thumbnail for the 4th dialogue
+                        if page == 0:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/Q7VMzD0/download-30.jpg")
+                        elif page == 1:
+                            if ctx.author.avatar is not None:
+                                dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                            else:
+                                dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
+                        elif page == 2:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/GC8V9cq/download-31.jpg")
+                        elif page == 3:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/2ckDS1k/download-32.jpg")
+
+                        return dialogue_embed
+
+                    pages = [create_dialogue_page(page) for page in range(len(level_9_dialogue))]
+
+                    current_page = 0
+                    dialogue_message = await ctx.send(embed=pages[current_page])
+
+                    # Define reactions for pagination
+                    reactions = ["⬅️", "➡️"]
+
+                    for reaction in reactions:
+                        await dialogue_message.add_reaction(reaction)
+
+                    def check(reaction, user):
+                        return user == ctx.author and str(reaction.emoji) in reactions
+
+                    while current_page < len(pages) - 1:  # Check the length of the 'pages' list
+                        try:
+                            reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
+
+                            if str(reaction.emoji) == "⬅️":
+                                current_page = max(0, current_page - 1)
+                            elif str(reaction.emoji) == "➡️":
+                                current_page = min(len(pages) - 1, current_page + 1)
+
+                            await dialogue_message.edit(embed=pages[current_page])
+                            if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
+                                await reaction.remove(user)
+
+                        except asyncio.TimeoutError:
+                            break
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 10:
+                    level_data = self.levels[level]
+                    face_image_url = "https://i.ibb.co/5TYNLrc/download-33.jpg"
+                    level_10_dialogue = [
+                        f"Soulreaver Lurkthar: (Manifesting from the void) {name_value}, you have reached the Ethereal Nexus, a realm beyond your comprehension. I am Soulreaver Lurkthar, and you are insignificant.",
+                        f"{name_value}: (With unyielding determination) I've come this far. What secrets does this realm hold, Soulreaver Lurkthar?",
+                        "Haunted Spirit: (With spectral whispers) Secrets that unravel sanity and defy reality. Are you prepared for the abyss of the unknown?",
+                        "Phantom Wraith: (With an ethereal presence) Your mind will crumble in the presence of the enigma."
+                    ]
+
+                    # Create an embed for the Abyssal Guardian's dialogue
+                    embed = discord.Embed(title="Frostfire Behemoth", color=0x003366)
+                    embed.set_thumbnail(url=face_image_url)
+
+                    # Function to create dialogue pages with specified titles, avatars, and thumbnails
+                    def create_dialogue_page(page):
+                        dialogue_embed = discord.Embed(
+                            title="Soulreaver Lurkthar" if page == 0 else name_value if page == 1 else "Haunted Spirit" if page == 2 else "Phantom Wraith",
+                            color=0x003366,
+                            description=level_10_dialogue[page]
+                        )
+
+                        # Set the Imp's thumbnail for the 4th dialogue
+                        if page == 0:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/5TYNLrc/download-33.jpg")
+                        elif page == 1:
+                            if ctx.author.avatar is not None:
+                                dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                            else:
+                                dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
+                        elif page == 2:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/kB5ypsM/download-34.jpg")
+                        elif page == 3:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/6BTRt3s/download-35.jpg")
+
+                        return dialogue_embed
+
+                    pages = [create_dialogue_page(page) for page in range(len(level_10_dialogue))]
+
+                    current_page = 0
+                    dialogue_message = await ctx.send(embed=pages[current_page])
+
+                    # Define reactions for pagination
+                    reactions = ["⬅️", "➡️"]
+
+                    for reaction in reactions:
+                        await dialogue_message.add_reaction(reaction)
+
+                    def check(reaction, user):
+                        return user == ctx.author and str(reaction.emoji) in reactions
+
+                    while current_page < len(pages) - 1:  # Check the length of the 'pages' list
+                        try:
+                            reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
+
+                            if str(reaction.emoji) == "⬅️":
+                                current_page = max(0, current_page - 1)
+                            elif str(reaction.emoji) == "➡️":
+                                current_page = min(len(pages) - 1, current_page + 1)
+
+                            await dialogue_message.edit(embed=pages[current_page])
+                            if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
+                                await reaction.remove(user)
+
+                        except asyncio.TimeoutError:
+                            break
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 11:
+                    level_data = self.levels[level]
+                    face_image_url = "https://i.ibb.co/5TYNLrc/download-33.jpg"
+                    level_11_dialogue = [
+                        f"Ravengaze Alpha: (Rising from the shadows) {name_value}, you have ventured into the dreaded Ravengaze Highlands. I am the Ravengaze Alpha, and this is my hunting ground. Prepare for your demise.",
+                        f"{name_value}: (With indomitable resolve) I've come to conquer this tower. What challenges await, Ravengaze Alpha?",
+                        f"Gnoll Raider: (With savage fervor) Challenges that will make you pray for mercy. Do you have what it takes to survive?",
+                        f"Hyena Pack: (With menacing laughter) *growls*"
+                    ]
+
+                    # Create an embed for the Abyssal Guardian's dialogue
+                    embed = discord.Embed(title="Ravengaze Alpha", color=0x003366)
+                    embed.set_thumbnail(url=face_image_url)
+
+                    # Function to create dialogue pages with specified titles, avatars, and thumbnails
+                    def create_dialogue_page(page):
+                        dialogue_embed = discord.Embed(
+                            title="Ravengaze Alpha" if page == 0 else name_value if page == 1 else "Gnoll Raider" if page == 2 else "Hyena Pack",
+                            color=0x003366,
+                            description=level_11_dialogue[page]
+                        )
+
+                        # Set the Imp's thumbnail for the 4th dialogue
+                        if page == 0:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/YjqfWSc/download-8.jpg")
+                        elif page == 1:
+                            if ctx.author.avatar is not None:
+                                dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                            else:
+                                dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
+                        elif page == 2:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/kJyTsWL/download-11.jpg")
+                        elif page == 3:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/Y7w2Sy4/download-12.jpg")
+
+                        return dialogue_embed
+
+                    pages = [create_dialogue_page(page) for page in range(len(level_11_dialogue))]
+
+                    current_page = 0
+                    dialogue_message = await ctx.send(embed=pages[current_page])
+
+                    # Define reactions for pagination
+                    reactions = ["⬅️", "➡️"]
+
+                    for reaction in reactions:
+                        await dialogue_message.add_reaction(reaction)
+
+                    def check(reaction, user):
+                        return user == ctx.author and str(reaction.emoji) in reactions
+
+                    while current_page < len(pages) - 1:  # Check the length of the 'pages' list
+                        try:
+                            reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
+
+                            if str(reaction.emoji) == "⬅️":
+                                current_page = max(0, current_page - 1)
+                            elif str(reaction.emoji) == "➡️":
+                                current_page = min(len(pages) - 1, current_page + 1)
+
+                            await dialogue_message.edit(embed=pages[current_page])
+                            if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
+                                await reaction.remove(user)
+
+                        except asyncio.TimeoutError:
+                            break
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 12:
+                    level_data = self.levels[level]
+                    face_image_url = "https://i.ibb.co/5TYNLrc/download-33.jpg"
+                    level_12_dialogue = [
+                        f"Nightshade Serpentis: (Emerging from the shadows) {name_value}, you stand within the cursed Nocturne Domain. I am Nightshade Serpentis, and your fate is sealed.",
+                        f"{name_value}: (With unwavering determination) I've come to conquer the tower. What nightmares do you bring, Nightshade Serpentis?",
+                        f"Gloomhound: (With eerie howling) Nightmares that will haunt your every thought. Do you have the courage to face them?",
+                        f"Nocturne Stalker: (With a sinister grin) Your resolve will crumble under the weight of your own dread."
+                    ]
+
+                    # Create an embed for the Abyssal Guardian's dialogue
+                    embed = discord.Embed(title="Frostfire Behemoth", color=0x003366)
+                    embed.set_thumbnail(url=face_image_url)
+
+                    # Function to create dialogue pages with specified titles, avatars, and thumbnails
+                    def create_dialogue_page(page):
+                        dialogue_embed = discord.Embed(
+                            title="Nightshade Serpentis" if page == 0 else name_value if page == 1 else "Gloomhound" if page == 2 else "Nocturne Stalker",
+                            color=0x003366,
+                            description=level_12_dialogue[page]
+                        )
+
+                        # Set the Imp's thumbnail for the 4th dialogue
+                        if page == 0:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/4TtY6T9/download-14.jpg")
+                        elif page == 1:
+                            if ctx.author.avatar is not None:
+                                dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                            else:
+                                dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
+                        elif page == 2:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/0BGmFXZ/download-15.jpg")
+                        elif page == 3:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/svhv2XJ/download-16.jpg")
+
+                        return dialogue_embed
+
+                    pages = [create_dialogue_page(page) for page in range(len(level_12_dialogue))]
+
+                    current_page = 0
+                    dialogue_message = await ctx.send(embed=pages[current_page])
+
+                    # Define reactions for pagination
+                    reactions = ["⬅️", "➡️"]
+
+                    for reaction in reactions:
+                        await dialogue_message.add_reaction(reaction)
+
+                    def check(reaction, user):
+                        return user == ctx.author and str(reaction.emoji) in reactions
+
+                    while current_page < len(pages) - 1:  # Check the length of the 'pages' list
+                        try:
+                            reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
+
+                            if str(reaction.emoji) == "⬅️":
+                                current_page = max(0, current_page - 1)
+                            elif str(reaction.emoji) == "➡️":
+                                current_page = min(len(pages) - 1, current_page + 1)
+
+                            await dialogue_message.edit(embed=pages[current_page])
+                            if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
+                                await reaction.remove(user)
+
+                        except asyncio.TimeoutError:
+                            break
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 13:
+                    level_data = self.levels[level]
+                    face_image_url = "https://i.ibb.co/5TYNLrc/download-33.jpg"
+                    level_13_dialogue = [
+                        f"Ignis Inferno: (Rising from molten flames) {name_value}, you have entered the Pyroclasmic Abyss, a realm of searing torment. I am Ignis Inferno, and your presence will fuel the flames of destruction.",
+                        f"{name_value}: (Unyielding) I've come to conquer this tower. What scorching challenges do you present, Ignis Inferno?",
+                        f"Magma Elemental: (With fiery rage) Challenges as relentless as the molten core itself. Are you prepared to endure the unending inferno?",
+                        f"Inferno Imp: (With malevolent glee) Your flesh will sear, and your spirit will smolder."
+                    ]
+
+                    # Create an embed for the Abyssal Guardian's dialogue
+                    embed = discord.Embed(title="Frostfire Behemoth", color=0x003366)
+                    embed.set_thumbnail(url=face_image_url)
+
+                    # Function to create dialogue pages with specified titles, avatars, and thumbnails
+                    def create_dialogue_page(page):
+                        dialogue_embed = discord.Embed(
+                            title="Ignis Inferno" if page == 0 else name_value if page == 1 else "Magma Elemental" if page == 2 else "Inferno Imp",
+                            color=0x003366,
+                            description=level_13_dialogue[page]
+                        )
+
+                        # Set the Imp's thumbnail for the 4th dialogue
+                        if page == 0:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/HYcdZBy/download-17.jpg")
+                        elif page == 1:
+                            if ctx.author.avatar is not None:
+                                dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                            else:
+                                dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
+                        elif page == 2:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/K0tG23M/download-18.jpg")
+                        elif page == 3:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/2ZgBn44/download-20.jpg")
+
+                        return dialogue_embed
+
+                    pages = [create_dialogue_page(page) for page in range(len(level_13_dialogue))]
+
+                    current_page = 0
+                    dialogue_message = await ctx.send(embed=pages[current_page])
+
+                    # Define reactions for pagination
+                    reactions = ["⬅️", "➡️"]
+
+                    for reaction in reactions:
+                        await dialogue_message.add_reaction(reaction)
+
+                    def check(reaction, user):
+                        return user == ctx.author and str(reaction.emoji) in reactions
+
+                    while current_page < len(pages) - 1:  # Check the length of the 'pages' list
+                        try:
+                            reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
+
+                            if str(reaction.emoji) == "⬅️":
+                                current_page = max(0, current_page - 1)
+                            elif str(reaction.emoji) == "➡️":
+                                current_page = min(len(pages) - 1, current_page + 1)
+
+                            await dialogue_message.edit(embed=pages[current_page])
+                            if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
+                                await reaction.remove(user)
+
+                        except asyncio.TimeoutError:
+                            break
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 14:
+                    level_data = self.levels[level]
+                    face_image_url = "https://i.ibb.co/5TYNLrc/download-33.jpg"
+                    level_14_dialogue = [
+                        f"Wraithlord Maroth: (Emerging from the spectral mists) {name_value}, you have reached the spectral wastes, a realm of eternal torment. I am Wraithlord Maroth, and your suffering will echo through the void.",
+                        f"{name_value}: (With unwavering determination) I've come to conquer the tower. What spectral horrors await, Wraithlord Maroth?",
+                        f"Cursed Banshee: (With haunting wails) Horrors that will rend your soul asunder. Do you have the will to endure?",
+                        f"Spectral Harbinger: (With a malevolent whisper) Your torment shall be everlasting."
+                    ]
+
+                    # Create an embed for the Abyssal Guardian's dialogue
+                    embed = discord.Embed(title="Frostfire Behemoth", color=0x003366)
+                    embed.set_thumbnail(url=face_image_url)
+
+                    # Function to create dialogue pages with specified titles, avatars, and thumbnails
+                    def create_dialogue_page(page):
+                        dialogue_embed = discord.Embed(
+                            title="Wraithlord Maroth" if page == 0 else name_value if page == 1 else "Cursed Banshee" if page == 2 else "Spectral Harbinger",
+                            color=0x003366,
+                            description=level_14_dialogue[page]
+                        )
+
+                        # Set the Imp's thumbnail for the 4th dialogue
+                        if page == 0:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/56dsQMY/download-21.jpg")
+                        elif page == 1:
+                            if ctx.author.avatar is not None:
+                                dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                            else:
+                                dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
+                        elif page == 2:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/pLP2djF/download-22.jpg")
+                        elif page == 3:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/R0PdqJ7/download-23.jpg")
+
+                        return dialogue_embed
+
+                    pages = [create_dialogue_page(page) for page in range(len(level_14_dialogue))]
+
+                    current_page = 0
+                    dialogue_message = await ctx.send(embed=pages[current_page])
+
+                    # Define reactions for pagination
+                    reactions = ["⬅️", "➡️"]
+
+                    for reaction in reactions:
+                        await dialogue_message.add_reaction(reaction)
+
+                    def check(reaction, user):
+                        return user == ctx.author and str(reaction.emoji) in reactions
+
+                    while current_page < len(pages) - 1:  # Check the length of the 'pages' list
+                        try:
+                            reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
+
+                            if str(reaction.emoji) == "⬅️":
+                                current_page = max(0, current_page - 1)
+                            elif str(reaction.emoji) == "➡️":
+                                current_page = min(len(pages) - 1, current_page + 1)
+
+                            await dialogue_message.edit(embed=pages[current_page])
+                            if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
+                                await reaction.remove(user)
+
+                        except asyncio.TimeoutError:
+                            break
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 15:
+                    level_data = self.levels[level]
+                    face_image_url = "https://i.ibb.co/5TYNLrc/download-33.jpg"
+                    level_15_dialogue = [
+                        f"Infernus, the Infernal: (Emerging from the depths of fire) {name_value}, you have entered the Infernal Abyss, a realm of unrelenting flames. I am Infernus, the Infernal, and your existence will be consumed by the inferno.",
+                        f"{name_value}: (Unyielding) I've come this far, and I won't be deterred. What blazing trials do you have in store, Infernus?",
+                        f"Demonic Imp: (With a malevolent grin) Trials that will scorch your very soul. Are you prepared to burn?",
+                        f"Hellspawn Reaver: (With fiery eyes) The flames of your doom shall be unquenchable."
+                    ]
+
+                    # Create an embed for the Abyssal Guardian's dialogue
+                    embed = discord.Embed(title="Frostfire Behemoth", color=0x003366)
+                    embed.set_thumbnail(url=face_image_url)
+
+
+
+                    # Function to create dialogue pages with specified titles, avatars, and thumbnails
+                    def create_dialogue_page(page):
+                        dialogue_embed = discord.Embed(
+                            title="Infernus, the Infernal" if page == 0 else name_value if page == 1 else "Demonic Imp" if page == 2 else "Hellspawn Reaver",
+                            color=0x003366,
+                            description=level_15_dialogue[page]
+                        )
+
+                        # Set the Imp's thumbnail for the 4th dialogue
+                        if page == 0:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/R2Nm6vY/download-24.jpg")
+                        elif page == 1:
+                            if ctx.author.avatar is not None:
+                                dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                            else:
+                                dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+
+                        elif page == 2:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/GdhXTWN/download-25.jpg")
+                        elif page == 3:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/ZftX1xB/download-26.jpg")
+
+                        return dialogue_embed
+
+                    pages = [create_dialogue_page(page) for page in range(len(level_15_dialogue))]
+
+                    current_page = 0
+                    dialogue_message = await ctx.send(embed=pages[current_page])
+
+                    # Define reactions for pagination
+                    reactions = ["⬅️", "➡️"]
+
+                    for reaction in reactions:
+                        await dialogue_message.add_reaction(reaction)
+
+                    def check(reaction, user):
+                        return user == ctx.author and str(reaction.emoji) in reactions
+
+                    while current_page < len(pages) - 1:  # Check the length of the 'pages' list
+                        try:
+                            reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
+
+                            if str(reaction.emoji) == "⬅️":
+                                current_page = max(0, current_page - 1)
+                            elif str(reaction.emoji) == "➡️":
+                                current_page = min(len(pages) - 1, current_page + 1)
+
+                            await dialogue_message.edit(embed=pages[current_page])
+                            if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
+                                await reaction.remove(user)
+
+                        except asyncio.TimeoutError:
+                            break
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 16:
+                    async with self.bot.pool.acquire() as connection:
+                        query = 'SELECT "user" FROM profile WHERE "user" != $1 ORDER BY RANDOM() LIMIT 2'
+                        random_users = await connection.fetch(query, ctx.author.id)
+
+                        # Extracting the user IDs
+                        random_user_objects = []
+
+                        for user in random_users:
+                            user_id = user['user']
+                            # Fetch user object from ID
+                            fetched_user = await self.bot.fetch_user(user_id)
+                            if fetched_user:
+                                random_user_objects.append(fetched_user)
+
+                        # Ensure two separate user objects are obtained
+                        if len(random_user_objects) >= 2:
+                            random_user_object_1 = random_user_objects[0]
+                            random_user_object_2 = random_user_objects[1]
+                            # await ctx.send(f"{random_user_object_1.display_name} {random_user_object_2.display_name}")
                         else:
-                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+                            # Handle case if there are fewer than 2 non-author users in the database
+                            return None, None
+                    level_data = self.levels[level]
+                    face_image_url = "https://gcdnb.pbrd.co/images/ueKgTmbvB8qb.jpg"
+                    level_16_dialogue = [
+                        f"Master Shapeshifter: In the dance of shadows, I am the conductor—every face you've known, every trust betrayed, I've worn like a symphony; now, join my orchestra or become its crescendo.",
+                        f"{name_value}: In your game of deceit, I see only a feeble attempt to shroud the inevitable. Your illusions crumble against my unyielding will—cross me, and witness the true horror of defiance.",
+                        f"{random_user_object_1.display_name}: I mimic your friend's form, but within me, your worst nightmares lurk, a puppeteer of your trust, feeding on your doubt and fear, reveling in the impending doom.",
+                        f"{random_user_object_2.display_name}: I've assumed your confidant's guise, yet beneath this borrowed skin, your anxieties writhe, whispering your secrets; in the labyrinth of your mind, I'm the embodiment of your darkest apprehensions, ready to consume your hopes."
+                    ]
 
-                    elif page == 2:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/NC2kHpz/download-3.png")
-                    elif page == 3:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/BchZsDh/download-7.png")
+                    # Create an embed for the Abyssal Guardian's dialogue
+                    embed = discord.Embed(title="Master Shapeshifter", color=0x003366)
+                    embed.set_thumbnail(url=face_image_url)
 
-                    return dialogue_embed
+                    # Function to create dialogue pages with specified titles, avatars, and thumbnails
+                    def create_dialogue_page(page):
+                        dialogue_embed = discord.Embed(
+                            title="Master Shapeshifter" if page == 0 else name_value if page == 1 else random_user_object_1.display_name if page == 2 else random_user_object_2.display_name,
+                            color=0x003366,
+                            description=level_16_dialogue[page]
+                        )
 
-                pages = [create_dialogue_page(page) for page in range(len(level_2_dialogue))]
+                        # Set the Imp's thumbnail for the 4th dialogue
+                        default_avatar_url = "https://ia803204.us.archive.org/4/items/discordprofilepictures/discordblue.png"
 
-                current_page = 0
-                dialogue_message = await ctx.send(embed=pages[current_page])
+                        if page == 0:
+                            thumbnail_url = "https://gcdnb.pbrd.co/images/ueKgTmbvB8qb.jpg"
+                        elif page == 1:
+                            thumbnail_url = ctx.author.avatar.url if ctx.author.avatar else default_avatar_url
+                        elif page == 2:
+                            thumbnail_url = random_user_object_1.avatar.url if random_user_object_1.avatar else default_avatar_url
+                        elif page == 3:
+                            thumbnail_url = random_user_object_2.avatar.url if random_user_object_2.avatar else default_avatar_url
 
-                # Define reactions for pagination
-                reactions = ["⬅️", "➡️"]
+                        dialogue_embed.set_thumbnail(url=thumbnail_url)
 
-                for reaction in reactions:
-                    await dialogue_message.add_reaction(reaction)
+                        return dialogue_embed
 
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in reactions
+                    pages = [create_dialogue_page(page) for page in range(len(level_16_dialogue))]
 
-                while current_page < len(pages) - 1:  # Check the length of the 'pages' list
-                    try:
-                        reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
+                    current_page = 0
+                    dialogue_message = await ctx.send(embed=pages[current_page])
 
-                        if str(reaction.emoji) == "⬅️":
-                            current_page = max(0, current_page - 1)
-                        elif str(reaction.emoji) == "➡️":
-                            current_page = min(len(pages) - 1, current_page + 1)
+                    # Define reactions for pagination
+                    reactions = ["⬅️", "➡️"]
 
-                        await dialogue_message.edit(embed=pages[current_page])
-                        if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
-                            await reaction.remove(user)
+                    for reaction in reactions:
+                        await dialogue_message.add_reaction(reaction)
 
-                    except asyncio.TimeoutError:
-                        break
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+                    def check(reaction, user):
+                        return user == ctx.author and str(reaction.emoji) in reactions
 
-            if level == 3:
-                level_data = self.levels[level]
-                face_image_url = "https://i.ibb.co/wLYrp17/download-8.png"
-                level_3_dialogue = [
-                    f"Warlord Grakthar: (Roaring with fury) {name_value}, you've entered the Chamber of Whispers, but it is I, Warlord Grakthar, who commands this chamber. You will bow before me!",
-                    f"{name_value}: (Unyielding) I've come to conquer this tower. What twisted game are you playing, Warlord?",
-                    f"Goblin: (With a wicked cackle) Our game is one of torment and despair. You are our plaything, {name_value}.",
-                    f"Orc: (With a thunderous roar) Your strength won't save you from our might."
-                ]
+                    while current_page < len(pages) - 1:  # Check the length of the 'pages' list
+                        try:
+                            reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
 
-                # Create an embed for the Abyssal Guardian's dialogue
-                embed = discord.Embed(title="Warlord Grakthar", color=0x003366)
-                embed.set_thumbnail(url=face_image_url)
+                            if str(reaction.emoji) == "⬅️":
+                                current_page = max(0, current_page - 1)
+                            elif str(reaction.emoji) == "➡️":
+                                current_page = min(len(pages) - 1, current_page + 1)
 
-                # Function to create dialogue pages with specified titles, avatars, and thumbnails
-                def create_dialogue_page(page):
-                    dialogue_embed = discord.Embed(
-                        title="Warlord Grakthar" if page == 0 else name_value if page == 1 else "Goblin" if page == 2 else "Orc",
-                        color=0x003366,
-                        description=level_3_dialogue[page]
-                    )
+                            await dialogue_message.edit(embed=pages[current_page])
+                            if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
+                                await reaction.remove(user)
 
-                    # Set the Imp's thumbnail for the 4th dialogue
-                    if page == 0:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/wLYrp17/download-8.png")
-                    elif page == 1:
-                        if ctx.author.avatar is not None:
+                        except asyncio.TimeoutError:
+                            break
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                # ===============================================================================================
+                # ===============================================================================================
+
+                if level == 17:
+                    level_data = self.levels[level]
+                    face_image_url = "https://i.ibb.co/R2v9jYs/image2.png"
+                    level_15_dialogue = [
+                        f"Eldritch Devourer: (Rising from the cosmic abyss) {name_value}, you stand at the Convergence Nexus, a junction of cosmic forces. I am the Eldritch Devourer, and your futile resistance will be devoured by the void.",
+                        f"{name_value}: (Fierce) I've carved my path through the chaos, and your cosmic feast won't satiate your hunger. Prepare for annihilation, Devourer.",
+                        f"Chaos Fiend: (With malicious glee) Annihilation, you say? The chaos you face is beyond comprehension. Your defiance is merely a flicker against the impending cosmic storm.",
+                        f"Voidborn Horror: (With eyes like swirling galaxies) Your essence will dissipate into the cosmic winds. Prepare for oblivion, interloper."
+                    ]
+
+                    # Create an embed for the Abyssal Guardian's dialogue
+                    embed = discord.Embed(title="Eldritch Devourer", color=0x003366)
+                    embed.set_thumbnail(url=face_image_url)
+
+                    # Function to create dialogue pages with specified titles, avatars, and thumbnails
+                    def create_dialogue_page(page):
+                        dialogue_embed = discord.Embed(
+                            title="Eldritch Devourer" if page == 0 else name_value if page == 1 else "Chaos Fiend" if page == 2 else "Voidborn Horror",
+                            color=0x003366,
+                            description=level_15_dialogue[page]
+                        )
+
+                        # Set the Imp's thumbnail for the 4th dialogue
+                        if page == 0:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/R2v9jYs/image2.png")
+                        elif page == 1:
                             dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        elif page == 2:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/c22vsWF/image.png")
+                        elif page == 3:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/kyvTszF/image3.png")
+
+                        return dialogue_embed
+
+                    pages = [create_dialogue_page(page) for page in range(len(level_15_dialogue))]
+
+                    current_page = 0
+                    dialogue_message = await ctx.send(embed=pages[current_page])
+
+                    # Define reactions for pagination
+                    reactions = ["⬅️", "➡️"]
+
+                    for reaction in reactions:
+                        await dialogue_message.add_reaction(reaction)
+
+                    def check(reaction, user):
+                        return user == ctx.author and str(reaction.emoji) in reactions
+
+                    while current_page < len(pages) - 1:  # Check the length of the 'pages' list
+                        try:
+                            reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
+
+                            if str(reaction.emoji) == "⬅️":
+                                current_page = max(0, current_page - 1)
+                            elif str(reaction.emoji) == "➡️":
+                                current_page = min(len(pages) - 1, current_page + 1)
+
+                            await dialogue_message.edit(embed=pages[current_page])
+                            if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
+                                await reaction.remove(user)
+
+                        except asyncio.TimeoutError:
+                            break
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                # ===============================================================================================
+                # ===============================================================================================
+
+                if level == 1:
+                    level_data = self.levels[level]
+                    face_image_url = "https://i.ibb.co/MgMbRjF/download-4.jpg"
+                    dialogue = [
+                        "[Abyssal Guardian]: With a bone-chilling hiss, the Abyssal Guardian emerges from the shadows, its eyes glowing with malevolence. Its obsidian armor exudes an aura of dread.",
+                        f"[{name_value}]: (Defiance in your voice) 'I've come to reclaim the Battle Tower and restore its glory,' you proclaim. Your voice echoes through the chamber, unwavering.",
+                        "[Abyssal Guardian]: (Raising its enormous spear high) 'Reclaim the tower, you say?' it taunts. 'Hahaha! You'll need more than bravado to defeat me. Prepare to face the abyss itself!'",
+                        "[Imp]: (Cackling with wicked glee) The impish creature appears at the guardian's side. 'Oh boy! I am starving. Gimme gimme!!'",
+                        f"[{name_value}]: (Radiant aura surrounding you) 'My resolve remains unshaken,' you declare. 'With the blessings of {god_value}, I shall bring your reign to an end!'"
+                    ]
+
+                    # Create an embed for the Abyssal Guardian's dialogue
+                    embed = discord.Embed(title="Abyssal Guardian", color=0x003366)
+                    embed.set_thumbnail(url=face_image_url)
+
+                    # Function to create dialogue pages with specified titles, avatars, and thumbnails
+                    def create_dialogue_page(page):
+                        dialogue_embed = discord.Embed(
+                            title="Abyssal Guardian" if page == 0 else name_value if page == 1 else "Abyssal Guardian" if page == 2 else "Imp" if page == 3 else name_value,
+                            color=0x003366,
+                            description=dialogue[page]
+                        )
+
+                        # Set the Imp's thumbnail for the 4th dialogue
+                        if page == 3:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/vYBdn7j/download-7.jpg")
                         else:
-                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
+                            # Set the player's profile picture as the thumbnail for dialogues 1 and 5
+                            thumbnail_url = str(ctx.author.avatar.url) if page in [1, 4] else face_image_url
+                            dialogue_embed.set_thumbnail(url=thumbnail_url)
 
-                    elif page == 2:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/nfMcsry/download-10.png")
-                    elif page == 3:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/30HY5Jx/download-9.png")
+                        return dialogue_embed
 
-                    return dialogue_embed
+                    pages = [create_dialogue_page(page) for page in range(len(dialogue))]
 
-                pages = [create_dialogue_page(page) for page in range(len(level_3_dialogue))]
+                    current_page = 0
+                    dialogue_message = await ctx.send(embed=pages[current_page])
 
-                current_page = 0
-                dialogue_message = await ctx.send(embed=pages[current_page])
+                    # Define reactions for pagination
+                    reactions = ["⬅️", "➡️"]
 
-                # Define reactions for pagination
-                reactions = ["⬅️", "➡️"]
+                    for reaction in reactions:
+                        await dialogue_message.add_reaction(reaction)
 
-                for reaction in reactions:
-                    await dialogue_message.add_reaction(reaction)
+                    def check(reaction, user):
+                        return user == ctx.author and str(reaction.emoji) in reactions
 
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in reactions
+                    while current_page < len(dialogue) - 1:
+                        try:
+                            reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
 
-                while current_page < len(pages) - 1:  # Check the length of the 'pages' list
-                    try:
-                        reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
+                            if str(reaction.emoji) == "⬅️":
+                                current_page = max(0, current_page - 1)
+                            elif str(reaction.emoji) == "➡️":
+                                current_page = min(len(pages) - 1, current_page + 1)
 
-                        if str(reaction.emoji) == "⬅️":
-                            current_page = max(0, current_page - 1)
-                        elif str(reaction.emoji) == "➡️":
-                            current_page = min(len(pages) - 1, current_page + 1)
+                            await dialogue_message.edit(embed=pages[current_page])
+                            if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
+                                await reaction.remove(user)
 
-                        await dialogue_message.edit(embed=pages[current_page])
-                        if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
-                            await reaction.remove(user)
+                        except asyncio.TimeoutError:
+                            break
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
 
-                    except asyncio.TimeoutError:
-                        break
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
 
-            if level == 4:
-                level_data = self.levels[level]
-                face_image_url = "https://i.ibb.co/wLYrp17/download-8.png"
-                level_4_dialogue = [
-                    f"Necromancer Voss: (Raising his staff, emitting an eerie aura) Welcome to the Serpent's Lair, {name_value}. I am the Necromancer Voss, and this is my domain. Prepare for your doom.",
-                    f"{name_value}: (With unwavering resolve) I've come to conquer the tower. What relentless nightmare do you have in store, Voss?",
-                    f"Skeleton: (With a malevolent laugh) Nightmares are our specialty. You won't escape our grasp, {name_value}.",
-                    f"Zombie: (With an eerie moan) We will feast upon your despair."
-                ]
+                # ===============================================================================================
+                # ===============================================================================================
 
-                # Create an embed for the Abyssal Guardian's dialogue
-                embed = discord.Embed(title="Necromancer Voss", color=0x003366)
-                embed.set_thumbnail(url=face_image_url)
+                if level == 18:
+                    level_data = self.levels[level]
+                    face_image_url = "https://i.ibb.co/0DjDgy5/image4.png"
+                    level_15_dialogue = [
+                        f"Dreadlord Vortigon: (Unfurling shadowy wings) {name_value}, your presence disrupts the harmony of shadows. I am Dreadlord Vortigon, and your defiance will be swallowed by the eternal night.",
+                        f"{name_value}: (Menacing) The shadows won't shield you from the reckoning I bring, Dreadlord. Prepare for your eternal night to meet its dawn of doom.",
+                        f"Blood Warden: (With vampiric grace) Doom, you say? Your life force will sustain the shadows, but it won't save you from the crimson embrace of the Blood Warden.",
+                        f"Juzam Djinn: (With an otherworldly sneer) Taste? Your arrogance is amusing, mortal. The price for entering this domain is your torment, inflicted by the Juzam Djinn."
+                    ]
 
-                # Function to create dialogue pages with specified titles, avatars, and thumbnails
-                def create_dialogue_page(page):
-                    dialogue_embed = discord.Embed(
-                        title="Necromancer Voss" if page == 0 else name_value if page == 1 else "Skeleton" if page == 2 else "Zombie",
-                        color=0x003366,
-                        description=level_4_dialogue[page]
-                    )
+                    # Create an embed for the Abyssal Guardian's dialogue
+                    embed = discord.Embed(title="Dreadlord Vortigon", color=0x003366)
+                    embed.set_thumbnail(url=face_image_url)
 
-                    # Set the Imp's thumbnail for the 4th dialogue
-                    if page == 0:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/G5DrFfv/download-13.jpg")
-                    elif page == 1:
-                        if ctx.author.avatar is not None:
+                    # Function to create dialogue pages with specified titles, avatars, and thumbnails
+                    def create_dialogue_page(page):
+                        dialogue_embed = discord.Embed(
+                            title="Dreadlord Vortigon" if page == 0 else name_value if page == 1 else "Blood Warden" if page == 2 else "Juzam Djinn",
+                            color=0x003366,
+                            description=level_15_dialogue[page]
+                        )
+
+                        # Set the Imp's thumbnail for the 4th dialogue
+                        if page == 0:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/0DjDgy5/image4.png")
+                        elif page == 1:
                             dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
+                        elif page == 2:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/t4QJ8ym/image5.png")
+                        elif page == 3:
+                            dialogue_embed.set_thumbnail(url="https://i.ibb.co/bRYv2Db/image6.png")
+
+                        return dialogue_embed
+
+                    pages = [create_dialogue_page(page) for page in range(len(level_15_dialogue))]
+
+                    current_page = 0
+                    dialogue_message = await ctx.send(embed=pages[current_page])
+
+                    # Define reactions for pagination
+                    reactions = ["⬅️", "➡️"]
+
+                    for reaction in reactions:
+                        await dialogue_message.add_reaction(reaction)
+
+                    def check(reaction, user):
+                        return user == ctx.author and str(reaction.emoji) in reactions
+
+                    while current_page < len(pages) - 1:  # Check the length of the 'pages' list
+                        try:
+                            reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
+
+                            if str(reaction.emoji) == "⬅️":
+                                current_page = max(0, current_page - 1)
+                            elif str(reaction.emoji) == "➡️":
+                                current_page = min(len(pages) - 1, current_page + 1)
+
+                            await dialogue_message.edit(embed=pages[current_page])
+                            if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
+                                await reaction.remove(user)
+
+                        except asyncio.TimeoutError:
+                            break
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                # ===============================================================================================
+                # ===============================================================================================
+
+
+
+                if level == 19:
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 20:
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 21:
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 22:
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 23:
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 24:
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 25:
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 26:
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 27:
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 28:
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 29:
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+                if level == 30:
+                    # Start the battle after all dialogue
+                    await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+
+            if dialoguetoggle:
+                if level != 0:
+                    if level != 16:
+                        await ctx.send("The battle begins!")
+
+            if dialoguetoggle:
+                if level == 16:
+                    async with self.bot.pool.acquire() as connection:
+                        query = 'SELECT "user" FROM profile WHERE "user" != $1 ORDER BY RANDOM() LIMIT 2'
+                        random_users = await connection.fetch(query, ctx.author.id)
+
+                        # Extracting the user IDs
+                        random_user_objects = []
+
+                        for user in random_users:
+                            user_id = user['user']
+                            # Fetch user object from ID
+                            fetched_user = await self.bot.fetch_user(user_id)
+                            if fetched_user:
+                                random_user_objects.append(fetched_user)
+
+                        # Ensure two separate user objects are obtained
+                        if len(random_user_objects) >= 2:
+                            random_user_object_1 = random_user_objects[0]
+                            random_user_object_2 = random_user_objects[1]
+                            # await ctx.send(f"{random_user_object_1.display_name} {random_user_object_2.display_name}")
                         else:
-                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
-
-                    elif page == 2:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/zS26jYD/download-12.jpg")
-                    elif page == 3:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/5L6V446/download-11.jpg")
-
-                    return dialogue_embed
-
-                pages = [create_dialogue_page(page) for page in range(len(level_4_dialogue))]
-
-                current_page = 0
-                dialogue_message = await ctx.send(embed=pages[current_page])
-
-                # Define reactions for pagination
-                reactions = ["⬅️", "➡️"]
-
-                for reaction in reactions:
-                    await dialogue_message.add_reaction(reaction)
-
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in reactions
-
-                while current_page < len(pages) - 1:  # Check the length of the 'pages' list
-                    try:
-                        reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
-
-                        if str(reaction.emoji) == "⬅️":
-                            current_page = max(0, current_page - 1)
-                        elif str(reaction.emoji) == "➡️":
-                            current_page = min(len(pages) - 1, current_page + 1)
-
-                        await dialogue_message.edit(embed=pages[current_page])
-                        if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
-                            await reaction.remove(user)
-
-                    except asyncio.TimeoutError:
-                        break
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 5:
-                level_data = self.levels[level]
-                face_image_url = "https://i.ibb.co/wLYrp17/download-8.png"
-                level_5_dialogue = [
-                    f"Blackblade Marauder: (Drawing a wicked blade) You've reached the Halls of Despair, {name_value}, but it is I, the Blackblade Marauder, who governs this realm. Prepare for annihilation.",
-                    f"{name_value}: (Unyielding) I've come this far, and I won't be deterred. What torment do you have for me, Marauder?",
-                    f"Bandit: (With a sinister laugh) Torment is our art. You'll crumble under our assault, {name_value}.",
-                    f"Highwayman: (With malevolence in his eyes) We'll break you, one way or another."
-                ]
-
-                # Create an embed for the Abyssal Guardian's dialogue
-                embed = discord.Embed(title="Blackblade Marauder", color=0x003366)
-                embed.set_thumbnail(url=face_image_url)
-
-                # Function to create dialogue pages with specified titles, avatars, and thumbnails
-                def create_dialogue_page(page):
-                    dialogue_embed = discord.Embed(
-                        title="Blackblade Marauder" if page == 0 else name_value if page == 1 else "Bandit" if page == 2 else "Highwayman",
-                        color=0x003366,
-                        description=level_5_dialogue[page]
-                    )
-
-                    # Set the Imp's thumbnail for the 4th dialogue
-                    if page == 0:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/0BdGZBn/download-14.jpg")
-                    elif page == 1:
-                        if ctx.author.avatar is not None:
-                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
-                        else:
-                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
-
-                    elif page == 2:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/gzsJR55/download-15.jpg")
-                    elif page == 3:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/zX0rXsP/download-18.jpg")
-
-                    return dialogue_embed
-
-                pages = [create_dialogue_page(page) for page in range(len(level_5_dialogue))]
-
-                current_page = 0
-                dialogue_message = await ctx.send(embed=pages[current_page])
-
-                # Define reactions for pagination
-                reactions = ["⬅️", "➡️"]
-
-                for reaction in reactions:
-                    await dialogue_message.add_reaction(reaction)
-
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in reactions
-
-                while current_page < len(pages) - 1:  # Check the length of the 'pages' list
-                    try:
-                        reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
-
-                        if str(reaction.emoji) == "⬅️":
-                            current_page = max(0, current_page - 1)
-                        elif str(reaction.emoji) == "➡️":
-                            current_page = min(len(pages) - 1, current_page + 1)
-
-                        await dialogue_message.edit(embed=pages[current_page])
-                        if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
-                            await reaction.remove(user)
-
-                    except asyncio.TimeoutError:
-                        break
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 6:
-                level_data = self.levels[level]
-                face_image_url = "https://i.ibb.co/0rGtfC9/3d-illustration-dark-purple-spider-260nw-2191752107.png"
-                level_6_dialogue = [
-                    f"Arachnok Queen: (Emerges from a web of silk) {name_value}, you have ventured into the Crimson Abyss. I am the Arachnok Queen, and this is my web. Tremble before my fangs.",
-                    f"{name_value}: (With unwavering determination) Enough of your games, Arachnok Queen. My journey continues, and I'll crush your illusions beneath my heel.",
-                    f"Spiderling: (With skittering legs) Illusions that shroud your path in darkness.",
-                    f"Venomous Arachnid: (With a poisonous hiss) We'll savor the moment your courage wanes."
-                ]
-
-                # Create an embed for the Abyssal Guardian's dialogue
-                embed = discord.Embed(title="Arachnok Queen", color=0x003366)
-                embed.set_thumbnail(url=face_image_url)
-
-                # Function to create dialogue pages with specified titles, avatars, and thumbnails
-                def create_dialogue_page(page):
-                    dialogue_embed = discord.Embed(
-                        title="Arachnok Queen" if page == 0 else name_value if page == 1 else "Spiderling" if page == 2 else "Venomous Arachnid",
-                        color=0x003366,
-                        description=level_6_dialogue[page]
-                    )
-
-                    # Set the Imp's thumbnail for the 4th dialogue
-                    if page == 0:
-                        dialogue_embed.set_thumbnail(
-                            url="https://i.ibb.co/0rGtfC9/3d-illustration-dark-purple-spider-260nw-2191752107.png")
-                    elif page == 1:
-                        if ctx.author.avatar is not None:
-                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
-                        else:
-                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
-
-                    elif page == 2:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/RDXvXcD/download-19.jpg")
-                    elif page == 3:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/XZPcqCY/download-20.jpg")
-
-                    return dialogue_embed
-
-                pages = [create_dialogue_page(page) for page in range(len(level_6_dialogue))]
-
-                current_page = 0
-                dialogue_message = await ctx.send(embed=pages[current_page])
-
-                # Define reactions for pagination
-                reactions = ["⬅️", "➡️"]
-
-                for reaction in reactions:
-                    await dialogue_message.add_reaction(reaction)
-
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in reactions
-
-                while current_page < len(pages) - 1:  # Check the length of the 'pages' list
-                    try:
-                        reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
-
-                        if str(reaction.emoji) == "⬅️":
-                            current_page = max(0, current_page - 1)
-                        elif str(reaction.emoji) == "➡️":
-                            current_page = min(len(pages) - 1, current_page + 1)
-
-                        await dialogue_message.edit(embed=pages[current_page])
-                        if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
-                            await reaction.remove(user)
-
-                    except asyncio.TimeoutError:
-                        break
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 7:
-                level_data = self.levels[level]
-                face_image_url = "https://i.ibb.co/4jF6z29/download-22.jpg"
-                level_7_dialogue = [
-                    f"Lich Lord Moros: (Rising from the ethereal mist) {name_value}, you stand upon the Forgotten Abyss. I am the Lich Lord Moros, and this realm is my spectral dominion. Your fate is sealed.",
-                    f"{name_value}: (With resolute determination) Your illusions won't deter me, Lich Lord Moros. I'll shatter your spectral veil and press on.",
-                    f"Wisp: (With a haunting glow) Veil of the forgotten and the lost.",
-                    f"Specter: (With an otherworldly presence) You'll become a forgotten memory."
-                ]
-
-                # Create an embed for the Abyssal Guardian's dialogue
-                embed = discord.Embed(title="Arachnok Queen", color=0x003366)
-                embed.set_thumbnail(url=face_image_url)
-
-                # Function to create dialogue pages with specified titles, avatars, and thumbnails
-                def create_dialogue_page(page):
-                    dialogue_embed = discord.Embed(
-                        title="Lich Lord Moros" if page == 0 else name_value if page == 1 else "Wisp" if page == 2 else "Specter",
-                        color=0x003366,
-                        description=level_7_dialogue[page]
-                    )
-
-                    # Set the Imp's thumbnail for the 4th dialogue
-                    if page == 0:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/4jF6z29/download-22.jpg")
-                    elif page == 1:
-                        if ctx.author.avatar is not None:
-                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
-                        else:
-                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
-
-                    elif page == 2:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/J3PJzPR/download-26.jpg")
-                    elif page == 3:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/XZPcqCY/download-20.jpg")
-
-                    return dialogue_embed
-
-                pages = [create_dialogue_page(page) for page in range(len(level_7_dialogue))]
-
-                current_page = 0
-                dialogue_message = await ctx.send(embed=pages[current_page])
-
-                # Define reactions for pagination
-                reactions = ["⬅️", "➡️"]
-
-                for reaction in reactions:
-                    await dialogue_message.add_reaction(reaction)
-
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in reactions
-
-                while current_page < len(pages) - 1:  # Check the length of the 'pages' list
-                    try:
-                        reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
-
-                        if str(reaction.emoji) == "⬅️":
-                            current_page = max(0, current_page - 1)
-                        elif str(reaction.emoji) == "➡️":
-                            current_page = min(len(pages) - 1, current_page + 1)
-
-                        await dialogue_message.edit(embed=pages[current_page])
-                        if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
-                            await reaction.remove(user)
-
-                    except asyncio.TimeoutError:
-                        break
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 8:
-                level_data = self.levels[level]
-                face_image_url = "https://i.ibb.co/YWSkgYx/download-27.jpg"
-                level_8_dialogue = [
-                    f"Frostfire Behemoth: (Rising from the molten core) {name_value}, you have entered the Dreadlord's Domain, my domain. I am the Frostfire Behemoth, and I shall incinerate your hopes.",
-                    f"{name_value}: (With fierce determination) You will find no mercy in the heart of the dreadlord, Frostfire Behemoth. Your flames won't consume me.",
-                    "Frost Imp: (With icy flames) Flames that burn with unrelenting fury.",
-                    "Ice Elemental: (With a frigid gaze) We'll snuff out your defiance."
-                ]
-
-                # Create an embed for the Abyssal Guardian's dialogue
-                embed = discord.Embed(title="Frostfire Behemoth", color=0x003366)
-                embed.set_thumbnail(url=face_image_url)
-
-                # Function to create dialogue pages with specified titles, avatars, and thumbnails
-                def create_dialogue_page(page):
-                    dialogue_embed = discord.Embed(
-                        title="Frostfire Behemoth" if page == 0 else name_value if page == 1 else "Frost Imp" if page == 2 else "Ice Elemental",
-                        color=0x003366,
-                        description=level_8_dialogue[page]
-                    )
-
-                    # Set the Imp's thumbnail for the 4th dialogue
-                    if page == 0:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/YWSkgYx/download-27.jpg")
-                    elif page == 1:
-                        if ctx.author.avatar is not None:
-                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
-                        else:
-                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
-
-                    elif page == 2:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/5M6zTB4/download-28.jpg")
-                    elif page == 3:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/ssLVKWv/download-29.jpg")
-
-                    return dialogue_embed
-
-                pages = [create_dialogue_page(page) for page in range(len(level_8_dialogue))]
-
-                current_page = 0
-                dialogue_message = await ctx.send(embed=pages[current_page])
-
-                # Define reactions for pagination
-                reactions = ["⬅️", "➡️"]
-
-                for reaction in reactions:
-                    await dialogue_message.add_reaction(reaction)
-
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in reactions
-
-                while current_page < len(pages) - 1:  # Check the length of the 'pages' list
-                    try:
-                        reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
-
-                        if str(reaction.emoji) == "⬅️":
-                            current_page = max(0, current_page - 1)
-                        elif str(reaction.emoji) == "➡️":
-                            current_page = min(len(pages) - 1, current_page + 1)
-
-                        await dialogue_message.edit(embed=pages[current_page])
-                        if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
-                            await reaction.remove(user)
-
-                    except asyncio.TimeoutError:
-                        break
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 9:
-                level_data = self.levels[level]
-                face_image_url = "https://i.ibb.co/GC8V9cq/download-31.jpghttps://i.ibb.co/GC8V9cq/download-31.jpg"
-                level_9_dialogue = [
-                    f"Dragonlord Zaldrak: (Emerging from the icy winds) {name_value}, you tread upon the Frozen Abyss. I am the Dragonlord Zaldrak, and your presence chills me to the bone.",
-                    f"{name_value}: (With steely resolve) I've come to conquer the tower. What frigid challenges lie ahead, Dragonlord Zaldrak?",
-                    f"Lizardman: (With reptilian cunning) Challenges as cold as the abyss itself. Will your spirit thaw in the face of despair?",
-                    f"Dragonkin: (With a fiery breath) We shall engulf you in frost and flame."
-                ]
-
-                # Create an embed for the Abyssal Guardian's dialogue
-                embed = discord.Embed(title="Dragonlord Zaldrak", color=0x003366)
-                embed.set_thumbnail(url=face_image_url)
-
-                # Function to create dialogue pages with specified titles, avatars, and thumbnails
-                def create_dialogue_page(page):
-                    dialogue_embed = discord.Embed(
-                        title="Dragonlord Zaldrak" if page == 0 else name_value if page == 1 else "Lizardman" if page == 2 else "Dragonkin",
-                        color=0x003366,
-                        description=level_9_dialogue[page]
-                    )
-
-                    # Set the Imp's thumbnail for the 4th dialogue
-                    if page == 0:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/Q7VMzD0/download-30.jpg")
-                    elif page == 1:
-                        if ctx.author.avatar is not None:
-                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
-                        else:
-                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
-
-                    elif page == 2:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/GC8V9cq/download-31.jpg")
-                    elif page == 3:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/2ckDS1k/download-32.jpg")
-
-                    return dialogue_embed
-
-                pages = [create_dialogue_page(page) for page in range(len(level_9_dialogue))]
-
-                current_page = 0
-                dialogue_message = await ctx.send(embed=pages[current_page])
-
-                # Define reactions for pagination
-                reactions = ["⬅️", "➡️"]
-
-                for reaction in reactions:
-                    await dialogue_message.add_reaction(reaction)
-
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in reactions
-
-                while current_page < len(pages) - 1:  # Check the length of the 'pages' list
-                    try:
-                        reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
-
-                        if str(reaction.emoji) == "⬅️":
-                            current_page = max(0, current_page - 1)
-                        elif str(reaction.emoji) == "➡️":
-                            current_page = min(len(pages) - 1, current_page + 1)
-
-                        await dialogue_message.edit(embed=pages[current_page])
-                        if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
-                            await reaction.remove(user)
-
-                    except asyncio.TimeoutError:
-                        break
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 10:
-                level_data = self.levels[level]
-                face_image_url = "https://i.ibb.co/5TYNLrc/download-33.jpg"
-                level_10_dialogue = [
-                    f"Soulreaver Lurkthar: (Manifesting from the void) {name_value}, you have reached the Ethereal Nexus, a realm beyond your comprehension. I am Soulreaver Lurkthar, and you are insignificant.",
-                    f"{name_value}: (With unyielding determination) I've come this far. What secrets does this realm hold, Soulreaver Lurkthar?",
-                    "Haunted Spirit: (With spectral whispers) Secrets that unravel sanity and defy reality. Are you prepared for the abyss of the unknown?",
-                    "Phantom Wraith: (With an ethereal presence) Your mind will crumble in the presence of the enigma."
-                ]
-
-                # Create an embed for the Abyssal Guardian's dialogue
-                embed = discord.Embed(title="Frostfire Behemoth", color=0x003366)
-                embed.set_thumbnail(url=face_image_url)
-
-                # Function to create dialogue pages with specified titles, avatars, and thumbnails
-                def create_dialogue_page(page):
-                    dialogue_embed = discord.Embed(
-                        title="Soulreaver Lurkthar" if page == 0 else name_value if page == 1 else "Haunted Spirit" if page == 2 else "Phantom Wraith",
-                        color=0x003366,
-                        description=level_10_dialogue[page]
-                    )
-
-                    # Set the Imp's thumbnail for the 4th dialogue
-                    if page == 0:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/5TYNLrc/download-33.jpg")
-                    elif page == 1:
-                        if ctx.author.avatar is not None:
-                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
-                        else:
-                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
-
-                    elif page == 2:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/kB5ypsM/download-34.jpg")
-                    elif page == 3:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/6BTRt3s/download-35.jpg")
-
-                    return dialogue_embed
-
-                pages = [create_dialogue_page(page) for page in range(len(level_10_dialogue))]
-
-                current_page = 0
-                dialogue_message = await ctx.send(embed=pages[current_page])
-
-                # Define reactions for pagination
-                reactions = ["⬅️", "➡️"]
-
-                for reaction in reactions:
-                    await dialogue_message.add_reaction(reaction)
-
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in reactions
-
-                while current_page < len(pages) - 1:  # Check the length of the 'pages' list
-                    try:
-                        reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
-
-                        if str(reaction.emoji) == "⬅️":
-                            current_page = max(0, current_page - 1)
-                        elif str(reaction.emoji) == "➡️":
-                            current_page = min(len(pages) - 1, current_page + 1)
-
-                        await dialogue_message.edit(embed=pages[current_page])
-                        if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
-                            await reaction.remove(user)
-
-                    except asyncio.TimeoutError:
-                        break
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 11:
-                level_data = self.levels[level]
-                face_image_url = "https://i.ibb.co/5TYNLrc/download-33.jpg"
-                level_11_dialogue = [
-                    f"Ravengaze Alpha: (Rising from the shadows) {name_value}, you have ventured into the dreaded Ravengaze Highlands. I am the Ravengaze Alpha, and this is my hunting ground. Prepare for your demise.",
-                    f"{name_value}: (With indomitable resolve) I've come to conquer this tower. What challenges await, Ravengaze Alpha?",
-                    f"Gnoll Raider: (With savage fervor) Challenges that will make you pray for mercy. Do you have what it takes to survive?",
-                    f"Hyena Pack: (With menacing laughter) *growls*"
-                ]
-
-                # Create an embed for the Abyssal Guardian's dialogue
-                embed = discord.Embed(title="Ravengaze Alpha", color=0x003366)
-                embed.set_thumbnail(url=face_image_url)
-
-                # Function to create dialogue pages with specified titles, avatars, and thumbnails
-                def create_dialogue_page(page):
-                    dialogue_embed = discord.Embed(
-                        title="Ravengaze Alpha" if page == 0 else name_value if page == 1 else "Gnoll Raider" if page == 2 else "Hyena Pack",
-                        color=0x003366,
-                        description=level_11_dialogue[page]
-                    )
-
-                    # Set the Imp's thumbnail for the 4th dialogue
-                    if page == 0:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/YjqfWSc/download-8.jpg")
-                    elif page == 1:
-                        if ctx.author.avatar is not None:
-                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
-                        else:
-                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
-
-                    elif page == 2:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/kJyTsWL/download-11.jpg")
-                    elif page == 3:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/Y7w2Sy4/download-12.jpg")
-
-                    return dialogue_embed
-
-                pages = [create_dialogue_page(page) for page in range(len(level_11_dialogue))]
-
-                current_page = 0
-                dialogue_message = await ctx.send(embed=pages[current_page])
-
-                # Define reactions for pagination
-                reactions = ["⬅️", "➡️"]
-
-                for reaction in reactions:
-                    await dialogue_message.add_reaction(reaction)
-
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in reactions
-
-                while current_page < len(pages) - 1:  # Check the length of the 'pages' list
-                    try:
-                        reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
-
-                        if str(reaction.emoji) == "⬅️":
-                            current_page = max(0, current_page - 1)
-                        elif str(reaction.emoji) == "➡️":
-                            current_page = min(len(pages) - 1, current_page + 1)
-
-                        await dialogue_message.edit(embed=pages[current_page])
-                        if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
-                            await reaction.remove(user)
-
-                    except asyncio.TimeoutError:
-                        break
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 12:
-                level_data = self.levels[level]
-                face_image_url = "https://i.ibb.co/5TYNLrc/download-33.jpg"
-                level_12_dialogue = [
-                    f"Nightshade Serpentis: (Emerging from the shadows) {name_value}, you stand within the cursed Nocturne Domain. I am Nightshade Serpentis, and your fate is sealed.",
-                    f"{name_value}: (With unwavering determination) I've come to conquer the tower. What nightmares do you bring, Nightshade Serpentis?",
-                    f"Gloomhound: (With eerie howling) Nightmares that will haunt your every thought. Do you have the courage to face them?",
-                    f"Nocturne Stalker: (With a sinister grin) Your resolve will crumble under the weight of your own dread."
-                ]
-
-                # Create an embed for the Abyssal Guardian's dialogue
-                embed = discord.Embed(title="Frostfire Behemoth", color=0x003366)
-                embed.set_thumbnail(url=face_image_url)
-
-                # Function to create dialogue pages with specified titles, avatars, and thumbnails
-                def create_dialogue_page(page):
-                    dialogue_embed = discord.Embed(
-                        title="Nightshade Serpentis" if page == 0 else name_value if page == 1 else "Gloomhound" if page == 2 else "Nocturne Stalker",
-                        color=0x003366,
-                        description=level_12_dialogue[page]
-                    )
-
-                    # Set the Imp's thumbnail for the 4th dialogue
-                    if page == 0:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/4TtY6T9/download-14.jpg")
-                    elif page == 1:
-                        if ctx.author.avatar is not None:
-                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
-                        else:
-                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
-
-                    elif page == 2:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/0BGmFXZ/download-15.jpg")
-                    elif page == 3:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/svhv2XJ/download-16.jpg")
-
-                    return dialogue_embed
-
-                pages = [create_dialogue_page(page) for page in range(len(level_12_dialogue))]
-
-                current_page = 0
-                dialogue_message = await ctx.send(embed=pages[current_page])
-
-                # Define reactions for pagination
-                reactions = ["⬅️", "➡️"]
-
-                for reaction in reactions:
-                    await dialogue_message.add_reaction(reaction)
-
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in reactions
-
-                while current_page < len(pages) - 1:  # Check the length of the 'pages' list
-                    try:
-                        reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
-
-                        if str(reaction.emoji) == "⬅️":
-                            current_page = max(0, current_page - 1)
-                        elif str(reaction.emoji) == "➡️":
-                            current_page = min(len(pages) - 1, current_page + 1)
-
-                        await dialogue_message.edit(embed=pages[current_page])
-                        if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
-                            await reaction.remove(user)
-
-                    except asyncio.TimeoutError:
-                        break
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 13:
-                level_data = self.levels[level]
-                face_image_url = "https://i.ibb.co/5TYNLrc/download-33.jpg"
-                level_13_dialogue = [
-                    f"Ignis Inferno: (Rising from molten flames) {name_value}, you have entered the Pyroclasmic Abyss, a realm of searing torment. I am Ignis Inferno, and your presence will fuel the flames of destruction.",
-                    f"{name_value}: (Unyielding) I've come to conquer this tower. What scorching challenges do you present, Ignis Inferno?",
-                    f"Magma Elemental: (With fiery rage) Challenges as relentless as the molten core itself. Are you prepared to endure the unending inferno?",
-                    f"Inferno Imp: (With malevolent glee) Your flesh will sear, and your spirit will smolder."
-                ]
-
-                # Create an embed for the Abyssal Guardian's dialogue
-                embed = discord.Embed(title="Frostfire Behemoth", color=0x003366)
-                embed.set_thumbnail(url=face_image_url)
-
-                # Function to create dialogue pages with specified titles, avatars, and thumbnails
-                def create_dialogue_page(page):
-                    dialogue_embed = discord.Embed(
-                        title="Ignis Inferno" if page == 0 else name_value if page == 1 else "Magma Elemental" if page == 2 else "Inferno Imp",
-                        color=0x003366,
-                        description=level_13_dialogue[page]
-                    )
-
-                    # Set the Imp's thumbnail for the 4th dialogue
-                    if page == 0:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/HYcdZBy/download-17.jpg")
-                    elif page == 1:
-                        if ctx.author.avatar is not None:
-                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
-                        else:
-                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
-
-                    elif page == 2:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/K0tG23M/download-18.jpg")
-                    elif page == 3:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/2ZgBn44/download-20.jpg")
-
-                    return dialogue_embed
-
-                pages = [create_dialogue_page(page) for page in range(len(level_13_dialogue))]
-
-                current_page = 0
-                dialogue_message = await ctx.send(embed=pages[current_page])
-
-                # Define reactions for pagination
-                reactions = ["⬅️", "➡️"]
-
-                for reaction in reactions:
-                    await dialogue_message.add_reaction(reaction)
-
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in reactions
-
-                while current_page < len(pages) - 1:  # Check the length of the 'pages' list
-                    try:
-                        reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
-
-                        if str(reaction.emoji) == "⬅️":
-                            current_page = max(0, current_page - 1)
-                        elif str(reaction.emoji) == "➡️":
-                            current_page = min(len(pages) - 1, current_page + 1)
-
-                        await dialogue_message.edit(embed=pages[current_page])
-                        if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
-                            await reaction.remove(user)
-
-                    except asyncio.TimeoutError:
-                        break
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 14:
-                level_data = self.levels[level]
-                face_image_url = "https://i.ibb.co/5TYNLrc/download-33.jpg"
-                level_14_dialogue = [
-                    f"Wraithlord Maroth: (Emerging from the spectral mists) {name_value}, you have reached the spectral wastes, a realm of eternal torment. I am Wraithlord Maroth, and your suffering will echo through the void.",
-                    f"{name_value}: (With unwavering determination) I've come to conquer the tower. What spectral horrors await, Wraithlord Maroth?",
-                    f"Cursed Banshee: (With haunting wails) Horrors that will rend your soul asunder. Do you have the will to endure?",
-                    f"Spectral Harbinger: (With a malevolent whisper) Your torment shall be everlasting."
-                ]
-
-                # Create an embed for the Abyssal Guardian's dialogue
-                embed = discord.Embed(title="Frostfire Behemoth", color=0x003366)
-                embed.set_thumbnail(url=face_image_url)
-
-                # Function to create dialogue pages with specified titles, avatars, and thumbnails
-                def create_dialogue_page(page):
-                    dialogue_embed = discord.Embed(
-                        title="Wraithlord Maroth" if page == 0 else name_value if page == 1 else "Cursed Banshee" if page == 2 else "Spectral Harbinger",
-                        color=0x003366,
-                        description=level_14_dialogue[page]
-                    )
-
-                    # Set the Imp's thumbnail for the 4th dialogue
-                    if page == 0:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/56dsQMY/download-21.jpg")
-                    elif page == 1:
-                        if ctx.author.avatar is not None:
-                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
-                        else:
-                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
-
-                    elif page == 2:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/pLP2djF/download-22.jpg")
-                    elif page == 3:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/R0PdqJ7/download-23.jpg")
-
-                    return dialogue_embed
-
-                pages = [create_dialogue_page(page) for page in range(len(level_14_dialogue))]
-
-                current_page = 0
-                dialogue_message = await ctx.send(embed=pages[current_page])
-
-                # Define reactions for pagination
-                reactions = ["⬅️", "➡️"]
-
-                for reaction in reactions:
-                    await dialogue_message.add_reaction(reaction)
-
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in reactions
-
-                while current_page < len(pages) - 1:  # Check the length of the 'pages' list
-                    try:
-                        reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
-
-                        if str(reaction.emoji) == "⬅️":
-                            current_page = max(0, current_page - 1)
-                        elif str(reaction.emoji) == "➡️":
-                            current_page = min(len(pages) - 1, current_page + 1)
-
-                        await dialogue_message.edit(embed=pages[current_page])
-                        if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
-                            await reaction.remove(user)
-
-                    except asyncio.TimeoutError:
-                        break
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 15:
-                level_data = self.levels[level]
-                face_image_url = "https://i.ibb.co/5TYNLrc/download-33.jpg"
-                level_15_dialogue = [
-                    f"Infernus, the Infernal: (Emerging from the depths of fire) {name_value}, you have entered the Infernal Abyss, a realm of unrelenting flames. I am Infernus, the Infernal, and your existence will be consumed by the inferno.",
-                    f"{name_value}: (Unyielding) I've come this far, and I won't be deterred. What blazing trials do you have in store, Infernus?",
-                    f"Demonic Imp: (With a malevolent grin) Trials that will scorch your very soul. Are you prepared to burn?",
-                    f"Hellspawn Reaver: (With fiery eyes) The flames of your doom shall be unquenchable."
-                ]
-
-                # Create an embed for the Abyssal Guardian's dialogue
-                embed = discord.Embed(title="Frostfire Behemoth", color=0x003366)
-                embed.set_thumbnail(url=face_image_url)
-
-
-
-                # Function to create dialogue pages with specified titles, avatars, and thumbnails
-                def create_dialogue_page(page):
-                    dialogue_embed = discord.Embed(
-                        title="Infernus, the Infernal" if page == 0 else name_value if page == 1 else "Demonic Imp" if page == 2 else "Hellspawn Reaver",
-                        color=0x003366,
-                        description=level_15_dialogue[page]
-                    )
-
-                    # Set the Imp's thumbnail for the 4th dialogue
-                    if page == 0:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/R2Nm6vY/download-24.jpg")
-                    elif page == 1:
-                        if ctx.author.avatar is not None:
-                            dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
-                        else:
-                            dialogue_embed.set_thumbnail(url=ctx.author.default_avatar.url)
-
-                    elif page == 2:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/GdhXTWN/download-25.jpg")
-                    elif page == 3:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/ZftX1xB/download-26.jpg")
-
-                    return dialogue_embed
-
-                pages = [create_dialogue_page(page) for page in range(len(level_15_dialogue))]
-
-                current_page = 0
-                dialogue_message = await ctx.send(embed=pages[current_page])
-
-                # Define reactions for pagination
-                reactions = ["⬅️", "➡️"]
-
-                for reaction in reactions:
-                    await dialogue_message.add_reaction(reaction)
-
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in reactions
-
-                while current_page < len(pages) - 1:  # Check the length of the 'pages' list
-                    try:
-                        reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
-
-                        if str(reaction.emoji) == "⬅️":
-                            current_page = max(0, current_page - 1)
-                        elif str(reaction.emoji) == "➡️":
-                            current_page = min(len(pages) - 1, current_page + 1)
-
-                        await dialogue_message.edit(embed=pages[current_page])
-                        if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
-                            await reaction.remove(user)
-
-                    except asyncio.TimeoutError:
-                        break
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 16:
-                async with self.bot.pool.acquire() as connection:
-                    query = 'SELECT "user" FROM profile WHERE "user" != $1 ORDER BY RANDOM() LIMIT 2'
-                    random_users = await connection.fetch(query, ctx.author.id)
-
-                    # Extracting the user IDs
-                    random_user_objects = []
-
-                    for user in random_users:
-                        user_id = user['user']
-                        # Fetch user object from ID
-                        fetched_user = await self.bot.fetch_user(user_id)
-                        if fetched_user:
-                            random_user_objects.append(fetched_user)
-
-                    # Ensure two separate user objects are obtained
-                    if len(random_user_objects) >= 2:
-                        random_user_object_1 = random_user_objects[0]
-                        random_user_object_2 = random_user_objects[1]
-                        # await ctx.send(f"{random_user_object_1.display_name} {random_user_object_2.display_name}")
-                    else:
-                        # Handle case if there are fewer than 2 non-author users in the database
-                        return None, None
-                level_data = self.levels[level]
-                face_image_url = "https://gcdnb.pbrd.co/images/ueKgTmbvB8qb.jpg"
-                level_16_dialogue = [
-                    f"Master Shapeshifter: In the dance of shadows, I am the conductor—every face you've known, every trust betrayed, I've worn like a symphony; now, join my orchestra or become its crescendo.",
-                    f"{name_value}: In your game of deceit, I see only a feeble attempt to shroud the inevitable. Your illusions crumble against my unyielding will—cross me, and witness the true horror of defiance.",
-                    f"{random_user_object_1.display_name}: I mimic your friend's form, but within me, your worst nightmares lurk, a puppeteer of your trust, feeding on your doubt and fear, reveling in the impending doom.",
-                    f"{random_user_object_2.display_name}: I've assumed your confidant's guise, yet beneath this borrowed skin, your anxieties writhe, whispering your secrets; in the labyrinth of your mind, I'm the embodiment of your darkest apprehensions, ready to consume your hopes."
-                ]
-
-                # Create an embed for the Abyssal Guardian's dialogue
-                embed = discord.Embed(title="Master Shapeshifter", color=0x003366)
-                embed.set_thumbnail(url=face_image_url)
-
-                # Function to create dialogue pages with specified titles, avatars, and thumbnails
-                def create_dialogue_page(page):
-                    dialogue_embed = discord.Embed(
-                        title="Master Shapeshifter" if page == 0 else name_value if page == 1 else random_user_object_1.display_name if page == 2 else random_user_object_2.display_name,
-                        color=0x003366,
-                        description=level_16_dialogue[page]
-                    )
-
-                    # Set the Imp's thumbnail for the 4th dialogue
-                    default_avatar_url = "https://ia803204.us.archive.org/4/items/discordprofilepictures/discordblue.png"
-
-                    if page == 0:
-                        thumbnail_url = "https://gcdnb.pbrd.co/images/ueKgTmbvB8qb.jpg"
-                    elif page == 1:
-                        thumbnail_url = ctx.author.avatar.url if ctx.author.avatar else default_avatar_url
-                    elif page == 2:
-                        thumbnail_url = random_user_object_1.avatar.url if random_user_object_1.avatar else default_avatar_url
-                    elif page == 3:
-                        thumbnail_url = random_user_object_2.avatar.url if random_user_object_2.avatar else default_avatar_url
-
-                    dialogue_embed.set_thumbnail(url=thumbnail_url)
-
-                    return dialogue_embed
-
-                pages = [create_dialogue_page(page) for page in range(len(level_16_dialogue))]
-
-                current_page = 0
-                dialogue_message = await ctx.send(embed=pages[current_page])
-
-                # Define reactions for pagination
-                reactions = ["⬅️", "➡️"]
-
-                for reaction in reactions:
-                    await dialogue_message.add_reaction(reaction)
-
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in reactions
-
-                while current_page < len(pages) - 1:  # Check the length of the 'pages' list
-                    try:
-                        reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
-
-                        if str(reaction.emoji) == "⬅️":
-                            current_page = max(0, current_page - 1)
-                        elif str(reaction.emoji) == "➡️":
-                            current_page = min(len(pages) - 1, current_page + 1)
-
-                        await dialogue_message.edit(embed=pages[current_page])
-                        if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
-                            await reaction.remove(user)
-
-                    except asyncio.TimeoutError:
-                        break
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            # ===============================================================================================
-            # ===============================================================================================
-
-            if level == 17:
-                level_data = self.levels[level]
-                face_image_url = "https://i.ibb.co/R2v9jYs/image2.png"
-                level_15_dialogue = [
-                    f"Eldritch Devourer: (Rising from the cosmic abyss) {name_value}, you stand at the Convergence Nexus, a junction of cosmic forces. I am the Eldritch Devourer, and your futile resistance will be devoured by the void.",
-                    f"{name_value}: (Fierce) I've carved my path through the chaos, and your cosmic feast won't satiate your hunger. Prepare for annihilation, Devourer.",
-                    f"Chaos Fiend: (With malicious glee) Annihilation, you say? The chaos you face is beyond comprehension. Your defiance is merely a flicker against the impending cosmic storm.",
-                    f"Voidborn Horror: (With eyes like swirling galaxies) Your essence will dissipate into the cosmic winds. Prepare for oblivion, interloper."
-                ]
-
-                # Create an embed for the Abyssal Guardian's dialogue
-                embed = discord.Embed(title="Eldritch Devourer", color=0x003366)
-                embed.set_thumbnail(url=face_image_url)
-
-                # Function to create dialogue pages with specified titles, avatars, and thumbnails
-                def create_dialogue_page(page):
-                    dialogue_embed = discord.Embed(
-                        title="Eldritch Devourer" if page == 0 else name_value if page == 1 else "Chaos Fiend" if page == 2 else "Voidborn Horror",
-                        color=0x003366,
-                        description=level_15_dialogue[page]
-                    )
-
-                    # Set the Imp's thumbnail for the 4th dialogue
-                    if page == 0:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/R2v9jYs/image2.png")
-                    elif page == 1:
-                        dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
-                    elif page == 2:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/c22vsWF/image.png")
-                    elif page == 3:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/kyvTszF/image3.png")
-
-                    return dialogue_embed
-
-                pages = [create_dialogue_page(page) for page in range(len(level_15_dialogue))]
-
-                current_page = 0
-                dialogue_message = await ctx.send(embed=pages[current_page])
-
-                # Define reactions for pagination
-                reactions = ["⬅️", "➡️"]
-
-                for reaction in reactions:
-                    await dialogue_message.add_reaction(reaction)
-
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in reactions
-
-                while current_page < len(pages) - 1:  # Check the length of the 'pages' list
-                    try:
-                        reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
-
-                        if str(reaction.emoji) == "⬅️":
-                            current_page = max(0, current_page - 1)
-                        elif str(reaction.emoji) == "➡️":
-                            current_page = min(len(pages) - 1, current_page + 1)
-
-                        await dialogue_message.edit(embed=pages[current_page])
-                        if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
-                            await reaction.remove(user)
-
-                    except asyncio.TimeoutError:
-                        break
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            # ===============================================================================================
-            # ===============================================================================================
-            # ===============================================================================================
-            # ===============================================================================================
-
-            if level == 18:
-                level_data = self.levels[level]
-                face_image_url = "https://i.ibb.co/0DjDgy5/image4.png"
-                level_15_dialogue = [
-                    f"Dreadlord Vortigon: (Unfurling shadowy wings) {name_value}, your presence disrupts the harmony of shadows. I am Dreadlord Vortigon, and your defiance will be swallowed by the eternal night.",
-                    f"{name_value}: (Menacing) The shadows won't shield you from the reckoning I bring, Dreadlord. Prepare for your eternal night to meet its dawn of doom.",
-                    f"Blood Warden: (With vampiric grace) Doom, you say? Your life force will sustain the shadows, but it won't save you from the crimson embrace of the Blood Warden.",
-                    f"Juzam Djinn: (With an otherworldly sneer) Taste? Your arrogance is amusing, mortal. The price for entering this domain is your torment, inflicted by the Juzam Djinn."
-                ]
-
-                # Create an embed for the Abyssal Guardian's dialogue
-                embed = discord.Embed(title="Dreadlord Vortigon", color=0x003366)
-                embed.set_thumbnail(url=face_image_url)
-
-                # Function to create dialogue pages with specified titles, avatars, and thumbnails
-                def create_dialogue_page(page):
-                    dialogue_embed = discord.Embed(
-                        title="Dreadlord Vortigon" if page == 0 else name_value if page == 1 else "Blood Warden" if page == 2 else "Juzam Djinn",
-                        color=0x003366,
-                        description=level_15_dialogue[page]
-                    )
-
-                    # Set the Imp's thumbnail for the 4th dialogue
-                    if page == 0:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/0DjDgy5/image4.png")
-                    elif page == 1:
-                        dialogue_embed.set_thumbnail(url=ctx.author.avatar.url)
-                    elif page == 2:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/t4QJ8ym/image5.png")
-                    elif page == 3:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/bRYv2Db/image6.png")
-
-                    return dialogue_embed
-
-                pages = [create_dialogue_page(page) for page in range(len(level_15_dialogue))]
-
-                current_page = 0
-                dialogue_message = await ctx.send(embed=pages[current_page])
-
-                # Define reactions for pagination
-                reactions = ["⬅️", "➡️"]
-
-                for reaction in reactions:
-                    await dialogue_message.add_reaction(reaction)
-
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in reactions
-
-                while current_page < len(pages) - 1:  # Check the length of the 'pages' list
-                    try:
-                        reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
-
-                        if str(reaction.emoji) == "⬅️":
-                            current_page = max(0, current_page - 1)
-                        elif str(reaction.emoji) == "➡️":
-                            current_page = min(len(pages) - 1, current_page + 1)
-
-                        await dialogue_message.edit(embed=pages[current_page])
-                        if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
-                            await reaction.remove(user)
-
-                    except asyncio.TimeoutError:
-                        break
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            # ===============================================================================================
-            # ===============================================================================================
-
-            if level == 19:
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 20:
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 21:
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 22:
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 23:
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 24:
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 25:
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 26:
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 27:
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 28:
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 29:
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
-
-            if level == 30:
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
+                            # Handle case if there are fewer than 2 non-author users in the database
+                            return None, None
 
             def create_hp_bar(current_hp, max_hp, length=20):
                 """
@@ -3463,70 +3615,6 @@ class Battles(commands.Cog):
                             return await ctx.send(
                                 f"{ctx.author.mention}, you've paid the entry fee of ${entry_fee}. You may proceed to level 1 using `$battletower fight`.")
 
-            if level == 1:
-                level_data = self.levels[level]
-                face_image_url = "https://i.ibb.co/MgMbRjF/download-4.jpg"
-                dialogue = [
-                    "[Abyssal Guardian]: With a bone-chilling hiss, the Abyssal Guardian emerges from the shadows, its eyes glowing with malevolence. Its obsidian armor exudes an aura of dread.",
-                    f"[{name_value}]: (Defiance in your voice) 'I've come to reclaim the Battle Tower and restore its glory,' you proclaim. Your voice echoes through the chamber, unwavering.",
-                    "[Abyssal Guardian]: (Raising its enormous spear high) 'Reclaim the tower, you say?' it taunts. 'Hahaha! You'll need more than bravado to defeat me. Prepare to face the abyss itself!'",
-                    "[Imp]: (Cackling with wicked glee) The impish creature appears at the guardian's side. 'Oh boy! I am starving. Gimme gimme!!'",
-                    f"[{name_value}]: (Radiant aura surrounding you) 'My resolve remains unshaken,' you declare. 'With the blessings of {god_value}, I shall bring your reign to an end!'"
-                ]
-
-                # Create an embed for the Abyssal Guardian's dialogue
-                embed = discord.Embed(title="Abyssal Guardian", color=0x003366)
-                embed.set_thumbnail(url=face_image_url)
-
-                # Function to create dialogue pages with specified titles, avatars, and thumbnails
-                def create_dialogue_page(page):
-                    dialogue_embed = discord.Embed(
-                        title="Abyssal Guardian" if page == 0 else name_value if page == 1 else "Abyssal Guardian" if page == 2 else "Imp" if page == 3 else name_value,
-                        color=0x003366,
-                        description=dialogue[page]
-                    )
-
-                    # Set the Imp's thumbnail for the 4th dialogue
-                    if page == 3:
-                        dialogue_embed.set_thumbnail(url="https://i.ibb.co/vYBdn7j/download-7.jpg")
-                    else:
-                        # Set the player's profile picture as the thumbnail for dialogues 1 and 5
-                        thumbnail_url = str(ctx.author.avatar.url) if page in [1, 4] else face_image_url
-                        dialogue_embed.set_thumbnail(url=thumbnail_url)
-
-                    return dialogue_embed
-
-                pages = [create_dialogue_page(page) for page in range(len(dialogue))]
-
-                current_page = 0
-                dialogue_message = await ctx.send(embed=pages[current_page])
-
-                # Define reactions for pagination
-                reactions = ["⬅️", "➡️"]
-
-                for reaction in reactions:
-                    await dialogue_message.add_reaction(reaction)
-
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in reactions
-
-                while current_page < len(dialogue) - 1:
-                    try:
-                        reaction, user = await self.bot.wait_for("reaction_add", check=check, timeout=60)
-
-                        if str(reaction.emoji) == "⬅️":
-                            current_page = max(0, current_page - 1)
-                        elif str(reaction.emoji) == "➡️":
-                            current_page = min(len(pages) - 1, current_page + 1)
-
-                        await dialogue_message.edit(embed=pages[current_page])
-                        if ctx.guild and ctx.guild.me.guild_permissions.manage_messages:
-                            await reaction.remove(user)
-
-                    except asyncio.TimeoutError:
-                        break
-                # Start the battle after all dialogue
-                await ctx.send("The battle begins!")  # Include the current dialogue page as the embed
 
             try:
 
@@ -3758,7 +3846,7 @@ class Battles(commands.Cog):
                         raise Exception("Prestige data fetch failed.")
 
                 if prestige_level and prestige_level != 0:
-                    prestige_multiplier = 1 + (0.40 * prestige_level)
+                    prestige_multiplier = 1 + (0.25 * prestige_level)
                     prestige_multiplierhp = 1 + (0.20 * prestige_level)
                 else:
                     prestige_multiplier = 1
@@ -3771,7 +3859,7 @@ class Battles(commands.Cog):
                             "user": minion1_name,
                             "hp": int(round(float(250) * prestige_multiplierhp)),
                             "max_hp": int(round(float(250) * prestige_multiplierhp)),
-                            "armor": int(round(float(minion1def) * prestige_multiplierhp)),
+                            "armor": int(round(float(minion1def) * prestige_multiplier)),
                             "damage": int(round(float(minion1atk) * prestige_multiplier)),
                             "is_pet": False,
                             "element": "unknown"  # Ensure 'element' key exists
@@ -3780,7 +3868,7 @@ class Battles(commands.Cog):
                             "user": minion2_name,
                             "hp": int(round(float(150) * prestige_multiplierhp)),
                             "max_hp": int(round(float(150) * prestige_multiplierhp)),
-                            "armor": int(round(float(minion2def) * prestige_multiplierhp)),
+                            "armor": int(round(float(minion2def) * prestige_multiplier)),
                             "damage": int(round(float(minion2atk) * prestige_multiplier)),
                             "is_pet": False,
                             "element": "unknown"
@@ -3789,7 +3877,7 @@ class Battles(commands.Cog):
                             "user": boss_name,
                             "hp": int(round(float(boss_stats["hp"]) * prestige_multiplierhp)),
                             "max_hp": int(round(float(boss_stats["hp"]) * prestige_multiplierhp)),
-                            "armor": int(round(float(boss_stats["armor"]) * prestige_multiplierhp)),
+                            "armor": int(round(float(boss_stats["armor"]) * prestige_multiplier)),
                             "damage": int(round(float(boss_stats["damage"]) * prestige_multiplier)),
                             "is_pet": False,
                             "element": boss_stats.get("element", "unknown")
@@ -3802,7 +3890,7 @@ class Battles(commands.Cog):
                             "user": minion1_name,
                             "hp": int(round(minion1_stats["hp"] * prestige_multiplierhp)),
                             "max_hp": int(round(minion1_stats["hp"] * prestige_multiplierhp)),
-                            "armor": int(round(minion1_stats["armor"] * prestige_multiplierhp)),
+                            "armor": int(round(minion1_stats["armor"] * prestige_multiplier)),
                             "damage": int(round(minion1_stats["damage"] * prestige_multiplier)),
                             "is_pet": False,
                             "element": minion1_stats.get("element", "unknown")  # Ensure 'element' key exists
@@ -3811,7 +3899,7 @@ class Battles(commands.Cog):
                             "user": minion2_name,
                             "hp": int(round(minion2_stats["hp"] * prestige_multiplierhp)),
                             "max_hp": int(round(minion2_stats["hp"] * prestige_multiplierhp)),
-                            "armor": int(round(minion2_stats["armor"] * prestige_multiplierhp)),
+                            "armor": int(round(minion2_stats["armor"] * prestige_multiplier)),
                             "damage": int(round(minion2_stats["damage"] * prestige_multiplier)),
                             "is_pet": False,
                             "element": minion2_stats.get("element", "unknown")
@@ -3820,7 +3908,7 @@ class Battles(commands.Cog):
                             "user": boss_name,
                             "hp": int(round(boss_stats["hp"] * prestige_multiplierhp)),
                             "max_hp": int(round(boss_stats["hp"] * prestige_multiplierhp)),
-                            "armor": int(round(boss_stats["armor"] * prestige_multiplierhp)),
+                            "armor": int(round(boss_stats["armor"] * prestige_multiplier)),
                             "damage": int(round(boss_stats["damage"] * prestige_multiplier)),
                             "is_pet": False,
                             "element": boss_stats.get("element", "unknown")
@@ -3828,7 +3916,7 @@ class Battles(commands.Cog):
                     ]
 
 
-              
+
 
                 # Initialize 'winner' to None
                 winner = None
@@ -3890,6 +3978,8 @@ class Battles(commands.Cog):
                     [current_opponent]  # Team B
                 ]
 
+                randomm.shuffle(turn_order_options)
+
                 combatant_order = turn_order_options[0] + turn_order_options[1]  # Merge teams into combatant_order
 
                 while battle_ongoing and datetime.datetime.utcnow() < start_time + datetime.timedelta(minutes=9):
@@ -3917,15 +4007,13 @@ class Battles(commands.Cog):
                         )  # Opponent's turn: attack player or pet
 
                     if target is not None:
-                        # Calculate damage
+                        # Calculate base damage before armor
                         damage_variance = randomm.randint(0, 100) if not combatant.get("is_pet") else randomm.randint(0,
                                                                                                                       50)
                         fireball_shot = False
 
                         if not combatant.get("is_pet") and combatant["user"] == ctx.author:
-
                             if target["user"] != ctx.author:
-
                                 if combatant.get("mage_evolution") is not None:
                                     fireball_chance = randomm.randint(1, 100)
                                     if fireball_chance <= 30:
@@ -3942,10 +4030,13 @@ class Battles(commands.Cog):
                                         dmg_decimal = (base_damage + random_damage - target_armor) * damage_mult
                                         dmg_decimal = max(dmg_decimal, Decimal('1'))
 
+                                        # Store blocked damage for reflection
+                                        blocked_damage = min(float(base_damage + random_damage), float(target_armor))
+
                                         # Convert Decimal to float for compatibility with lifesteal
                                         dmg = float(round(dmg_decimal, 2))
 
-                                        # Subtract damage from target's HP
+                                        # Apply damage to target
                                         target["hp"] -= dmg
 
                                         # Format the Fireball message
@@ -3956,27 +4047,33 @@ class Battles(commands.Cog):
                                         )
                                         fireball_shot = True
                                     else:
-                                        # Regular attack without Fireball
-                                        dmg = round(max(combatant["damage"] + damage_variance - target["armor"], 1), 3)
+                                        # Regular attack calculation with reflection tracking
+                                        raw_damage = combatant["damage"] + damage_variance
+                                        blocked_damage = min(raw_damage, target["armor"])
+                                        dmg = round(max(raw_damage - target["armor"], 1), 3)
                                         target["hp"] -= dmg
                                         target["hp"] = max(target["hp"], 0)
                                 else:
-                                    # Regular attack without Fireball
-                                    dmg = round(max(combatant["damage"] + damage_variance - target["armor"], 1), 3)
+                                    # Regular attack calculation with reflection tracking
+                                    raw_damage = combatant["damage"] + damage_variance
+                                    blocked_damage = min(raw_damage, target["armor"])
+                                    dmg = round(max(raw_damage - target["armor"], 1), 3)
                                     target["hp"] -= dmg
                                     target["hp"] = max(target["hp"], 0)
-
                             else:
-                                # Regular attack if not the author's turn or if it's a pet
-                                dmg = round(max(combatant["damage"] + damage_variance - target["armor"], 1), 3)
+                                # Regular attack calculation with reflection tracking
+                                raw_damage = combatant["damage"] + damage_variance
+                                blocked_damage = min(raw_damage, target["armor"])
+                                dmg = round(max(raw_damage - target["armor"], 1), 3)
                                 target["hp"] -= dmg
                                 target["hp"] = max(target["hp"], 0)
-
                         else:
-                            dmg = round(max(combatant["damage"] + damage_variance - target["armor"], 1), 3)
+                            # Regular attack calculation with reflection tracking
+                            raw_damage = combatant["damage"] + damage_variance
+                            blocked_damage = min(raw_damage, target["armor"])
+                            dmg = round(max(raw_damage - target["armor"], 1), 3)
                             target["hp"] -= dmg
                             target["hp"] = max(target["hp"], 0)
-
 
                         # Build attack message
                         if combatant.get("is_pet"):
@@ -3989,10 +4086,22 @@ class Battles(commands.Cog):
                             target_name = target['pet_name']
                         else:
                             target_name = target['user'].mention if isinstance(target['user'], discord.User) else \
-                            target['user']
+                                target['user']
 
-                        if fireball_shot == False:
+                        if not fireball_shot:
                             message = f"{attacker_name} attacks! {target_name} takes **{dmg:.1f}HP** damage."
+
+                        # Handle damage reflection if target is a tank
+                        if target.get("damage_reflection", 0) > 0:
+                            reflected_damage = round(blocked_damage * target["damage_reflection"], 3)
+                            if reflected_damage > 0:
+                                combatant["hp"] -= reflected_damage
+                                combatant["hp"] = max(combatant["hp"], 0)
+                                message += f"\n{target_name}'s armor reflects **{reflected_damage:.3f}HP** damage back!"
+
+                                # Check if attacker died from reflection
+                                if combatant["hp"] <= 0:
+                                    message += f" {attacker_name} has been defeated by reflected damage!"
 
                         # Handle lifesteal if applicable
                         if not combatant.get("is_pet") and combatant["user"] == ctx.author and lifestealauth != 0:
@@ -4157,9 +4266,20 @@ class Battles(commands.Cog):
                                     if element == c["element"]:
                                         element_emoji = emoji
                                         break
-                                field_name = f"**[TEAM A]** \n{c['user'].display_name} {element_emoji}" if not c.get(
+
+                                # Add tank indicator if applicable
+                                tank_indicator = "🛡️" if c.get("tank_evolution") and c.get("has_shield") else ""
+
+                                field_name = f"**[TEAM A]** \n{c['user'].display_name} {element_emoji} {tank_indicator}" if not c.get(
                                     "is_pet") else f"{c['pet_name']} {element_emoji}"
+
                                 field_value = f"HP: {current_hp:.1f}/{max_hp:.1f}\n{hp_bar}"
+
+                                # Add reflection percentage for tanks
+                                if c.get("damage_reflection", 0) > 0:
+                                    reflection_percent = c["damage_reflection"] * 100
+                                    field_value += f"\nDamage Reflection: {reflection_percent:.1f}%"
+
                                 embed.add_field(name=field_name, value=field_value, inline=False)
 
                             # Add current opponent status
@@ -4180,11 +4300,10 @@ class Battles(commands.Cog):
                             # Edit the embed message
                             await log_message.edit(embed=embed)
                             await asyncio.sleep(4)
-
                     # After the loop, declare the winner
                 if winner == ctx.author:
                     await ctx.send(
-                            f"**Congratulations {ctx.author.display_name}! You have defeated all opponents!**")
+                            f"**Congratulations {ctx.author.mention}! You have defeated all opponents!**")
 
                 else:
                     await ctx.send(f"**{ctx.author.mention}**, you have been defeated. Better luck next time!")
@@ -4200,6 +4319,8 @@ class Battles(commands.Cog):
                 error_message = f"An error occurred during the battletower battle: {e}\n{traceback.format_exc()}"
                 await ctx.send(error_message)
                 print(error_message)
+                await self.bot.reset_cooldown(ctx)
+                return
 
 
 
@@ -5625,13 +5746,11 @@ class Battles(commands.Cog):
 
                         await ctx.send(f'This is the end for you... {ctx.author.mention}.. or is it..?')
 
-                        crate_options = ['legendary', 'divine', 'mystery', 'fortune']
-                        weights = [0.25, 0.25, 0.25, 0.25]  # Weighted values according to percentages
+                        crate_options = ['legendary', 'divine', 'fortune']
+                        weights = [0.25, 0.25, 0.25]  # Weighted values according to percentages
 
                         selected_crate = randomm.choices(crate_options, weights)[0]
 
-                        if ctx.author.id == 295173706496475136:
-                            selected_crate = 'divine'
 
 
                         async with self.bot.pool.acquire() as connection:
@@ -6283,6 +6402,36 @@ class Battles(commands.Cog):
                 6: 2.00,  # 200%
             }
 
+            tank_evolution_levels = {
+                "Protector": 1,
+                "Guardian": 2,
+                "Bulwark": 3,
+                "Defender": 4,
+                "Vanguard": 5,
+                "Fortress": 6,
+                "Titan": 7,
+            }
+
+            evolution_health_multiplier = {
+                1: 1.05,  # 105%
+                2: 1.10,  # 110%
+                3: 1.15,  # 115%
+                4: 1.20,  # 120%
+                5: 1.25,  # 125%
+                6: 1.30,  # 130%
+                7: 1.35,  # 135%
+            }
+
+            evolution_reflection_multiplier = {
+                1: 0.04,  # 4%
+                2: 0.08,  # 8%
+                3: 0.12,  # 12%
+                4: 0.16,  # 16%
+                5: 0.20,  # 20%
+                6: 0.24,  # 24%
+                7: 0.28,  # 28%
+            }
+
             # Fetch classes and XP for both players
             async with self.bot.pool.acquire() as conn:
                 # Fetch data for the author
@@ -6308,6 +6457,16 @@ class Battles(commands.Cog):
             enemy_chance = 0
             lifestealauth = 0
             lifestealopp = 0
+
+
+            def get_tank_evolution(classes):
+                max_evolution = None
+                for class_name in classes:
+                    if class_name in tank_evolution_levels:
+                        level = tank_evolution_levels[class_name]
+                        if max_evolution is None or level > max_evolution:
+                            max_evolution = level
+                return max_evolution
 
             # Function to get Mage evolution level
             def get_mage_evolution(classes):
@@ -6442,19 +6601,20 @@ class Battles(commands.Cog):
 
             battle_ongoing = True
             combatant_order_options = [
-                [author_combatant, enemy_pet_combatant, author_pet_combatant, enemy_combatant],
-                [enemy_combatant, author_pet_combatant, enemy_pet_combatant, author_combatant]
+                author_combatant,
+                enemy_pet_combatant,
+                author_pet_combatant,
+                enemy_combatant
             ]
 
-            combatant_order = random.choice(combatant_order_options)
+            # Shuffle the list in place
+            random.shuffle(combatant_order_options)
+
+            # The shuffled list is now in combatant_order_options
+            combatant_order = combatant_order_options
 
             while battle_ongoing and datetime.datetime.utcnow() < start_time + datetime.timedelta(minutes=5):
-                # Randomly choose the combatant order
-
-
                 for combatant in combatant_order:
-
-
                     if not combatant or combatant["hp"] <= 0:
                         continue  # Skip dead or non-existent combatants
 
@@ -6472,16 +6632,26 @@ class Battles(commands.Cog):
                     target = self.select_target(opponent_combatant, opponent_pet_combatant, player_prob=0.60,
                                                 pet_prob=0.40)
                     if target is not None:
-                        # Calculate damage
+                        # Calculate base damage
                         if combatant.get("is_pet"):
                             damage_variance = random.randint(0, 50)
                         else:
                             damage_variance = random.randint(0, 100)
-                        dmg = round(max(combatant["damage"] + damage_variance - target["armor"], 1), 3)
+
+                        # Calculate raw damage before armor
+                        raw_damage = combatant["damage"] + damage_variance
+
+                        # Calculate how much damage was blocked by armor
+                        blocked_damage = min(raw_damage, target["armor"])
+
+                        # Calculate final damage that gets through armor
+                        dmg = round(max(raw_damage - target["armor"], 1), 3)
+
+                        # Apply damage to target
                         target["hp"] -= dmg
                         target["hp"] = max(target["hp"], 0)
 
-                        # Build message
+                        # Build initial message
                         if combatant.get("is_pet"):
                             attacker_name = combatant['pet_name']
                         else:
@@ -6490,7 +6660,21 @@ class Battles(commands.Cog):
                             target_name = target['pet_name']
                         else:
                             target_name = target['user'].mention
+
                         message = f"{attacker_name} attacks! {target_name} takes **{dmg:.3f}HP** damage."
+
+                        # Handle damage reflection if target is a tank
+                        if target.get("damage_reflection", 0) > 0:
+                            # Reflect based on the total damage blocked by armor
+                            reflected_damage = round(blocked_damage * target["damage_reflection"], 3)
+                            if reflected_damage > 0:
+                                combatant["hp"] -= reflected_damage
+                                combatant["hp"] = max(combatant["hp"], 0)
+                                message += f"\n{target_name}'s armor reflects **{reflected_damage:.3f}HP** damage back!"
+
+                                # Check if attacker died from reflection
+                                if combatant["hp"] <= 0:
+                                    message += f" {attacker_name} has been defeated by reflected damage!"
 
                         # Handle lifesteal if applicable
                         if not combatant.get("is_pet"):
@@ -6498,16 +6682,16 @@ class Battles(commands.Cog):
                                 lifesteal_percentage = lifestealauth / 100.0
                                 heal = round(lifesteal_percentage * dmg, 3)
                                 combatant["hp"] = min(combatant["hp"] + heal, combatant["max_hp"])
-                                message += f" Lifesteals: **{heal:.3f}HP**"
+                                message += f"\nLifesteals: **{heal:.3f}HP**"
                             elif combatant["user"] == enemy_ and lifestealopp != 0:
                                 lifesteal_percentage = lifestealopp / 100.0
                                 heal = round(lifesteal_percentage * dmg, 3)
                                 combatant["hp"] = min(combatant["hp"] + heal, combatant["max_hp"])
-                                message += f" Lifesteals: **{heal:.3f}HP**"
+                                message += f"\nLifesteals: **{heal:.3f}HP**"
 
                         # Check if target is defeated
                         if target["hp"] <= 0:
-                            message += f" {target_name} has been defeated!"
+                            message += f"\n{target_name} has been defeated!"
 
                         # Append message to battle log
                         battle_log.append(f"**Action #{action_number}**\n{message}")
@@ -6523,9 +6707,13 @@ class Battles(commands.Cog):
                         for c in [author_combatant, author_pet_combatant, enemy_combatant, enemy_pet_combatant]:
                             if not c:
                                 continue  # Skip if pet does not exist
-                            current_hp = max(0, round(c["hp"], 1))  # Rounded to .0
+                            current_hp = max(0, round(c["hp"], 1))  # Rounded to .1
                             max_hp = round(c["max_hp"], 1)
                             hp_bar = self.create_hp_bar(current_hp, max_hp)
+
+                            # Add tank indicator if applicable
+                            tank_indicator = "🛡️" if c.get("tank_evolution") else ""
+
                             if not c.get("is_pet"):
                                 # Player's element emoji
                                 element_emoji = "❌"  # Default emoji
@@ -6534,9 +6722,9 @@ class Battles(commands.Cog):
                                         element_emoji = emoji
                                         break
                                 if c['user'].id == ctx.author.id:
-                                    field_name = f"[TEAM A]\n{c['user'].display_name} {element_emoji}"
+                                    field_name = f"[TEAM A]\n{c['user'].display_name} {element_emoji} {tank_indicator}"
                                 else:
-                                    field_name = f"[TEAM B]\n{c['user'].display_name} {element_emoji}"
+                                    field_name = f"[TEAM B]\n{c['user'].display_name} {element_emoji} {tank_indicator}"
                             else:
                                 # Pet's element emoji
                                 pet_element_emoji = "❌"  # Default emoji
@@ -6545,8 +6733,15 @@ class Battles(commands.Cog):
                                         pet_element_emoji = emoji
                                         break
                                 field_name = f"{c['pet_name']} {pet_element_emoji}"
+
                             # Format HP with one decimal place
                             field_value = f"HP: {current_hp:.1f}/{max_hp:.1f}\n{hp_bar}"
+
+                            # Add reflection percentage for tanks
+                            if c.get("damage_reflection", 0) > 0:
+                                reflection_percent = c["damage_reflection"] * 100
+                                field_value += f"\nDamage Reflection: {reflection_percent:.1f}%"
+
                             embed.add_field(name=field_name, value=field_value, inline=False)
 
                         # Update battle log in the embed
@@ -6556,11 +6751,15 @@ class Battles(commands.Cog):
                         await log_message.edit(embed=embed)
                         await asyncio.sleep(4)
 
-                        # Check for win condition
+                        # Check win conditions including reflection deaths
                         if opponent_combatant["hp"] <= 0 and (
                                 opponent_pet_combatant is None or opponent_pet_combatant["hp"] <= 0):
                             battle_ongoing = False
-                            winner = combatant['user'] if not combatant.get("is_pet") else combatant['user']
+                            # If combatant is a pet, use its owner as winner
+                            if combatant.get("is_pet"):
+                                winner = combatant['user']  # This is the owner's user object
+                            else:
+                                winner = combatant['user']
                             loser = opponent_user
                             break
                         elif author_combatant["hp"] <= 0 and (
@@ -6655,8 +6854,17 @@ class Battles(commands.Cog):
 
     async def fetch_combatants(self, ctx, player, highest_element, level, lifesteal, mage_evolution, conn):
         try:
+            # First check if player has a shield equipped
+            shield_check = await conn.fetchrow(
+                "SELECT ai.* FROM profile p JOIN allitems ai ON (p.user=ai.owner) "
+                "JOIN inventory i ON (ai.id=i.item) WHERE p.user=$1 AND "
+                "i.equipped IS TRUE AND ai.type='Shield';",
+                player.id
+            )
+            has_shield = bool(shield_check)
+
             # Fetch stats
-            query = 'SELECT "luck", "health", "stathp" FROM profile WHERE "user" = $1;'
+            query = 'SELECT "luck", "health", "stathp", "class" FROM profile WHERE "user" = $1;'
             result = await conn.fetchrow(query, player.id)
             if result:
                 luck_value = float(result['luck'])
@@ -6675,6 +6883,7 @@ class Battles(commands.Cog):
                 base_health = 250.0
                 health = float(result['health']) + base_health
                 stathp = float(result['stathp']) * 50.0
+                player_classes = result['class']
                 dmg, deff = await self.bot.get_raidstats(player, conn=conn)
 
                 # Ensure dmg and deff are floats
@@ -6682,6 +6891,41 @@ class Battles(commands.Cog):
                 deff = float(deff)
 
                 total_health = health + level * 5.0 + stathp
+
+                # Get tank evolution level from player classes
+                tank_evolution = None
+                tank_evolution_levels = {
+                    "Protector": 1,
+                    "Guardian": 2,
+                    "Bulwark": 3,
+                    "Defender": 4,
+                    "Vanguard": 5,
+                    "Fortress": 6,
+                    "Titan": 7,
+                }
+
+                for class_name in player_classes:
+                    if class_name in tank_evolution_levels:
+                        level = tank_evolution_levels[class_name]
+                        if tank_evolution is None or level > tank_evolution:
+                            tank_evolution = level
+
+                # Only apply tank bonuses if they have a shield equipped
+                damage_reflection = 0.0
+                if tank_evolution and has_shield:
+                    # Health bonus: +5% per evolution
+                    health_multiplier = 1 + (0.04 * tank_evolution)
+                    total_health *= health_multiplier
+
+                    # Damage reflection: +3% per evolution
+                    damage_reflection = 0.03 * tank_evolution
+                elif tank_evolution and not has_shield:
+                    # If they're a tank but don't have a shield, still give them a smaller health bonus
+                    # but no reflection
+                    health_multiplier = 1 + (0.01 * tank_evolution)  # Half the normal bonus
+                    total_health *= health_multiplier
+
+
 
                 # Create combatant dictionary
                 combatant = {
@@ -6691,6 +6935,9 @@ class Battles(commands.Cog):
                     "damage": dmg,
                     "luck": Luck,
                     "mage_evolution": mage_evolution,
+                    "tank_evolution": tank_evolution,
+                    "has_shield": has_shield,  # Add this to track shield status
+                    "damage_reflection": damage_reflection,
                     "max_hp": total_health,
                     "is_pet": False,
                     "element": highest_element if highest_element else "Unknown"
@@ -6713,6 +6960,7 @@ class Battles(commands.Cog):
                         "luck": 50.0,  # Assuming fixed luck; adjust as needed
                         "element": pet_element,  # Already capitalized or set to "Unknown"
                         "max_hp": float(pet["hp"]),
+                        "damage_reflection": 0.0,  # Pets don't have damage reflection
                         "is_pet": True
                     }
                     return combatant, pet_combatant
@@ -6727,6 +6975,9 @@ class Battles(commands.Cog):
                     "damage": 50.0,
                     "luck": 50.0,
                     "mage_evolution": None,
+                    "tank_evolution": None,
+                    "has_shield": False,
+                    "damage_reflection": 0.0,
                     "max_hp": 500.0,
                     "is_pet": False,
                     "element": "Unknown"
@@ -6742,6 +6993,9 @@ class Battles(commands.Cog):
                 "damage": 50.0,
                 "luck": 50.0,
                 "mage_evolution": None,
+                "tank_evolution": None,
+                "has_shield": False,
+                "damage_reflection": 0.0,
                 "max_hp": 500.0,
                 "is_pet": False,
                 "element": "Unknown"
@@ -7048,7 +7302,7 @@ class Battles(commands.Cog):
 
                 trickluck = float(random.randint(1, 100))
 
-                if float(trickluck) < float(attacker["luck"]):
+                if float(trickluck) <= float(attacker["luck"]):
                     # Regular attack
                     dmg = (
                             attacker["damage"] + Decimal(random.randint(0, 100)) - defender["armor"]
@@ -7393,6 +7647,19 @@ class Battles(commands.Cog):
         await ctx.send(embed=embed)
 
 
+    @is_gm()
+    @has_char()
+    @commands.command(brief=_("Force Legendary Spawn for Debug"), hidden=True)
+    @locale_doc
+    async def fl(self, ctx):
+        if self.forceleg == False:
+            self.forceleg = True
+            await ctx.send("You forced leg on")
+        else:
+            self.forceleg = False
+            await ctx.send("You forced leg off")
+
+
 
     @has_char()
     @commands.command(brief=_("Battle against a monster and gain XP"), hidden=True)
@@ -7417,6 +7684,9 @@ class Battles(commands.Cog):
 
             (This command has a cooldown of 5 minutes)"""
         )
+
+        monster_override = getattr(ctx, 'monster_override', None)
+        levelchoice_override = getattr(ctx, 'levelchoice_override', None)
 
 
         # Define the elements and their strengths
@@ -7484,6 +7754,16 @@ class Battles(commands.Cog):
             4: 1.50,  # 150%
             5: 1.75,  # 175%
             6: 2.00,  # 200%
+        }
+
+        tank_evolution_levels = {
+            "Protector": 1,
+            "Guardian": 2,
+            "Bulwark": 3,
+            "Defender": 4,
+            "Vanguard": 5,
+            "Fortress": 6,
+            "Titan": 7,
         }
 
         # Define the monsters per level
@@ -7644,76 +7924,32 @@ class Battles(commands.Cog):
                 {"name": "Boto", "hp": 640, "attack": 570, "defense": 555, "element": "Water", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Boto.png"},
             ],
             8: [
-                {"name": "Ultra Chaos Beast", "hp": 700, "attack": 680, "defense": 670, "element": "Corrupted", "url":""},
-                {"name": "Earth Colossus Prime", "hp": 680, "attack": 675, "defense": 665, "element": "Earth", "url":""},
-                {"name": "Water Lord Leviathan", "hp": 720, "attack": 690, "defense": 675, "element": "Water", "url":""},
-                {"name": "Shadow Dragon", "hp": 690, "attack": 680, "defense": 665, "element": "Dark", "url":""},
-                {"name": "Wind Titan Lord", "hp": 710, "attack": 685, "defense": 675, "element": "Wind", "url":""},
-                {"name": "Dwakel Ultimate Mecha", "hp": 705, "attack": 690, "defense": 680, "element": "Electric", "url":""},
-                {"name": "Infernal Warlord Prime", "hp": 695, "attack": 680, "defense": 665, "element": "Fire", "url":""},
-                {"name": "Divine Lightbringer", "hp": 685, "attack": 675, "defense": 665, "element": "Light", "url":""},
-                {"name": "Undead Legion Overlord", "hp": 730, "attack": 680, "defense": 670, "element": "Dark", "url":""},
-                {"name": "Chaos Beast Wolfwing", "hp": 715, "attack": 675, "defense": 665, "element": "Corrupted", "url":""},
-                {"name": "Dire Lion", "hp": 725, "attack": 690, "defense": 675, "element": "Nature", "url":""},
-                {"name": "Storm King Prime", "hp": 740, "attack": 695, "defense": 685, "element": "Electric", "url":""},
-                {"name": "Leviathan Prime", "hp": 720, "attack": 680, "defense": 670, "element": "Water", "url":""},
-                {"name": "Earth Elemental King", "hp": 735, "attack": 675, "defense": 680, "element": "Earth", "url":""},
-                {"name": "Shadow Lord Prime", "hp": 700, "attack": 680, "defense": 665, "element": "Dark", "url":""},
-                {"name": "Blazing Inferno Dragon Prime", "hp": 710, "attack": 685, "defense": 670, "element": "Fire", "url":""},
-                {"name": "Obsidian Colossus Prime", "hp": 725, "attack": 675, "defense": 680, "element": "Earth", "url":""},
-                {"name": "Tempest Dragon Lord", "hp": 715, "attack": 670, "defense": 680, "element": "Wind", "url":""},
-                {"name": "Chaos Beast Kimberly", "hp": 730, "attack": 680, "defense": 665, "element": "Corrupted", "url":""},
-                {"name": "Elder Treeant", "hp": 740, "attack": 675, "defense": 660, "element": "Nature", "url":""},
+                {"name": "Meatmongous", "hp": 1200, "attack": 450, "defense": 600, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Meatmongous-removebg-preview.png"},
+                {"name": "Ebil Meta Dragon", "hp": 810, "attack": 770, "defense": 550, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_MetaDragon_n_Greg-transformed.png"},
+                {"name": "Shadow Nulgath", "hp": 850, "attack": 700, "defense": 700, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Shadow_Nulgath.png"},
+                {"name": "The First Speaker", "hp": 800, "attack": 600, "defense": 700, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FirstSpeakerFix-Photoroom.png"},
             ],
             9: [
-                {"name": "Ultra Kathool", "hp": 800, "attack": 780, "defense": 770, "element": "Corrupted", "url":""},
-                {"name": "Earth Titan Overlord", "hp": 780, "attack": 775, "defense": 765, "element": "Earth", "url":""},
-                {"name": "Water Lord Leviathan Prime", "hp": 820, "attack": 790, "defense": 775, "element": "Water", "url":""},
-                {"name": "Shadow Lord Alteon Prime", "hp": 790, "attack": 780, "defense": 765, "element": "Dark", "url":""},
-                {"name": "Wind Titan Emperor", "hp": 810, "attack": 785, "defense": 775, "element": "Wind", "url":""},
-                {"name": "Dwakel Ultimate Mecha Prime", "hp": 805, "attack": 790, "defense": 780,
-                 "element": "Electric", "url":""},
-                {"name": "Infernal Warlord Supreme", "hp": 795, "attack": 780, "defense": 765, "element": "Fire", "url":""},
-                {"name": "Divine Light Guardian", "hp": 785, "attack": 775, "defense": 765, "element": "Light", "url":""},
-                {"name": "Undead Legion DoomKnight", "hp": 830, "attack": 780, "defense": 770, "element": "Dark", "url":""},
-                {"name": "Chaos Beast Tibicenas", "hp": 815, "attack": 775, "defense": 765, "element": "Corrupted", "url":""},
-                {"name": "Dire Mammoth Prime", "hp": 825, "attack": 790, "defense": 775, "element": "Nature", "url":""},
-                {"name": "Storm Emperor Prime", "hp": 840, "attack": 795, "defense": 785, "element": "Electric", "url":""},
-                {"name": "Kraken Supreme", "hp": 820, "attack": 780, "defense": 770, "element": "Water", "url":""},
-                {"name": "Earth Elemental Overlord", "hp": 835, "attack": 775, "defense": 780, "element": "Earth", "url":""},
-                {"name": "Shadow Dragon Prime", "hp": 800, "attack": 780, "defense": 765, "element": "Dark", "url":""},
-                {"name": "Blazing Inferno Titan Prime", "hp": 810, "attack": 785, "defense": 770, "element": "Fire", "url":""},
-                {"name": "Obsidian Titan Supreme", "hp": 825, "attack": 775, "defense": 785, "element": "Earth", "url":""},
-                {"name": "Tempest Dragon Emperor", "hp": 815, "attack": 770, "defense": 785, "element": "Wind", "url":""},
-                {"name": "Chaos Beast Iadoa", "hp": 830, "attack": 780, "defense": 765, "element": "Corrupted", "url":""},
-                {"name": "Ancient Guardian Treeant", "hp": 840, "attack": 775, "defense": 760, "element": "Nature", "url":""},
+                {"name": "Avatar Tynfdarius", "hp": 800, "attack": 780, "defense": 770, "element": "Fire", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Avatar_Tynfdarius-removebg-preview-transformed-Photoroom.png"},
+                {"name": "Mech-a-Knight", "hp": 780, "attack": 775, "defense": 790, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Mech-a-knight-removebg-preview-transformed.png"},
+                {"name": "Astraea's Engineer", "hp": 820, "attack": 790, "defense": 775, "element": "Light", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Engineer-removebg-preview-transformed.png"},
             ],
             10: [
-                {"name": "Ultra Chaos Vordred", "hp": 1200, "attack": 600, "defense": 600, "element": "Corrupted", "url":""},
-                {"name": "Shadow Guardian", "hp": 1180, "attack": 595, "defense": 600, "element": "Dark", "url":""},
-                {"name": "Ultra Kathool", "hp": 1250, "attack": 605, "defense": 595, "element": "Corrupted", "url":""},
-                {"name": "Elemental Dragon of Time", "hp": 1220, "attack": 600, "defense": 590, "element": "Electric", "url":""},
-                {"name": "Celestial Dragon", "hp": 1240, "attack": 595, "defense": 595, "element": "Light", "url":""},
-                {"name": "Infernal Warlord Nulgath", "hp": 1230, "attack": 600, "defense": 585, "element": "Fire", "url":""},
-                {"name": "Obsidian Colossus Supreme", "hp": 1260, "attack": 605, "defense": 580, "element": "Earth", "url":""},
-                {"name": "Tempest Dragon King", "hp": 1210, "attack": 600, "defense": 600, "element": "Wind", "url":""},
-                {"name": "Chaos Lord Xiang", "hp": 1250, "attack": 605, "defense": 575, "element": "Corrupted", "url":""},
-                {"name": "Dark Spirit Orbs", "hp": 1190, "attack": 595, "defense": 605, "element": "Dark", "url":""},
-                {"name": "Electric Titan", "hp": 1230, "attack": 600, "defense": 590, "element": "Electric", "url":""},
-                {"name": "Light Elemental Lord", "hp": 1240, "attack": 595, "defense": 595, "element": "Light", "url":""},
-                {"name": "Flame Dragon", "hp": 1220, "attack": 605, "defense": 585, "element": "Fire", "url":""},
-                {"name": "ShadowFlame Dragon", "hp": 1200, "attack": 600, "defense": 600, "element": "Dark", "url":""},
-                {"name": "Chaos Beast Mana Golem", "hp": 1250, "attack": 605, "defense": 575, "element": "Corrupted", "url":""},
-                {"name": "Electric Phoenix", "hp": 1230, "attack": 600, "defense": 590, "element": "Electric", "url":""},
-                {"name": "Light Bringer", "hp": 1240, "attack": 595, "defense": 595, "element": "Light", "url":""},
-                {"name": "Void Dragon", "hp": 1260, "attack": 605, "defense": 580, "element": "Corrupted", "url":""},
-                {"name": "Elemental Titan", "hp": 1210, "attack": 600, "defense": 600, "element": "Electric", "url":""},
-                {"name": "Celestial Guardian Dragon", "hp": 1250, "attack": 605, "defense": 580, "element": "Light", "url":""},
+                {"name": "Deimos", "hp": 1200, "attack": 700, "defense": 900, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Deimos.png"},
+                {"name": "Void Dragon", "hp": 2500, "attack": 570, "defense": 575, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_6pnyUGr-Photoroom-Photoroom.png"},
+                {"name": "End of all things", "hp": 300, "attack": 2500, "defense": 300, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Beast-Photoroom-transformed-Photoroom.png"},
             ],
             11: [
-                {"name": "Drakath", "hp": 2500, "attack": 1022, "defense": 648, "element": "Corrupted", "url":""},
-                {"name": "Astraea", "hp": 3100, "attack": 723, "defense": 733, "element": "Light", "url":""},
-                {"name": "Sepulchure", "hp": 2310, "attack": 690, "defense": 866, "element": "Dark", "url":""},
+                {"name": "Drakath", "hp": 4000, "attack": 1022, "defense": 700, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Pngtreelightning_source_lightning_effect_purple_3916970.png"},
+                {"name": "Astraea", "hp": 3500, "attack": 930, "defense": 930, "element": "Light", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_5z90r962trs71_1-Photoroom.png"},
+                {"name": "Sepulchure", "hp": 3000, "attack": 1400, "defense": 777, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_wakai-quketsuki-sepulchuredoomknightdoomblade-Photoroom.png"},
+                {"name": "Ultra Drakath", "hp": 7950, "attack": 1750, "defense": 1460, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Pngtreelightning_source_lightning_effect_purple_3916970.png"},
+                {"name": "Ultra Astraea", "hp": 6550, "attack": 1440, "defense": 1650, "element": "Light",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_5z90r962trs71_1-Photoroom.png"},
+                {"name": "Ultra Sepulchure", "hp": 6990, "attack": 1985, "defense": 1290, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_wakai-quketsuki-sepulchuredoomknightdoomblade-Photoroom.png"},
+
             ]
         }
 
@@ -7724,13 +7960,13 @@ class Battles(commands.Cog):
                     await ctx.send(
                         _("Monsters for level {level} are incomplete. Please contact the admin.").format(level=level))
                     return
-                if level != 11 and len(monsters[level]) < 20:
+                if level < 8 and len(monsters[level]) < 20:
                     await ctx.send(
                         _("Monsters for level {level} are incomplete. Please contact the admin.").format(level=level))
                     return
-                if level == 11 and len(monsters[level]) < 3:
+                if level >= 8 and len(monsters[level]) < 3:
                     await ctx.send(
-                        _("Level 11 monsters are incomplete. Please contact the admin."))
+                        _(f"Level {level} monsters are incomplete. Please contact the admin."))
                     return
 
             # Fetch the player's XP and level
@@ -7742,62 +7978,81 @@ class Battles(commands.Cog):
                 title=_("Searching for a monster..."),
                 description=_("Your journey begins as you venture into the unknown to find a worthy foe."),
                 color=self.bot.config.game.primary_colour,
-
             )
             searching_message = await ctx.send(embed=searching_embed)
 
             # Simulate searching time
-            await asyncio.sleep(randomm.randint(3, 8))  # Adjust the sleep time as desired
+            if not monster_override:
+                await asyncio.sleep(randomm.randint(3, 8))  # Adjust the sleep time as desired
 
             # Determine if a legendary monster (level 11) should spawn
-            legendary_spawn_chance = 0.01 # 1% chance
+            legendary_spawn_chance = 0.01  # 1% chance
             spawn_legendary = False
-            if player_level >= 5:
-                if randomm.random() < legendary_spawn_chance:
-                    spawn_legendary = True
 
-            if spawn_legendary:
-                # Select one of the 3 legendary gods
-                monster = random.choice(monsters[11])
-                # Send a dramatic announcement
-                legendary_embed = discord.Embed(
-                    title=_("A Legendary God Appears!"),
-                    description=_(
-                        "Behold! **{monster}** has descended to challenge you! Prepare for an epic battle!").format(
-                        monster=monster["name"]
-                    ),
-                    color=discord.Color.gold(),
+            if not monster_override:  # Only do regular spawning if no override
+                if player_level >= 5:
+                    if randomm.random() < legendary_spawn_chance:
+                        spawn_legendary = True
 
+                if ctx.author.id == 295173706496475136:
+                    if self.forceleg:
+                        spawn_legendary = True
 
-                )
-                await ctx.send(embed=legendary_embed)
-                levelchoice = 11
-                await asyncio.sleep(4)
+                if spawn_legendary:
+                    # Select one of the 3 legendary gods
+                    monster = random.choice(monsters[11])
+                    # Send a dramatic announcement
+                    legendary_embed = discord.Embed(
+                        title=_("A Legendary God Appears!"),
+                        description=_(
+                            "Behold! **{monster}** has descended to challenge you! Prepare for an epic battle!").format(
+                            monster=monster["name"]
+                        ),
+                        color=discord.Color.gold(),
+                    )
+                    await ctx.send(embed=legendary_embed)
+                    levelchoice = 11
+                    await asyncio.sleep(4)
+                else:
+                    # Determine monster level based on player level
+                    if player_level <= 4:
+                        levelchoice = randomm.randint(1, 2)
+                    elif player_level <= 8:
+                        levelchoice = randomm.randint(1, 3)
+                    elif player_level <= 12:
+                        levelchoice = randomm.randint(1, 4)
+                    elif player_level <= 15:
+                        levelchoice = randomm.randint(1, 5)
+                    elif player_level <= 20:
+                        levelchoice = randomm.randint(1, 6)
+                    elif player_level <= 25:
+                        levelchoice = randomm.randint(1, 7)
+                    elif player_level <= 30:
+                        levelchoice = randomm.randint(1, 8)
+                    elif player_level <= 35:
+                        levelchoice = randomm.randint(1, 9)
+                    elif player_level <= 40:
+                        levelchoice = randomm.randint(1, 10)
+                    else:  # 40+
+                        levelchoice = randomm.randint(1, 10)
+
+                    monster = random.choice(monsters[levelchoice])
+
             else:
-                # Determine monster level based on player level
-                base_monster_level = math.ceil((player_level - 10) / 10) + 3
-                base_monster_level = max(1, min(10, base_monster_level))  # Clamp between 1 and 10
+                # Use the overridden monster and level from scout command
+                monster = monster_override
+                levelchoice = levelchoice_override
 
-                # Add some randomness: monster level can vary by ±1
-                monster_level_variation = random.choice([-1, 0, 1])
-                levelchoice = base_monster_level + monster_level_variation
-                levelchoice = max(1, min(10, levelchoice))  # Clamp between 1 and 10
-                levelchoice = randomm.randint(1, 7)
-
-                # Select a random monster from the chosen level
-                monster = random.choice(monsters[levelchoice])
-
-                # Optionally, edit the searching message to indicate that a monster has been found
-                found_embed = discord.Embed(
-                    title=_("Monster Found!"),
-                    description=_("A Level {level} **{monster}** has appeared! Prepare to fight..").format(
-                        level=levelchoice, monster=monster["name"]
-                    ),
-                    color=self.bot.config.game.primary_colour,
-
-                )
-                await searching_message.edit(embed=found_embed)
-                await asyncio.sleep(4)
+            # Then continue with your found monster embed
+            found_embed = discord.Embed(
+                title=_("Monster Found!"),
+                description=_("A Level {level} **{monster}** has appeared! Prepare to fight..").format(
+                    level=levelchoice, monster=monster["name"]
+                ),
+                color=self.bot.config.game.primary_colour,
+            )
+            await searching_message.edit(embed=found_embed)
+            await asyncio.sleep(4)
 
             # Fetch the player's stats and classes
             async with self.bot.pool.acquire() as conn:
@@ -7856,6 +8111,51 @@ class Battles(commands.Cog):
                         if class_name in life_steal_values:
                             lifestealauth += life_steal_values[class_name]
 
+                    shield_check = await conn.fetchrow(
+                        "SELECT ai.* FROM profile p JOIN allitems ai ON (p.user=ai.owner) "
+                        "JOIN inventory i ON (ai.id=i.item) WHERE p.user=$1 AND "
+                        "i.equipped IS TRUE AND ai.type='Shield';",
+                        user_id
+                    )
+                    has_shield = bool(shield_check)
+
+                    # Get tank evolution level
+                    tank_evolution = None
+                    for class_name in player_classes:
+                        if class_name in tank_evolution_levels:
+                            level = tank_evolution_levels[class_name]
+                            if tank_evolution is None or level > tank_evolution:
+                                tank_evolution = level
+
+                    # Apply tank bonuses if applicable
+                    if tank_evolution and has_shield:
+                        # Health bonus: +4% per evolution
+                        health_multiplier = 1 + (0.04 * tank_evolution)
+                        total_health *= health_multiplier
+                        damage_reflection = 0.03 * tank_evolution
+                    elif tank_evolution and not has_shield:
+                        # Smaller health bonus without shield
+                        health_multiplier = 1 + (0.01 * tank_evolution)
+                        total_health *= health_multiplier
+                        damage_reflection = 0.0
+                    else:
+                        damage_reflection = 0.0
+
+                    try:
+                        highest_element = None
+                        highest_items = await conn.fetch(
+                            "SELECT ai.element FROM profile p JOIN allitems ai ON (p.user=ai.owner) JOIN"
+                            " inventory i ON (ai.id=i.item) WHERE i.equipped IS TRUE AND p.user=$1"
+                            " ORDER BY GREATEST(ai.damage, ai.armor) DESC;",
+                            user_id,
+                        )
+
+                        if highest_items:
+                            highest_element = highest_items[0]["element"].capitalize()
+                    except Exception as e:
+                        await ctx.send(f"An error occurred while fetching player's element: {e}")
+                        highest_element = None
+
                     # Initialize player stats
                     player_stats = {
                         "user": ctx.author,
@@ -7865,8 +8165,11 @@ class Battles(commands.Cog):
                         "damage": dmg,
                         "luck": Luck,
                         "mage_evolution": author_mage_evolution,
+                        "tank_evolution": tank_evolution,
+                        "has_shield": has_shield,
+                        "damage_reflection": damage_reflection,
                         "lifesteal": lifestealauth,
-                        "element": None  # Will be set below
+                        "element": highest_element
                     }
 
                     # Fetch player's equipped items to determine element
@@ -7946,7 +8249,7 @@ class Battles(commands.Cog):
 
             # Initialize player stats in the embed
             current_hp = max(0, round(player_stats["hp"], 2))
-            max_hp = player_stats["max_hp"]
+            max_hp = max(0, round(player_stats["max_hp"], 2))
             hp_bar = create_hp_bar(current_hp, max_hp)
             element_emoji = element_to_emoji.get(player_stats["element"], "❌") if player_stats["element"] else "❌"
             field_name = f"{player_stats['user'].display_name} {element_emoji}"
@@ -7955,7 +8258,7 @@ class Battles(commands.Cog):
 
             # Initialize monster stats in the embed
             monster_current_hp = max(0, round(monster_stats["hp"], 2))
-            monster_max_hp = monster_stats["max_hp"]
+            monster_max_hp = max(0, round(monster_stats["max_hp"], 2))
             monster_hp_bar = create_hp_bar(monster_current_hp, monster_max_hp)
             monster_element_emoji = element_to_emoji.get(monster_stats["element"], "❌")
             monster_field_name = f"{monster_stats['name']} {monster_element_emoji}"
@@ -7993,10 +8296,11 @@ class Battles(commands.Cog):
 
                 if player_turn:
                     attacker_luck = attacker["luck"]
-                else:
-                    attacker_luck = 80  # Monsters have a fixed luck of 80
 
-                if trickluck < attacker_luck:
+                else:
+                    attacker_luck = 90  # Monsters have a fixed luck of 80
+
+                if trickluck <= attacker_luck:
                     # Attack hits
                     if player_turn:
                         # Player's turn
@@ -8007,11 +8311,19 @@ class Battles(commands.Cog):
                                 # Fireball happens
                                 evolution_level = attacker["mage_evolution"]
                                 damage_multiplier = evolution_damage_multiplier.get(evolution_level, 1.0)
-                                dmg = (attacker["damage"] + Decimal(random.randint(0, 100)) - Decimal(
-                                    defender["armor"])) * Decimal(damage_multiplier)
-                                dmg = max(dmg, 1)
+
+                                # Convert attacker damage and defender armor to float
+                                atk_damage = float(attacker["damage"])
+                                def_armor = float(defender["armor"])
+
+                                dmg = (atk_damage + float(random.randint(0, 100)) - def_armor) * float(
+                                    damage_multiplier)
+                                dmg = max(dmg, 1.0)
                                 dmg = round(dmg, 2)
-                                defender["hp"] -= dmg
+
+                                # Ensure defender HP is a float, then subtract
+                                defender["hp"] = float(defender["hp"]) - dmg
+                                defender["hp"] = round(defender["hp"], 2)
 
                                 message = _("You cast Fireball! **{monster}** takes **{dmg} HP** damage.").format(
                                     monster=defender["name"],
@@ -8019,30 +8331,41 @@ class Battles(commands.Cog):
                                 )
                             else:
                                 # Normal attack
-                                dmg = attacker["damage"] + Decimal(random.randint(0, 100)) - Decimal(defender["armor"])
-                                dmg = max(dmg, 1)
+                                atk_damage = float(attacker["damage"])
+                                def_armor = float(defender["armor"])
+
+                                dmg = atk_damage + float(random.randint(0, 100)) - def_armor
+                                dmg = max(dmg, 1.0)
                                 dmg = round(dmg, 2)
+
                                 # Apply damage modifiers for player attacks
                                 if damage_modifier_player != 0:
-                                    dmg = dmg * (1 + damage_modifier_player)
+                                    dmg = dmg * (1 + float(damage_modifier_player))
                                     dmg = round(dmg, 2)
-                                defender["hp"] -= dmg
+
+                                defender["hp"] = float(defender["hp"]) - dmg
+                                defender["hp"] = round(defender["hp"], 2)
 
                                 message = _("You attack! **{monster}** takes **{dmg} HP** damage.").format(
                                     monster=defender["name"],
                                     dmg=dmg,
                                 )
-
                         else:
                             # Normal attack if no mage evolution
-                            dmg = attacker["damage"] + Decimal(random.randint(0, 100)) - Decimal(defender["armor"])
-                            dmg = max(dmg, 1)
+                            atk_damage = float(attacker["damage"])
+                            def_armor = float(defender["armor"])
+
+                            dmg = atk_damage + float(random.randint(0, 100)) - def_armor
+                            dmg = max(dmg, 1.0)
                             dmg = round(dmg, 2)
+
                             # Apply damage modifiers for player attacks
                             if damage_modifier_player != 0:
-                                dmg = dmg * (1 + damage_modifier_player)
+                                dmg = dmg * (1 + float(damage_modifier_player))
                                 dmg = round(dmg, 2)
-                            defender["hp"] -= dmg
+
+                            defender["hp"] = float(defender["hp"]) - dmg
+                            defender["hp"] = round(defender["hp"], 2)
 
                             message = _("You attack! **{monster}** takes **{dmg} HP** damage.").format(
                                 monster=defender["name"],
@@ -8051,54 +8374,81 @@ class Battles(commands.Cog):
 
                         # Handle lifesteal if applicable
                         if attacker.get("lifesteal", 0) > 0:
-                            lifesteal_percentage = Decimal(attacker["lifesteal"]) / Decimal(100)
+                            lifesteal_percentage = float(attacker["lifesteal"]) / 100.0
                             heal = lifesteal_percentage * dmg
-                            heal = heal.quantize(Decimal('0.00'), rounding=ROUND_HALF_UP)
-                            attacker["hp"] += heal
-                            if attacker["hp"] > attacker["max_hp"]:
-                                attacker["hp"] = attacker["max_hp"]
+                            heal = round(heal, 2)
+
+                            # Convert attacker HP to float and add
+                            attacker["hp"] = float(attacker["hp"]) + heal
+                            # Cap at max_hp
+                            if attacker["hp"] > float(attacker["max_hp"]):
+                                attacker["hp"] = float(attacker["max_hp"])
+                            attacker["hp"] = round(attacker["hp"], 2)
+
                             message += _(" Lifesteals: **{heal} HP**").format(heal=heal)
 
                         # Check if defender is defeated
                         if defender["hp"] <= 0:
-                            defender["hp"] = 0
+                            defender["hp"] = 0.0
                             message += _(" **{monster}** is defeated!").format(
                                 monster=defender["name"]
                             )
-
                     else:
                         # Monster's turn
-                        dmg = attacker["damage"] + Decimal(random.randint(0, 100)) - Decimal(defender["armor"])
-                        dmg = max(dmg, 1)
+                        atk_damage = float(attacker["damage"])
+                        def_armor = float(defender["armor"])
+
+                        raw_damage = atk_damage + float(random.randint(0, 100))
+                        dmg = max(raw_damage - def_armor, 1.0)
                         dmg = round(dmg, 2)
-                        defender["hp"] -= dmg
+
+                        defender["hp"] = float(defender["hp"]) - dmg
+                        defender["hp"] = round(defender["hp"], 2)
 
                         message = _("{monster} attacks! You take **{dmg} HP** damage.").format(
                             monster=attacker["name"],
                             dmg=dmg,
                         )
 
+                        # Add reflection damage calculation here
+                        if defender.get("damage_reflection", 0) > 0:
+                            blocked_damage = min(raw_damage, def_armor)
+                            reflected_damage = blocked_damage * float(defender["damage_reflection"])
+                            reflected_damage = round(reflected_damage, 3)  # 3 decimals for reflection detail
+                            if reflected_damage > 0:
+                                attacker["hp"] = float(attacker["hp"]) - reflected_damage
+                                attacker["hp"] = round(attacker["hp"], 2)
+                                attacker["hp"] = max(attacker["hp"], 0.0)
+
+                                message += f"\n{defender['user'].display_name}'s armor reflects **{reflected_damage:.3f} HP** damage back!"
+
+                                # Check if monster died from reflection
+                                if attacker["hp"] <= 0:
+                                    message += f" {attacker['name']} has been defeated by reflected damage!"
+
                         # Check if defender is defeated
                         if defender["hp"] <= 0:
-                            defender["hp"] = 0
+                            defender["hp"] = 0.0
                             # Handle Cheating Death for the player being attacked
                             if not cheated:
-                                chance = author_chance
+                                chance = float(author_chance)
                                 random_number = random.randint(1, 100)
                                 if random_number <= chance:
-                                    defender["hp"] = 75
+                                    defender["hp"] = 75.0
                                     cheated = True
                                     message += _(" You cheat death and survive with **75 HP**!")
                                 else:
                                     message += _(" You are defeated!")
                             else:
                                 message += _(" You are defeated!")
-
                 else:
                     # Attack misses or attacker trips
-                    dmg = Decimal('10.00')
+                    dmg = 10.00  # float
+                    attacker["hp"] = float(attacker["hp"])  # Convert from Decimal to float if needed
                     attacker["hp"] -= dmg
-                    attacker["hp"] = max(attacker["hp"], 0)
+                    attacker["hp"] = round(attacker["hp"], 2)
+                    attacker["hp"] = max(attacker["hp"], 0.0)
+
                     if player_turn:
                         message = _("You tripped and took **{dmg} HP** damage. Bad luck!").format(
                             dmg=dmg,
@@ -8108,7 +8458,6 @@ class Battles(commands.Cog):
                             monster=attacker["name"],
                             dmg=dmg,
                         )
-
                 # Append message to battle log
                 battle_log.append(
                     (
@@ -8117,7 +8466,6 @@ class Battles(commands.Cog):
                     )
                 )
 
-                # (Rest of your code to update the embed and continue the battle)
 
                 # Update the embed
                 embed = discord.Embed(
@@ -8127,7 +8475,7 @@ class Battles(commands.Cog):
 
                 # Update player stats in the embed
                 current_hp = max(0, round(player_stats["hp"], 2))
-                max_hp = player_stats["max_hp"]
+                max_hp = max(0, round(player_stats["max_hp"], 2))
                 hp_bar = create_hp_bar(current_hp, max_hp)
                 field_name = f"{player_stats['user'].display_name} {element_to_emoji.get(player_stats['element'], '❌') if player_stats['element'] else '❌'}"
                 field_value = f"HP: {current_hp}/{max_hp}\n{hp_bar}"
@@ -8135,7 +8483,7 @@ class Battles(commands.Cog):
 
                 # Update monster stats in the embed
                 monster_current_hp = max(0, round(monster_stats["hp"], 2))
-                monster_max_hp = monster_stats["max_hp"]
+                monster_max_hp = max(0, round(monster_stats["max_hp"], 2))
                 monster_hp_bar = create_hp_bar(monster_current_hp, monster_max_hp)
                 monster_field_name = f"{monster_stats['name']} {element_to_emoji.get(monster_stats['element'], '❌')}"
                 monster_field_value = f"HP: {monster_current_hp}/{monster_max_hp}\n{monster_hp_bar}"
@@ -8159,7 +8507,7 @@ class Battles(commands.Cog):
                 player_turn = not player_turn
 
             # Define the egg drop chance
-            egg_drop_chance = 0.10 # 5% chance
+            egg_drop_chance = 0.05 # 5% chance
 
             # Determine the outcome
             if player_stats["hp"] > 0 and monster_stats["hp"] <= 0:
@@ -8186,8 +8534,37 @@ class Battles(commands.Cog):
                 if newlevel != player_level:
                     await self.bot.process_levelup(ctx, newlevel, player_level)
 
-                if levelchoice < 8:
-                    if randomm.random() < egg_drop_chance:
+                ranger_egg_bonuses = {
+                    "Caretaker": 0.02,  # +2% (total 7%)
+                    "Tamer": 0.04,  # +4% (total 9%)
+                    "Trainer": 0.06,  # +6% (total 11%)
+                    "Bowman": 0.08,  # +8% (total 13%)
+                    "Hunter": 0.10,  # +10% (total 15%)
+                    "Warden": 0.13,  # +13% (total 18%)
+                    "Ranger": 0.15,  # +15% (total 25%)
+                }
+
+                # Then modify the egg drop chance check section:
+                if levelchoice < 12:
+                    base_egg_chance = 0.05  # Base 5% chance
+                    final_egg_chance = base_egg_chance
+
+                    # Check if player has a Ranger class
+                    async with self.bot.pool.acquire() as conn:
+                        profile = await conn.fetchrow('SELECT class FROM profile WHERE "user"=$1;', ctx.author.id)
+                        if profile and profile['class']:
+                            # Find the highest ranger bonus
+                            ranger_bonus = 0
+                            for class_name in profile['class']:
+                                if class_name in ranger_egg_bonuses:
+                                    class_bonus = ranger_egg_bonuses[class_name]
+                                    ranger_bonus = max(ranger_bonus, class_bonus)
+
+                            # Apply the bonus
+                            final_egg_chance += ranger_bonus
+
+                    # Check for egg drop with modified chance
+                    if randomm.random() < final_egg_chance:
 
                         async with self.bot.pool.acquire() as conn:
                             pet_and_egg_count = await conn.fetchval(
@@ -8289,7 +8666,7 @@ class Battles(commands.Cog):
                                 )
 
                             await ctx.send(
-                                f"You found a **{monster['name']} Egg** with an IV of {iv_percentage:.2f}%! It will hatch in 36 hours."
+                                f"{ctx.author.mention}! You found a **{monster['name']} Egg** with an IV of {iv_percentage:.2f}%! It will hatch in 36 hours."
                             )
                         except Exception as e:
                             await ctx.send(e)
@@ -8305,7 +8682,461 @@ class Battles(commands.Cog):
 
             # End of the command
         except Exception as e:
-            await ctx.send(f"An error occurred: {e}")
+            import traceback
+            error_message = f"Error occurred: {e}\n"
+            error_message += traceback.format_exc()
+            await ctx.send(error_message)
+            print(error_message)
+
+    @commands.command(brief="Scout ahead to see what monster you'll face")
+    @has_char()
+    @user_cooldown(1800)  # 30 minute cooldown between scouting attempts
+    async def scout(self, ctx):
+
+
+
+        # Define element to emoji mapping
+        element_to_emoji = {
+            "Light": "🌟",
+            "Dark": "🌑",
+            "Corrupted": "🌀",
+            "Nature": "🌿",
+            "Electric": "⚡",
+            "Water": "💧",
+            "Fire": "🔥",
+            "Wind": "💨",
+            "Earth": "🌍",
+        }
+
+        # Define the monsters per level
+        monsters = {
+            1: [
+                {"name": "Sneevil", "hp": 100, "attack": 95, "defense": 100, "element": "Earth", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Sneevil-removebg-preview.png"},
+                {"name": "Slime", "hp": 120, "attack": 100, "defense": 105, "element": "Water", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_slime.png"},
+                {"name": "Frogzard", "hp": 120, "attack": 90, "defense": 95, "element": "Nature", "url": "https://static.wikia.nocookie.net/aqwikia/images/d/d6/Frogzard.png"},
+                {"name": "Rat", "hp": 90, "attack": 100, "defense": 90, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Rat-removebg-preview.png"},
+                {"name": "Bat", "hp": 150, "attack": 95, "defense": 85, "element": "Wind", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Bat-removebg-preview.png"},
+                {"name": "Skeleton", "hp": 190, "attack": 105, "defense": 100, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Skelly-removebg-preview.png"},
+                {"name": "Imp", "hp": 180, "attack": 95, "defense": 85, "element": "Fire", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zZquzlh-removebg-preview.png"},
+                {"name": "Pixie", "hp": 100, "attack": 90, "defense": 80, "element": "Light", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_pixie-removebg-preview.png"},
+                {"name": "Zombie", "hp": 170, "attack": 100, "defense": 95, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zombie-removebg-preview.png"},
+                {"name": "Spiderling", "hp": 220, "attack": 95, "defense": 90, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_spider-removebg-preview.png"},
+                {"name": "Spiderling", "hp": 220, "attack": 95, "defense": 90, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_spider-removebg-preview.png"},
+                {"name": "Moglin", "hp": 200, "attack": 90, "defense": 85, "element": "Light", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Moglin.png"},
+                {"name": "Red Ant", "hp": 140, "attack": 105, "defense": 100, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_redant-removebg-preview.png"},
+                {"name": "Chickencow", "hp": 300, "attack": 150, "defense": 90, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChickenCow-removebg-preview.png"},
+                {"name": "Tog", "hp": 380, "attack": 105, "defense": 95, "element": "Earth", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Tog-removebg-preview.png"},
+                {"name": "Lemurphant", "hp": 340, "attack": 95, "defense": 80, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Lemurphant-removebg-preview.png"},
+                {"name": "Fire Imp", "hp": 200, "attack": 100, "defense": 90, "element": "Fire", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zZquzlh-removebg-preview.png"},
+                {"name": "Zardman", "hp": 300, "attack": 95, "defense": 100, "element": "Earth", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Zardman-removebg-preview.png"},
+                {"name": "Wind Elemental", "hp": 165, "attack": 90, "defense": 85, "element": "Wind", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_WindElemental-removebg-preview.png"},
+                {"name": "Dark Wolf", "hp": 200, "attack": 100, "defense": 90, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DarkWolf-removebg-preview.png"},
+                {"name": "Treeant", "hp": 205, "attack": 105, "defense": 95, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Treeant-removebg-preview.png"},
+            ],
+            2: [
+                {"name": "Cyclops Warlord", "hp": 230, "attack": 160, "defense": 155, "element": "Earth", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_CR-removebg-preview.png"},
+                {"name": "Fishman Soldier", "hp": 200, "attack": 165, "defense": 160, "element": "Water", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Fisherman-removebg-preview.png"},
+                {"name": "Fire Elemental", "hp": 215, "attack": 150, "defense": 145, "element": "Fire", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_fire_elemental-removebg-preview.png"},
+                {"name": "Vampire Bat", "hp": 200, "attack": 170, "defense": 160, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_viO2oSJ-removebg-preview.png"},
+                {"name": "Blood Eagle", "hp": 195, "attack": 165, "defense": 150, "element": "Wind", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BloodEagle-removebg-preview.png"},
+                {"name": "Earth Elemental", "hp": 190, "attack": 175, "defense": 160, "element": "Earth", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Earth_Elemental-removebg-preview.png"},
+                {"name": "Fire Mage", "hp": 200, "attack": 160, "defense": 140, "element": "Fire", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireMage-removebg-preview.png"},
+                {"name": "Dready Bear", "hp": 230, "attack": 155, "defense": 150, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_dreddy-removebg-preview.png"},
+                {"name": "Undead Soldier", "hp": 280, "attack": 160, "defense": 155, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_UndeadSoldier-removebg-preview.png"},
+                {"name": "Skeleton Warrior", "hp": 330, "attack": 155, "defense": 150, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SkeelyWarrior-removebg-preview.png"},
+                {"name": "Giant Spider", "hp": 350, "attack": 160, "defense": 145, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DreadSpider-removebg-preview.png"},
+                {"name": "Castle spider", "hp": 310, "attack": 170, "defense": 160, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Castle-removebg-preview.png"},
+                {"name": "ConRot", "hp": 210, "attack": 165, "defense": 155, "element": "Water", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ConRot-removebg-preview.png"},
+                {"name": "Horc Warrior", "hp": 270, "attack": 175, "defense": 170, "element": "Earth", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_HorcWarrior-removebg-preview.png"},
+                {"name": "Shadow Hound", "hp": 300, "attack": 160, "defense": 150, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Hound-removebg-preview.png"},
+                {"name": "Fire Sprite", "hp": 290, "attack": 165, "defense": 155, "element": "Fire", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireSprite-removebg-preview.png"},
+                {"name": "Rock Elemental", "hp": 300, "attack": 160, "defense": 165, "element": "Earth", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Earth_Elemental-removebg-preview.png"},
+                {"name": "Shadow Serpent", "hp": 335, "attack": 155, "defense": 150, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadowSerpant-removebg-preview.png"},
+                {"name": "Dark Elemental", "hp": 340, "attack": 165, "defense": 155, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DarkEle-Photoroom.png"},
+                {"name": "Forest Guardian", "hp": 500, "attack": 250, "defense": 250, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ForestGuardian-removebg-preview.png"},
+            ],
+            3: [
+                {"name": "Mana Golem", "hp": 200, "attack": 220, "defense": 210, "element": "Corrupted", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_managolum-removebg-preview.png"},
+                {"name": "Karok the Fallen", "hp": 180, "attack": 215, "defense": 205, "element": "Ice", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_VIMs8un-removebg-preview.png"},
+                {"name": "Water Draconian", "hp": 220, "attack": 225, "defense": 200, "element": "Water", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_waterdrag-removebg-preview.png"},
+                {"name": "Shadow Creeper", "hp": 190, "attack": 220, "defense": 205, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_shadowcreep-removebg-preview.png"},
+                {"name": "Wind Djinn", "hp": 210, "attack": 225, "defense": 215, "element": "Wind", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_djinn-removebg-preview.png"},
+                {"name": "Autunm Fox", "hp": 205, "attack": 230, "defense": 220, "element": "Earth", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Autumn_Fox-removebg-preview.png"},
+                {"name": "Dark Draconian", "hp": 195, "attack": 220, "defense": 200, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_darkdom-removebg-preview.png"},
+                {"name": "Light Elemental", "hp": 185, "attack": 215, "defense": 210, "element": "Light", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_LightELemental-removebg-preview.png"},
+                {"name": "Undead Giant", "hp": 230, "attack": 220, "defense": 210, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_UndGiant-removebg-preview.png"},
+                {"name": "Chaos Spider", "hp": 215, "attack": 215, "defense": 205, "element": "Corrupted", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosSpider-removebg-preview.png"},
+                {"name": "Seed Spitter", "hp": 225, "attack": 220, "defense": 200, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SeedSpitter-removebg-preview.png"},
+                {"name": "Beach Werewolf", "hp": 240, "attack": 230, "defense": 220, "element": "Water", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BeachWerewold-removebg-preview.png"},
+                {"name": "Boss Dummy", "hp": 220, "attack": 225, "defense": 210, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BossDummy-removebg-preview.png"},
+                {"name": "Rock", "hp": 235, "attack": 225, "defense": 215, "element": "Earth", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Rock-removebg-preview.png"},
+                {"name": "Shadow Serpent", "hp": 200, "attack": 220, "defense": 205, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadoeSerpant-removebg-preview.png"},
+                {"name": "Flame Elemental", "hp": 210, "attack": 225, "defense": 210, "element": "Fire", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireElemental-removebg-preview.png"},
+                {"name": "Bear", "hp": 225, "attack": 215, "defense": 220, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732611726453.png"},
+                {"name": "Chair", "hp": 215, "attack": 210, "defense": 215, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_chair-removebg-preview.png"},
+                {"name": "Chaos Serpant", "hp": 230, "attack": 220, "defense": 205, "element": "Corrupted", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosSerp-removebg-preview.png"},
+                {"name": "Gorillaphant", "hp": 240, "attack": 225, "defense": 210, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_gorillaserpant-removebg-preview.png"},
+            ],
+            4: [
+                {"name": "Hydra Head", "hp": 300, "attack": 280, "defense": 270, "element": "Water", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_hydra.png"},
+                {"name": "Blessed Deer", "hp": 280, "attack": 275, "defense": 265, "element": "Light", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BlessedDeer-removebg-preview.png"},
+                {"name": "Chaos Sphinx", "hp": 320, "attack": 290, "defense": 275, "element": "Corrupted", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaopsSpinx.png"},
+                {"name": "Inferno Dracolion", "hp": 290, "attack": 285, "defense": 270, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614284328.png"},
+                {"name": "Wind Cyclone", "hp": 310, "attack": 290, "defense": 280, "element": "Wind", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_WindElemental-removebg-preview.png"},
+                {"name": "Mr Cuddles", "hp": 305, "attack": 295, "defense": 285, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_mrcuddles-removebg-preview.png"},
+                {"name": "Infernal Fiend", "hp": 295, "attack": 285, "defense": 270, "element": "Fire", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614284328.png"},
+                {"name": "Dark Mukai", "hp": 285, "attack": 275, "defense": 265, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614826889.png"},
+                {"name": "Undead Berserker", "hp": 330, "attack": 285, "defense": 275, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614863579.png"},
+                {"name": "Chaos Warrior", "hp": 315, "attack": 280, "defense": 270, "element": "Corrupted", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosWarrior-removebg-preview.png"},
+                {"name": "Dire Wolf", "hp": 325, "attack": 285, "defense": 275, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DireWolf-removebg-preview.png"},
+                {"name": "Skye Warrior", "hp": 340, "attack": 295, "defense": 285, "element": "Corrupted", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SkyeWarrior-removebg-preview.png"},
+                {"name": "Death On Wings", "hp": 320, "attack": 290, "defense": 275, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DeathonWings-removebg-preview.png"},
+                {"name": "Chaorruption", "hp": 335, "attack": 295, "defense": 285, "element": "Corrupted", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Chaorruption-removebg-preview.png"},
+                {"name": "Shadow Beast", "hp": 300, "attack": 285, "defense": 270, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadowBeast-removebg-preview.png"},
+                {"name": "Hootbear", "hp": 310, "attack": 290, "defense": 275, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_HootBear-removebg-preview.png"},
+                {"name": "Anxiety", "hp": 325, "attack": 280, "defense": 290, "element": "Dark", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_anxiety-removebg-preview.png"},
+                {"name": "Twilly", "hp": 315, "attack": 275, "defense": 285, "element": "Nature", "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Twilly-removebg-preview.png"},
+                {"name": "Black Cat", "hp": 330, "attack": 285, "defense": 270, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_QJsLMnk-removebg-preview.png"},
+                {"name": "Forest Guardian", "hp": 340, "attack": 290, "defense": 275, "element": "Nature", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ForestGuardian-removebg-preview.png"},
+            ],
+            5: [
+                {"name": "Chaos Dragon", "hp": 400, "attack": 380, "defense": 370, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosDragon-removebg-preview.png"},
+                {"name": "Wooden Door", "hp": 380, "attack": 375, "defense": 365, "element": "Earth", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_WoodenDoor-removebg-preview.png"},
+                {"name": "Garvodeus", "hp": 420, "attack": 390, "defense": 375, "element": "Water", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Garvodeus-removebg-preview.png"},
+                {"name": "Shadow Lich", "hp": 390, "attack": 385, "defense": 370, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadowLich-removebg-preview.png"},
+                {"name": "Zorbak", "hp": 410, "attack": 390, "defense": 380, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Zorbak-removebg-preview.png"},
+                {"name": "Dwakel Rocketman", "hp": 405, "attack": 395, "defense": 385, "element": "Electric", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DwarkalRock-removebg-preview.png"},
+                {"name": "Kathool", "hp": 395, "attack": 385, "defense": 370, "element": "Water", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Kathool-removebg-preview.png"},
+                {"name": "Celestial Hound", "hp": 385, "attack": 375, "defense": 365, "element": "Light", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_CelestialHound-removebg-preview.png"},
+                {"name": "Undead Raxgore", "hp": 430, "attack": 385, "defense": 375, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Raxfore-removebg-preview_1.png"},
+                {"name": "Droognax", "hp": 415, "attack": 380, "defense": 370, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Droognax-removebg-preview.png"},
+                {"name": "Corrupted Boar", "hp": 425, "attack": 385, "defense": 375, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Corrupted_Bear-removebg-preview.png"},
+                {"name": "Fressa", "hp": 440, "attack": 395, "defense": 385, "element": "Water", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Fressa-removebg-preview.png"},
+                {"name": "Grimskull", "hp": 420, "attack": 390, "defense": 375, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Grimskull-removebg-preview.png"},
+                {"name": "Chaotic Chicken", "hp": 435, "attack": 385, "defense": 380, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaoticChicken-removebg-preview.png"},
+                {"name": "Baelgar", "hp": 400, "attack": 385, "defense": 370, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Baelgar-removebg-preview.png"},
+                {"name": "Blood Dragon", "hp": 410, "attack": 390, "defense": 375, "element": "Fire", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BloodDragon-removebg-preview.png"},
+                {"name": "Avatar of Desolich", "hp": 425, "attack": 380, "defense": 390, "element": "Fire", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732696555786.png"},
+                {"name": "Piggy Drake", "hp": 415, "attack": 375, "defense": 385, "element": "Wind", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732696596976.png"},
+                {"name": "Chaos Alteon", "hp": 430, "attack": 385, "defense": 370, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Chaos_Alteon-removebg-preview.png"},
+                {"name": "Argo", "hp": 440, "attack": 380, "defense": 375, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Argo-removebg-preview.png"},
+            ],
+            6: [
+                {"name": "Ultra Cuddles", "hp": 500, "attack": 470, "defense": 460, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ultracuddles-removebg-preview.png"},
+                {"name": "General Pollution", "hp": 480, "attack": 465, "defense": 455, "element": "Earth", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_genpol-removebg-preview.png"},
+                {"name": "Manslayer Fiend", "hp": 520, "attack": 475, "defense": 460, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_manlsayer-removebg-preview.png"},
+                {"name": "The Hushed", "hp": 490, "attack": 470, "defense": 455, "element": "Light", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_hushed-removebg-preview.png"},
+                {"name": "The Jailer", "hp": 510, "attack": 475, "defense": 465, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_jailer-removebg-preview.png"},
+                {"name": "Thriller", "hp": 505, "attack": 480, "defense": 470, "element": "Electric", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Thriller-removebg-preview.png"},
+                {"name": "Dire Razorclaw", "hp": 495, "attack": 470, "defense": 455, "element": "Fire", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file.png"},
+                {"name": "Dollageddon", "hp": 485, "attack": 465, "defense": 455, "element": "Light", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Dollageddon-removebg-preview.png"},
+                {"name": "Gold Werewolf", "hp": 530, "attack": 475, "defense": 460, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Gold_Werewolf-removebg-preview.png"},
+                {"name": "FlameMane", "hp": 515, "attack": 470, "defense": 455, "element": "Fire", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FlameMane-removebg-preview.png"},
+                {"name": "Specimen 66", "hp": 525, "attack": 475, "defense": 460, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Specimen_66-removebg-preview.png"},
+                {"name": "Frank", "hp": 540, "attack": 480, "defense": 470, "element": "Electric", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Frank-removebg-preview.png"},
+                {"name": "French Horned ToadDragon", "hp": 520, "attack": 475, "defense": 460, "element": "Water", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file__1_-removebg-preview.png"},
+                {"name": "Mog Zard", "hp": 535, "attack": 475, "defense": 465, "element": "Earth", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_MogZard-removebg-preview.png"},
+                {"name": "Mo-Zard", "hp": 500, "attack": 470, "defense": 455, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file__2_-removebg-preview.png"},
+                {"name": "Nulgath", "hp": 510, "attack": 475, "defense": 460, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Nulgath-removebg-preview.png"},
+                {"name": "Proto Champion", "hp": 525, "attack": 465, "defense": 475, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file_3.png"},
+                {"name": "Trash Can", "hp": 515, "attack": 460, "defense": 470, "element": "Light", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_TrashCan-removebg-preview.png"},
+                {"name": "Turdragon", "hp": 530, "attack": 475, "defense": 460, "element": "Nature", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Turagon-removebg-preview.png"},
+                {"name": "Unending Avatar", "hp": 540, "attack": 470, "defense": 455, "element": "Nature", "url":" https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file_4.png"},
+            ],
+            7: [
+                {"name": "Astral Dragon", "hp": 600, "attack": 570, "defense": 560, "element": "Light", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_AstralDragon.png"},
+                {"name": "Eise Horror", "hp": 580, "attack": 565, "defense": 555, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Elise_Horror-removebg-preview.png"},
+                {"name": "Asbane", "hp": 620, "attack": 575, "defense": 560, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Adbane.png"},
+                {"name": "Apephyryx", "hp": 590, "attack": 570, "defense": 555, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Apephryx-removebg-preview.png"},
+                {"name": "Enchantress", "hp": 610, "attack": 575, "defense": 565, "element": "Nature", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Enchantress-removebg-preview.png"},
+                {"name": "Queen of Monsters", "hp": 605, "attack": 580, "defense": 570, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_QueenOfMonsters-removebg-preview.png"},
+                {"name": "Krykan", "hp": 595, "attack": 570, "defense": 555, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove_background_project.png"},
+                {"name": "Painadin Overlord", "hp": 585, "attack": 565, "defense": 555, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Painadin_Overlord-removebg-preview.png"},
+                {"name": "EL-Blender", "hp": 630, "attack": 575, "defense": 560, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_EbilBlender-removebg-preview.png"},
+                {"name": "Key of Sholemoh", "hp": 615, "attack": 570, "defense": 555, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Key_of_Sholemoh-removebg-preview.png"},
+                {"name": "Specimen 30", "hp": 625, "attack": 575, "defense": 560, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Specimen_30.png"},
+                {"name": "Pinky", "hp": 640, "attack": 580, "defense": 570, "element": "Electric", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Pinky-removebg-preview.png"},
+                {"name": "Monster Cake", "hp": 620, "attack": 575, "defense": 560, "element": "Nature", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Monster_Cake-removebg-preview.png"},
+                {"name": "Angyler Fish", "hp": 635, "attack": 575, "defense": 565, "element": "Water", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Angyler_Fish-removebg-preview.png"},
+                {"name": "Big Bad Ancient.. Goose?", "hp": 600, "attack": 570, "defense": 555, "element": "Light", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BigBadAncientGoose-removebg-preview.png"},
+                {"name": "Barlot Field", "hp": 610, "attack": 575, "defense": 560, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Barlot_Fiend-removebg-preview.png"},
+                {"name": "Barghest", "hp": 625, "attack": 565, "defense": 575, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Barghest-removebg-preview.png"},
+                {"name": "Yuzil", "hp": 615, "attack": 560, "defense": 570, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Yuzil.png"},
+                {"name": "Azkorath", "hp": 630, "attack": 575, "defense": 560, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Azkorath-removebg-preview.png"},
+                {"name": "Boto", "hp": 640, "attack": 570, "defense": 555, "element": "Water", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Boto.png"},
+            ],
+            8: [
+                {"name": "Meatmongous", "hp": 1200, "attack": 450, "defense": 600, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Meatmongous-removebg-preview.png"},
+                {"name": "Ebil Meta Dragon", "hp": 810, "attack": 770, "defense": 550, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_MetaDragon_n_Greg-transformed.png"},
+                {"name": "Shadow Nulgath", "hp": 850, "attack": 700, "defense": 700, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Shadow_Nulgath.png"},
+                {"name": "The First Speaker", "hp": 800, "attack": 600, "defense": 700, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FirstSpeakerFix-Photoroom.png"},
+            ],
+            9: [
+                {"name": "Avatar Tynfdarius", "hp": 800, "attack": 780, "defense": 770, "element": "Fire", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Avatar_Tynfdarius-removebg-preview-transformed-Photoroom.png"},
+                {"name": "Mech-a-Knight", "hp": 780, "attack": 775, "defense": 790, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Mech-a-knight-removebg-preview-transformed.png"},
+                {"name": "Astraea's Engineer", "hp": 820, "attack": 790, "defense": 775, "element": "Light", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Engineer-removebg-preview-transformed.png"},
+            ],
+            10: [
+                {"name": "Deimos", "hp": 1200, "attack": 700, "defense": 900, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Deimos.png"},
+                {"name": "Void Dragon", "hp": 2500, "attack": 570, "defense": 575, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_6pnyUGr-Photoroom-Photoroom.png"},
+                {"name": "End of all things", "hp": 300, "attack": 2500, "defense": 300, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Beast-Photoroom-transformed-Photoroom.png"},
+            ],
+            11: [
+                {"name": "Drakath", "hp": 4000, "attack": 1022, "defense": 700, "element": "Corrupted", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Pngtreelightning_source_lightning_effect_purple_3916970.png"},
+                {"name": "Astraea", "hp": 3500, "attack": 723, "defense": 857, "element": "Light", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_5z90r962trs71_1-Photoroom.png"},
+                {"name": "Sepulchure", "hp": 3000, "attack": 1355, "defense": 600, "element": "Dark", "url":"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_wakai-quketsuki-sepulchuredoomknightdoomblade-Photoroom.png"},
+            ]
+        }
+        try:
+            # Check if user is a Ranger class
+            async with self.bot.pool.acquire() as conn:
+                profile = await conn.fetchrow('SELECT class FROM profile WHERE "user"=$1;', ctx.author.id)
+                if not profile or not profile['class']:
+                    await ctx.send("You need to be a Ranger to use this ability!")
+                    await self.bot.reset_cooldown(ctx)
+                    return
+
+                is_ranger = False
+                ranger_class = None
+                ranger_classes = ["Caretaker", "Tamer", "Trainer", "Bowman", "Hunter", "Warden", "Ranger"]
+                for class_name in profile['class']:
+                    if class_name in ranger_classes:
+                        is_ranger = True
+                        ranger_class = class_name
+                        break
+
+
+                if not is_ranger:
+                    await ctx.send("You need to be a Ranger to use this ability!")
+                    await self.bot.reset_cooldown(ctx)
+                    return
+
+                pve_command = self.bot.get_command("pve")
+                if pve_command is not None:
+                    pve_ttl = await ctx.bot.redis.execute_command(
+                        "TTL", f"cd:{ctx.author.id}:{pve_command.qualified_name}"
+                    )
+
+                    if pve_ttl != -2:  # If cooldown exists
+                        hours, remainder = divmod(pve_ttl, 3600)
+                        minutes, seconds = divmod(remainder, 60)
+                        time_str = f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
+                        await ctx.send(f"You must wait **{time_str}** before you can scout for monsters!")
+                        await self.bot.reset_cooldown(ctx)  # Reset scout cooldown since we couldn't use it
+                        return
+
+                # Define reroll chances based on ranger evolution
+                reroll_chances = {
+                    "Caretaker": 1,
+                    "Tamer": 1,
+                    "Trainer": 2,
+                    "Bowman": 2,
+                    "Hunter": 3,
+                    "Warden": 3,
+                    "Ranger": 4
+                }
+
+                max_rerolls = reroll_chances[ranger_class]
+                rerolls_left = max_rerolls
+
+                # Fetch player level for monster selection
+                player_xp = ctx.character_data.get("xp", 0)
+                player_level = rpgtools.xptolevel(player_xp)
+
+
+            class ScoutingView(discord.ui.View):
+                def __init__(self, ctx, monster_data, rerolls_left, max_rerolls):
+                    super().__init__(timeout=30)
+                    self.ctx = ctx
+                    self.monster = monster_data
+                    self.rerolls = rerolls_left
+                    self.max_rerolls = max_rerolls
+                    self.result = None
+
+                    self.engage_button = discord.ui.Button(
+                        label="Engage",
+                        style=discord.ButtonStyle.success,
+                        custom_id="engage"
+                    )
+                    self.engage_button.callback = self.engage_callback
+                    self.add_item(self.engage_button)
+
+                    self.reroll_button = discord.ui.Button(
+                        label="Reroll",
+                        style=discord.ButtonStyle.primary,
+                        custom_id="reroll"
+                    )
+                    self.reroll_button.callback = self.reroll_callback
+                    self.add_item(self.reroll_button)
+
+                    self.retreat_button = discord.ui.Button(
+                        label="Retreat",
+                        style=discord.ButtonStyle.danger,
+                        custom_id="retreat"
+                    )
+                    self.retreat_button.callback = self.retreat_callback
+                    self.add_item(self.retreat_button)
+
+                    self.update_button_states()
+
+                async def engage_callback(self, interaction: discord.Interaction):
+                    try:
+                        if interaction.user.id != self.ctx.author.id:
+                            await interaction.response.send_message("This isn't your battle!", ephemeral=True)
+                            return
+
+                        # First defer the response
+                        await interaction.response.defer()
+                        # Then set result and stop
+                        self.result = "engage"
+                        self.stop()
+
+                    except Exception as e:
+                        await self.ctx.send(f"Error in engage callback: {str(e)}")
+
+                async def reroll_callback(self, interaction: discord.Interaction):
+                    try:
+                        if interaction.user.id != self.ctx.author.id:
+                            await interaction.response.send_message("This isn't your battle!", ephemeral=True)
+                            return
+
+                        if self.rerolls > 0:
+                            # First defer the response
+                            await interaction.response.defer()
+                            # Then update rerolls and set result
+                            self.rerolls -= 1
+                            self.result = "reroll"
+                            self.stop()
+
+                    except Exception as e:
+                        await self.ctx.send(f"Error in reroll callback: {str(e)}")
+
+                async def retreat_callback(self, interaction: discord.Interaction):
+                    try:
+                        if interaction.user.id != self.ctx.author.id:
+                            await interaction.response.send_message("This isn't your battle!", ephemeral=True)
+                            return
+
+                        # First defer the response
+                        await interaction.response.defer()
+                        # Then set result and stop
+                        self.result = "retreat"
+                        self.stop()
+
+                    except Exception as e:
+                        await self.ctx.send(f"Error in retreat callback: {str(e)}")
+
+
+
+                def update_button_states(self):
+                    self.reroll_button.disabled = self.rerolls <= 0
+
+            async def select_monster(level):
+                monster = random.choice(monsters[level])
+                return monster
+
+            async def show_monster_info(monster_data, rerolls, max_rerolls):
+                embed = discord.Embed(
+                    title="🔍 Monster Scouting Report",
+                    description=f"You spot a Level {levelchoice} **{monster_data['name']}** ahead!",
+                    color=discord.Color.blue()
+                )
+
+                element_emoji = element_to_emoji.get(monster_data["element"], "❓")
+                stats_text = (
+                    f"**Element:** {element_emoji} {monster_data['element']}\n"
+                    f"**HP:** {monster_data['hp']}\n"
+                    f"**Attack:** {monster_data['attack']}\n"
+                    f"**Defense:** {monster_data['defense']}"
+                )
+                embed.add_field(name="Stats", value=stats_text, inline=False)
+
+                embed.add_field(
+                    name="Scouting Options",
+                    value=f"Rerolls remaining: {rerolls}/{max_rerolls}",
+                    inline=False
+                )
+
+                return embed
+
+
+            # Main scouting loop
+            while True:
+                # Determine monster level
+                if player_level <= 4:
+                    levelchoice = randomm.randint(1, 2)
+                elif player_level <= 8:
+                    levelchoice = randomm.randint(1, 3)
+                elif player_level <= 12:
+                    levelchoice = randomm.randint(1, 4)
+                elif player_level <= 15:
+                    levelchoice = randomm.randint(1, 5)
+                elif player_level <= 20:
+                    levelchoice = randomm.randint(1, 6)
+                elif player_level <= 25:
+                    levelchoice = randomm.randint(1, 7)
+                elif player_level <= 30:
+                    levelchoice = randomm.randint(1, 8)
+                elif player_level <= 35:
+                    levelchoice = randomm.randint(1, 9)
+                elif player_level <= 40:
+                    levelchoice = randomm.randint(1, 10)
+                else:  # 40+
+                    levelchoice = randomm.randint(1, 10)
+
+
+                # Select and display monster
+                monster_data = await select_monster(levelchoice)
+
+                embed = await show_monster_info(monster_data, rerolls_left, max_rerolls)
+
+                # Create a fresh view each time
+                view = ScoutingView(ctx, monster_data, rerolls_left, max_rerolls)
+                message = await ctx.send(embed=embed, view=view)
+
+                await view.wait()
+
+                if view.result == "engage":
+                    pve_command = self.bot.get_command("pve")
+                    if pve_command is not None:
+                        pve_ttl = await ctx.bot.redis.execute_command(
+                            "TTL", f"cd:{ctx.author.id}:{pve_command.qualified_name}"
+                        )
+
+                        if pve_ttl != -2:  # Cooldown exists
+                            # Format the remaining time
+                            hours, remainder = divmod(pve_ttl, 3600)
+                            minutes, seconds = divmod(remainder, 60)
+                            time_str = f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
+
+                            await message.delete()
+                            await ctx.send(f"Ha! Nice try. You must wait {time_str} before engaging in combat again!")
+                            break
+                    await ctx.bot.redis.execute_command(
+                        "SET", f"cd:{ctx.author.id}:pve",
+                        "pve",
+                        "EX", 60 * 30
+                    )
+
+                    await message.delete()
+                    ctx.monster_override = monster_data
+                    ctx.levelchoice_override = levelchoice
+                    await ctx.invoke(self.bot.get_command("pve"))
+                    break
+                elif view.result == "reroll":
+                    rerolls_left = view.rerolls
+                    await message.delete()
+                    continue
+                elif view.result == "retreat":
+                    await message.delete()
+                    await ctx.send("You decide to retreat and look for another opportunity.")
+                    break
+                else:
+                    await message.delete()
+                    await ctx.send("Scouting timed out.")
+                    break
+        except Exception as e:
+            await ctx.send(e)
 
     @pets.command(brief=_("Check your monster eggs"))
     async def eggs(self, ctx):
@@ -8322,9 +9153,15 @@ class Battles(commands.Cog):
             for egg in eggs:
                 time_left = egg["hatch_time"] - datetime.datetime.utcnow()
                 time_left_str = str(time_left).split('.')[0]  # Remove microseconds
+
+                # Check if egg ID is 6666 and modify stats display accordingly
+                hp_display = "???" if egg['id'] == 6666 else egg['hp']
+                attack_display = "???" if egg['id'] == 6666 else egg['attack']
+                defense_display = "???" if egg['id'] == 6666 else egg['defense']
+
                 embed.add_field(
                     name=egg["egg_type"],
-                    value=f"**ID:** {egg['id']}\n**IV:** {egg['IV']}%\n**Element:** {egg['element']}\n**HP:** {egg['hp']}\n**Attack:** {egg['attack']}\n**Defense:** {egg['defense']}\n**Hatches in:** {time_left_str}",
+                    value=f"**ID:** {egg['id']}\n**IV:** {egg['IV']}%\n**Element:** {egg['element']}\n**HP:** {hp_display}\n**Attack:** {attack_display}\n**Defense:** {defense_display}\n**Hatches in:** {time_left_str}",
                     inline=False,
                 )
             await ctx.send(embed=embed)
@@ -8648,29 +9485,32 @@ class Battles(commands.Cog):
         - If `nickname` is provided, sets the pet's name to the given nickname.
         - If `nickname` is omitted, resets the pet's name to the default.
         """
-        async with self.bot.pool.acquire() as conn:
-            # Fetch the pet from the database
-            pet = await conn.fetchrow("SELECT * FROM monster_pets WHERE user_id = $1 AND id = $2;", ctx.author.id, id)
+        try:
+            async with self.bot.pool.acquire() as conn:
+                # Fetch the pet from the database
+                pet = await conn.fetchrow("SELECT * FROM monster_pets WHERE user_id = $1 AND id = $2;", ctx.author.id, id)
 
-            if not pet:
-                await ctx.send(_("❌ No pet with ID `{id}` found in your collection.").format(id=id))
-                return
-
-            # Check if resetting or renaming
-            if nickname:
-                if len(nickname) > 50:  # Limit nickname length to 20 characters
-                    await ctx.send(_("❌ Nickname cannot exceed 50 characters."))
+                if not pet:
+                    await ctx.send(_("❌ No pet with ID `{id}` found in your collection.").format(id=id))
                     return
 
-                # Update the pet's nickname in the database
-                await conn.execute("UPDATE monster_pets SET name = $1 WHERE id = $2;", nickname, id)
-                await ctx.send(_("✅ Successfully renamed your pet to **{nickname}**!").format(nickname=nickname))
-            else:
-                # Reset the pet's nickname to the default name
-                default_name = pet['default_name']
-                await conn.execute("UPDATE monster_pets SET name = NULL WHERE id = $1;", id)
-                await ctx.send(_("✅ Pet's name has been reset to its default: **{default_name}**.").format(
-                    default_name=default_name))
+                # Check if resetting or renaming
+                if nickname:
+                    if len(nickname) > 50:  # Limit nickname length to 20 characters
+                        await ctx.send(_("❌ Nickname cannot exceed 50 characters."))
+                        return
+
+                    # Update the pet's nickname in the database
+                    await conn.execute("UPDATE monster_pets SET name = $1 WHERE id = $2;", nickname, id)
+                    await ctx.send(_("✅ Successfully renamed your pet to **{nickname}**!").format(nickname=nickname))
+                else:
+                    # Reset the pet's nickname to the default name
+                    default_name = pet['default_name']
+                    await conn.execute("UPDATE monster_pets SET name = $1 WHERE id = $2;", default_name, id)
+                    await ctx.send(_("✅ Pet's name has been reset to its default: **{default_name}**.").format(
+                        default_name=default_name))
+        except Exception as e:
+            await ctx.send(e)
 
     @has_char()
     @user_cooldown(600)

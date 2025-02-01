@@ -550,7 +550,7 @@ class RRBeta(commands.Cog):
         if target.role == "Guardian" and target.items.get("protect", 0) > 0:
             embed = discord.Embed(
                 title="Guardian Shield",
-                description=f"{target.user.mention}'s Guardian ability protected them from the {'Assassin\'s strike' if assassin else 'shot'}!",
+                description=f"{target.user.mention}'s Guardian ability protected them from the {'Assassins strike' if assassin else 'shot'}!",
                 color=discord.Color.blue()
             )
             await ctx.send(embed=embed)
@@ -563,21 +563,21 @@ class RRBeta(commands.Cog):
             if random.random() < 0.5:
                 embed = discord.Embed(
                     title="Bulletproof Vest",
-                    description=f"{target.user.mention}'s bulletproof vest absorbed the {'Assassin\'s strike' if assassin else 'shot'}!",
+                    description=f"{target.user.mention}'s bulletproof vest absorbed the {'Assassins strike' if assassin else 'shot'}!",
                     color=discord.Color.blue()
                 )
                 await ctx.send(embed=embed)
                 target.items["vest"] -= 1
                 return True  # Protection used
             else:
-                await ctx.send(f"{target.user.mention}'s bulletproof vest failed to stop the {'Assassin\'s strike' if assassin else 'shot'}!")
+                await ctx.send(f"{target.user.mention}'s bulletproof vest failed to stop the {'Assassins strike' if assassin else 'shot'}!")
                 target.items["vest"] -= 1
 
         # Check for extra life
         if target.items.get("extra_life", 0) > 0:
             embed = discord.Embed(
                 title="Extra Life Used",
-                description=f"{target.user.mention} uses an extra life to survive the {'Assassin\'s strike' if assassin else 'shot'}!",
+                description=f"{target.user.mention} uses an extra life to survive the {'Assassins strike' if assassin else 'shot'}!",
                 color=discord.Color.green()
             )
             await ctx.send(embed=embed)

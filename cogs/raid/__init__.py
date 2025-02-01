@@ -104,6 +104,7 @@ class Raid(commands.Cog):
         self.bot = bot
         self.raid = {}
         self.toggle_list = set()  # Use a set for efficient membership checking
+        self.chaoslist = []
 
         self.joined = []
         self.raidactive = False
@@ -160,24 +161,6 @@ class Raid(commands.Cog):
             return await ctx.send("Could not edit Boss HP!")
         await ctx.send("Boss HP updated!")
 
-    @is_gm()
-    @commands.command()
-    async def getraidkeys(self, ctx):
-        try:
-            keys = [str(key) for key in self.raid.keys()]
-
-            if not keys:
-                await ctx.send("No participants in the raid.")
-                return
-
-            # Convert list of keys to a single string
-            message = ", ".join(keys)
-
-            # Split the message into chunks of 2000 characters
-            for chunk in [message[i:i + 2000] for i in range(0, len(message), 2000)]:
-                await ctx.send(chunk)
-        except Exception as e:
-            await ctx.send(f"An error occurred: {e}")
 
     @is_gm()
     @raid_channel()
@@ -192,6 +175,7 @@ class Raid(commands.Cog):
             """[Bot Admin only] Starts a raid."""
             await ctx.message.delete()
             await self.set_raid_timer()
+            survival_used = set()
 
             self.boss = {"hp": hp, "initial_hp": hp, "min_dmg": 1, "max_dmg": 750}
             self.joined = []
@@ -201,7 +185,7 @@ class Raid(commands.Cog):
             # overwrite=self.read_only,
             # )
 
-            fi = discord.File("assets/other/dragon.jpeg")
+            fi = discord.File("assets/other/startdragon.webp")
             em = discord.Embed(
                 title="Ragnarok Spawned",
                 description=(
@@ -212,7 +196,7 @@ class Raid(commands.Cog):
                 color=self.bot.config.game.primary_colour,
             )
 
-            em.set_image(url="attachment://dragon.jpeg")
+            em.set_image(url="attachment://startdragon.webp")
             em.set_thumbnail(url=ctx.author.display_avatar.url)
 
             view = JoinView(
@@ -220,7 +204,7 @@ class Raid(commands.Cog):
                 message=_("You joined the raid."),
                 timeout=60 * 15,
             )
-            fi_path = "assets/other/dragon.jpeg"
+            fi_path = "assets/other/startdragon.webp"
             try:
                 channels_ids = [1140211789573935164, 1199297906755252234,
                                 1158743317325041754]  # Replace with your actual channel IDs
@@ -272,13 +256,13 @@ class Raid(commands.Cog):
 
                     # Countdown messages
                     time_intervals = [300, 300, 180, 60, 30, 20, 10]
-                    messages = ["**The dragon will be vulnerable in 10 minutes**",
-                                "**The dragon will be vulnerable in 5 minutes**",
-                                "**The dragon will be vulnerable in 2 minutes**",
-                                "**The dragon will be vulnerable in 1 minute**",
-                                "**The dragon will be vulnerable in 30 seconds**",
-                                "**The dragon will be vulnerable in 20 seconds**",
-                                "**The dragon will be vulnerable in 10 seconds**"]
+                    messages = ["**Ragnarok will be vulnerable in 10 minutes**",
+                                "**Ragnarok will be vulnerable in 5 minutes**",
+                                "**Ragnarok will be vulnerable in 2 minutes**",
+                                "**Ragnarok will be vulnerable in 1 minute**",
+                                "**Ragnarok will be vulnerable in 30 seconds**",
+                                "**Ragnarok will be vulnerable in 20 seconds**",
+                                "**Ragnarok will be vulnerable in 10 seconds**"]
 
                     for interval, message in zip(time_intervals, messages):
                         await asyncio.sleep(interval)
@@ -312,18 +296,18 @@ class Raid(commands.Cog):
 
             # Define the tier threshold and the user ID to exclude
             tier_threshold = 1  # Assuming you want tiers >= 1
-            excluded_user_id = 782017044828782642
+            excluded_user_ids = [782017044828782642, 579703576570494976, 761469900853215263, 1322593504098254959]
 
-            # Fetch Discord IDs where tier is >= tier_threshold and user is not excluded_user_id
+            # Fetch Discord IDs where tier is >= tier_threshold and user is not in excluded_user_ids
             discord_ids = await self.bot.pool.fetch(
                 '''
                 SELECT "user" 
                 FROM profile 
                 WHERE "tier" >= $1 
-                  AND "user" != $2;
+                  AND "user" != ALL($2);
                 ''',
                 tier_threshold,
-                excluded_user_id
+                excluded_user_ids
             )
 
             # Extract the IDs from the result and append them to a list
@@ -381,7 +365,7 @@ class Raid(commands.Cog):
             while (
                     self.boss["hp"] > 0
                     and len(self.raid) > 0
-                    and datetime.datetime.utcnow() < start + datetime.timedelta(minutes=45)
+                    and datetime.datetime.utcnow() < start + datetime.timedelta(minutes=60)
             ):
                 (target, participant_type) = random.choice(list(self.raid.keys()))
                 dmg = random.randint(self.boss["min_dmg"], self.boss["max_dmg"])
@@ -393,22 +377,56 @@ class Raid(commands.Cog):
                 if self.raid[(target, participant_type)]["hp"] > 0:  # If target is still alive
                     description = f"{target.mention if participant_type == 'user' else target} now has {self.raid[(target, participant_type)]['hp']} HP!"
                     em.description = description
-                    em.add_field(name="Theoretical Damage", value=finaldmg + self.raid[(target, participant_type)]["armor"])
+                    em.add_field(name="Theoretical Damage",
+                                 value=finaldmg + self.raid[(target, participant_type)]["armor"])
                     em.add_field(name="Shield", value=self.raid[(target, participant_type)]["armor"])
                     em.add_field(name="Effective Damage", value=finaldmg)
                 else:  # If target has died
-                    description = f"{target.mention if participant_type == 'user' else target} died!"
-                    em.description = description
-                    em.add_field(name="Theoretical Damage", value=finaldmg + self.raid[(target, participant_type)]["armor"])
-                    em.add_field(name="Shield", value=self.raid[(target, participant_type)]["armor"])
-                    em.add_field(name="Effective Damage", value=finaldmg)
-                    del self.raid[(target, participant_type)]
+                    # Check if target is a Raider and hasn't used their survival
+                    if self.raid[(target, participant_type)]["hp"] <= 0:  # Changed from else to explicit check
+                        # Check if target is a Raider and hasn't used their survival
+                        survived = False  # Add this flag
+                        if participant_type == "user" and target.id not in survival_used:
+                            # Check if they're a Raider
+                            async with self.bot.pool.acquire() as conn:
+                                profile = await conn.fetchrow('SELECT class FROM profile WHERE "user"=$1;', target.id)
+                                if profile and profile['class']:
+                                    raider_classes = {"Adventurer", "Swordsman", "Fighter", "Swashbuckler",
+                                                      "Dragonslayer",
+                                                      "Raider", "Eternal Hero"}
+
+                                    is_raider = bool(set(profile['class']) & raider_classes)
+
+                                    if is_raider:
+                                        self.raid[(target, participant_type)]["hp"] = 1
+                                        survival_used.add(target.id)
+                                        description = f"💫 {target.mention}'s Raider instincts allowed them to survive with 1 HP!"
+                                        em.description = description
+                                        em.add_field(name="Theoretical Damage",
+                                                     value=finaldmg + self.raid[(target, participant_type)]["armor"])
+                                        em.add_field(name="Shield",
+                                                     value=self.raid[(target, participant_type)]["armor"])
+                                        em.add_field(name="Effective Damage", value=finaldmg)
+                                        survived = True  # Set the flag
+
+
+
+                        # Only handle death if they didn't survive
+                        if not survived:
+                            description = f"{target.mention if participant_type == 'user' else target} died!"
+                            em.description = description
+                            em.add_field(name="Theoretical Damage",
+                                         value=finaldmg + self.raid[(target, participant_type)]["armor"])
+                            em.add_field(name="Shield", value=self.raid[(target, participant_type)]["armor"])
+                            em.add_field(name="Effective Damage", value=finaldmg)
+                            del self.raid[(target, participant_type)]
+
 
                 if participant_type == "user":
                     em.set_author(name=str(target), icon_url=target.display_avatar.url)
                 else:  # For bots
                     em.set_author(name=str(target))
-                em.set_thumbnail(url=f"https://gcdnb.pbrd.co/images/GTGxc2PQxJiD.png")
+                em.set_thumbnail(url=f"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_dragonattack.webp")
                 for channel_id in channels_ids:
                     channel = self.bot.get_channel(channel_id)
                     if channel:
@@ -419,7 +437,7 @@ class Raid(commands.Cog):
                 await asyncio.sleep(4)
 
                 em = discord.Embed(title="The raid attacked Ragnarok!", colour=0xFF5C00)
-                em.set_thumbnail(url=f"https://gcdnb.pbrd.co/images/EjEN1hcCFtID.png")
+                em.set_thumbnail(url=f"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_attackdragon.webp")
                 em.add_field(name="Damage", value=dmg_to_take)
 
                 if self.boss["hp"] > 0:
@@ -618,53 +636,96 @@ class Raid(commands.Cog):
                                     " the meantime. They will get banned if it happens again."
                                 )
 
-                    # cash_pool = 4
-                    #cash_pool = 1000000 / 4
                     cash_pool = hp * 1.3
                     survivors = len(self.raid)
                     self.raid = {(user, p_type): data for (user, p_type), data in self.raid.items() if
                                  p_type == "user" and not user.bot}
-                    cash = int(cash_pool / survivors)
+                    base_cash = int(cash_pool / survivors)  # This is our base reward
+
+                    # Send the base cash to all survivors first
                     users = [user.id for user, p_type in self.raid.keys() if p_type == "user"]
                     await self.bot.pool.execute(
                         'UPDATE profile SET "money"="money"+$1 WHERE "user"=ANY($2);',
-                        cash,
+                        base_cash,
                         users
                     )
+
+                    # Process each survivor for potential Raider bonus
+                    for (user, p_type) in list(
+                            self.raid.keys()):  # Use list() to avoid runtime changes issues
+                        async with self.bot.pool.acquire() as conn:
+                            profile = await conn.fetchrow('SELECT class FROM profile WHERE "user"=$1;',
+                                                          user.id)
+                            bonus_multiplier = 0  # Initialize bonus multiplier
+
+                            if profile and profile['class']:
+                                # Define Raider classes and their corresponding bonuses
+                                raider_classes = {
+                                    "Adventurer": 0.05,  # 5% bonus
+                                    "Swordsman": 0.10,  # 10% bonus
+                                    "Fighter": 0.15,  # 15% bonus
+                                    "Swashbuckler": 0.20,  # 20% bonus
+                                    "Dragonslayer": 0.25,  # 25% bonus
+                                    "Raider": 0.30,  # 30% bonus
+                                    "Eternal Hero": 0.40  # 40% bonus
+                                }
+
+                                # Determine the highest applicable bonus
+                                for class_name in profile['class']:
+                                    if class_name in raider_classes:
+                                        class_bonus = raider_classes[class_name]
+                                        bonus_multiplier = max(bonus_multiplier, class_bonus)
+
+                                if bonus_multiplier > 0:
+                                    bonus_amount = int(base_cash * bonus_multiplier)
+                                    await conn.execute(
+                                        'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                                        bonus_amount,
+                                        user.id
+                                    )
+                                    # Announce bonus if there was one
+                                    for channel_id in channels_ids:
+                                        channel = self.bot.get_channel(channel_id)
+                                        if channel:
+                                            await channel.send(
+                                                f"💰 {user.mention}'s Raider abilities earned them an extra ${bonus_amount:,.0f}!"
+                                            )
+
                     # Send the final message to all channels
                     for channel_id in channels_ids:
                         channel = self.bot.get_channel(channel_id)
                         if channel:
                             await channel.send(
-                                f"**Gave ${cash:,.0f} of Ragnarok's ${cash_pool:,.0f} drop to all survivors!**")
+                                f"**Gave ${base_cash:,.0f} of Ragnarok's ${cash_pool:,.0f} drop to all survivors!**")
 
-                    summary_text = (
-                        f"Emoji_here Defeated in: **{summary_duration}**\n"
-                        f"{summary_crate}\n"
-                        f"Emoji_here Payout per survivor: **${cash:,.0f}**\n"
-                        f"Emoji_here Survivors: **{survivors} and {bots} of placeholders forces**"
-                    )
+                        summary_text = (
+                            f"Emoji_here Defeated in: **{summary_duration}**\n"
+                            f"{summary_crate}\n"
+                            f"Emoji_here Payout per survivor: **${base_cash:,.0f}**\n"
+                            f"Emoji_here Survivors: **{survivors} and {bots} of placeholders forces**"
+                        )
 
                     # Assuming channels_ids is a list of channel IDs
-                    if self.boss["hp"] > 1:
-                        for channel_id in channels_ids:
-                            channel = self.bot.get_channel(channel_id)
-                            if channel:
-                                m = await ctx.send(
-                                    "The raid did not manage to kill Ragnarok within 45 Minutes... He disappeared!")
-                                await m.add_reaction("\U0001F1EB")
-                                summary_text = (
-                                    "Emoji_here The raid did not manage to kill Ragnarok within 45"
-                                    f" Minutes... He disappeared with **{self.boss['hp']:,.3f}** health remaining."
-                                )
+            if self.boss["hp"] > 1:
+                for channel_id in channels_ids:
+                    channel = self.bot.get_channel(channel_id)
+                    if channel:
+                        m = await ctx.send(
+                            "The raid did not manage to kill Ragnarok within an hour... He disappeared!")
+                        await m.add_reaction("\U0001F1EB")
+                        summary = (
+                            "The raid did not manage to kill Ragnarok within an hour... He disappeared with **{self.boss['hp']:,.3f}** health remaining."
+                        )
 
-                await asyncio.sleep(30)
-                await ctx.channel.set_permissions(ctx.guild.default_role, overwrite=self.deny_sending)
-                await self.clear_raid_timer()
-                try:
-                    self.raid.clear()
-                except Exception as e:
-                    await ctx.send(f"An error occurred: {e}")
+            await asyncio.sleep(30)
+            await ctx.channel.set_permissions(ctx.guild.default_role, overwrite=self.deny_sending)
+            await self.clear_raid_timer()
+            try:
+                self.raid.clear()
+            except Exception as e:
+                await ctx.send(f"An error occurred: {e}")
+
+            if self.boss["hp"] < 1:
 
                 if self.bot.config.bot.is_beta:
                     summary = (
@@ -677,16 +738,16 @@ class Raid(commands.Cog):
                         "Emoji_here",
                         ":small_blue_diamond:" if self.boss["hp"] < 1 else ":vibration_mode:"
                     )
-                    summary_channel = self.bot.get_channel(1199299514490683392)
-                    summary_msg = await summary_channel.send(summary)
+            summary_channel = self.bot.get_channel(1199299514490683392)
+            summary_msg = await summary_channel.send(summary)
 
                 #await ctx.send("attempting to clear keys...")
-                try:
-                    self.raid.clear()
-                except Exception as e:
-                    await ctx.send(f"An error occurred: {e}")
-                self.raid_preparation = False
-                self.boss = None
+            try:
+                self.raid.clear()
+            except Exception as e:
+                await ctx.send(f"An error occurred: {e}")
+            self.raid_preparation = False
+            self.boss = None
         except Exception as e:
             import traceback
             error_message = f"Error occurred: {e}\n"
@@ -793,578 +854,6 @@ class Raid(commands.Cog):
 
         except Exception as e:
             await ctx.send(f"An error occurred: {e}")
-
-    @is_god()
-    @raid_free()
-    @commands.command(hidden=True, brief=_("Start a Kvothe raid"))
-    async def kvothespawn(self, ctx, scrael: IntGreaterThan(1)):
-        """[Kvothe only] Starts a raid."""
-        await self.set_raid_timer()
-        scrael = [{"hp": random.randint(80, 100), "id": i + 1} for i in range(scrael)]
-
-        view = JoinView(
-            Button(style=ButtonStyle.primary, label="Join the raid!"),
-            message=_("You joined the raid."),
-            timeout=60 * 15,
-        )
-
-        await ctx.send(
-            """
-The cthae has gathered an army of scrael. Fight for your life!
-
-**Only Kvothe's followers may join.**""",
-            file=discord.File("assets/other/cthae.webp"),
-            view=view,
-        )
-        if not self.bot.config.bot.is_beta:
-            await asyncio.sleep(300)
-            await ctx.send("**The scrael arrive in 10 minutes**")
-            await asyncio.sleep(300)
-            await ctx.send("**The scrael arrive in 5 minutes**")
-            await asyncio.sleep(180)
-            await ctx.send("**The scrael arrive in 2 minutes**")
-            await asyncio.sleep(60)
-            await ctx.send("**The scrael arrive in 1 minute**")
-            await asyncio.sleep(30)
-            await ctx.send("**The scrael arrive in 30 seconds**")
-            await asyncio.sleep(20)
-            await ctx.send("**The scrael arrive in 10 seconds**")
-            await asyncio.sleep(10)
-            await ctx.send(
-                "**The scrael arrived! Fetching participant data... Hang on!**"
-            )
-        else:
-            await asyncio.sleep(60)
-
-        view.stop()
-
-        async with self.bot.pool.acquire() as conn:
-            raid = {}
-            for u in view.joined:
-                if (
-                        not (
-                                profile := await conn.fetchrow(
-                                    'SELECT * FROM profile WHERE "user"=$1;', u.id
-                                )
-                        )
-                        or profile["god"] != "Kvothe"
-                ):
-                    continue
-                try:
-                    dmg, deff = await self.bot.get_raidstats(
-                        u,
-                        atkmultiply=profile["atkmultiply"],
-                        defmultiply=profile["defmultiply"],
-                        classes=profile["class"],
-                        race=profile["race"],
-                        guild=profile["guild"],
-                        god=profile["god"],
-                        conn=conn,
-                    )
-                except ValueError:
-                    continue
-                raid[u] = {"hp": 100, "armor": deff, "damage": dmg, "kills": 0}
-
-        await ctx.send("**Done getting data!**")
-
-        start = datetime.datetime.utcnow()
-
-        while (
-                len(scrael) > 0
-                and len(raid) > 0
-                and datetime.datetime.utcnow() < start + datetime.timedelta(minutes=45)
-        ):
-            target, target_data = random.choice(list(raid.items()))
-            dmg = random.randint(35, 65)
-            dmg = self.getfinaldmg(
-                dmg, target_data["armor"] * Decimal(random.choice(["0.4", "0.5"]))
-            )
-            target_data["hp"] -= dmg
-            em = discord.Embed(title=f"Scrael left: `{len(scrael)}`", colour=0x000000)
-            em.add_field(name="Scrael HP", value=f"{scrael[0]['hp']} HP left")
-            if target_data["hp"] > 0:
-                em.add_field(
-                    name="Attack", value=f"Scrael is fighting against `{target}`"
-                )
-            else:
-                em.add_field(name="Attack", value=f"Scrael killed `{target}`")
-            em.add_field(
-                name="Scrael Damage", value=f"Has dealt `{dmg}` damage to `{target}`"
-            )
-            em.set_image(url=f"{self.bot.BASE_URL}/scrael.jpg")
-            await ctx.send(embed=em)
-            if target_data["hp"] <= 0:
-                del raid[target]
-                if len(raid) == 0:  # no more raiders
-                    break
-            scrael[0]["hp"] -= target_data["damage"]
-            await asyncio.sleep(7)
-            em = discord.Embed(title=f"Heroes left: `{len(raid)}`", colour=0x009900)
-            em.set_author(
-                name=f"Hero ({target})", icon_url=f"{self.bot.BASE_URL}/swordsman1.jpg"
-            )
-            em.add_field(
-                name="Hero HP", value=f"`{target}` got {target_data['hp']} HP left"
-            )
-            if scrael[0]["hp"] > 0:
-                em.add_field(
-                    name="Hero attack",
-                    value=(
-                        f"Is attacking the scrael and dealt `{target_data['damage']}`"
-                        " damage"
-                    ),
-                )
-            else:
-                money = random.randint(250, 750)
-                await self.bot.pool.execute(
-                    'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
-                    money,
-                    target.id,
-                )
-                scrael.pop(0)
-                em.add_field(
-                    name="Hero attack", value=f"Killed the scrael and received ${money}"
-                )
-                if raid.get(target, None):
-                    raid[target]["kills"] += 1
-            em.set_image(url=f"{self.bot.BASE_URL}/swordsman2.jpg")
-            await ctx.send(embed=em)
-            await asyncio.sleep(7)
-
-        if len(scrael) == 0:
-            most_kills = sorted(raid.items(), key=lambda x: -(x[1]["kills"]))[0][0]
-            async with self.bot.pool.acquire() as conn:
-                await conn.execute(
-                    'UPDATE profile SET "crates_legendary"="crates_legendary"+$1 WHERE'
-                    ' "user"=$2;',
-                    1,
-                    most_kills.id,
-                )
-                await self.bot.log_transaction(
-                    ctx,
-                    from_=1,
-                    to=most_kills.id,
-                    subject="crates",
-                    data={"Rarity": "legendary", "Amount": 1},
-                    conn=conn,
-                )
-            await ctx.send(
-                "The scrael were defeated! Our most glorious hero,"
-                f" {most_kills.mention}, has received Kvothe's grace, a"
-                f" {self.bot.cogs['Crates'].emotes.legendary}."
-            )
-        elif len(raid) == 0:
-            await ctx.send(
-                "The scrael have extinguished life in Kvothe's temple! All heroes died!"
-            )
-        await self.clear_raid_timer()
-
-    @is_god()
-    @raid_free()
-    @commands.command(hidden=True, brief=_("Start an Eden raid"))
-    async def edenspawn(self, ctx, hp: IntGreaterThan(0)):
-        """[Eden only] Starts a raid."""
-        await self.set_raid_timer()
-        self.boss = {"hp": hp, "min_dmg": 100, "max_dmg": 500}
-        await ctx.channel.set_permissions(
-            ctx.guild.default_role,
-            overwrite=self.read_only,
-        )
-
-        view = JoinView(
-            Button(style=ButtonStyle.primary, label="Join the raid!"),
-            message=_("You joined the raid."),
-            timeout=60 * 15,
-        )
-
-        await ctx.send(
-            f"""
-The guardian of the gate to the garden has awoken! To gain entry to the Garden of Sanctuary that lays behind the gate you must defeat the guardian.
-This boss has {self.boss['hp']} HP and will be vulnerable in 15 Minutes
-
-**Only followers of Eden may join.**
-""",
-            file=discord.File("assets/other/guardian.webp"),
-            view=view,
-        )
-        if not self.bot.config.bot.is_beta:
-            await asyncio.sleep(300)
-            await ctx.send("**The guardian will be vulnerable in 10 minutes**")
-            await asyncio.sleep(300)
-            await ctx.send("**The guardian will be vulnerable in 5 minutes**")
-            await asyncio.sleep(180)
-            await ctx.send("**The guardian will be vulnerable in 2 minutes**")
-            await asyncio.sleep(60)
-            await ctx.send("**The guardian will be vulnerable in 1 minute**")
-            await asyncio.sleep(30)
-            await ctx.send("**The guardian will be vulnerable in 30 seconds**")
-            await asyncio.sleep(20)
-            await ctx.send("**The guardian will be vulnerable in 10 seconds**")
-            await asyncio.sleep(10)
-        else:
-            await asyncio.sleep(60)
-
-        view.stop()
-
-        await ctx.send(
-            "**The guardian is vulnerable! Fetching participant data... Hang on!**"
-        )
-
-        async with self.bot.pool.acquire() as conn:
-            raid = {}
-            for u in view.joined:
-                if (
-                        not (
-                                profile := await conn.fetchrow(
-                                    'SELECT * FROM profile WHERE "user"=$1;', u.id
-                                )
-                        )
-                        or profile["god"] != "Eden"
-                ):
-                    continue
-                try:
-                    dmg, deff = await self.bot.get_raidstats(
-                        u,
-                        atkmultiply=profile["atkmultiply"],
-                        defmultiply=profile["defmultiply"],
-                        classes=profile["class"],
-                        race=profile["race"],
-                        guild=profile["guild"],
-                        god=profile["god"],
-                        conn=conn,
-                    )
-                except ValueError:
-                    continue
-                raid[u] = {"hp": 250, "armor": deff, "damage": dmg}
-
-        await ctx.send("**Done getting data!**")
-
-        start = datetime.datetime.utcnow()
-
-        while (
-                self.boss["hp"] > 0
-                and len(raid) > 0
-                and datetime.datetime.utcnow() < start + datetime.timedelta(minutes=45)
-        ):
-            target = random.choice(list(raid.keys()))  # the guy it will attack
-            dmg = random.randint(self.boss["min_dmg"], self.boss["max_dmg"])
-            dmg = self.getfinaldmg(dmg, raid[target]["armor"])
-            raid[target]["hp"] -= dmg  # damage dealt
-            if raid[target]["hp"] > 0:
-                em = discord.Embed(
-                    title="The Guardian attacks the seekers of the garden!",
-                    description=f"{target} now has {raid[target]['hp']} HP!",
-                    colour=0xFFB900,
-                )
-            else:
-                em = discord.Embed(
-                    title="The Guardian attacks the seekers of the garden!",
-                    description=f"{target} died!",
-                    colour=0xFFB900,
-                )
-            em.add_field(name="Theoretical Damage", value=dmg + raid[target]["armor"])
-            em.add_field(name="Shield", value=raid[target]["armor"])
-            em.add_field(name="Effective Damage", value=dmg)
-            em.set_author(name=str(target), icon_url=target.display_avatar.url)
-            em.set_thumbnail(url=f"{self.bot.BASE_URL}/guardian_small.jpg")
-            await ctx.send(embed=em)
-            if raid[target]["hp"] <= 0:
-                del raid[target]
-            dmg_to_take = sum(i["damage"] for i in raid.values())
-            self.boss["hp"] -= dmg_to_take
-            await asyncio.sleep(4)
-            em = discord.Embed(
-                title="The seekers attacked the Guardian!", colour=0xFF5C00
-            )
-            em.set_thumbnail(url=f"{self.bot.BASE_URL}/eden_followers.jpg")
-            em.add_field(name="Damage", value=dmg_to_take)
-            if self.boss["hp"] > 0:
-                em.add_field(name="HP left", value=self.boss["hp"])
-            else:
-                em.add_field(name="HP left", value="Dead!")
-            await ctx.send(embed=em)
-            await asyncio.sleep(4)
-
-        if len(raid) == 0:
-            await ctx.send("The raid was all wiped!")
-        elif self.boss["hp"] < 1:
-            await ctx.channel.set_permissions(
-                ctx.guild.default_role,
-                overwrite=self.allow_sending,
-            )
-            winner = random.choice(list(raid.keys()))
-            await self.bot.pool.execute(
-                'UPDATE profile SET "crates_legendary"="crates_legendary"+1 WHERE'
-                ' "user"=$1;',
-                winner.id,
-            )
-            await ctx.send(
-                "The guardian was defeated, the seekers can enter the garden! Eden has"
-                f" gracefully given {winner.mention} a legendary crate for their"
-                " efforts."
-            )
-
-            # cash = int(hp / 4 / len(raid))  # what da hood gets per survivor
-            cash = 11241
-            users = [u.id for u in raid]
-            await self.bot.pool.execute(
-                'UPDATE profile SET money=money+$1 WHERE "user"=ANY($2);',
-                cash,
-                users,
-            )
-            await ctx.send(
-                f"**Gave ${cash} of the Guardian's ${int(hp / 4)} drop to all"
-                " survivors!**"
-            )
-
-        else:
-            await ctx.send(
-                "The raid did not manage to kill the Guardian within 45 Minutes... The"
-                " entrance remains blocked!"
-            )
-
-        await asyncio.sleep(30)
-        await ctx.channel.set_permissions(
-            ctx.guild.default_role,
-            overwrite=self.deny_sending,
-        )
-        await self.clear_raid_timer()
-        self.boss = None
-
-    @is_god()
-    @raid_free()
-    @commands.command(hidden=True, brief=_("Start a CHamburr raid"))
-    async def chamburrspawn(self, ctx, hp: IntGreaterThan(0)):
-        """[CHamburr only] Starts a raid."""
-        await self.set_raid_timer()
-        self.boss = {"hp": hp, "min_dmg": 100, "max_dmg": 500}
-        await ctx.channel.set_permissions(
-            ctx.guild.default_role,
-            overwrite=self.read_only,
-        )
-
-        view = JoinView(
-            Button(style=ButtonStyle.primary, label="Join the raid!"),
-            message=_("You joined the raid."),
-            timeout=60 * 15,
-        )
-
-        await ctx.send(
-            f"""
-*Time to eat the hamburger! No, this time, the hamburger will eat you up...*
-
-This boss has {self.boss['hp']} HP and has high-end loot!
-The hamburger will be vulnerable in 15 Minutes
-
-**Only followers of CHamburr may join.**""",
-            file=discord.File("assets/other/hamburger.webp"),
-            view=view,
-        )
-        if not self.bot.config.bot.is_beta:
-            await asyncio.sleep(300)
-            await ctx.send("**The hamburger will be vulnerable in 10 minutes**")
-            await asyncio.sleep(300)
-            await ctx.send("**The hamburger will be vulnerable in 5 minutes**")
-            await asyncio.sleep(180)
-            await ctx.send("**The hamburger will be vulnerable in 2 minutes**")
-            await asyncio.sleep(60)
-            await ctx.send("**The hamburger will be vulnerable in 1 minute**")
-            await asyncio.sleep(30)
-            await ctx.send("**The hamburger will be vulnerable in 30 seconds**")
-            await asyncio.sleep(20)
-            await ctx.send("**The hamburger will be vulnerable in 10 seconds**")
-            await asyncio.sleep(10)
-        else:
-            await asyncio.sleep(60)
-
-        view.stop()
-
-        await ctx.send(
-            "**The hamburger is vulnerable! Fetching participant data... Hang on!**"
-        )
-
-        async with self.bot.pool.acquire() as conn:
-            raid = {}
-            for u in view.joined:
-                if (
-                        not (
-                                profile := await conn.fetchrow(
-                                    'SELECT * FROM profile WHERE "user"=$1;', u.id
-                                )
-                        )
-                        or profile["god"] != "CHamburr"
-                ):
-                    continue
-                try:
-                    dmg, deff = await self.bot.get_raidstats(
-                        u,
-                        atkmultiply=profile["atkmultiply"],
-                        defmultiply=profile["defmultiply"],
-                        classes=profile["class"],
-                        race=profile["race"],
-                        guild=profile["guild"],
-                        god=profile["god"],
-                        conn=conn,
-                    )
-                except ValueError:
-                    continue
-                raid[u] = {"hp": 250, "armor": deff, "damage": dmg}
-
-        await ctx.send("**Done getting data!**")
-
-        start = datetime.datetime.utcnow()
-
-        while (
-                self.boss["hp"] > 0
-                and len(raid) > 0
-                and datetime.datetime.utcnow() < start + datetime.timedelta(minutes=45)
-        ):
-            target = random.choice(list(raid.keys()))  # the guy it will attack
-            dmg = random.randint(self.boss["min_dmg"], self.boss["max_dmg"])
-            dmg = self.getfinaldmg(dmg, raid[target]["armor"])
-            raid[target]["hp"] -= dmg  # damage dealt
-            if raid[target]["hp"] > 0:
-                em = discord.Embed(
-                    title="Hamburger attacked!",
-                    description=f"{target} now has {raid[target]['hp']} HP!",
-                    colour=0xFFB900,
-                )
-            else:
-                em = discord.Embed(
-                    title="Hamburger attacked!",
-                    description=f"{target} died!",
-                    colour=0xFFB900,
-                )
-            em.add_field(name="Theoretical Damage", value=dmg + raid[target]["armor"])
-            em.add_field(name="Shield", value=raid[target]["armor"])
-            em.add_field(name="Effective Damage", value=dmg)
-            em.set_author(name=str(target), icon_url=target.display_avatar.url)
-            em.set_thumbnail(url=f"{self.bot.BASE_URL}/hamburger.jpg")
-            await ctx.send(embed=em)
-            if raid[target]["hp"] <= 0:
-                del raid[target]
-            dmg_to_take = sum(i["damage"] for i in raid.values())
-            self.boss["hp"] -= dmg_to_take
-            await asyncio.sleep(4)
-            em = discord.Embed(
-                title="The raid attacked the hamburger!", colour=0xFF5C00
-            )
-            em.set_thumbnail(url=f"https://i.imgur.com/jxtVg6a.png")
-            em.add_field(name="Damage", value=dmg_to_take)
-            if self.boss["hp"] > 0:
-                em.add_field(name="HP left", value=self.boss["hp"])
-            else:
-                em.add_field(name="HP left", value="Dead!")
-            await ctx.send(embed=em)
-            await asyncio.sleep(4)
-
-        if len(raid) == 0:
-            await ctx.send("The raid was all wiped!")
-        elif self.boss["hp"] < 1:
-            await ctx.channel.set_permissions(
-                ctx.guild.default_role,
-                overwrite=self.allow_sending,
-            )
-            highest_bid = [
-                356_091_260_429_402_122,
-                0,
-            ]  # userid, amount
-
-            def check(msg):
-                if (
-                        msg.channel.id != ctx.channel.id
-                        or (not msg.content.isdigit())
-                        or (msg.author not in raid)
-                ):
-                    return False
-                if not (int(msg.content) > highest_bid[1]):
-                    return False
-                if (
-                        msg.author.id == highest_bid[0]
-                ):  # don't allow a player to outbid themselves
-                    return False
-                return True
-
-            page = commands.Paginator()
-            for u in list(raid.keys()):
-                page.add_line(u.mention)
-            page.add_line(
-                "The raid killed the boss!\nHe dropped a"
-                f" {self.bot.cogs['Crates'].emotes.legendary} Legendary Crate!\nThe highest"
-                " bid for it wins <:roosip:505447694408482846>\nSimply type how much"
-                " you bid!"
-            )
-            for p in page.pages:
-                await ctx.send(p[4:-4])
-
-            while True:
-                try:
-                    msg = await self.bot.wait_for("message", timeout=60, check=check)
-                except asyncio.TimeoutError:
-                    break
-                bid = int(msg.content)
-                money = await self.bot.pool.fetchval(
-                    'SELECT money FROM profile WHERE "user"=$1;', msg.author.id
-                )
-                if money and money >= bid:
-                    highest_bid = [msg.author.id, bid]
-                    await ctx.send(f"{msg.author.mention} bids **${msg.content}**!")
-            msg = await ctx.send(
-                f"Auction done! Winner is <@{highest_bid[0]}> with"
-                f" **${highest_bid[1]}**!\nGiving Legendary Crate..."
-            )
-            money = await self.bot.pool.fetchval(
-                'SELECT money FROM profile WHERE "user"=$1;', highest_bid[0]
-            )
-            if money >= highest_bid[1]:
-                async with self.bot.pool.acquire() as conn:
-                    await conn.execute(
-                        'UPDATE profile SET "money"="money"-$1,'
-                        ' "crates_legendary"="crates_legendary"+1 WHERE "user"=$2;',
-                        highest_bid[1],
-                        highest_bid[0],
-                    )
-                    await self.bot.log_transaction(
-                        ctx,
-                        from_=highest_bid[0],
-                        to=2,
-                        subject="Raid Bid Winner",
-                        data={"Gold": highest_bid[1]},
-                        conn=conn,
-                    )
-                await msg.edit(content=f"{msg.content} Done!")
-            else:
-                await ctx.send(
-                    f"<@{highest_bid[0]}> spent the money in the meantime... Meh!"
-                    " Noone gets it then, pah!\nThis incident has been reported and"
-                    " they will get banned if it happens again. Cheers!"
-                )
-
-            cash = int(hp / 4 / len(raid))  # what da hood gets per survivor
-            users = [u.id for u in raid]
-            await self.bot.pool.execute(
-                'UPDATE profile SET money=money+$1 WHERE "user"=ANY($2);',
-                cash,
-                users,
-            )
-            await ctx.send(
-                f"**Gave ${cash} of the hamburger's ${int(hp / 4)} drop to all"
-                " survivors!**"
-            )
-
-        else:
-            await ctx.send(
-                "The raid did not manage to kill the hamburger within 45 Minutes... He"
-                " disappeared!"
-            )
-
-        await asyncio.sleep(30)
-        await ctx.channel.set_permissions(
-            ctx.guild.default_role,
-            overwrite=self.deny_sending,
-        )
-        await self.clear_raid_timer()
-        self.boss = None
 
     @is_god()
     @raid_free()
@@ -1487,6 +976,7 @@ The hamburger will be vulnerable in 15 Minutes
 
             async with self.bot.pool.acquire() as conn:
                 raid = []
+                HowMany = 0
                 for u in view.joined:
                     if (
                             not (
@@ -1497,9 +987,11 @@ The hamburger will be vulnerable in 15 Minutes
                             or profile["god"] != "Astraea"
                     ):
                         continue
+                    HowMany = HowMany + 1
                     raid.append(u)
 
             await send_to_channels(content="**Done getting data!**")
+            await send_to_channels(content=f"**{HowMany} followers joined!**")
 
             while len(raid) > 1:
                 time = random.choice(["day", "night"])
@@ -1618,15 +1110,36 @@ The hamburger will be vulnerable in 15 Minutes
             # Convert luck_query to float
             luck_query_float = float(luck_query)
 
-            # Perform the multiplication
-            weightdivine = 0.20 * luck_query_float
+            # Define gods with their boundaries
+            gods = {
+                "Astraea": {"boundary_low": 0.9, "boundary_high": 1.1},
+                "Sepulchure": {"boundary_low": 0.75, "boundary_high": 1.5},
+                "Drakath": {"boundary_low": 0.3, "boundary_high": 2.0},
+            }
 
-            # Round to the nearest .000
+            # Replace 'selected_god' with the actual selected god name (e.g., "Astraea")
+            selected_god = "Astraea"  # Example, replace dynamically
+            god_data = gods.get(selected_god)
+
+            if not god_data:
+                raise ValueError(f"God {selected_god} not found.")
+
+            boundary_low = god_data["boundary_low"]
+            boundary_high = god_data["boundary_high"]
+
+            # Normalize the user's luck value
+            normalized_luck = (luck_query_float - boundary_low) / (boundary_high - boundary_low)
+            normalized_luck = max(0.0, min(1.0, normalized_luck))  # Clamp between 0.0 and 1.0
+
+            # Scale the divine weight
+            weightdivine = 0.20 + (0.20 * normalized_luck)  # Example scaling factor
             rounded_weightdivine = round(weightdivine, 3)
 
+            # Define weights for crate selection
             options = ['legendary', 'fortune', 'divine']
             weights = [0.40, 0.40, rounded_weightdivine]
 
+            # Select a crate based on weights
             crate = randomm.choices(options, weights=weights)[0]
 
             await send_to_channels(
@@ -1745,6 +1258,7 @@ The hamburger will be vulnerable in 15 Minutes
                 space = '⬜'
                 num_of_arrows = int(progress * bar_length)
                 return arrow * num_of_arrows + space * (bar_length - num_of_arrows)
+            HowMany = 0
 
             async with self.bot.pool.acquire() as conn:
                 for u in view.joined:
@@ -1757,6 +1271,7 @@ The hamburger will be vulnerable in 15 Minutes
                             or profile["god"] != "Sepulchure"
                     ):
                         continue
+                    HowMany = HowMany + 1
                     try:
                         dmg, deff = await self.bot.get_raidstats(
                             u,
@@ -1779,7 +1294,7 @@ The hamburger will be vulnerable in 15 Minutes
                     return True
                 return False
 
-            await ctx.send("**Gathering the faithful...**")
+            await ctx.send("**Gathering the faithful... checking dm eligibility this may take awhile**")
             embed_message_id = None
             async with self.bot.pool.acquire() as conn:
                 participants = [u for u in view.joined if await is_valid_participant(u, conn)]
@@ -1788,6 +1303,26 @@ The hamburger will be vulnerable in 15 Minutes
                 await ctx.send("No valid participants joined the ritual.")
                 await self.clear_raid_timer()
                 return
+
+            for participant in participants.copy():
+                try:
+                    await participant.send("You have joined the ritual! Stay tuned for more info.")
+                    await asyncio.sleep(1)
+                except (discord.Forbidden, discord.HTTPException):
+                    # Remove participant if bot cannot DM
+                    participants.remove(participant)
+                    await ctx.send(
+                        f"{participant.mention} was removed because I could not send them a DM. "
+                        "Please enable your DMs or unblock the bot to participate."
+                    )
+
+                # After removing DM-blocked users, check if anyone remains
+            if not participants:
+                await ctx.send("All participants have been removed. The ritual is canceled.")
+                await self.clear_raid_timer()
+                return
+
+            await ctx.send(content=f"**{HowMany} followers joined!**")
 
             champion = random.choice(participants)
             participants.remove(champion)
@@ -2514,15 +2049,36 @@ The hamburger will be vulnerable in 15 Minutes
                 # Convert luck_query to float
                 luck_query_float = float(luck_query)
 
-                # Perform the multiplication
-                weightdivine = 0.20 * luck_query_float
+                # Define gods with their boundaries
+                gods = {
+                    "Astraea": {"boundary_low": 0.9, "boundary_high": 1.1},
+                    "Sepulchure": {"boundary_low": 0.75, "boundary_high": 1.5},
+                    "Drakath": {"boundary_low": 0.3, "boundary_high": 2.0},
+                }
 
-                # Round to the nearest .000
+                # Replace 'selected_god' with the actual selected god name (e.g., "Astraea")
+                selected_god = "Sepulchure"  # Example, replace dynamically
+                god_data = gods.get(selected_god)
+
+                if not god_data:
+                    raise ValueError(f"God {selected_god} not found.")
+
+                boundary_low = god_data["boundary_low"]
+                boundary_high = god_data["boundary_high"]
+
+                # Normalize the user's luck value
+                normalized_luck = (luck_query_float - boundary_low) / (boundary_high - boundary_low)
+                normalized_luck = max(0.0, min(1.0, normalized_luck))  # Clamp between 0.0 and 1.0
+
+                # Scale the divine weight
+                weightdivine = 0.20 + (0.20 * normalized_luck)  # Example scaling factor
                 rounded_weightdivine = round(weightdivine, 3)
 
+                # Define weights for crate selection
                 options = ['legendary', 'fortune', 'divine']
                 weights = [0.40, 0.40, rounded_weightdivine]
 
+                # Select a crate based on weights
                 crate = randomm.choices(options, weights=weights)[0]
 
                 embed = Embed(
@@ -2560,6 +2116,33 @@ The hamburger will be vulnerable in 15 Minutes
         except Exception as e:
             await ctx.send(f"An error occurred: {e}")
             # Log the error if a logger is set up.
+
+    async def convert_to_display_names(self):
+        display_names = []
+
+        for user_id in self.chaoslist:
+            # Fetch the user object (if you only have user IDs in self.chaoslist)
+            user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
+
+            if user:  # Ensure the user exists
+                display_names.append(user.display_name)
+            else:
+                display_names.append(f"Unknown User ({user_id})")  # Fallback for missing users
+
+        return display_names
+
+    @is_gm()
+    @commands.command(hidden=True, breif=("See who was in your last raid"))
+    async def chaoslist(self, ctx):
+        try:
+            if self.chaoslist is None:
+                await ctx.send("Data on your most recent raid was not found")
+            else:
+
+                display_names = await self.convert_to_display_names()
+                await ctx.send(content=f"Participants: {', '.join(display_names)}")
+        except Exception as e:
+            await ctx.send(e)
 
 
     @is_god()
@@ -2651,6 +2234,7 @@ The hamburger will be vulnerable in 15 Minutes
             view.stop()
 
             await send_to_channels(content="**The raid on the facility started! Fetching participant data... Hang on!**")
+            HowMany = 0
 
             async with self.bot.pool.acquire() as conn:
                 raid = {}
@@ -2665,8 +2249,11 @@ The hamburger will be vulnerable in 15 Minutes
                     ):
                         continue
                     raid[u] = 250
+                    HowMany = HowMany + 1
 
             await send_to_channels(content="**Done getting data!**")
+            self.chaoslist = [u.id for u in raid.keys()]
+            await send_to_channels(content=f"**{HowMany} followers joined!**")
 
             start = datetime.datetime.utcnow()
 
@@ -2676,6 +2263,7 @@ The hamburger will be vulnerable in 15 Minutes
                     and datetime.datetime.utcnow() < start + datetime.timedelta(minutes=45)
             ):
                 target = random.choice(list(raid.keys()))
+
                 dmg = random.randint(100, 300)
                 raid[target] -= dmg
                 if raid[target] > 0:
@@ -2774,18 +2362,45 @@ The hamburger will be vulnerable in 15 Minutes
                 winner = random.choice(list(raid.keys()))
                 try:
                     async with self.bot.pool.acquire() as conn:
+                        # Fetch the luck value for the specified user (winner)
                         luck_query = await conn.fetchval(
                             'SELECT luck FROM profile WHERE "user" = $1;',
                             winner.id,
                         )
 
+                    # Convert luck_query to float
                     luck_query_float = float(luck_query)
-                    weightdivine = 0.20 * luck_query_float
+
+                    # Define gods with their boundaries
+                    gods = {
+                        "Astraea": {"boundary_low": 0.9, "boundary_high": 1.1},
+                        "Sepulchure": {"boundary_low": 0.75, "boundary_high": 1.5},
+                        "Drakath": {"boundary_low": 0.3, "boundary_high": 2.0},
+                    }
+
+                    # Replace 'selected_god' with the actual selected god name (e.g., "Astraea")
+                    selected_god = "Drakath"  # Example, replace dynamically
+                    god_data = gods.get(selected_god)
+
+                    if not god_data:
+                        raise ValueError(f"God {selected_god} not found.")
+
+                    boundary_low = god_data["boundary_low"]
+                    boundary_high = god_data["boundary_high"]
+
+                    # Normalize the user's luck value
+                    normalized_luck = (luck_query_float - boundary_low) / (boundary_high - boundary_low)
+                    normalized_luck = max(0.0, min(1.0, normalized_luck))  # Clamp between 0.0 and 1.0
+
+                    # Scale the divine weight
+                    weightdivine = 0.20 + (0.20 * normalized_luck)  # Example scaling factor
                     rounded_weightdivine = round(weightdivine, 3)
 
+                    # Define weights for crate selection
                     options = ['legendary', 'fortune', 'divine']
                     weights = [0.40, 0.40, rounded_weightdivine]
 
+                    # Select a crate based on weights
                     crate = randomm.choices(options, weights=weights)[0]
 
                     try:
@@ -2843,466 +2458,7 @@ The hamburger will be vulnerable in 15 Minutes
         else:
             await ctx.send(f"{ctx.author.mention}, you've already joined the raid!")
 
-    @is_god()
-    @raid_free()
-    @commands.command(hidden=True, brief=_("Start a Kirby raid"))
-    async def kirbycultspawn(self, ctx, hp: IntGreaterThan(0)):
-        """[Kirby only] Starts a raid."""
-        await self.set_raid_timer()
-        self.boss = {"hp": hp, "min_dmg": 200, "max_dmg": 300}
 
-        view = JoinView(
-            Button(style=ButtonStyle.primary, label="Join the raid!"),
-            message=_("You joined the raid."),
-            timeout=60 * 15,
-        )
-
-        em = discord.Embed(
-            title="Dark Mind attacks Dream Land",
-            description=f"""
-**A great curse has fallen upon Dream Land! Dark Mind is trying to conquer Dream Land and absorb it to the Mirror World! Join forces and defend Dream Land!**
-
-This boss has {self.boss['hp']} HP and will be vulnerable in 15 Minutes
-
-**Only followers of Kirby may join.**""",
-            color=0xFFB900,
-        )
-        em.set_image(url=f"{self.bot.BASE_URL}/image/dark_mind.png")
-        await ctx.send(embed=em, view=view)
-
-        if not self.bot.config.bot.is_beta:
-            await asyncio.sleep(300)
-            await ctx.send("**The attack on Dream Land will start in 10 minutes**")
-            await asyncio.sleep(300)
-            await ctx.send("**The attack on Dream Land will start in 5 minutes**")
-            await asyncio.sleep(180)
-            await ctx.send("**The attack on Dream Land will start in 2 minutes**")
-            await asyncio.sleep(60)
-            await ctx.send("**The attack on Dream Land will start in 1 minute**")
-            await asyncio.sleep(30)
-            await ctx.send("**The attack on Dream Land will start in 30 seconds**")
-            await asyncio.sleep(20)
-            await ctx.send("**The attack on Dream Land will start in 10 seconds**")
-            await asyncio.sleep(10)
-        else:
-            await asyncio.sleep(60)
-
-        view.stop()
-
-        await ctx.send(
-            "**The attack on Dream Land started! Fetching participant data... Hang on!**"
-        )
-
-        async with self.bot.pool.acquire() as conn:
-            raid = {}
-            for u in view.joined:
-                if (
-                        not (
-                                profile := await conn.fetchrow(
-                                    'SELECT * FROM profile WHERE "user"=$1;', u.id
-                                )
-                        )
-                        or profile["god"] != "Kirby"
-                ):
-                    continue
-                try:
-                    dmg, deff = await self.bot.get_raidstats(u, god="Kirby", conn=conn)
-                except ValueError:
-                    continue
-                raid[u] = {"hp": 250, "armor": deff, "damage": dmg}
-
-        await ctx.send("**Done getting data!**")
-
-        start = datetime.datetime.utcnow()
-
-        while (
-                self.boss["hp"] > 0
-                and len(raid) > 0
-                and datetime.datetime.utcnow() < start + datetime.timedelta(minutes=10)
-        ):
-            target = random.choice(list(raid.keys()))
-            dmg = random.randint(self.boss["min_dmg"], self.boss["max_dmg"])
-            dmg = self.getfinaldmg(dmg, raid[target]["armor"])
-            raid[target]["hp"] -= dmg
-            if raid[target]["hp"] > 0:
-                em = discord.Embed(
-                    title="Dark Mind attacked!",
-                    description=f"{target} now has {raid[target]['hp']} HP!",
-                    colour=0xFFB900,
-                )
-            else:
-                em = discord.Embed(
-                    title="Dark Mind attacked!",
-                    description=f"{target} died!",
-                    colour=0xFFB900,
-                )
-            em.add_field(name="Theoretical Damage", value=dmg + raid[target]["armor"])
-            em.add_field(name="Shield", value=raid[target]["armor"])
-            em.add_field(name="Effective Damage", value=dmg)
-            em.set_author(name=str(target), icon_url=target.display_avatar.url)
-            em.set_thumbnail(url=f"{self.bot.BASE_URL}/image/dark_mind.png")
-            await ctx.send(embed=em)
-            if raid[target]["hp"] <= 0:
-                del raid[target]
-            dmg_to_take = sum(i["damage"] for i in raid.values())
-            self.boss["hp"] -= dmg_to_take
-            await asyncio.sleep(4)
-            em = discord.Embed(title="The raiders attacked Dark Mind!", colour=0xFF5C00)
-            em.set_thumbnail(url=f"{self.bot.BASE_URL}/image/kirby_raiders.png")
-            em.add_field(name="Damage", value=dmg_to_take)
-            if self.boss["hp"] > 0:
-                em.add_field(name="HP left", value=self.boss["hp"])
-            else:
-                em.add_field(name="HP left", value="Dead!")
-            await ctx.send(embed=em)
-            await asyncio.sleep(4)
-
-        if len(raid) == 0:
-            em = discord.Embed(
-                title="Defeat!",
-                description="Dark Mind was too strong! You cannot stop him from conquering Dream Land as he ushers in a dark period of terror and tyranny!",
-                color=0xFFB900,
-            )
-            em.set_image(url=f"{self.bot.BASE_URL}/image/kirby_loss.png")
-            await self.clear_raid_timer()
-            return await ctx.send(embed=em)
-        elif self.boss["hp"] > 0:
-            em = discord.Embed(
-                title="Timed out!",
-                description="You took too long! The mirror world has successfully absorbed Dream Land and it is lost forever.",
-                color=0xFFB900,
-            )
-            em.set_image(url=f"{self.bot.BASE_URL}/image/kirby_timeout.png")
-            await self.clear_raid_timer()
-            return await ctx.send(embed=em)
-        em = discord.Embed(
-            title="Win!",
-            description="Hooray! Dream Land is saved!",
-            color=0xFFB900,
-        )
-        em.set_image(url=f"{self.bot.BASE_URL}/image/kirby_win.png")
-        await ctx.send(embed=em)
-        await asyncio.sleep(5)
-        em = discord.Embed(
-            title="Dark Mind returns!",
-            description="Oh no! Dark Mind is back in his final form, stronger than ever before! Defeat him once and for all to protect Dream Land!",
-            color=0xFFB900,
-        )
-        em.set_image(url=f"{self.bot.BASE_URL}/image/kirby_return.png")
-        await ctx.send(embed=em)
-        await asyncio.sleep(5)
-
-        self.boss = {"hp": hp, "min_dmg": 300, "max_dmg": 400}
-        while self.boss["hp"] > 0 and len(raid) > 0:
-            target = random.choice(list(raid.keys()))
-            dmg = random.randint(self.boss["min_dmg"], self.boss["max_dmg"])
-            dmg = self.getfinaldmg(dmg, raid[target]["armor"])
-            raid[target]["hp"] -= dmg
-            if raid[target]["hp"] > 0:
-                em = discord.Embed(
-                    title="Dark Mind attacked!",
-                    description=f"{target} now has {raid[target]['hp']} HP!",
-                    colour=0xFFB900,
-                )
-            else:
-                em = discord.Embed(
-                    title="Dark Mind attacked!",
-                    description=f"{target} died!",
-                    colour=0xFFB900,
-                )
-            em.add_field(name="Theoretical Damage", value=dmg + raid[target]["armor"])
-            em.add_field(name="Shield", value=raid[target]["armor"])
-            em.add_field(name="Effective Damage", value=dmg)
-            em.set_author(name=str(target), icon_url=target.display_avatar.url)
-            em.set_thumbnail(url=f"{self.bot.BASE_URL}/image/dark_mind_final.png")
-            await ctx.send(embed=em)
-            if raid[target]["hp"] <= 0:
-                del raid[target]
-            dmg_to_take = sum(i["damage"] for i in raid.values())
-            self.boss["hp"] -= dmg_to_take
-            await asyncio.sleep(4)
-            em = discord.Embed(title="The raiders attacked Dark Mind!", colour=0xFF5C00)
-            em.set_thumbnail(url=f"{self.bot.BASE_URL}/image/kirby_raiders.png")
-            em.add_field(name="Damage", value=dmg_to_take)
-            if self.boss["hp"] > 0:
-                em.add_field(name="HP left", value=self.boss["hp"])
-            else:
-                em.add_field(name="HP left", value="Dead!")
-            await ctx.send(embed=em)
-            await asyncio.sleep(4)
-
-        if self.boss["hp"] > 0:
-            em = discord.Embed(
-                title="Defeat!",
-                description="Dark Mind was too strong! You cannot stop him from conquering Dream Land as he ushers in a dark period of terror and tyranny!",
-                color=0xFFB900,
-            )
-            em.set_image(url=f"{self.bot.BASE_URL}/image/kirby_loss.png")
-            await self.clear_raid_timer()
-            return await ctx.send(embed=em)
-        winner = random.choice(list(raid.keys()))
-        em = discord.Embed(
-            title="Win!",
-            description=f"Hooray! Dark Mind is defeated and his dream of conquering Dream Land is shattered. You return back to Dream Land to Cappy Town where you are met with a huge celebration! The Mayor gives {winner.mention} a Legendary Crate for your bravery!\n**Gave $10000 to each survivor**",
-            color=0xFFB900,
-        )
-        em.set_image(url=f"{self.bot.BASE_URL}/image/kirby_final_win.png")
-        await ctx.send(embed=em)
-
-        users = [u.id for u in raid]
-
-        async with self.bot.pool.acquire() as conn:
-            await conn.execute(
-                'UPDATE profile SET "crates_legendary"="crates_legendary"+1 WHERE "user"=$1;',
-                winner.id,
-            )
-            await conn.execute(
-                'UPDATE profile SET "money"="money"+$1 WHERE "user"=ANY($2);',
-                10000,
-                users,
-            )
-        await self.clear_raid_timer()
-
-    @is_god()
-    @raid_free()
-    @commands.command(hidden=True, brief=_("Start a Jesus raid"))
-    async def jesusspawn(self, ctx, hp: IntGreaterThan(0)):
-        """[Jesus only] Starts a raid."""
-        await self.set_raid_timer()
-        self.boss = {"hp": hp, "min_dmg": 100, "max_dmg": 500}
-        await ctx.channel.set_permissions(
-            ctx.guild.default_role,
-            overwrite=self.read_only,
-        )
-
-        view = JoinView(
-            Button(style=ButtonStyle.primary, label="Join the raid!"),
-            message=_("You joined the raid."),
-            timeout=60 * 15,
-        )
-
-        await ctx.send(
-            f"""
-**Atheistus the Tormentor has returned to earth to punish humanity for their belief.**
-
-This boss has {self.boss['hp']} HP and has high-end loot!
-Atheistus will be vulnerable in 15 Minutes
-
-**Only followers of Jesus may join.**""",
-            file=discord.File("assets/other/atheistus.webp"),
-            view=view,
-        )
-
-        if not self.bot.config.bot.is_beta:
-            await asyncio.sleep(300)
-            await ctx.send("**Atheistus will be vulnerable in 10 minutes**")
-            await asyncio.sleep(300)
-            await ctx.send("**Atheistus will be vulnerable in 5 minutes**")
-            await asyncio.sleep(180)
-            await ctx.send("**Atheistus will be vulnerable in 2 minutes**")
-            await asyncio.sleep(60)
-            await ctx.send("**Atheistus will be vulnerable in 1 minute**")
-            await asyncio.sleep(30)
-            await ctx.send("**Atheistus will be vulnerable in 30 seconds**")
-            await asyncio.sleep(20)
-            await ctx.send("**Atheistus will be vulnerable in 10 seconds**")
-            await asyncio.sleep(10)
-        else:
-            await asyncio.sleep(60)
-
-        view.stop()
-
-        await ctx.send(
-            "**Atheistus is vulnerable! Fetching participant data... Hang on!**"
-        )
-
-        async with self.bot.pool.acquire() as conn:
-            raid = {}
-            for u in view.joined:
-                if (
-                        not (
-                                profile := await conn.fetchrow(
-                                    'SELECT * FROM profile WHERE "user"=$1;', u.id
-                                )
-                        )
-                        or profile["god"] != "Jesus"
-                ):
-                    continue
-                try:
-                    dmg, deff = await self.bot.get_raidstats(u, god="Jesus", conn=conn)
-                except ValueError:
-                    continue
-                raid[u] = {"hp": 250, "armor": deff, "damage": dmg}
-
-        await ctx.send("**Done getting data!**")
-
-        start = datetime.datetime.utcnow()
-
-        while (
-                self.boss["hp"] > 0
-                and len(raid) > 0
-                and datetime.datetime.utcnow() < start + datetime.timedelta(minutes=45)
-        ):
-            target = random.choice(list(raid.keys()))
-            dmg = random.randint(self.boss["min_dmg"], self.boss["max_dmg"])
-            dmg = self.getfinaldmg(dmg, raid[target]["armor"])
-            raid[target]["hp"] -= dmg
-            if raid[target]["hp"] > 0:
-                em = discord.Embed(
-                    title="Atheistus attacked!",
-                    description=f"{target} now has {raid[target]['hp']} HP!",
-                    colour=0xFFB900,
-                )
-            else:
-                em = discord.Embed(
-                    title="Atheistus attacked!",
-                    description=f"{target} died!",
-                    colour=0xFFB900,
-                )
-            em.add_field(name="Theoretical Damage", value=dmg + raid[target]["armor"])
-            em.add_field(name="Shield", value=raid[target]["armor"])
-            em.add_field(name="Effective Damage", value=dmg)
-            em.set_author(name=str(target), icon_url=target.display_avatar.url)
-            em.set_thumbnail(url=f"{self.bot.BASE_URL}/atheistus.jpg")
-            await ctx.send(embed=em)
-            if raid[target]["hp"] <= 0:
-                del raid[target]
-            dmg_to_take = sum(i["damage"] for i in raid.values())
-            self.boss["hp"] -= dmg_to_take
-            await asyncio.sleep(4)
-            em = discord.Embed(title="The raid attacked Atheistus!", colour=0xFF5C00)
-            em.set_thumbnail(url=f"{self.bot.BASE_URL}/knight.jpg")
-            em.add_field(name="Damage", value=dmg_to_take)
-            if self.boss["hp"] > 0:
-                em.add_field(name="HP left", value=self.boss["hp"])
-            else:
-                em.add_field(name="HP left", value="Dead!")
-            await ctx.send(embed=em)
-            await asyncio.sleep(4)
-
-        if len(raid) == 0:
-            await ctx.send("The raid was all wiped!")
-        elif self.boss["hp"] < 1:
-            await ctx.channel.set_permissions(
-                ctx.guild.default_role,
-                overwrite=self.allow_sending,
-            )
-            highest_bid = [
-                356_091_260_429_402_122,
-                0,
-            ]  # userid, amount
-
-            def check(msg):
-                try:
-                    val = int(msg.content)
-                except ValueError:
-                    return False
-                if msg.channel.id != ctx.channel.id or not any(msg.author == k[0] for k in self.raid.keys()):
-                    return False
-                if highest_bid[1] == 0:  # Allow starting bid to be $1
-                    if val < 1:
-                        return False
-                    else:
-                        return True
-                if val > highest_bid[1]:
-                    if highest_bid[1] < 100:
-                        return True
-                    else:
-                        return False
-                if val < int(highest_bid[1] * 1.1):  # Minimum bid is 10% higher than the highest bid
-                    return False
-                if (
-                        msg.author.id == highest_bid[0]
-                ):  # don't allow a player to outbid themselves
-                    return False
-                return True
-
-            page = commands.Paginator()
-            for u in list(raid.keys()):
-                page.add_line(u.mention)
-            page.add_line(
-                "The raid killed the boss!\nHe dropped a"
-                f" {self.bot.cogs['Crates'].emotes.legendary} Legendary Crate!\nThe highest"
-                " bid for it wins <:roosip:505447694408482846>\nSimply type how much"
-                " you bid!"
-            )
-            for p in page.pages:
-                await ctx.send(p[4:-4])
-
-            while True:
-                try:
-                    msg = await self.bot.wait_for("message", timeout=60, check=check)
-                except asyncio.TimeoutError:
-                    break
-                bid = int(msg.content)
-                money = await self.bot.pool.fetchval(
-                    'SELECT money FROM profile WHERE "user"=$1;', msg.author.id
-                )
-                if money and money >= bid:
-                    highest_bid = [msg.author.id, bid]
-                    if highest_bid[1] > 100:
-                        next_bid = int(highest_bid[1] * 1.1)
-                        await ctx.send(
-                            f"{msg.author.mention} bids **${msg.content}**!\n The minimum next bid is **${next_bid}**.")
-                    else:
-                        await ctx.send(
-                            f"{msg.author.mention} bids **${msg.content}**!")
-            msg = await ctx.send(
-                f"Auction done! Winner is <@{highest_bid[0]}> with"
-                f" **${highest_bid[1]}**!\nGiving Legendary Crate..."
-            )
-            money = await self.bot.pool.fetchval(
-                'SELECT money FROM profile WHERE "user"=$1;', highest_bid[0]
-            )
-            if money >= highest_bid[1]:
-                async with self.bot.pool.acquire() as conn:
-                    await conn.execute(
-                        'UPDATE profile SET "money"="money"-$1,'
-                        ' "crates_legendary"="crates_legendary"+1 WHERE "user"=$2;',
-                        highest_bid[1],
-                        highest_bid[0],
-                    )
-                    await self.bot.log_transaction(
-                        ctx,
-                        from_=highest_bid[0],
-                        to=2,
-                        subject="Highest Bid Winner",
-                        data={"Gold": highest_bid[1]},
-                        conn=conn,
-                    )
-                await msg.edit(content=f"{msg.content} Done!")
-            else:
-                await ctx.send(
-                    f"<@{highest_bid[0]}> spent the money in the meantime... Meh!"
-                    " Noone gets it then, pah!\nThis incident has been reported and"
-                    " they will get banned if it happens again. Cheers!"
-                )
-
-            cash = int(hp / 4 / len(raid))  # what da hood gets per survivor
-            users = [u.id for u in raid]
-            await self.bot.pool.execute(
-                'UPDATE profile SET money=money+$1 WHERE "user"=ANY($2);',
-                cash,
-                users,
-            )
-            await ctx.send(
-                f"**Gave ${cash} of Atheistus' ${int(hp / 4)} drop to all survivors!"
-                " Thanks to you, the world can live in peace and love again.**"
-            )
-
-        else:
-            await ctx.send(
-                "The raid did not manage to kill Atheistus within 45 Minutes... He"
-                " disappeared!"
-            )
-
-        await asyncio.sleep(30)
-        await ctx.channel.set_permissions(
-            ctx.guild.default_role,
-            overwrite=self.deny_sending,
-        )
-        await self.clear_raid_timer()
-        self.boss = None
 
     def getpriceto(self, level: float):
         return sum(i * 25000 for i in range(1, int(level * 10) - 9))

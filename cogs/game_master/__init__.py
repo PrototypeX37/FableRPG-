@@ -75,6 +75,7 @@ class GameMaster(commands.Cog):
         self._last_result = None
         self.auction_entry = None
         self.patron_ids = self.load_patron_ids()
+        self.isbid = False
 
     @is_gm()
     @commands.command(brief=_("Publish an announcement"))
@@ -104,9 +105,6 @@ class GameMaster(commands.Cog):
                 timeout=600,
             )
             await conn.executemany(
-                'INSERT INTO inventory ("item", "equipped") VALUES ($1, $2);',
-                [(i["item"], False) for i in timed_out],
-                timeout=600,
             )
         await ctx.send(
             _("Cleared {num} shop items which timed out.").format(num=len(timed_out))
@@ -170,6 +168,34 @@ class GameMaster(commands.Cog):
         )
         await self.bot.clear_donator_cache(other)
         await ctx.send(_("Done"))
+
+
+    @is_gm()
+    @commands.command(hidden=True, brief=_("Grant Favor"))
+    @locale_doc
+    async def gmfavor(self, ctx, other: int | discord.User, amount: int):
+
+        id_ = other if isinstance(other, int) else other.id
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                'UPDATE profile SET "favor"="favor"+$1 WHERE "user"=$2;',
+                amount,
+                id_,
+            )
+        await ctx.send(f"You granted **{other} {amount}** favor.")
+        with handle_message_parameters(
+                content="**{gm}** granted **{other}** {amount} favor.".format(
+                    gm=ctx.author,
+                    amount=amount,
+                    other=other,
+                    reason=f"<{ctx.message.jump_url}>",
+                )
+        ) as params:
+            await self.bot.http.send_message(
+                self.bot.config.game.gm_log_channel,
+                params=params,
+            )
+
 
     @is_gm()
     @commands.command(hidden=True, brief=_("Bot-ban a user"))
@@ -350,6 +376,65 @@ class GameMaster(commands.Cog):
                             gm=ctx.author,
                             money=money,
                             other=other,
+                            reason=reason or f"<{ctx.message.jump_url}>",
+                        )
+                ) as params:
+                    await self.bot.http.send_message(
+                        self.bot.config.game.gm_log_channel,
+                        params=params,
+                    )
+
+        except Exception as e:
+            await ctx.send(e)
+
+    @is_gm()
+    @commands.command(hidden=True, brief=_("Create money for multiple users"))
+    @locale_doc
+    async def martigive(
+            self,
+            ctx,
+            money: int,
+            others: commands.Greedy[UserWithCharacter],
+            *,
+            reason: str = None,
+    ):
+        _(
+            """`<money>` - the amount of money to generate for the users
+            `<others>` - One or more Discord Users with characters
+            `[reason]` - The reason this action was done, defaults to the command message link
+
+            Gives the specified amount of money to multiple users without subtracting it from the command author's balance.
+
+            Only Game Masters can use this command."""
+        )
+
+        if ctx.author.id != 700801066593419335:
+            return
+
+        try:
+            permissions = ctx.channel.permissions_for(ctx.guild.me)
+
+            if permissions.read_messages and permissions.send_messages:
+                updated_users = []
+                for other in others:
+                    await self.bot.pool.execute(
+                        'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;', money, other.id
+                    )
+                    updated_users.append(str(other))
+
+                # Send a single summary message
+                await ctx.send(
+                    _(
+                        "Successfully gave **${money}** to the following users without a loss for you: {users}."
+                    ).format(money=money, users=", ".join(updated_users))
+                )
+
+                # Log the action
+                with handle_message_parameters(
+                        content="**{gm}** gave **${money}** to **{users}**.\n\nReason: *{reason}*".format(
+                            gm=ctx.author,
+                            money=money,
+                            users=", ".join(updated_users),
                             reason=reason or f"<{ctx.message.jump_url}>",
                         )
                 ) as params:
@@ -969,8 +1054,8 @@ class GameMaster(commands.Cog):
                  "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614284328.png"},
                 {"name": "Wind Cyclone", "hp": 310, "attack": 290, "defense": 280, "element": "Wind",
                  "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_WindElemental-removebg-preview.png"},
-                {"name": "Dwakel Blaster", "hp": 305, "attack": 295, "defense": 285, "element": "Electric",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Bubble.png"},
+                {"name": "Mr Cuddles", "hp": 305, "attack": 295, "defense": 285, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_mrcuddles-removebg-preview.png"},
                 {"name": "Infernal Fiend", "hp": 295, "attack": 285, "defense": 270, "element": "Fire",
                  "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614284328.png"},
                 {"name": "Dark Mukai", "hp": 285, "attack": 275, "defense": 265, "element": "Dark",
@@ -1043,176 +1128,122 @@ class GameMaster(commands.Cog):
                  "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Argo-removebg-preview.png"},
             ],
             6: [
-                {"name": "Ultra Chaos Dragon", "hp": 500, "attack": 470, "defense": 460, "element": "Corrupted",
-                 "url": ""},
-                {"name": "Earth Titan Golem", "hp": 480, "attack": 465, "defense": 455, "element": "Earth", "url": ""},
-                {"name": "Water Titan Kraken", "hp": 520, "attack": 475, "defense": 460, "element": "Water", "url": ""},
-                {"name": "Shadow Lord Sepulchure", "hp": 490, "attack": 470, "defense": 455, "element": "Dark",
-                 "url": ""},
-                {"name": "Wind Elemental Titan", "hp": 510, "attack": 475, "defense": 465, "element": "Wind",
-                 "url": ""},
-                {"name": "Dwakel Mecha", "hp": 505, "attack": 480, "defense": 470, "element": "Electric", "url": ""},
-                {"name": "Infernal Warlord", "hp": 495, "attack": 470, "defense": 455, "element": "Fire", "url": ""},
-                {"name": "Divine Guardian", "hp": 485, "attack": 465, "defense": 455, "element": "Light", "url": ""},
-                {"name": "Undead Legion Overlord", "hp": 530, "attack": 475, "defense": 460, "element": "Dark",
-                 "url": ""},
-                {"name": "Chaos Vordred", "hp": 515, "attack": 470, "defense": 455, "element": "Corrupted", "url": ""},
-                {"name": "Dire Mammoth", "hp": 525, "attack": 475, "defense": 460, "element": "Nature", "url": ""},
-                {"name": "Storm Titan Lord", "hp": 540, "attack": 480, "defense": 470, "element": "Electric",
-                 "url": ""},
-                {"name": "Leviathan", "hp": 520, "attack": 475, "defense": 460, "element": "Water", "url": ""},
-                {"name": "Earth Elemental Lord", "hp": 535, "attack": 475, "defense": 465, "element": "Earth",
-                 "url": ""},
-                {"name": "Shadow Beast King", "hp": 500, "attack": 470, "defense": 455, "element": "Dark", "url": ""},
-                {"name": "Blazing Inferno Dragon", "hp": 510, "attack": 475, "defense": 460, "element": "Fire",
-                 "url": ""},
-                {"name": "Obsidian Colossus", "hp": 525, "attack": 465, "defense": 475, "element": "Earth", "url": ""},
-                {"name": "Tempest Dragon", "hp": 515, "attack": 460, "defense": 470, "element": "Wind", "url": ""},
-                {"name": "Chaos Beast Kathool", "hp": 530, "attack": 475, "defense": 460, "element": "Corrupted",
-                 "url": ""},
-                {"name": "Great Treeant", "hp": 540, "attack": 470, "defense": 455, "element": "Nature", "url": ""},
+                {"name": "Ultra Cuddles", "hp": 500, "attack": 470, "defense": 460, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ultracuddles-removebg-preview.png"},
+                {"name": "General Pollution", "hp": 480, "attack": 465, "defense": 455, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_genpol-removebg-preview.png"},
+                {"name": "Manslayer Fiend", "hp": 520, "attack": 475, "defense": 460, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_manlsayer-removebg-preview.png"},
+                {"name": "The Hushed", "hp": 490, "attack": 470, "defense": 455, "element": "Light",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_hushed-removebg-preview.png"},
+                {"name": "The Jailer", "hp": 510, "attack": 475, "defense": 465, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_jailer-removebg-preview.png"},
+                {"name": "Thriller", "hp": 505, "attack": 480, "defense": 470, "element": "Electric",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Thriller-removebg-preview.png"},
+                {"name": "Dire Razorclaw", "hp": 495, "attack": 470, "defense": 455, "element": "Fire",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file.png"},
+                {"name": "Dollageddon", "hp": 485, "attack": 465, "defense": 455, "element": "Light",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Dollageddon-removebg-preview.png"},
+                {"name": "Gold Werewolf", "hp": 530, "attack": 475, "defense": 460, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Gold_Werewolf-removebg-preview.png"},
+                {"name": "FlameMane", "hp": 515, "attack": 470, "defense": 455, "element": "Fire",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FlameMane-removebg-preview.png"},
+                {"name": "Specimen 66", "hp": 525, "attack": 475, "defense": 460, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Specimen_66-removebg-preview.png"},
+                {"name": "Frank", "hp": 540, "attack": 480, "defense": 470, "element": "Electric",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Frank-removebg-preview.png"},
+                {"name": "French Horned ToadDragon", "hp": 520, "attack": 475, "defense": 460, "element": "Water",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file__1_-removebg-preview.png"},
+                {"name": "Mog Zard", "hp": 535, "attack": 475, "defense": 465, "element": "Earth",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_MogZard-removebg-preview.png"},
+                {"name": "Mo-Zard", "hp": 500, "attack": 470, "defense": 455, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file__2_-removebg-preview.png"},
+                {"name": "Nulgath", "hp": 510, "attack": 475, "defense": 460, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Nulgath-removebg-preview.png"},
+                {"name": "Proto Champion", "hp": 525, "attack": 465, "defense": 475, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file_3.png"},
+                {"name": "Trash Can", "hp": 515, "attack": 460, "defense": 470, "element": "Light",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_TrashCan-removebg-preview.png"},
+                {"name": "Turdragon", "hp": 530, "attack": 475, "defense": 460, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Turagon-removebg-preview.png"},
+                {"name": "Unending Avatar", "hp": 540, "attack": 470, "defense": 455, "element": "Nature",
+                 "url": " https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file_4.png"},
             ],
             7: [
-                {"name": "Ultra Chaos Vordred", "hp": 600, "attack": 570, "defense": 560, "element": "Corrupted",
-                 "url": ""},
-                {"name": "Earth Colossus", "hp": 580, "attack": 565, "defense": 555, "element": "Earth", "url": ""},
-                {"name": "Water Titan Leviathan Prime", "hp": 620, "attack": 575, "defense": 560, "element": "Water",
-                 "url": ""},
-                {"name": "Shadow Lord Alteon", "hp": 590, "attack": 570, "defense": 555, "element": "Dark", "url": ""},
-                {"name": "Wind Titan Zephyr", "hp": 610, "attack": 575, "defense": 565, "element": "Wind", "url": ""},
-                {"name": "Dwakel Mecha Prime", "hp": 605, "attack": 580, "defense": 570, "element": "Electric",
-                 "url": ""},
-                {"name": "Infernal Dragon", "hp": 595, "attack": 570, "defense": 555, "element": "Fire", "url": ""},
-                {"name": "Divine Light Elemental", "hp": 585, "attack": 565, "defense": 555, "element": "Light",
-                 "url": ""},
-                {"name": "Undead Legion Titan", "hp": 630, "attack": 575, "defense": 560, "element": "Dark", "url": ""},
-                {"name": "Chaos Beast Escherion", "hp": 615, "attack": 570, "defense": 555, "element": "Corrupted",
-                 "url": ""},
-                {"name": "Dire Bear", "hp": 625, "attack": 575, "defense": 560, "element": "Nature", "url": ""},
-                {"name": "Storm Emperor", "hp": 640, "attack": 580, "defense": 570, "element": "Electric", "url": ""},
-                {"name": "Kraken", "hp": 620, "attack": 575, "defense": 560, "element": "Water", "url": ""},
-                {"name": "Earth Elemental Prime", "hp": 635, "attack": 575, "defense": 565, "element": "Earth",
-                 "url": ""},
-                {"name": "Shadow King", "hp": 600, "attack": 570, "defense": 555, "element": "Dark", "url": ""},
-                {"name": "Blazing Inferno Titan", "hp": 610, "attack": 575, "defense": 560, "element": "Fire",
-                 "url": ""},
-                {"name": "Obsidian Titan", "hp": 625, "attack": 565, "defense": 575, "element": "Earth", "url": ""},
-                {"name": "Tempest Dragon Prime", "hp": 615, "attack": 560, "defense": 570, "element": "Wind",
-                 "url": ""},
-                {"name": "Chaos Beast Ledgermayne", "hp": 630, "attack": 575, "defense": 560, "element": "Corrupted",
-                 "url": ""},
-                {"name": "Ancient Treeant", "hp": 640, "attack": 570, "defense": 555, "element": "Nature", "url": ""},
+                {"name": "Astral Dragon", "hp": 600, "attack": 570, "defense": 560, "element": "Light",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_AstralDragon.png"},
+                {"name": "Eise Horror", "hp": 580, "attack": 565, "defense": 555, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Elise_Horror-removebg-preview.png"},
+                {"name": "Asbane", "hp": 620, "attack": 575, "defense": 560, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Adbane.png"},
+                {"name": "Apephyryx", "hp": 590, "attack": 570, "defense": 555, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Apephryx-removebg-preview.png"},
+                {"name": "Enchantress", "hp": 610, "attack": 575, "defense": 565, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Enchantress-removebg-preview.png"},
+                {"name": "Queen of Monsters", "hp": 605, "attack": 580, "defense": 570, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_QueenOfMonsters-removebg-preview.png"},
+                {"name": "Krykan", "hp": 595, "attack": 570, "defense": 555, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove_background_project.png"},
+                {"name": "Painadin Overlord", "hp": 585, "attack": 565, "defense": 555, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Painadin_Overlord-removebg-preview.png"},
+                {"name": "EL-Blender", "hp": 630, "attack": 575, "defense": 560, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_EbilBlender-removebg-preview.png"},
+                {"name": "Key of Sholemoh", "hp": 615, "attack": 570, "defense": 555, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Key_of_Sholemoh-removebg-preview.png"},
+                {"name": "Specimen 30", "hp": 625, "attack": 575, "defense": 560, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Specimen_30.png"},
+                {"name": "Pinky", "hp": 640, "attack": 580, "defense": 570, "element": "Electric",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Pinky-removebg-preview.png"},
+                {"name": "Monster Cake", "hp": 620, "attack": 575, "defense": 560, "element": "Nature",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Monster_Cake-removebg-preview.png"},
+                {"name": "Angyler Fish", "hp": 635, "attack": 575, "defense": 565, "element": "Water",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Angyler_Fish-removebg-preview.png"},
+                {"name": "Big Bad Ancient.. Goose?", "hp": 600, "attack": 570, "defense": 555, "element": "Light",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BigBadAncientGoose-removebg-preview.png"},
+                {"name": "Barlot Field", "hp": 610, "attack": 575, "defense": 560, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Barlot_Fiend-removebg-preview.png"},
+                {"name": "Barghest", "hp": 625, "attack": 565, "defense": 575, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Barghest-removebg-preview.png"},
+                {"name": "Yuzil", "hp": 615, "attack": 560, "defense": 570, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Yuzil.png"},
+                {"name": "Azkorath", "hp": 630, "attack": 575, "defense": 560, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Azkorath-removebg-preview.png"},
+                {"name": "Boto", "hp": 640, "attack": 570, "defense": 555, "element": "Water",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Boto.png"},
             ],
             8: [
-                {"name": "Ultra Chaos Beast", "hp": 700, "attack": 680, "defense": 670, "element": "Corrupted",
-                 "url": ""},
-                {"name": "Earth Colossus Prime", "hp": 680, "attack": 675, "defense": 665, "element": "Earth",
-                 "url": ""},
-                {"name": "Water Lord Leviathan", "hp": 720, "attack": 690, "defense": 675, "element": "Water",
-                 "url": ""},
-                {"name": "Shadow Dragon", "hp": 690, "attack": 680, "defense": 665, "element": "Dark", "url": ""},
-                {"name": "Wind Titan Lord", "hp": 710, "attack": 685, "defense": 675, "element": "Wind", "url": ""},
-                {"name": "Dwakel Ultimate Mecha", "hp": 705, "attack": 690, "defense": 680, "element": "Electric",
-                 "url": ""},
-                {"name": "Infernal Warlord Prime", "hp": 695, "attack": 680, "defense": 665, "element": "Fire",
-                 "url": ""},
-                {"name": "Divine Lightbringer", "hp": 685, "attack": 675, "defense": 665, "element": "Light",
-                 "url": ""},
-                {"name": "Undead Legion Overlord", "hp": 730, "attack": 680, "defense": 670, "element": "Dark",
-                 "url": ""},
-                {"name": "Chaos Beast Wolfwing", "hp": 715, "attack": 675, "defense": 665, "element": "Corrupted",
-                 "url": ""},
-                {"name": "Dire Lion", "hp": 725, "attack": 690, "defense": 675, "element": "Nature", "url": ""},
-                {"name": "Storm King Prime", "hp": 740, "attack": 695, "defense": 685, "element": "Electric",
-                 "url": ""},
-                {"name": "Leviathan Prime", "hp": 720, "attack": 680, "defense": 670, "element": "Water", "url": ""},
-                {"name": "Earth Elemental King", "hp": 735, "attack": 675, "defense": 680, "element": "Earth",
-                 "url": ""},
-                {"name": "Shadow Lord Prime", "hp": 700, "attack": 680, "defense": 665, "element": "Dark", "url": ""},
-                {"name": "Blazing Inferno Dragon Prime", "hp": 710, "attack": 685, "defense": 670, "element": "Fire",
-                 "url": ""},
-                {"name": "Obsidian Colossus Prime", "hp": 725, "attack": 675, "defense": 680, "element": "Earth",
-                 "url": ""},
-                {"name": "Tempest Dragon Lord", "hp": 715, "attack": 670, "defense": 680, "element": "Wind", "url": ""},
-                {"name": "Chaos Beast Kimberly", "hp": 730, "attack": 680, "defense": 665, "element": "Corrupted",
-                 "url": ""},
-                {"name": "Elder Treeant", "hp": 740, "attack": 675, "defense": 660, "element": "Nature", "url": ""},
+                {"name": "Meatmongous", "hp": 1200, "attack": 450, "defense": 600, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Meatmongous-removebg-preview.png"},
+                {"name": "Ebil Meta Dragon", "hp": 810, "attack": 770, "defense": 550, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_MetaDragon_n_Greg-transformed.png"},
+                {"name": "Shadow Nulgath", "hp": 850, "attack": 700, "defense": 700, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Shadow_Nulgath.png"},
+                {"name": "The First Speaker", "hp": 800, "attack": 600, "defense": 700, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FirstSpeakerFix-Photoroom.png"},
             ],
             9: [
-                {"name": "Ultra Kathool", "hp": 800, "attack": 780, "defense": 770, "element": "Corrupted", "url": ""},
-                {"name": "Earth Titan Overlord", "hp": 780, "attack": 775, "defense": 765, "element": "Earth",
-                 "url": ""},
-                {"name": "Water Lord Leviathan Prime", "hp": 820, "attack": 790, "defense": 775, "element": "Water",
-                 "url": ""},
-                {"name": "Shadow Lord Alteon Prime", "hp": 790, "attack": 780, "defense": 765, "element": "Dark",
-                 "url": ""},
-                {"name": "Wind Titan Emperor", "hp": 810, "attack": 785, "defense": 775, "element": "Wind", "url": ""},
-                {"name": "Dwakel Ultimate Mecha Prime", "hp": 805, "attack": 790, "defense": 780,
-                 "element": "Electric", "url": ""},
-                {"name": "Infernal Warlord Supreme", "hp": 795, "attack": 780, "defense": 765, "element": "Fire",
-                 "url": ""},
-                {"name": "Divine Light Guardian", "hp": 785, "attack": 775, "defense": 765, "element": "Light",
-                 "url": ""},
-                {"name": "Undead Legion DoomKnight", "hp": 830, "attack": 780, "defense": 770, "element": "Dark",
-                 "url": ""},
-                {"name": "Chaos Beast Tibicenas", "hp": 815, "attack": 775, "defense": 765, "element": "Corrupted",
-                 "url": ""},
-                {"name": "Dire Mammoth Prime", "hp": 825, "attack": 790, "defense": 775, "element": "Nature",
-                 "url": ""},
-                {"name": "Storm Emperor Prime", "hp": 840, "attack": 795, "defense": 785, "element": "Electric",
-                 "url": ""},
-                {"name": "Kraken Supreme", "hp": 820, "attack": 780, "defense": 770, "element": "Water", "url": ""},
-                {"name": "Earth Elemental Overlord", "hp": 835, "attack": 775, "defense": 780, "element": "Earth",
-                 "url": ""},
-                {"name": "Shadow Dragon Prime", "hp": 800, "attack": 780, "defense": 765, "element": "Dark", "url": ""},
-                {"name": "Blazing Inferno Titan Prime", "hp": 810, "attack": 785, "defense": 770, "element": "Fire",
-                 "url": ""},
-                {"name": "Obsidian Titan Supreme", "hp": 825, "attack": 775, "defense": 785, "element": "Earth",
-                 "url": ""},
-                {"name": "Tempest Dragon Emperor", "hp": 815, "attack": 770, "defense": 785, "element": "Wind",
-                 "url": ""},
-                {"name": "Chaos Beast Iadoa", "hp": 830, "attack": 780, "defense": 765, "element": "Corrupted",
-                 "url": ""},
-                {"name": "Ancient Guardian Treeant", "hp": 840, "attack": 775, "defense": 760, "element": "Nature",
-                 "url": ""},
+                {"name": "Avatar Tynfdarius", "hp": 800, "attack": 780, "defense": 770, "element": "Fire",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Avatar_Tynfdarius-removebg-preview-transformed-Photoroom.png"},
+                {"name": "Mech-a-Knight", "hp": 780, "attack": 775, "defense": 790, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Mech-a-knight-removebg-preview-transformed.png"},
+                {"name": "Astraea's Engineer", "hp": 820, "attack": 790, "defense": 775, "element": "Light",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Engineer-removebg-preview-transformed.png"},
             ],
             10: [
-                {"name": "Ultra Chaos Vordred", "hp": 1200, "attack": 600, "defense": 600, "element": "Corrupted",
-                 "url": ""},
-                {"name": "Shadow Guardian", "hp": 1180, "attack": 595, "defense": 600, "element": "Dark", "url": ""},
-                {"name": "Ultra Kathool", "hp": 1250, "attack": 605, "defense": 595, "element": "Corrupted", "url": ""},
-                {"name": "Elemental Dragon of Time", "hp": 1220, "attack": 600, "defense": 590, "element": "Electric",
-                 "url": ""},
-                {"name": "Celestial Dragon", "hp": 1240, "attack": 595, "defense": 595, "element": "Light", "url": ""},
-                {"name": "Infernal Warlord Nulgath", "hp": 1230, "attack": 600, "defense": 585, "element": "Fire",
-                 "url": ""},
-                {"name": "Obsidian Colossus Supreme", "hp": 1260, "attack": 605, "defense": 580, "element": "Earth",
-                 "url": ""},
-                {"name": "Tempest Dragon King", "hp": 1210, "attack": 600, "defense": 600, "element": "Wind",
-                 "url": ""},
-                {"name": "Chaos Lord Xiang", "hp": 1250, "attack": 605, "defense": 575, "element": "Corrupted",
-                 "url": ""},
-                {"name": "Dark Spirit Orbs", "hp": 1190, "attack": 595, "defense": 605, "element": "Dark", "url": ""},
-                {"name": "Electric Titan", "hp": 1230, "attack": 600, "defense": 590, "element": "Electric", "url": ""},
-                {"name": "Light Elemental Lord", "hp": 1240, "attack": 595, "defense": 595, "element": "Light",
-                 "url": ""},
-                {"name": "Flame Dragon", "hp": 1220, "attack": 605, "defense": 585, "element": "Fire", "url": ""},
-                {"name": "ShadowFlame Dragon", "hp": 1200, "attack": 600, "defense": 600, "element": "Dark", "url": ""},
-                {"name": "Chaos Beast Mana Golem", "hp": 1250, "attack": 605, "defense": 575, "element": "Corrupted",
-                 "url": ""},
-                {"name": "Electric Phoenix", "hp": 1230, "attack": 600, "defense": 590, "element": "Electric",
-                 "url": ""},
-                {"name": "Light Bringer", "hp": 1240, "attack": 595, "defense": 595, "element": "Light", "url": ""},
-                {"name": "Void Dragon", "hp": 1260, "attack": 605, "defense": 580, "element": "Corrupted", "url": ""},
-                {"name": "Elemental Titan", "hp": 1210, "attack": 600, "defense": 600, "element": "Electric",
-                 "url": ""},
-                {"name": "Celestial Guardian Dragon", "hp": 1250, "attack": 605, "defense": 580, "element": "Light",
-                 "url": ""},
+                {"name": "Deimos", "hp": 1200, "attack": 700, "defense": 900, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Deimos.png"},
+                {"name": "Void Dragon", "hp": 2500, "attack": 570, "defense": 575, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_6pnyUGr-Photoroom-Photoroom.png"},
+                {"name": "End of all things", "hp": 500, "attack": 2500, "defense": 700, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Beast-Photoroom-transformed-Photoroom.png"},
             ],
             11: [
-                {"name": "Drakath", "hp": 2500, "attack": 1022, "defense": 648, "element": "Corrupted", "url": ""},
-                {"name": "Astraea", "hp": 3100, "attack": 723, "defense": 733, "element": "Light", "url": ""},
-                {"name": "Sepulchure", "hp": 2310, "attack": 690, "defense": 866, "element": "Dark", "url": ""},
+                {"name": "Drakath", "hp": 4000, "attack": 1022, "defense": 700, "element": "Corrupted",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Pngtreelightning_source_lightning_effect_purple_3916970.png"},
+                {"name": "Astraea", "hp": 3500, "attack": 723, "defense": 857, "element": "Light",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_5z90r962trs71_1-Photoroom.png"},
+                {"name": "Sepulchure", "hp": 3000, "attack": 1355, "defense": 600, "element": "Dark",
+                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_wakai-quketsuki-sepulchuredoomknightdoomblade-Photoroom.png"},
             ]
         }
         for level_monsters in monsters.values():
@@ -1551,6 +1582,7 @@ class GameMaster(commands.Cog):
         avatar_url = str(user.avatar)  # Here's the change
         return await self.fetch_image(avatar_url)
 
+    @is_gm()
     @commands.command(name='poop')
     async def poop(self, ctx, user: discord.Member = None, *, reason=None):
         """Bans a user from the server by their tag and sends their cropped avatar on an external image."""
@@ -1565,6 +1597,10 @@ class GameMaster(commands.Cog):
             return
 
         try:
+            # Reinitialize the user to ensure a valid Member object
+            user = await ctx.guild.fetch_member(user.id)
+
+            # Fetch the base image and user avatar
             base_image_data = await self.fetch_image(external_image_url)
             avatar_data = await self.fetch_avatar(user.id)
 
@@ -1575,17 +1611,15 @@ class GameMaster(commands.Cog):
                 avatar_image = Image.open(avatar_io).convert("RGBA")
                 avatar_resized = avatar_image.resize((200, 200))  # Adjust size as needed
 
-                # Rotate the avatar without any fillcolor
+                # Rotate the avatar without any fill color
                 avatar_resized = avatar_resized.rotate(35, expand=True)
 
-                # Calculate the vertical shift - 10% of the avatar's height
-                vertical_shift = int(avatar_resized.height * 0.20)
+                # Calculate positioning
                 x_center = (base_image.width - avatar_resized.width) // 2
-
                 y_position_75_percent = int(base_image.height * 0.75)
                 y_center = y_position_75_percent - (avatar_resized.height // 2)
 
-                # Check if the avatar has an alpha channel (transparency) and use it as a mask if present
+                # Use alpha channel as mask if available
                 mask = avatar_resized.split()[3] if avatar_resized.mode == 'RGBA' else None
 
                 base_image.paste(avatar_resized, (x_center, y_center), mask)
@@ -1595,15 +1629,15 @@ class GameMaster(commands.Cog):
                     output.seek(0)
                     await ctx.send(file=discord.File(output, 'banned_avatar.png'))
 
-            # user = Object(id=user_id)
-            # await ctx.guild.ban(user, reason=reason)
-
-            # await ctx.send(f'Trash taken out!')
-            # await ctx.send(f'The trash known as <@{user_id}> was taken out in **__1 server(s)__** for the reason: {reason}')
-        except HTTPException:
-            await ctx.send(f'Failed to fetch user or image.')
+            # Ban the user
+            await ctx.guild.ban(user, reason=reason)
+            await ctx.send(f"Trash taken out! {user.mention} has been banned.")
+        except discord.Forbidden:
+            await ctx.send("I do not have permission to ban this user.")
+        except discord.HTTPException as e:
+            await ctx.send(f"Failed to ban the user due to an HTTP error: {e}")
         except Exception as e:
-            await ctx.send(f'An error occurred: {e}')
+            await ctx.send(f"An error occurred: {e}")
 
     @commands.command(name='trash')
     async def ban_by_id(self, ctx, user: discord.Member = None, *, reason=None):
@@ -1739,65 +1773,126 @@ class GameMaster(commands.Cog):
         else:
             await ctx.send(f"User with ID {user_id} is not a patron.")
 
+    async def end_auction(self, channel):
+        """Helper method to handle auction ending"""
+        if self.top_auction[0]:  # If there was at least one bid
+            winner, winning_bid = self.top_auction
+            await channel.send(
+                f"🔨 No more bids for **{self.current_item}**.\n"
+                f"Auction ended! **{winner.mention}** wins with a bid of **${winning_bid:,}**!"
+            )
+        else:
+            await channel.send(
+                f"🔨 No bids were made for **{self.current_item}**.\n"
+                f"Auction ended with no winner."
+            )
+
+        self.top_auction = None
+        self.current_item = None
+        self.isbid = False
+        self.auction_entry.clear()
+
+    @is_gm()
+    @commands.command()
+    async def impersonate(self, ctx, user: discord.Member, *, message):
+        # Delete the command message
+        try:
+            await ctx.message.delete()
+
+            # Create a webhook with the target user's name and avatar
+            webhook = await ctx.channel.create_webhook(name=user.display_name)
+
+            # Send the message through the webhook
+            await webhook.send(content=message, avatar_url=user.avatar.url)
+
+            # Delete the webhook after sending the message
+            await webhook.delete()
+        except Exception as e:
+            await ctx.send(e)
+
     @is_gm()
     @commands.command(hidden=True, brief=_("Start an auction"))
     @locale_doc
     async def gmauction(self, ctx, *, item: str):
         _(
             """`<item>` - a description of what is being auctioned
-
             Starts an auction on the support server. Users are able to bid. The auction timeframe extends by 30 minutes if users keep betting.
             The auction ends when no user bids in a 30 minute timeframe.
-
-            The item is not given automatically and the needs to be given manually.
-
+            The item is not given automatically and needs to be given manually.
             Only Game Masters can use this command."""
         )
         if self.top_auction is not None:
             return await ctx.send(_("There's still an auction running."))
-        try:
-            channel = discord.utils.get(
-                self.bot.get_guild(self.bot.config.game.support_server_id).channels,
-                name="⟢auctions〡🧾",
-            )
-        except AttributeError:
-            return await ctx.send(_("Auctions channel wasn't found."))
-        role_id = 1146279043692503112  # Replace with the actual role ID
-        role = discord.utils.get(ctx.guild.roles, id=role_id)
-        await channel.send(
-            f"{ctx.author.mention} started auction on **{item}**! Please use"
-            f" `{ctx.clean_prefix}bid amount` to raise the bid from any channel. If no more bids are sent"
-            f" within the 30 minute timeframe of the highest bid, the auction is over. {role.mention} "
+
+        # Get the auctions channel
+        channel = discord.utils.get(
+            self.bot.get_guild(self.bot.config.game.support_server_id).channels,
+            name="『🧾』auctions",
         )
-        self.top_auction = (ctx.author, 0)
-        timer = 1800  # 30 minutes in seconds
+
+        if not channel:
+            return await ctx.send(_("Auctions channel wasn't found."))
+
+        role_id = 1199287508857540699
+        role = discord.utils.get(ctx.guild.roles, id=role_id)
+
+        if not role:
+            return await ctx.send(_("Auction role wasn't found."))
+
+        # Initialize auction state
+        self.current_item = item
+        self.top_auction = (None, 0)  # Start with no bidder and 0 bid
         self.auction_entry = asyncio.Event()
+        self.auction_task = None  # Store the auction task
 
-        while True:
-            await asyncio.sleep(timer)  # Wait for 30 minutes
-            if not self.auction_entry.is_set():
-                if self.top_auction:
-                    winner, winning_bid = self.top_auction
-                    channel = discord.utils.get(
-                        self.bot.get_guild(self.bot.config.game.support_server_id).channels,
-                        name="🧾auctions🧾",
-                    )
-                    await channel.send(
-                        f"No more bids for **{item}**. Auction ended. **{winner.mention}** wins the auction with a bid of **${winning_bid}**!"
-                    )
-                else:
-                    channel = discord.utils.get(
-                        self.bot.get_guild(self.bot.config.game.support_server_id).channels,
-                        name="🧾auctions🧾",
-                    )
-                    await channel.send(
-                        f"No bids were made for **{item}**. Auction ended with no winner."
-                    )
-                self.top_auction = None
-                self.auction_entry.clear()
-                break  # End the auction
+        # Send initial auction message
+        await channel.send(
+            f"{ctx.author.mention} started auction on **{item}**!\n\n"
+            f"Current bid: **$0**\n\n"
+            f"Please use `{ctx.clean_prefix}bid amount` to raise the bid from any channel.\n\n"
+            f"If no more bids are sent within 30 minutes of the highest bid, the auction will end.\n"
+            f"{role.mention}"
+        )
 
-            self.auction_entry.clear()  # Clear the event for the next iteration
+        # Create and start the auction task
+        self.auction_task = asyncio.create_task(self.run_auction(channel))
+        try:
+            await self.auction_task
+        except Exception as e:
+            await channel.send(f"Error in auction: {str(e)}")
+            self.cleanup_auction()
+
+    async def run_auction(self, channel):
+        """Separate method to handle the auction loop"""
+        try:
+            while True:
+                try:
+                    # Wait for a bid
+                    await asyncio.wait_for(self.auction_entry.wait(), timeout=1800)  # 30 minutes
+                    self.auction_entry.clear()
+                except asyncio.TimeoutError:
+                    # No bids received within timeout period
+                    await self.end_auction(channel)
+                    break
+        finally:
+            self.cleanup_auction()
+
+    def cleanup_auction(self):
+        """Clean up auction state"""
+        self.top_auction = None
+        self.current_item = None
+        self.auction_entry = None
+        self.auction_task = None
+
+    async def end_auction(self, channel):
+        """Handle auction ending"""
+        if self.top_auction[0]:
+            await channel.send(
+                f"🎉 Auction ended! **{self.current_item}** sold to {self.top_auction[0].mention} "
+                f"for **${self.top_auction[1]:,}**!"
+            )
+        else:
+            await channel.send(f"Auction ended with no bids for **{self.current_item}**.")
 
     @has_char()
     @commands.command(hidden=True, brief=_("Bid on an auction"))
@@ -1805,36 +1900,39 @@ class GameMaster(commands.Cog):
     async def bid(self, ctx, amount: IntGreaterThan(0)):
         _(
             """`<amount>` - the amount of money to bid, must be higher than the current highest bid
-
             Bid on an ongoing auction.
-
-            The amount is removed from you as soon as you bid and given back if someone outbids you. This is to prevent bidding impossibly high and then not paying up."""
+            The amount is removed from you as soon as you bid and given back if someone outbids you."""
         )
         if self.top_auction is None:
             return await ctx.send(_("No auction running."))
 
+        if self.top_auction[0] and self.top_auction[0].id == ctx.author.id:
+            return await ctx.send(_("You cannot outbid yourself."))
+
         if amount <= self.top_auction[1]:
-            return await ctx.send(_("Bid too low."))
+            return await ctx.send(_("Bid too low. Current bid is ${:,}.".format(self.top_auction[1])))
 
         if ctx.character_data["money"] < amount:
             return await ctx.send(_("You are too poor."))
 
         async with self.bot.pool.acquire() as conn:
-            await conn.execute(
-                'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
-                self.top_auction[1],
-                self.top_auction[0].id,
-            )
-            await self.bot.log_transaction(
-                ctx,
-                from_=1,
-                to=self.top_auction[0].id,
-                subject="bid",
-                data={"Gold": self.top_auction[1]},
-                conn=conn,
-            )
-            self.top_auction = (ctx.author, amount)
-            self.auction_entry.set()
+            # If there was a previous bidder, refund their money
+            if self.top_auction[0]:
+                await conn.execute(
+                    'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                    self.top_auction[1],
+                    self.top_auction[0].id,
+                )
+                await self.bot.log_transaction(
+                    ctx,
+                    from_=1,
+                    to=self.top_auction[0].id,
+                    subject="bid_refund",
+                    data={"Gold": self.top_auction[1]},
+                    conn=conn,
+                )
+
+            # Take money from new bidder
             await conn.execute(
                 'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
                 amount,
@@ -1848,14 +1946,26 @@ class GameMaster(commands.Cog):
                 data={"Gold": amount},
                 conn=conn,
             )
+
+            # Update auction state
+            old_top = self.top_auction[0]
+            self.top_auction = (ctx.author, amount)
+            self.auction_entry.set()
+
+        # Send bid notifications
         await ctx.send(_("Bid submitted."))
+
         channel = discord.utils.get(
             self.bot.get_guild(self.bot.config.game.support_server_id).channels,
-            name="🧾auctions🧾",
+            name="『🧾』auctions",
         )
-        await channel.send(
-            f"**{ctx.author.mention}** bids **${amount}**! Check above for what's being auctioned."
-        )
+
+        if channel:
+            await channel.send(
+                f"**{ctx.author.mention}** bids **${amount:,}** on **{self.current_item}**!\n"
+                + (f"Previous bidder: {old_top.mention}\n" if old_top else "")
+                + f"Previous bid: **${self.top_auction[1]:,}**"
+            )
 
     @is_gm()
     @commands.command(
@@ -2800,222 +2910,8 @@ class GameMaster(commands.Cog):
 
         await ctx.send("Done")
 
-    @is_gm()
-    @commands.command(name="viewtransactions")
-    async def view_transactions(self, ctx, user_id1: discord.User, user_id2: discord.User = None,
-                                start_date_str: str = None, end_date_str: str = None, page: int = 1):
-        try:
-            # Convert start and end date strings to datetime objects
-            start_date = datetime.strptime(start_date_str, "%Y-%m-%d") if start_date_str else None
-            end_date = datetime.strptime(end_date_str, "%Y-%m-%d") if end_date_str else None
-
-            async with self.bot.pool.acquire() as connection:
-                # Build the query based on the provided date range and user IDs
-                query = """
-                    SELECT * 
-                    FROM transactions 
-                    WHERE ("from" = $1 AND "to" = $2) OR ("from" = $2 AND "to" = $1)
-                """
-
-                # Add conditions for the date range if provided
-                if start_date:
-                    query += " AND timestamp >= $3"
-                if end_date:
-                    query += " AND timestamp <= $4"
-
-                query += " ORDER BY timestamp DESC"
-
-                # Execute the query
-                if user_id2:
-                    if start_date and end_date:
-                        transactions = await connection.fetch(query, user_id1.id, user_id2.id, start_date, end_date)
-                    elif start_date:
-                        transactions = await connection.fetch(query, user_id1.id, user_id2.id, start_date)
-                    elif end_date:
-                        transactions = await connection.fetch(query, user_id1.id, user_id2.id, end_date)
-                    else:
-                        transactions = await connection.fetch(query, user_id1.id, user_id2.id)
-                else:
-                    # If user_id2 is not specified, fetch all transactions involving user_id1
-                    all_transactions_query = """
-                        SELECT * 
-                        FROM transactions 
-                        WHERE "from" = $1 OR "to" = $1
-                        ORDER BY timestamp DESC
-                    """
-                    if start_date and end_date:
-                        transactions = await connection.fetch(all_transactions_query, user_id1.id, start_date, end_date)
-                    elif start_date:
-                        transactions = await connection.fetch(all_transactions_query, user_id1.id, start_date)
-                    elif end_date:
-                        transactions = await connection.fetch(all_transactions_query, user_id1.id, end_date)
-                    else:
-                        transactions = await connection.fetch(all_transactions_query, user_id1.id)
-
-            if not transactions:
-                return await ctx.send("No transactions found.")
-
-            paginator = menus.MenuPages(
-                source=TransactionPaginator(transactions, per_page=5),
-                clear_reactions_after=True,
-                delete_message_after=True
-            )
-
-            await paginator.start(ctx)
-        except Exception as e:
-            await ctx.send(f"An error occurred: {e}")
-            # Handle the exception here or re-raise it
-
-    @commands.command(name="viewtransactions2")
-    async def view_transactions_2(self, ctx, user_id1: discord.User, subject: str = "all",
-                                  user_id2: discord.User = None,
-                                  page: int = 1):
-        valid_subjects = [
-            "gambling BJ", "Pet Item Fetch", "Active Battle Bet", "guild invest", "Family Event",
-            "daily", "Level Up!", "shop buy", "guild pay", "item", "Pet Purchase", "exchange", "item = OFFER",
-            "vote", "crates", "shop buy - bot give", "Tournament Prize", "gambling BJ-Insurance",
-            "Battle Bet", "spoil", "FamilyEvent Crate", "FamilyEvent Money", "RaidBattle Bet",
-            "Raid Stats Upgrade DEF", "crate open item", "raid bid winner", "gambling roulette",
-            "crates offercrate", "Starting out", "money", "class change", "give money", "gambling coinflip",
-            "adventure", "Raid Stats Upgrade ATK", "AA Reward", "bid", "crates trade", "steal",
-            "Raid Stats Upgrade HEALTH", "Torunament Winner", "buy boosters", "merch", "offer",
-            "alliance", "sacrifice", "gambling", "Memorial Item", "shop"
-        ]
-
-        try:
-            async with self.bot.pool.acquire() as connection:
-                # Check if the provided subject is valid
-                if subject.lower() != "all" and subject not in valid_subjects:
-                    valid_subjects_str = "\n".join(valid_subjects)
-                    return await ctx.send(
-                        f"Invalid subject. Here is the list of valid subjects:\n\n```{valid_subjects_str}```")
-
-                # Build the query based on the provided user IDs and subject
-                query = """
-                    SELECT * 
-                    FROM transactions 
-                    WHERE (("from" = $1 AND "to" = $2) OR ("from" = $2 AND "to" = $1))
-                """
-
-                # Add condition for the subject if provided and not "all"
-                if subject.lower() != "all":
-                    query += " AND subject = $3"
-
-                query += " ORDER BY timestamp DESC"
-
-                # Execute the query
-                if user_id2:
-                    transactions = await connection.fetch(query, user_id1.id, user_id2.id, subject)
-                else:
-                    # If user_id2 is not specified, fetch all transactions involving user_id1
-                    all_transactions_query = """
-                        SELECT * 
-                        FROM transactions 
-                        WHERE ("from" = $1 OR "to" = $1)
-                    """
-
-                    # Add condition for the subject if provided and not "all"
-                    if subject.lower() != "all":
-                        all_transactions_query += " AND subject = $2"
-
-                    all_transactions_query += " ORDER BY timestamp DESC"
-
-                    transactions = await connection.fetch(all_transactions_query, user_id1.id, subject)
-
-            if not transactions:
-                return await ctx.send("No transactions found.")
-
-            paginator = menus.MenuPages(
-                source=TransactionPaginator(transactions, per_page=5),
-                clear_reactions_after=True,
-                delete_message_after=True
-            )
-
-            await paginator.start(ctx)
-        except Exception as e:
-            await ctx.send(f"An error occurred: {e}")
-            # Handle the exception here or re-raise it
 
 
-from datetime import datetime
-
-import re
-
-
-class TransactionPaginator(menus.ListPageSource):
-    def __init__(self, transactions, per_page=5, *args, **kwargs):
-        super().__init__(transactions, per_page=per_page, *args, **kwargs)
-
-    async def format_page(self, menu, entries):
-        offset = (menu.current_page * self.per_page) + 1
-        embed = discord.Embed(title="Transaction History", color=discord.Color.blurple())
-
-        for transaction in entries:
-            from_member = None
-            to_member = None
-
-            # Check if 'from' is a valid Discord ID
-            if isinstance(transaction['from'], int):
-                from_member = discord.utils.get(menu.bot.users, id=transaction['from'])
-
-            # Check if 'to' is a valid Discord ID
-            if isinstance(transaction['to'], int):
-                to_member = discord.utils.get(menu.bot.users, id=transaction['to'])
-
-            from_display = f"{from_member.name}#{from_member.discriminator}" if from_member else str(
-                transaction['from'])
-            to_display = f"{to_member.name}#{to_member.discriminator}" if to_member else str(transaction['to'])
-
-            # Extract information from 'info' field
-            info_display = transaction.get('info', '')
-            user_id_matches = re.findall(r'\b(\d{17,21})\b', info_display)
-
-            for user_id_match in user_id_matches:
-                # If a potential Discord user ID is found, try to get the corresponding user
-                user_id = int(user_id_match)
-                user = discord.utils.get(menu.bot.users, id=user_id)
-                info_display = info_display.replace(user_id_match,
-                                                    f"{user.name}#{user.discriminator}" if user else user_id_match)
-
-            formatted_timestamp = transaction.get('timestamp', '')  # Adjust the column name as per your database
-
-            if isinstance(formatted_timestamp, datetime):
-                formatted_timestamp = formatted_timestamp.strftime("%Y-%m-%d %H:%M:%S %Z")
-            elif formatted_timestamp:
-                formatted_timestamp = datetime.strptime(formatted_timestamp, "%Y-%m-%d %H:%M:%S.%f%z").strftime(
-                    "%Y-%m-%d %H:%M:%S %Z"
-                )
-
-            embed.add_field(
-                name=f"Transaction #{offset}",
-                value=f"From: {from_display}\nTo: {to_display}\nSubject: {transaction['subject']}",
-                inline=False
-            )
-
-            embed.add_field(
-                name="Info",
-                value=info_display,
-                inline=False
-            )
-
-            if 'data' in transaction and transaction['data']:
-                embed.add_field(
-                    name="Data",
-                    value=transaction['data'],
-                    inline=False
-                )
-
-            embed.add_field(
-                name="Timestamp",
-                value=formatted_timestamp,
-                inline=False
-            )
-
-            embed.add_field(name='\u200b', value='\u200b', inline=False)  # Add an empty field as a separator
-            offset += 1
-
-        embed.set_footer(text=f"Page {menu.current_page + 1}/{self.get_max_pages()}")
-        return embed
 
 
 async def setup(bot):
