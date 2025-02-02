@@ -14,8 +14,9 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU Affero General Public License for more details.
 
 You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
+along with this program.  If not, see .
 """
+
 import asyncio
 import datetime
 import string
@@ -62,7 +63,8 @@ class Slots(commands.Cog):
 
         self.captcha_lock = {}
 
-        # --------------------------------------------
+        # Dictionary to track each user's output mode (False = graphic, True = text-only)
+        self.text_mode = {}
 
         self.logger = 0
 
@@ -78,22 +80,18 @@ class Slots(commands.Cog):
 
             Subcommands:
             - `seats`: View slot machine seat information.
-            - `takeseat <seat_number>`: Take a seat in the slot machine game.
+            - `takeseat `: Take a seat in the slot machine game.
             - `leaveseat`: Leave your current seat.
+            - `toggleslottxt`: Toggle text-only mode for slot machine output.
             """
         )
 
         if ctx.invoked_subcommand is None:
-
             updated_dragon = 1
             updated_player = 1
-
             try:
                 async with self.bot.pool.acquire() as connection:
-                    # Check if the user's ID exists in any row's 'occupant' column
-                    result = await connection.fetchrow("SELECT seat FROM dragonslots WHERE occupant = $1",
-                                                       ctx.author.id)
-
+                    result = await connection.fetchrow("SELECT seat FROM dragonslots WHERE occupant = $1", ctx.author.id)
                     if result:
                         seat = result['seat']
                         await self.update_last_activity(ctx.author.id)
@@ -108,59 +106,40 @@ class Slots(commands.Cog):
 
             verifycheck = random.randint(1, 100)
             if verifycheck <= 1:
-
-                captcha_text = self.generate_distorted_captcha()
-
                 try:
-
-                    # Generate and send the CAPTCHA
                     captcha_text = self.generate_distorted_captcha()
                     self.captcha_lock[ctx.author.id] = captcha_text
                     await ctx.send(f"{ctx.author.mention} Enter the CAPTCHA Text below. You have 60 seconds",
                                    file=discord.File('captcha.png'))
-
-                    # Add the user to the captcha lock
-
-
-                    # Wait for the user to solve the CAPTCHA
                     try:
                         await self.bot.wait_for(
                             'message',
                             check=lambda msg: msg.author == ctx.author and msg.content.lower() == captcha_text.lower(),
-                            timeout=60  # Adjust the timeout as needed
+                            timeout=60
                         )
                     except asyncio.TimeoutError:
                         try:
                             async with self.bot.pool.acquire() as connection:
-                                # Check if the user is currently occupying a seat
                                 seat_info = await connection.fetchrow("SELECT * FROM dragonslots WHERE occupant = $1",
                                                                       ctx.author.id)
-
                                 if seat_info:
                                     seat_number = seat_info['seat']
-
-                                    # Clear the seat for the user
                                     await connection.execute(
                                         "UPDATE dragonslots SET occupant = NULL, last_activity = NULL WHERE seat = $1",
                                         seat_number)
-
                                     await self.send_locked_message(ctx.author)
-
                                     await ctx.send("You are now CAPTCHA Locked. Use `$unlock` to unlock the CAPTCHA.")
-
                                 else:
                                     await self.send_locked_message(ctx.author)
                         except Exception as e:
                             await ctx.send(f"An error occurred: {e}")
                         return
-
-                    # Remove the user from the captcha lock
                     await ctx.send("CAPTCHA Verification Successful")
                     del self.captcha_lock[ctx.author.id]
-
                 except Exception as e:
                     await ctx.send(str(e))
 
+            # Check user balance
             try:
                 async with self.bot.pool.acquire() as connection:
                     result = await connection.fetch('SELECT money FROM profile WHERE "user" = $1', ctx.author.id)
@@ -176,293 +155,251 @@ class Slots(commands.Cog):
             else:
                 try:
                     async with self.bot.pool.acquire() as connection:
-                        # Deduct 2000 from the user's money
                         await connection.execute('UPDATE profile SET money = money - $1 WHERE "user" = $2', 1500,
                                                  ctx.author.id)
                         if ctx.author.id == 708435868842459169:
                             self.logger = self.logger - 1500
                         await connection.execute('UPDATE dragonslots SET jackpot = jackpot + $1 WHERE seat = $2', 250,
                                                  seat)
-
                         jackpot_result = await connection.fetchval('SELECT jackpot FROM dragonslots WHERE seat = $1',
-                                                                   seat)
+                                                                     seat)
                 except Exception as e:
                     return await ctx.send(f"An error occurred while deducting money: {e}")
 
-            try:
-                # Emoji slots with adjusted probabilities
-                # emojis = ["🐉", "🍏"]  # Add more emojis as needed
-                emojis = ["🍎", "🍒", "🍊", "🐉", "🍏", "🍓", "🍍"]  # Add more emojis as needed
+            # ----- Emoji slots with adjusted probabilities -----
+            fruit_values = {
+                "🐉": 1000,
+                "🍒": 1000,
+                "🍎": 2000,
+                "🍊": 2500,
+                "🍏": 3000,
+                "🍓": 4000,
+                "🍍": 6500
+            }
+            emojis = list(fruit_values.keys())
+            weights = [1, 4, 3, 2, 1, 1, 1]
+            slot_results = random.choices(emojis, weights=weights, k=3)
+            fruit_counts = Counter(slot_results)
+            dragon_count = slot_results.count("🐉")
 
-                # Generate three random emojis for the slots
+            if len(set(slot_results)) == 1:
+                total_reward = 4 * fruit_values[slot_results[0]]
+            elif len(set(slot_results)) == 2 and any(count == 2 for count in fruit_counts.values()):
+                total_reward = 2 * sum(fruit_values[fruit] for fruit, count in fruit_counts.items() if count == 2)
+            else:
+                total_reward = 0
 
-                fruit_values = {
-                    "🐉": 1000,
-                    "🍒": 1000,
-                    "🍎": 2000,
-                    "🍊": 2500,
-                    "🍏": 3000,
-                    "🍓": 4000,
-                    "🍍": 6500,  # Adjusted value for 🍍 to cover the base value (2000) for 2 pineapples
-                }
-
-                # Generate three random emojis for the slots with adjusted probabilities
-                emojis = list(fruit_values.keys())  # List of available emojis
-                weights = [1, 4, 3, 2, 1, 1, 1]  # Adjusted weights for each fruit
-                slot_results = random.choices(emojis, weights=weights, k=3)
-
-                # Count the occurrences of each fruit in the slots
-                fruit_counts = Counter(slot_results)
-                dragon_count = slot_results.count("🐉")
-
-                # Check for matching fruits in adjacent slots or all 3 slots
-                if len(set(slot_results)) == 1:
-                    # All three slots have the same fruit
-                    total_reward = 4 * fruit_values[slot_results[0]]
-                elif len(set(slot_results)) == 2 and any(count == 2 for count in fruit_counts.values()):
-                    # Two different fruits, and one of them appears twice (it's a pair)
-                    total_reward = 2 * sum(fruit_values[fruit] for fruit, count in fruit_counts.items() if count == 2)
+            # ----- Risk Event: 10% chance to modify the reward -----
+            risk_message = ""
+            bonus = 0
+            penalty = 0
+            if random.randint(1, 100) <= 10:
+                bonus_type = random.choice(["bonus", "penalty"])
+                if bonus_type == "bonus":
+                    bonus = random.randint(500, 2000)
+                    total_reward += bonus
+                    risk_message = f"Risk event triggered! You got a bonus of ${bonus}."
                 else:
-                    # No matching pair or three of a kind
-                    total_reward = 0
-
-                if total_reward != 0:
+                    penalty = random.randint(100, 2000)
                     async with self.bot.pool.acquire() as connection:
-                        await connection.execute('UPDATE profile SET money = money + $1 WHERE "user" = $2',
-                                                 total_reward,
-                                                 ctx.author.id)
+                        jackpot_result = await connection.fetchval('SELECT jackpot FROM dragonslots WHERE seat = $1',
+                                                                   seat)
+                        if jackpot_result < penalty:
+                            await connection.execute('UPDATE dragonslots SET jackpot = $1 WHERE seat = $2',
+                                                     0, seat)
+                        else:
+                            await connection.execute('UPDATE dragonslots SET jackpot = jackpot - $1 WHERE seat = $2',
+                                                     penalty, seat)
 
-                        if ctx.author.id == 708435868842459169:
-                            self.logger = self.logger + total_reward
 
-                # Send an embed with the slot machine result, reward, and jackpot
+
+                    risk_message = f"Risk event triggered! You suffered a penalty of ${penalty}."
+
+            # ----- Update user money and jackpot -----
+            try:
+                async with self.bot.pool.acquire() as connection:
+                    if total_reward != 0:
+                        if total_reward > 0:
+                            await connection.execute('UPDATE profile SET money = money + $1 WHERE "user" = $2',
+                                                     total_reward, ctx.author.id)
+                            if ctx.author.id == 708435868842459169:
+                                self.logger = self.logger + total_reward
+                        else:
+                            await connection.execute('UPDATE profile SET money = money - $1 WHERE "user" = $2',
+                                                     abs(total_reward), ctx.author.id)
+                            if ctx.author.id == 708435868842459169:
+                                self.logger = self.logger - abs(total_reward)
+                        await connection.execute('UPDATE dragonslots SET jackpot = jackpot + $1 WHERE seat = $2',
+                                                 250, seat)
+                        jackpot_result = await connection.fetchval('SELECT jackpot FROM dragonslots WHERE seat = $1', seat)
+                    else:
+                        jackpot_result = await connection.fetchval('SELECT jackpot FROM dragonslots WHERE seat = $1', seat)
+            except Exception as e:
+                return await ctx.send(f"An error occurred while updating money: {e}")
+
+            # Build output message
+            slot_output = (
+                f"Slot Machine Result\n"
+                f"Slot 1: {slot_results[0]}\n"
+                f"Slot 2: {slot_results[1]}\n"
+                f"Slot 3: {slot_results[2]}\n"
+                f"Base Reward: ${total_reward - (bonus if bonus else penalty)}\n"
+                f"{risk_message if risk_message else 'Risk event: None'}\n"
+                f"Jackpot: ${jackpot_result}\n"
+                f"Occupant: {ctx.author.display_name}"
+            )
+
+            if self.text_mode.get(ctx.author.id, False):
+                await ctx.send(f"```\n{slot_output}\n```")
+            else:
                 embed = discord.Embed(title="Slot Machine Result", color=discord.Color.blurple())
                 embed.add_field(name="Slot 1", value=slot_results[0], inline=True)
                 embed.add_field(name="Slot 2", value=slot_results[1], inline=True)
                 embed.add_field(name="Slot 3", value=slot_results[2], inline=True)
                 embed.add_field(name="**Reward**", value=f"${total_reward}", inline=False)
+                embed.add_field(name="Risk Event", value=risk_message if risk_message else "None", inline=False)
                 embed.add_field(name="Jackpot", value=f"${jackpot_result}", inline=False)
                 embed.add_field(name="Occupant", value=f"{ctx.author.mention}", inline=False)
                 await ctx.send(embed=embed)
 
-                if dragon_count > 0:
-                    if dragon_count == 1:
-                        await ctx.send(f"{ctx.author.display_name}, You rolled a dragon! Initiating attack sequence...")
-                    else:
-                        await ctx.send(
-                            f"You rolled {dragon_count} dragons! Initiating {dragon_count} attack sequence{'s' if dragon_count > 1 else ''}...")
+            # ----- Dragon event if a dragon emoji was rolled -----
+            if dragon_count > 0:
+                if dragon_count == 1:
+                    await ctx.send(f"{ctx.author.display_name}, you rolled a dragon! Initiating attack sequence...")
+                else:
+                    await ctx.send(f"You rolled {dragon_count} dragons! Initiating {dragon_count} attack sequence{'s' if dragon_count > 1 else ''}...")
+                # Process each dragon roll
+                for i in range(1, dragon_count + 1):
+                    await asyncio.sleep(1)
+                    background_url = 'https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Picsart_24-04-13_11-36-22-184.jpg'
+                    bg_image = Image.open(requests.get(background_url, stream=True).raw)
+                    font_path = 'EightBitDragon-anqx.ttf'
+                    dragonHP_font = ImageFont.truetype(font_path, size=38)
+                    HeroHP_font = ImageFont.truetype(font_path, size=33)
+                    draw = ImageDraw.Draw(bg_image)
+                    random_number = random.randint(1, 5)
 
-                    # Continue with any additional messages or actions here
-
-                    # For each dragon rolled
-                    for i in range(1, dragon_count + 1):
+                    if random_number == 1:
+                        async with self.bot.pool.acquire() as connection:
+                            await connection.execute(
+                                'UPDATE dragonslots SET dragon = dragon - $1, player = player - $2 WHERE seat = $3',
+                                5, 5, seat)
+                            updated_values = await connection.fetchrow('SELECT dragon, player FROM dragonslots WHERE seat = $1',
+                                                                       seat)
+                            updated_dragon = updated_values['dragon']
+                            updated_player = updated_values['player']
+                        await ctx.send(f"{ctx.author.display_name}, you attacked the dragon for **5 DMG!** It now has {updated_dragon}! You took **5 DMG** and now have {updated_player}.")
                         await asyncio.sleep(1)
-                        # Load the image outside the loop
-                        background_url = 'https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Picsart_24-04-13_11-36-22-184.jpg'
-                        bg_image = Image.open(requests.get(background_url, stream=True).raw)
 
-                        # Specify the font file path
-                        font_path = 'EightBitDragon-anqx.ttf'
+                    if random_number == 2:
+                        await ctx.send(f"{ctx.author.display_name}, you defended yourself. You took 0 damage!")
+                        async with self.bot.pool.acquire() as connection:
+                            updated_values = await connection.fetchrow('SELECT dragon, player FROM dragonslots WHERE seat = $1',
+                                                                       seat)
+                            updated_dragon = updated_values['dragon']
+                            updated_player = updated_values['player']
+                        await asyncio.sleep(1)
 
-                        # Load the Eight Bit Dragon font
-                        dragonHP_font = ImageFont.truetype(font_path, size=38)
-                        HeroHP_font = ImageFont.truetype(font_path, size=33)
-
-                        # Draw HP values on the image
-                        draw = ImageDraw.Draw(bg_image)
-
-                        font_size = 20
-
-                        random_number = random.randint(1, 5)
-
-                        # Handle the action for each dragon
-                        if random_number == 1:
-                            async with self.bot.pool.acquire() as connection:
-                                await connection.execute(
-                                    'UPDATE dragonslots SET dragon = dragon - $1, player = player - $2 WHERE seat = $3',
-                                    5,
-                                    5, seat)
-                                updated_values = await connection.fetchrow(
-                                    'SELECT dragon, player FROM dragonslots WHERE seat = $1', seat)
-                                updated_dragon = updated_values['dragon']
-                                updated_player = updated_values['player']
-
-                            await ctx.send(
-                                f"{ctx.author.display_name}, You attacked the dragon for **5 DMG!** It now has {updated_dragon}! You took **5 DMG** and now have {updated_player}.")
-                            await asyncio.sleep(1)
-
-                        if random_number == 2:
-                            await ctx.send(
-                                f"{ctx.author.display_name}, You have defended yourself against the dragon. You took 0 damage!")
-                            async with self.bot.pool.acquire() as connection:
-                                updated_values = await connection.fetchrow(
-                                    'SELECT dragon, player FROM dragonslots WHERE seat = $1', seat)
-                                updated_dragon = updated_values['dragon']
-                                updated_player = updated_values['player']
-                            await asyncio.sleep(1)
-
-                        if random_number == 3:
-                            triphurt = random.randint(1, 10)
-                            if triphurt <= 5:
-                                async with self.bot.pool.acquire() as connection:
-                                    await connection.execute(
-                                        'UPDATE dragonslots SET player = player - $1 WHERE seat = $2',
-                                        5,
-                                        seat)
-                                    updated_values = await connection.fetchrow(
-                                        'SELECT dragon, player FROM dragonslots WHERE seat = $1', seat)
-                                    updated_dragon = updated_values['dragon']
-                                    updated_player = updated_values['player']
-
-                                await ctx.send(
-                                    f"{ctx.author.display_name}, You tripped! You are vulnerable and took **5 DMG!** You now have {updated_player}!")
-                                await asyncio.sleep(1)
-
-                            else:
-                                async with self.bot.pool.acquire() as connection:
-                                    await connection.execute(
-                                        'UPDATE dragonslots SET player = player - $1 WHERE seat = $2',
-                                        10,
-                                        seat)
-                                    updated_values = await connection.fetchrow(
-                                        'SELECT dragon, player FROM dragonslots WHERE seat = $1', seat)
-                                    updated_dragon = updated_values['dragon']
-                                    updated_player = updated_values['player']
-
-                                await ctx.send(
-                                    f"Oops, {ctx.author.display_name}! You stumbled and sustained significant injuries, "
-                                    f"leaving you vulnerable. You've taken **10 DMG**. Your current HP is now "
-                                    f"{updated_player}!"
-                                )
-
-                                await asyncio.sleep(1)
-
-                        if random_number == 4:
-                            async with self.bot.pool.acquire() as connection:
-                                await connection.execute(
-                                    'UPDATE dragonslots SET dragon = dragon - $1, player = player - $2 WHERE seat = $3',
-                                    10,
-                                    5, seat)
-                                updated_values = await connection.fetchrow(
-                                    'SELECT dragon, player FROM dragonslots WHERE seat = $1', seat)
-                                updated_dragon = updated_values['dragon']
-                                updated_player = updated_values['player']
-
-                            await ctx.send(
-                                f"{ctx.author.display_name}, You cast a powerful spell! The dragon took **10 DMG!** It now has {updated_dragon}! You took **5 DMG** and now have {updated_player}.")
-                            await asyncio.sleep(1)
-
-                        if random_number == 5:
+                    if random_number == 3:
+                        triphurt = random.randint(1, 10)
+                        if triphurt <= 5:
                             async with self.bot.pool.acquire() as connection:
                                 await connection.execute('UPDATE dragonslots SET player = player - $1 WHERE seat = $2',
-                                                         5,
-                                                         seat)
-                                updated_values = await connection.fetchrow(
-                                    'SELECT dragon, player FROM dragonslots WHERE seat = $1', seat)
+                                                         5, seat)
+                                updated_values = await connection.fetchrow('SELECT dragon, player FROM dragonslots WHERE seat = $1',
+                                                                           seat)
                                 updated_dragon = updated_values['dragon']
                                 updated_player = updated_values['player']
+                            await ctx.send(f"{ctx.author.display_name}, you tripped and took **5 DMG!** Your HP is now {updated_player}!")
+                            await asyncio.sleep(1)
+                        else:
+                            async with self.bot.pool.acquire() as connection:
+                                await connection.execute('UPDATE dragonslots SET player = player - $1 WHERE seat = $2',
+                                                         10, seat)
+                                updated_values = await connection.fetchrow('SELECT dragon, player FROM dragonslots WHERE seat = $1',
+                                                                           seat)
+                                updated_dragon = updated_values['dragon']
+                                updated_player = updated_values['player']
+                            await ctx.send(f"Oops, {ctx.author.display_name}! You stumbled and took **10 DMG**. Your HP is now {updated_player}!")
+                            await asyncio.sleep(1)
 
-                            healthluck = random.randint(1, 11)
+                    if random_number == 4:
+                        async with self.bot.pool.acquire() as connection:
+                            await connection.execute('UPDATE dragonslots SET dragon = dragon - $1, player = player - $2 WHERE seat = $3',
+                                                     10, 5, seat)
+                            updated_values = await connection.fetchrow('SELECT dragon, player FROM dragonslots WHERE seat = $1',
+                                                                       seat)
+                            updated_dragon = updated_values['dragon']
+                            updated_player = updated_values['player']
+                        await ctx.send(f"{ctx.author.display_name}, you cast a spell! The dragon took **10 DMG** and you took **5 DMG**. Dragon HP: {updated_dragon}; Your HP: {updated_player}.")
+                        await asyncio.sleep(1)
 
-                            if healthluck <= 5:
-
-                                if updated_player < 85:
-
-                                    async with self.bot.pool.acquire() as connection:
-                                        await connection.execute(
-                                            'UPDATE dragonslots SET player = player + $1 WHERE seat = $2',
-                                            10,
-                                            seat)
-                                        updated_values = await connection.fetchrow(
-                                            'SELECT dragon, player FROM dragonslots WHERE seat = $1', seat)
-                                        updated_player = updated_values['player']
-
-                                    await ctx.send(
-                                        f"{ctx.author.display_name}, You cast a healing spell! You heal yourself for **10 HP!** You took **5 DMG** from the dragon and now have {updated_player}.")
-                                    await asyncio.sleep(1)
-                                    async with self.bot.pool.acquire() as connection:
-                                        updated_values = await connection.fetchrow(
-                                            'SELECT dragon, player FROM dragonslots WHERE seat = $1', seat)
-                                        updated_dragon = updated_values['dragon']
-                                        updated_player = updated_values['player']
-                                else:
-
-                                    async with self.bot.pool.acquire() as connection:
-                                        await connection.execute('UPDATE dragonslots SET player = $1 WHERE seat = $2',
-                                                                 95,
-                                                                 seat)
-                                        updated_values = await connection.fetchrow(
-                                            'SELECT dragon, player FROM dragonslots WHERE seat = $1', seat)
-                                        updated_player = updated_values['player']
-
-                                    await ctx.send(
-                                        f"{ctx.author.display_name}, You cast a healing spell! You heal yourself to **100 HP!** You took **5 DMG** from the dragon and now have {updated_player}.")
-                                    await asyncio.sleep(1)
-                                    async with self.bot.pool.acquire() as connection:
-                                        updated_values = await connection.fetchrow(
-                                            'SELECT dragon, player FROM dragonslots WHERE seat = $1', seat)
-                                        updated_dragon = updated_values['dragon']
-                                        updated_player = updated_values['player']
-
+                    if random_number == 5:
+                        async with self.bot.pool.acquire() as connection:
+                            await connection.execute('UPDATE dragonslots SET player = player - $1 WHERE seat = $2',
+                                                     5, seat)
+                            updated_values = await connection.fetchrow('SELECT dragon, player FROM dragonslots WHERE seat = $1',
+                                                                       seat)
+                            updated_dragon = updated_values['dragon']
+                            updated_player = updated_values['player']
+                        healthluck = random.randint(1, 11)
+                        if healthluck <= 5:
+                            if updated_player < 85:
+                                async with self.bot.pool.acquire() as connection:
+                                    await connection.execute('UPDATE dragonslots SET player = player + $1 WHERE seat = $2',
+                                                             10, seat)
+                                    updated_values = await connection.fetchrow('SELECT dragon, player FROM dragonslots WHERE seat = $1',
+                                                                               seat)
+                                    updated_player = updated_values['player']
+                                await ctx.send(f"{ctx.author.display_name}, you healed for **10 HP!** Your HP is now {updated_player}.")
+                                await asyncio.sleep(1)
                             else:
-                                if updated_player < 85:
+                                async with self.bot.pool.acquire() as connection:
+                                    await connection.execute('UPDATE dragonslots SET player = $1 WHERE seat = $2',
+                                                             95, seat)
+                                    updated_values = await connection.fetchrow('SELECT dragon, player FROM dragonslots WHERE seat = $1',
+                                                                               seat)
+                                    updated_player = updated_values['player']
+                                await ctx.send(f"{ctx.author.display_name}, you healed to **100 HP!** Your HP is now {updated_player}.")
+                                await asyncio.sleep(1)
+                        else:
+                            if updated_player < 85:
+                                async with self.bot.pool.acquire() as connection:
+                                    await connection.execute('UPDATE dragonslots SET player = player + $1 WHERE seat = $2',
+                                                             15, seat)
+                                    updated_values = await connection.fetchrow('SELECT dragon, player FROM dragonslots WHERE seat = $1',
+                                                                               seat)
+                                    updated_player = updated_values['player']
+                                await ctx.send(f"{ctx.author.display_name}, you healed for **15 HP!** Your HP is now {updated_player}.")
+                                await asyncio.sleep(1)
+                            else:
+                                async with self.bot.pool.acquire() as connection:
+                                    await connection.execute('UPDATE dragonslots SET player = $1 WHERE seat = $2',
+                                                             95, seat)
+                                    updated_values = await connection.fetchrow('SELECT dragon, player FROM dragonslots WHERE seat = $1',
+                                                                               seat)
+                                    updated_player = updated_values['player']
+                                await ctx.send(f"{ctx.author.display_name}, you healed to **100 HP!** Your HP is now {updated_player}.")
+                                await asyncio.sleep(1)
 
-                                    async with self.bot.pool.acquire() as connection:
-                                        await connection.execute(
-                                            'UPDATE dragonslots SET player = player + $1 WHERE seat = $2',
-                                            15,
-                                            seat)
-                                        updated_values = await connection.fetchrow(
-                                            'SELECT dragon, player FROM dragonslots WHERE seat = $1', seat)
-                                        updated_player = updated_values['player']
+                    if updated_player < 0:
+                        updated_player = 0
+                    if updated_dragon < 0:
+                        updated_dragon = 0
 
-                                    await ctx.send(
-                                        f"{ctx.author.display_name}, You cast a healing spell! You heal yourself for **15 HP!** You took **5 DMG** from the dragon and now have {updated_player}.")
-                                    await asyncio.sleep(1)
-                                    async with self.bot.pool.acquire() as connection:
-                                        updated_values = await connection.fetchrow(
-                                            'SELECT dragon, player FROM dragonslots WHERE seat = $1', seat)
-                                        updated_dragon = updated_values['dragon']
-                                        updated_player = updated_values['player']
-                                else:
+                    # Draw HP values on image
+                    draw.text((80, 391), f"{updated_player}", font=HeroHP_font, fill="cyan")
+                    draw.text((673, 10), f"{updated_dragon}", font=dragonHP_font, fill="white")
 
-                                    async with self.bot.pool.acquire() as connection:
-                                        await connection.execute('UPDATE dragonslots SET player = $1 WHERE seat = $2',
-                                                                 95,
-                                                                 seat)
-                                        updated_values = await connection.fetchrow(
-                                            'SELECT dragon, player FROM dragonslots WHERE seat = $1', seat)
-                                        updated_player = updated_values['player']
+                    # Run special event (send updated image or text summary)
+                    await self.run_special_event(ctx, bg_image, draw, i, random_number, seat)
 
-                                    await ctx.send(
-                                        f"{ctx.author.display_name}, You cast a healing spell! You heal yourself to **100 HP!** You took **5 DMG** from the dragon and now have {updated_player}.")
-                                    await asyncio.sleep(1)
-                                    async with self.bot.pool.acquire() as connection:
-                                        updated_values = await connection.fetchrow(
-                                            'SELECT dragon, player FROM dragonslots WHERE seat = $1', seat)
-                                        updated_dragon = updated_values['dragon']
-                                        updated_player = updated_values['player']
-
-                        if updated_player < 0:
-                            updated_player = 0
-
-                        if updated_dragon < 0:
-                            updated_dragon = 0
-
-                        # Draw Player's HP
-                        draw.text((80, 391), f"{updated_player}", font=HeroHP_font, fill="cyan")
-
-                        # Draw Dragon's HP
-                        draw.text((673, 10), f"{updated_dragon}", font=dragonHP_font, fill="white")
-
-                        # Trigger the event based on the number of dragon emojis
-                        await self.run_special_event(ctx, bg_image, draw, i, random_number, seat)
-
-            except Exception as e:
-                await ctx.send(f"An error occurred: {e}")
 
     async def run_special_event(self, ctx, bg_image, draw, image_index, random_number, seat):
-        # Your existing code for the special event
+        """
+        Draws a rounded rectangle on the image based on a preset location.
+        If the user is in text mode, a text summary is sent instead of an image.
+        """
 
         locations = [
             [(228, 369), (354, 402)],
@@ -475,43 +412,32 @@ class Slots(commands.Cog):
         corner_radius = 20
         draw.rounded_rectangle(rectangle_location, corner_radius, outline="red")
 
-        # Save the image to a BytesIO object
-        image_buffer = io.BytesIO()
-        bg_image.save(image_buffer, format="PNG")
-        image_buffer.seek(0)
+        if self.text_mode.get(ctx.author.id, False):
+            pass
+        else:
+            image_buffer = io.BytesIO()
+            bg_image.save(image_buffer, format="PNG")
+            image_buffer.seek(0)
+            await ctx.send(file=discord.File(image_buffer, filename=f"modified_image_{image_index}.png"))
 
-        # Send the modified image
-        await ctx.send(file=discord.File(image_buffer, filename=f"modified_image_{image_index}.png"))
-
+        # Post-event: Check and update statuses if dragon or player has reached 0 HP.
         async with self.bot.pool.acquire() as connection:
-            # Check dragon's HP after the special event
             dragon_hp = await connection.fetchval('SELECT dragon FROM dragonslots WHERE seat = $1', seat)
             player_hp = await connection.fetchval('SELECT player FROM dragonslots WHERE seat = $1', seat)
 
             if dragon_hp <= 0:
-                jackpot = random.randint(10000, 50000)
-                # If dragon's HP is 0 or less, reward the player with the jackpot
                 jackpot_value = await connection.fetchval('SELECT jackpot FROM dragonslots WHERE seat = $1', seat)
-                await connection.execute('UPDATE profile SET money = money + $1 WHERE "user" = $2', jackpot_value,
-                                         ctx.author.id)
+                await connection.execute('UPDATE profile SET money = money + $1 WHERE "user" = $2', jackpot_value, ctx.author.id)
                 if ctx.author.id == 708435868842459169:
                     self.logger = self.logger + jackpot_value
-
-                # Reset dragon's HP and jackpot for the next round (adjust values as needed)
-                await connection.execute(
-                    'UPDATE dragonslots SET dragon = 125, player = 100, jackpot = $1 WHERE seat = $2', jackpot, seat)
-                await ctx.send(
-                    f"💎💎💎JACKPOT!💎💎💎: {ctx.author.mention}, You defeated by the dragon and earned a jackpot of **${jackpot_value}!**")
+                new_jackpot = random.randint(10000, 50000)
+                await connection.execute('UPDATE dragonslots SET dragon = 125, player = 100, jackpot = $1 WHERE seat = $2', new_jackpot, seat)
+                await ctx.send(f"💎💎💎JACKPOT!💎💎💎 {ctx.author.mention}, you defeated the dragon and earned a jackpot of **${jackpot_value}**!")
                 return
 
             if player_hp <= 0:
-                # If dragon's HP is 0 or less, reward the player with the jackpot
-
-                # Reset dragon's HP and jackpot for the next round (adjust values as needed)
-                await connection.execute(
-                    'UPDATE dragonslots SET dragon = 125, player = 100 WHERE seat = $1', seat)
-                await ctx.send(
-                    f"💀💀💀DEFEATED!💀💀💀: {ctx.author.display_name}, You were defeated by the dragon!**")
+                await connection.execute('UPDATE dragonslots SET dragon = 125, player = 100 WHERE seat = $1', seat)
+                await ctx.send(f"💀💀💀DEFEATED!💀💀💀 {ctx.author.display_name}, you were defeated by the dragon!")
 
     @has_char()
     @slots.command()
@@ -523,14 +449,11 @@ class Slots(commands.Cog):
             Displays the status of each seat, including occupant, dragon HP, player HP, and the current jackpot.
             """
         )
-
         try:
             embed = discord.Embed(title="Seat Information", color=discord.Color.blurple())
-
             async with self.bot.pool.acquire() as connection:
                 for seat_number in range(1, 9):
                     seat_info = await connection.fetchrow("SELECT * FROM dragonslots WHERE seat = $1", seat_number)
-
                     if seat_info:
                         occupant_id = seat_info['occupant']
                         occupant_name = "Seat free" if occupant_id is None else await self.bot.fetch_user(occupant_id)
@@ -540,70 +463,64 @@ class Slots(commands.Cog):
                         if occupant_name == "Seat free":
                             embed.add_field(
                                 name=f"Seat #{seat_number}",
-                                value=f"Occupant: Seat free \n"
-                                      f"Dragon HP: {dragon_hp} 🐉 \n"
-                                      f"Player HP: {player_hp} 👤 \n"
-                                      f"Jackpot: {jackpot} 💰",
+                                value=f"Occupant: Seat free \nDragon HP: {dragon_hp} 🐉 \nPlayer HP: {player_hp} 👤 \nJackpot: {jackpot} 💰",
                                 inline=False
                             )
                         else:
                             embed.add_field(
                                 name=f"Seat #{seat_number}",
-                                value=f"Occupant: {occupant_name.display_name}\n"
-                                      f"Dragon HP: {dragon_hp} 🐉 \n"
-                                      f"Player HP: {player_hp} 👤 \n"
-                                      f"Jackpot: {jackpot} 💰",
+                                value=f"Occupant: {occupant_name.display_name}\nDragon HP: {dragon_hp} 🐉 \nPlayer HP: {player_hp} 👤 \nJackpot: {jackpot} 💰",
                                 inline=False
                             )
-
                 await ctx.send(embed=embed)
-
-
         except Exception as e:
             await ctx.send(f"An error occurred: {e}")
 
-    def cog_unload(self):
-        # Stop the timeout check task when the cog is unloaded
-        self.check_timeouts.cancel()
+    @has_char()
+    @slots.command(name="text")
+    @locale_doc
+    async def toggleslottxt(self, ctx):
+        _(
+            """Toggle text-only mode for the slot machine game.
 
-    from discord import User
+            When enabled, the slot machine will display results in plain text (no generated images).
+            """
+        )
+        try:
+            current = self.text_mode.get(ctx.author.id, False)
+            self.text_mode[ctx.author.id] = not current
+            mode = "Text-Only" if self.text_mode[ctx.author.id] else "Graphic"
+            await ctx.send(f"{ctx.author.mention} Slot machine mode toggled. You are now in **{mode}** mode.")
+        except Exception as e:
+            await ctx.send(e)
+
+    def cog_unload(self):
+        self.check_timeouts.cancel()
 
     @tasks.loop(seconds=60)
     async def check_timeouts(self):
         try:
-            # Check for timeouts every minute
             now = datetime.datetime.utcnow()
-
-
             async with self.bot.pool.acquire() as connection:
                 for seat_info in await connection.fetch("SELECT seat, occupant, last_activity FROM dragonslots"):
                     seat_number = seat_info['seat']
                     occupant_id = seat_info['occupant']
                     last_activity = seat_info['last_activity']
-
                     if occupant_id and (now - last_activity).total_seconds() > self.timeout_duration:
-                        # If the occupant has timed out, clear the seat
-                        await connection.execute(
-                            "UPDATE dragonslots SET occupant = NULL, last_activity = NULL WHERE seat = $1", seat_number)
-
+                        await connection.execute("UPDATE dragonslots SET occupant = NULL, last_activity = NULL WHERE seat = $1", seat_number)
                         user = await self.bot.fetch_user(occupant_id)
                         if user:
                             try:
-                                await user.send(
-                                    f"{user.mention} You have been automatically removed from seat #{seat_number} due to inactivity.")
+                                await user.send(f"{user.mention} You have been automatically removed from seat #{seat_number} due to inactivity.")
                             except discord.Forbidden:
-                                # Handle the 403 Forbidden error (the user might have DMs disabled)
                                 print(f"Could not send message to {user}. They might have DMs disabled.")
                             except Exception as e:
-                                # Handle any other possible exceptions
                                 print(f"An error occurred: {e}")
-
         except Exception as e:
-            # Handle any errors that occur during execution
-            error_user = await self.bot.fetch_user(295173706496475136)  # Replace with the ID of the user to notify
+            error_user = await self.bot.fetch_user(295173706496475136)
             if error_user:
                 await error_user.send(f"An error occurred: {str(e)}")
-            raise  # Re-raise the exception to allow it to propagate if needed
+            raise
 
     async def update_last_activity(self, occupant_id):
         async with self.bot.pool.acquire() as connection:
@@ -618,55 +535,41 @@ class Slots(commands.Cog):
         _(
             """Take a seat in the slot machine game.
 
-            `<seat_number>` - The number of the seat you wish to occupy (1-8).
+             - The number of the seat you wish to occupy (1-8).
 
             Occupy an available seat to participate in the slot machine game. You must leave your current seat before taking a new one.
             """
         )
-
         if ctx.author.id in self.captcha_lock:
             await ctx.send("You are currently locked by CAPTCHA verification.")
             self.bot.reset_cooldown(ctx)
             return
         try:
             async with self.bot.pool.acquire() as connection:
-                # Check if the user is currently occupying a seat
                 current_seat = await connection.fetchrow("SELECT * FROM dragonslots WHERE occupant = $1", ctx.author.id)
-
                 if current_seat:
                     current_seat_number = current_seat['seat']
-                    await ctx.send(
-                        f"{ctx.author.display_name}, You are already occupying seat #{current_seat_number}. Please leave that seat before taking a new one.")
+                    await ctx.send(f"{ctx.author.display_name}, you are already occupying seat #{current_seat_number}. Please leave that seat before taking a new one.")
                     self.bot.reset_cooldown(ctx)
                     return
                 else:
-                    # Check if the seat exists
                     seat_info = await connection.fetchrow("SELECT * FROM dragonslots WHERE seat = $1", seat_number)
-
                     if seat_info:
                         occupant_id = seat_info['occupant']
-
-                        # Check if the seat is already occupied
                         if occupant_id is None:
-                            # Seat is free, assign the user to the seat
-                            await connection.execute(
-                                "UPDATE dragonslots SET occupant = $1, last_activity = $2 WHERE seat = $3",
-                                ctx.author.id, datetime.datetime.utcnow(), seat_number)
-                            await ctx.send(f"{ctx.author.mention} has taken seat #{seat_number}! Will be kicked after "
-                                           f"10 minutes of inactivity.")
+                            await connection.execute("UPDATE dragonslots SET occupant = $1, last_activity = $2 WHERE seat = $3",
+                                                     ctx.author.id, datetime.datetime.utcnow(), seat_number)
+                            await ctx.send(f"{ctx.author.mention} has taken seat #{seat_number}! Will be kicked after 10 minutes of inactivity.")
                             await self.update_last_activity(ctx.author.id)
                         else:
-                            # Seat is occupied
                             occupant_name = await self.bot.fetch_user(occupant_id)
                             await ctx.send(f"Sorry, seat #{seat_number} is already taken by {occupant_name.display_name}.")
                             self.bot.reset_cooldown(ctx)
                     else:
                         await ctx.send(f"Seat #{seat_number} does not exist.")
                         self.bot.reset_cooldown(ctx)
-
         except Exception as e:
             await ctx.send(f"An error occurred: {e}")
-
 
     @is_gm()
     @commands.command(hidden=True)
@@ -675,65 +578,37 @@ class Slots(commands.Cog):
         _(
             """Forcefully increase the jackpot for all slot seats.
 
-            **(Game Master only)**
+            (Game Master only)
 
             This command increases the jackpot value for all seats, simulating player contributions.
             """
         )
-
         try:
             async with self.bot.pool.acquire() as connection:
-                # Get a list of all seat numbers
                 seat_numbers = await connection.fetch('SELECT seat FROM dragonslots')
-
                 for seat_info in seat_numbers:
                     seat_number = seat_info['seat']
-
-                    # Check if the seat is not occupied
-                    occupied_seat = await connection.fetchval(
-                        'SELECT seat FROM dragonslots WHERE seat = $1 AND occupant IS NOT NULL', seat_number)
-
-                        # Generate a random value between 15000 and 45000
+                    occupied_seat = await connection.fetchval('SELECT seat FROM dragonslots WHERE seat = $1 AND occupant IS NOT NULL', seat_number)
                     random_value = random.randint(10000, 12000)
-
-                        # Increase the jackpot by the random value for the specific seat
-                    await connection.execute('UPDATE dragonslots SET jackpot = jackpot + $1 WHERE seat = $2',
-                                                 random_value, seat_number)
-
+                    await connection.execute('UPDATE dragonslots SET jackpot = jackpot + $1 WHERE seat = $2', random_value, seat_number)
         except Exception as e:
             await ctx.send(e)
 
     async def increase_jackpot_periodically(self, ctx):
         while True:
-
             try:
                 async with self.bot.pool.acquire() as connection:
-                    # Get a list of all seat numbers
                     seat_numbers = await connection.fetch('SELECT seat FROM dragonslots')
-
                     for seat_info in seat_numbers:
                         seat_number = seat_info['seat']
-
-                        # Check if the seat is not occupied
-                        occupied_seat = await connection.fetchval(
-                            'SELECT seat FROM dragonslots WHERE seat = $1 AND occupant IS NOT NULL', seat_number)
-
+                        occupied_seat = await connection.fetchval('SELECT seat FROM dragonslots WHERE seat = $1 AND occupant IS NOT NULL', seat_number)
                         if not occupied_seat:
-                            # Generate a random value between 15000 and 45000
                             random_value = random.randint(10000, 12000)
-
-                            # Increase the jackpot by the random value for the specific seat
-                            await connection.execute('UPDATE dragonslots SET jackpot = jackpot + $1 WHERE seat = $2',
-                                                     random_value, seat_number)
+                            await connection.execute('UPDATE dragonslots SET jackpot = jackpot + $1 WHERE seat = $2', random_value, seat_number)
                 await asyncio.sleep(21600)
-
             except Exception as e:
-                # Handle exceptions appropriately
                 await ctx.send(f"An error occurred while increasing jackpot: {e}")
-
-            # Sleep for 1 hour (3600 seconds) after the update
-
-    # ... (existing code)
+            await asyncio.sleep(3600)
 
     @is_gm()
     @commands.command(hidden=True)
@@ -742,13 +617,11 @@ class Slots(commands.Cog):
         _(
             """Start the periodic increase of jackpot.
 
-            **(Game Master only)**
+            (Game Master only)
 
             Initiates a background task that periodically increases the jackpot for unoccupied seats.
             """
         )
-
-        # Start the periodic increase of jackpot in a separate task
         self.bot.loop.create_task(self.increase_jackpot_periodically(ctx))
         await ctx.send("Jackpot increase has been started.")
 
@@ -762,25 +635,16 @@ class Slots(commands.Cog):
             Use this command to vacate your seat, allowing others to occupy it.
             """
         )
-
-        captcha_text = self.generate_distorted_captcha()
-
         try:
-
-            # Generate and send the CAPTCHA
             captcha_text = self.generate_distorted_captcha()
-            await ctx.send(f"{ctx.author.mention} to prevent botting, enter the CAPTCHA Text as it is exactly below. You have 60 seconds",
+            await ctx.send(f"{ctx.author.mention} to prevent botting, enter the CAPTCHA Text as printed below. You have 60 seconds",
                            file=discord.File('captcha.png'))
-
-            # Add the user to the captcha lock
             self.captcha_lock[ctx.author.id] = captcha_text
-
-            # Wait for the user to solve the CAPTCHA
             try:
                 await self.bot.wait_for(
                     'message',
                     check=lambda msg: msg.author == ctx.author and msg.content.lower() == captcha_text.lower(),
-                    timeout=60  # Adjust the timeout as needed
+                    timeout=60
                 )
             except asyncio.TimeoutError:
                 try:
@@ -789,8 +653,6 @@ class Slots(commands.Cog):
                 except Exception as e:
                     await ctx.send(f"An error occurred: {e}")
                 return
-
-            # Remove the user from the captcha lock
             await ctx.send("CAPTCHA Verification Successful")
             del self.captcha_lock[ctx.author.id]
         except Exception as e:
@@ -798,19 +660,13 @@ class Slots(commands.Cog):
 
         try:
             async with self.bot.pool.acquire() as connection:
-                # Check if the user is currently occupying a seat
                 seat_info = await connection.fetchrow("SELECT * FROM dragonslots WHERE occupant = $1", ctx.author.id)
-
                 if seat_info:
                     seat_number = seat_info['seat']
-
-                    # Clear the seat for the user
-                    await connection.execute(
-                        "UPDATE dragonslots SET occupant = NULL, last_activity = NULL WHERE seat = $1", seat_number)
-
+                    await connection.execute("UPDATE dragonslots SET occupant = NULL, last_activity = NULL WHERE seat = $1", seat_number)
                     await ctx.send(f"{ctx.author.mention} has left seat #{seat_number}!")
                 else:
-                    await ctx.send(f"{ctx.author.display_name}, You are not currently occupying any seat.")
+                    await ctx.send(f"{ctx.author.display_name}, you are not currently occupying any seat.")
         except Exception as e:
             await ctx.send(f"An error occurred: {e}")
 
@@ -827,19 +683,13 @@ class Slots(commands.Cog):
 
     async def init_database(self):
         async with self.bot.pool.acquire() as connection:
-            # Delete all rows from the 'dragonslots' table
             await connection.execute("DELETE FROM dragonslots")
-
-            # Insert 8 rows into the 'dragonslots' table
             for seat_number in range(1, 9):
                 dragon_hp = 125
                 player_hp = 100
                 jackpot = random.randint(10000, 12000)
-
-                await connection.execute(
-                    "INSERT INTO dragonslots(seat, dragon, player, jackpot) VALUES($1, $2, $3, $4)",
-                    seat_number, dragon_hp, player_hp, jackpot
-                )
+                await connection.execute("INSERT INTO dragonslots(seat, dragon, player, jackpot) VALUES($1, $2, $3, $4)",
+                                         seat_number, dragon_hp, player_hp, jackpot)
 
     @is_gm()
     @commands.command(hidden=True)
@@ -848,12 +698,11 @@ class Slots(commands.Cog):
         _(
             """Reset the dragon slots to their initial state.
 
-            **(Game Master only)**
+            (Game Master only)
 
             Resets all dragon slots, clearing occupants and restoring default HP and jackpot values.
             """
         )
-
         try:
             await self.init_database()
             await ctx.send("Dragon slots have been reset successfully!")
@@ -863,27 +712,22 @@ class Slots(commands.Cog):
     def generate_distorted_captcha(self):
         captcha_text = ''.join(random.choices(string.ascii_letters + string.digits, k=6))
         captcha_text = captcha_text.replace('l', 'L')
-
         width, height = 300, 100
         background_color = 'grey'
         image = Image.new('RGB', (width, height), background_color)
         draw = ImageDraw.Draw(image)
-
         font_path = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
         font_size = 40
         font = ImageFont.truetype(font_path, font_size)
-
         letter_colors = ['red', 'green', 'blue', 'purple', 'orange']
         outline_thickness = 1
 
-        # Add noise to the background
         for _ in range(1000):
             x = random.randint(0, width - 1)
             y = random.randint(0, height - 1)
             color = random.choice(letter_colors)
             draw.point((x, y), fill=color)
 
-        # Draw random shapes on the background
         for _ in range(50):
             x = random.uniform(0, width)
             y = random.uniform(0, height)
@@ -893,19 +737,13 @@ class Slots(commands.Cog):
             self.draw_random_shape(draw, x, y, shape_type, shape_color, size, outline_thickness)
 
         for i, char in enumerate(captcha_text):
-            angle = random.uniform(-40, 40)
             x = i * width / 6
             y = random.uniform(0, height / 2)
             color = random.choice(letter_colors)
-
-            # Draw the character with distortion
             draw.text((x, y), char, font=font, fill=color)
 
-
-        # Apply filters to make it more distorted
         image = image.filter(ImageFilter.GaussianBlur(1))
         image = image.filter(ImageFilter.CONTOUR)
-
         image.save('captcha.png')
         return captcha_text
 
@@ -922,18 +760,16 @@ class Slots(commands.Cog):
         _(
             """Generate a CAPTCHA image.
 
-            **(Game Master only)**
+            (Game Master only)
 
             Creates and displays a CAPTCHA image for testing purposes.
             """
         )
-
         try:
             captcha_text = self.generate_distorted_captcha()
             await ctx.send(f"Enter the CAPTCHA Text below. You have 60 seconds", file=discord.File('captcha.png'))
         except Exception as e:
             await ctx.send(str(e))
-
 
     @is_gm()
     @commands.command(hidden=True)
@@ -942,17 +778,14 @@ class Slots(commands.Cog):
         _(
             """Unlock a user from CAPTCHA lock.
 
-            `<DiscordID>` - The Discord ID of the user to unlock.
+             - The Discord ID of the user to unlock.
 
-            **(Game Master only)**
+            (Game Master only)
 
             Removes a user from the CAPTCHA lock, allowing them to use commands again.
             """
         )
-
         DiscordID_str = str(DiscordID).strip()
-        # await ctx.send(self.captcha_lock)
-
         if DiscordID_str in map(str, self.captcha_lock.keys()):
             user = self.captcha_lock[DiscordID]
             await ctx.send(f"You have unlocked {user} ({DiscordID}).")
@@ -970,29 +803,20 @@ class Slots(commands.Cog):
             If you are locked due to failed CAPTCHA attempts, use this command to verify and unlock yourself.
             """
         )
-
         if ctx.author.id not in self.captcha_lock:
             await ctx.send("You are not currently locked by CAPTCHA verification.")
             return
-
         captcha_text = self.generate_distorted_captcha()
-
         try:
-
-            # Generate and send the CAPTCHA
             captcha_text = self.generate_distorted_captcha()
-            await ctx.send(f"{ctx.author.mention} to prevent botting, enter the CAPTCHA Text as it is exactly below. You have 60 seconds",
+            await ctx.send(f"{ctx.author.mention} to prevent botting, enter the CAPTCHA Text as printed below. You have 60 seconds",
                            file=discord.File('captcha.png'))
-
-            # Add the user to the captcha lock
             self.captcha_lock[ctx.author.id] = captcha_text
-
-            # Wait for the user to solve the CAPTCHA
             try:
                 await self.bot.wait_for(
                     'message',
                     check=lambda msg: msg.author == ctx.author and msg.content.lower() == captcha_text.lower(),
-                    timeout=60  # Adjust the timeout as needed
+                    timeout=60
                 )
             except asyncio.TimeoutError:
                 try:
@@ -1001,8 +825,6 @@ class Slots(commands.Cog):
                 except Exception as e:
                     await ctx.send(f"An error occurred: {e}")
                 return
-
-            # Remove the user from the captcha lock
             await ctx.send("CAPTCHA Verification Successful")
             del self.captcha_lock[ctx.author.id]
         except Exception as e:
