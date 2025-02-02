@@ -413,6 +413,7 @@ class Raid(commands.Cog):
 
                         # Only handle death if they didn't survive
                         if not survived:
+
                             description = f"{target.mention if participant_type == 'user' else target} died!"
                             em.description = description
                             em.add_field(name="Theoretical Damage",
@@ -430,7 +431,9 @@ class Raid(commands.Cog):
                 for channel_id in channels_ids:
                     channel = self.bot.get_channel(channel_id)
                     if channel:
+
                         await channel.send(embed=em)
+                await ctx.send(f"{target.mention}")
 
                 dmg_to_take = sum(i["damage"] for i in self.raid.values())
                 self.boss["hp"] -= dmg_to_take
