@@ -127,7 +127,7 @@ class Gods(commands.Cog):
         )
 
     @has_char()
-    @user_cooldown(180)  # to prevent double invoke
+    @user_cooldown(1209600)  # to prevent double invoke
     @commands.command(brief=_("Choose or change your God"))
     @locale_doc
     async def follow(self, ctx):
@@ -165,7 +165,7 @@ class Gods(commands.Cog):
                 print("Not in server")
 
         if ctx.character_data["reset_points"] < 0:
-            return await ctx.send(_("You became Godless and cannot follow a God anymore."))
+            return await ctx.send(_("You became Godless. You will not be able to follow a god anymore."))
 
         # Show gods selection to the user
         embeds = [
@@ -202,12 +202,8 @@ class Gods(commands.Cog):
                 return await ctx.send(
                     _("You became Godless while using this command. Following a God is not allowed after that.")
                 )
-            if not has_no_god(ctx):
-                await conn.execute(
-                    'UPDATE profile SET "reset_points"="reset_points"-$1 WHERE "user"=$2;',
-                    1,
-                    ctx.author.id,
-                )
+
+
             await conn.execute(
                 'UPDATE profile SET "god"=$1 WHERE "user"=$2;', god, ctx.author.id
             )

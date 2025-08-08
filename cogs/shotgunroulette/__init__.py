@@ -51,8 +51,9 @@ class Shotgunroulette(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @locale_doc
+
     @commands.command(aliases=['srhelp'], help='Displays how to play Shotgun Roulette')
+    @locale_doc
     async def shotgunroulettehelp(self, ctx):
         _(
             """Display instructions on how to play Shotgun Roulette.

@@ -486,13 +486,13 @@ class Alliance(commands.Cog):
             (This command has a cooldown of 1 minutes)"""
         )
         building_list = {
-            "cannons": {"hp": 500, "def": 60, "cost": 200000},
-            "archers": {"hp": 1000, "def": 50, "cost": 100000},
-            "outer wall": {"hp": 40000, "def": 0, "cost": 500000},
-            "inner wall": {"hp": 20000, "def": 0, "cost": 200000},
-            "moat": {"hp": 10000, "def": 25, "cost": 150000},
-            "tower": {"hp": 2500, "def": 50, "cost": 200000},
-            "ballista": {"hp": 500, "def": 30, "cost": 100000},
+            "cannons": {"hp": 1000, "def": 120, "cost": 200000},
+            "archers": {"hp": 2000, "def": 100, "cost": 100000},
+            "outer wall": {"hp": 80000, "def": 0, "cost": 500000},
+            "inner wall": {"hp": 40000, "def": 0, "cost": 200000},
+            "moat": {"hp": 20000, "def": 50, "cost": 150000},
+            "tower": {"hp": 5000, "def": 100, "cost": 200000},
+            "ballista": {"hp": 1000, "def": 60, "cost": 100000},
         }
         if name not in building_list:
             await self.bot.reset_alliance_cooldown(ctx)
