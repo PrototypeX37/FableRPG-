@@ -680,6 +680,7 @@ class Raid(commands.Cog):
                         classes=profile["class"],
                         race=profile["race"],
                         guild=profile["guild"],
+                        xp=profile["xp"],
                         conn=conn,
                     )
                     if raid_hp == 17776:
@@ -1307,6 +1308,7 @@ class Raid(commands.Cog):
                         classes=profile["class"],
                         race=profile["race"],
                         guild=profile["guild"],
+                        xp=profile["xp"],
                         conn=conn,
                     )
                     if raid_hp == 17776:
@@ -1984,6 +1986,7 @@ class Raid(commands.Cog):
                             race=profile["race"],
                             guild=profile["guild"],
                             god=profile["god"],
+                            xp=profile["xp"],
                             conn=conn,
                         )
                     except ValueError:
@@ -3627,6 +3630,7 @@ class Raid(commands.Cog):
                         classes=profile["class"],
                         race=profile["race"],
                         guild=profile["guild"],
+                        xp=profile["xp"],
                         conn=conn,
                     )
                     
@@ -4403,5 +4407,4 @@ async def setup(bot):
     if designated_shard_id in bot.shard_ids:
         await bot.add_cog(Raid(bot))
         print(f"Raid loaded on shard {designated_shard_id}")
-
 
