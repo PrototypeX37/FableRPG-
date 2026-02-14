@@ -1,6 +1,8 @@
+from datetime import timezone
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
+Copyright (C) 2026 Danaelis
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -150,11 +152,16 @@ class Bot(commands.AutoShardedBot):
     async def close(self):
         await super().close()
 
-        await self.session.close()
-        await self.trusted_session.close()
-        await self.pool.close()
-        await self.second_pool.close()
-        await self.redis.close()
+        if hasattr(self, "session") and self.session:
+            await self.session.close()
+        if hasattr(self, "trusted_session") and self.trusted_session:
+            await self.trusted_session.close()
+        if hasattr(self, "pool") and self.pool:
+            await self.pool.close()
+        if hasattr(self, "second_pool") and self.second_pool:
+            await self.second_pool.close()
+        if hasattr(self, "redis") and self.redis:
+            await self.redis.close()
 
     async def setup_hook(self):
         """Connects all databases and initializes sessions"""
@@ -193,9 +200,13 @@ class Bot(commands.AutoShardedBot):
 
         for extension in self.config.bot.initial_extensions:
             try:
-                await self.load_extension(extension)
+                print(f"[startup] Loading extension {extension}...", flush=True)
+                await asyncio.wait_for(self.load_extension(extension), timeout=25)
+                print(f"[startup] Loaded extension {extension}", flush=True)
+            except asyncio.TimeoutError:
+                print(f"[startup] Timeout loading extension {extension}; skipping.", file=sys.stderr, flush=True)
             except Exception:
-                print(f"Failed to load extension {extension}.", file=sys.stderr)
+                print(f"Failed to load extension {extension}.", file=sys.stderr, flush=True)
                 traceback.print_exc()
 
         self.redis_version = await self.get_redis_version()
@@ -682,13 +693,16 @@ class Bot(commands.AutoShardedBot):
         else:
             local = False
         reward_text = ""
-        stat_point_received = False
-        if new_level % 2 == 0 and new_level > 0:
-            # Increment statpoints directly in the database and fetch the updated value
-            update_query = 'UPDATE profile SET "statpoints" = "statpoints" + 1 WHERE "user" = $1 RETURNING "statpoints";'
-            new_statpoints = await conn.fetchval(update_query, ctx.author.id)
-            reward_text += f"You also received **1 stat point** (total: {new_statpoints}). "
-            stat_point_received = True
+        stat_points_text = ""
+        levels_gained = max(int(new_level) - int(old_level), 0)
+        if levels_gained > 0:
+            gained_points = levels_gained * 2
+            update_query = 'UPDATE profile SET "statpoints" = "statpoints" + $1 WHERE "user" = $2 RETURNING "statpoints";'
+            # Each level gives 2 points.
+            new_statpoints = await conn.fetchval(update_query, gained_points, ctx.author.id)
+            stat_points_text = _(
+                "You also received **{gained_points} stat points** (total: {new_statpoints})."
+            ).format(gained_points=gained_points, new_statpoints=new_statpoints)
 
         if (reward := random.choice(["crates", "money", "item"])) == "crates":
             if new_level < 6:
@@ -777,8 +791,13 @@ class Bot(commands.AutoShardedBot):
         await ctx.send(
             _(
                 "You reached a new level: **{new_level}** :star:! You received {reward} "
-                "as a reward :tada:! {additional}"
-            ).format(new_level=new_level, reward=reward_text, additional=additional)
+                "as a reward :tada:! {stat_points} {additional}"
+            ).format(
+                new_level=new_level,
+                reward=reward_text,
+                stat_points=stat_points_text,
+                additional=additional,
+            )
         )
 
     async def clear_donator_cache(self, user):
@@ -800,18 +819,95 @@ class Bot(commands.AutoShardedBot):
         if self.config.bot.is_beta or self.config.bot.is_custom:
             return DonatorRank.diamond
 
-        if self.support_server_id is None:
-            return False
-        try:
-            member = await self.http.get_member(self.support_server_id, user_id)
-        except discord.NotFound:
-            return False
-        top_donator_role = None
-        member_roles = [int(i) for i in member.get("roles", [])]
+        tier_to_rank = {
+            1: DonatorRank.basic,
+            2: DonatorRank.bronze,
+            3: DonatorRank.silver,
+            4: DonatorRank.gold,
+            5: DonatorRank.emerald,
+            6: DonatorRank.ruby,
+            7: DonatorRank.diamond,
+        }
+        patreon_core = self.get_cog("PatreonCore")
+        if patreon_core is not None:
+            try:
+                cached_tier = int(patreon_core.get_cached_tier_for_user(user_id))
+                cached_rank = tier_to_rank.get(cached_tier)
+                if cached_rank is not None:
+                    return cached_rank
+                if (
+                    not getattr(patreon_core, "role_driven_sync", True)
+                    and bool(getattr(patreon_core, "patrons_data", {}))
+                ):
+                    return None
+            except Exception:
+                pass
+
+        default_guild_id = 1323388333589528638
+        default_role_to_tier = {
+            1411756981274017912: "basic",   # Mortal (tier 1)
+            1411757068364546139: "bronze",  # Demi-God (tier 2)
+            1411757100136140913: "gold",    # Olympian (tier 4)
+            1411757151306645706: "gold",    # Titan (tier 4 + gift tier 1)
+            1411757168356491508: "gold",    # Primordial Fate (tier 4 + gift tier 2)
+        }
+
+        role_rank_map: dict[int, DonatorRank] = {}
         for role in self.config.external.donator_roles:
-            if role.id in member_roles:
-                top_donator_role = role.tier
-        return getattr(DonatorRank, top_donator_role) if top_donator_role else None
+            try:
+                role_id = int(role.id)
+                rank = getattr(DonatorRank, str(role.tier).strip().lower())
+            except (TypeError, ValueError, AttributeError):
+                continue
+            existing = role_rank_map.get(role_id)
+            if existing is None or rank > existing:
+                role_rank_map[role_id] = rank
+
+        # If config has no valid mapping, fall back to hardcoded Patreon roles.
+        if not role_rank_map:
+            for role_id, tier_name in default_role_to_tier.items():
+                rank = getattr(DonatorRank, tier_name)
+                role_rank_map[int(role_id)] = rank
+
+        guild_candidates: list[int] = []
+        if self.support_server_id:
+            try:
+                guild_candidates.append(int(self.support_server_id))
+            except (TypeError, ValueError):
+                pass
+        guild_candidates.append(default_guild_id)
+
+        patreon_core = self.get_cog("PatreonCore")
+        if patreon_core is not None and getattr(patreon_core, "guild_id", None):
+            try:
+                guild_candidates.append(int(patreon_core.guild_id))
+            except (TypeError, ValueError):
+                pass
+
+        # Deduplicate while preserving order.
+        guild_candidates = list(dict.fromkeys(guild_candidates))
+        if not guild_candidates:
+            return None
+
+        top_rank = None
+        for guild_id in guild_candidates:
+            try:
+                member = await self.http.get_member(guild_id, user_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                continue
+
+            member_roles = set()
+            for role_id in member.get("roles", []):
+                try:
+                    member_roles.add(int(role_id))
+                except (TypeError, ValueError):
+                    continue
+
+            for role_id, rank in role_rank_map.items():
+                if role_id in member_roles and (top_rank is None or rank > top_rank):
+                    top_rank = rank
+
+        return top_rank
 
     async def get_damage_armor_for(
         self, user, items=None, classes=None, race=None, conn=None

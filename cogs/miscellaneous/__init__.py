@@ -2,6 +2,7 @@
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
 Copyright (C) 2023-2024 Lunar (PrototypeX37)
+Copyright (C) 2026 Danaelis
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -179,9 +180,13 @@ class Miscellaneous(commands.Cog):
 
         # Check tier access
         character_data = await ctx.bot.pool.fetchrow(
-            'SELECT tier, class FROM profile WHERE "user"=$1;', ctx.author.id
+            'SELECT class FROM profile WHERE "user"=$1;', ctx.author.id
         )
-        if not character_data or character_data["tier"] < 1:
+        if not character_data:
+            return await ctx.send(_("You do not have access to this command."))
+
+        # Use the unified Patreon check (API cache, Discord roles, and DB fallback).
+        if not await user_is_patron(self.bot, ctx.author, "basic"):
             return await ctx.send(_("You do not have access to this command."))
 
         # Define commands and their cooldowns
@@ -396,6 +401,7 @@ class Miscellaneous(commands.Cog):
                         money = round(money * 1.5)
 
                     result = await self.bot.pool.fetchval('SELECT tier FROM profile WHERE "user" = $1;', ctx.author.id)
+                    result = int(result or 0)
 
                     if result >= 3:
                         money = round(money * 3)
@@ -1185,7 +1191,7 @@ class Miscellaneous(commands.Cog):
             """View the Patreon page of the bot. The different tiers will grant different rewards.
             View `{prefix}help module Patreon` to find the different commands.
 
-            Thank you for supporting Fable RPG!"""
+            Thank you for supporting EoO!"""
         )
         guild_count = sum(
             await self.bot.cogs["Sharding"].handler(
@@ -1204,7 +1210,7 @@ If you want to continue using the bot or just help us, please donate a small amo
 Even $1 can help us.
 **Thank you!**
 
-<https://patreon.com/FableRPG>"""
+https://www.patreon.com/c/Danaelis97"""
             ).format(guild_count=guild_count)
         )
 
@@ -1226,16 +1232,12 @@ Even $1 can help us.
     @locale_doc
     async def invite(self, ctx):
         _(
-            """Invite the bot to your server.
-
-            Use this https://discord.com/api/oauth2/authorize?client_id=1136590782183264308&permissions
-            =8945276537921&scope=bot"""
+            """Please join our support server https://discord.gg/BVWtrWvaDA"""
         )
         await ctx.send(
             _(
-                "You are running version **{version}** by The Fable"
-                "Developers.\nInvite me! https://discord.com/api/oauth2/authorize?client_id=1136590782183264308"
-                "&permissions=8945276537921&scope=bot"
+                "You are running version **{version}**"
+                "Developers.\nJoin us https://discord.gg/BVWtrWvaDA"
             ).format(version=self.bot.version)
         )
 
@@ -1400,23 +1402,23 @@ Even $1 can help us.
         compiler = re.search(r".*\[(.*)\]", sys.version)[1]
 
         embed = discord.Embed(
-            title=_("FableRPG Statistics"),
+            title=_("EoO Statistics"),
             colour=0xB8BBFF,
             url=self.bot.BASE_URL,
             description=_(
-                "Official Support Server Invite: https://discord.com/fablerpg"
+                "Official Support Server Invite: https://discord.gg/BVWtrWvaDA"
             ),
         )
         embed.set_thumbnail(url=self.bot.user.display_avatar.url)
         embed.set_footer(
-            text=f"Fable {self.bot.version} | By {owner}",
+            text=f"EoO {self.bot.version} | By {owner}",
             icon_url=self.bot.user.display_avatar.url,
         )
         embed.add_field(
             name=_("Hosting Statistics"),
             value=_(
                 """\
-CPU: **AMD Ryzen Threadripper PRO 7995WX**
+CPU: ****
 Python Version **{python}** 
 discord.py Version **{dpy}**
 Compiler: **{compiler}**
@@ -1818,7 +1820,7 @@ Average hours of work: **{hours}**"""
             _(
                 # xgettext: no-python-format
                 """\
-**FableRPG** is Discord's most advanced medieval RPG bot.
+**EoO** is Discord's most advanced greek mythology RPG bot.
 We aim to provide the perfect experience at RPG in Discord with minimum effort for the user.
 
 We are not collecting any data apart from your character information and our transaction logs.
@@ -1828,9 +1830,7 @@ This bot is developed by people who love to code for a good cause and improving 
 **Links**
 <https://git.travitia.xyz/Kenvyra/IdleRPG> - Source Code (IdleRPG)
 <https://git.travitia.xyz/prototypeX37/FableRPG-> - Source Code (FableRPG)
-<https://git.travitia.xyz> - GitLab (Public)
-<https://wiki.fablerpg.xyz> - FableRPG wiki
-<https://api.fablerpg.xyz> - Our API
+<https://github.com/Danaelis/Echoes-of-Olympus/> -Source Code (EoO)
 <https://discord.com/terms> - Discord's ToS
 <https://www.ncpgambling.org/help-treatment/national-helpline-1-800-522-4700/> - Gambling Helpline"""
             )
@@ -1852,11 +1852,10 @@ This bot is developed by people who love to code for a good cause and improving 
 4) Trading in-game content for anything outside of the game is prohibited
 5) Giving or selling renamed items is forbidden
 
-FableRPG is a global bot, your characters are valid everywhere"""
+EoO is a global bot, your characters are valid everywhere"""
             )
         )
 
 
 async def setup(bot):
     await bot.add_cog(Miscellaneous(bot))
-    await bot.tree.sync()

@@ -2,6 +2,7 @@
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
 Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2025 Danaelis (discord danaelis.)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -341,6 +342,111 @@ items = [
     ("Gravity-Challenged Yo-Yo", 100),
     ("World's Largest Tiny Hat", 250),
     ("Edible Remote Control (Not Recommended)", 110),
+    # New EoO items added
+    ("Zeus’ Lightning Rod (Slightly Bent)", 1200),
+    ("Athena’s Wisdom Feather (Makes You Overthink)", 800),
+    ("Poseidon’s Leaky Seashell", 300),
+    ("Hades’ Discount Ferry Ticket", 5),
+    ("Apollo’s Out-of-Tune Lyre", 600),
+    ("Aphrodite’s Expired Love Potion", 75),
+    ("Hermes’ Lost Sandal", 150),
+    ("Hera’s Marriage Counseling Pamphlet", 40),
+    ("Medusa’s Broken Hairbrush", 500),
+    ("Minotaur’s Parking Ticket", 25),
+    ("Cyclops’ Spare Contact Lens", 250),
+    ("Achilles’ Left Heel Protector", 900),
+    ("Odysseus’ Fake Map Home", 1000),
+    ("Sirens’ Karaoke Machine", 450),
+    ("Pandora’s Leftover Box", 3500),
+    ("Trojan Horse Miniature (Full of Ants)", 200),
+    ("Theseus’ Tangled Ball of String", 300),
+    ("Icarus’ Melted Sunglasses", 400),
+    ("Sisyphus’ Pocket-Sized Boulder", 750),
+    ("Cerberus’ Chewed-Up Bone", 100),
+    ("Hades’ Invisible Collar (Doesn’t Fit Dogs)", 600),
+    ("Perseus’ Polished Shield (Still Smudgy)", 1200),
+    ("Hecate’s Burnt-out Candle", 250),
+    ("Orpheus’ Broken Guitar Pick", 180),
+    ("Harpies’ Feather Duster", 320),
+    ("Heracles’ Used Gym Towel", 70),
+    ("Zeus’ Empty Cloud Jar", 300),
+    ("Apollo’s Sunburn Cream (Expired)", 60),
+    ("Ares’ Rusty Sword", 500),
+    ("Artemis’ Bent Arrow", 150),
+    ("Hermes’ Lost Mail Package", 100),
+    ("Athena’s DIY War Strategy Kit", 800),
+    ("Poseidon’s Rusty Trident (2 prongs missing)", 700),
+    ("Minotaur’s Maze Blueprint (Upside Down)", 200),
+    ("Medusa’s Pet Snake Collar", 90),
+    ("Achilles’ Other Heel Protector (Still Missing One)", 950),
+    ("Pegasus’ Feather (Needs Dry Cleaning)", 1000),
+    ("Hydra’s Travel Mug (Refills Heads, Not Coffee)", 1200),
+    ("Zeus’ Used Tinder Scroll", 500),
+    ("Demeter’s Wilted Wheat Sheaf", 250),
+    ("Hades’ Bag of Underworld Souvenirs", 350),
+    ("Satyr’s Party Flute (Smells Like Wine)", 300),
+    ("Centaur’s Tail Comb", 120),
+    ("Gorgon’s Compact Mirror (Shattered)", 1000),
+    ("Hermes’ Delayed Amazon Delivery Slip", 70),
+    ("Oracle of Delphi’s Vague Fortune Cookie", 333),
+    ("Spartan’s Broken Spear", 400),
+    ("Trojan Helmet (Made of Cardboard)", 250),
+    ("Arachne’s Half-Finished Sweater", 600),
+    ("Atlas’ Stress Ball (Still Heavy)", 1500),
+    ("Zeus’ Lightning Bug Collection", 220),
+    ("Apollo’s Harp String (Snapped)", 180),
+    ("Persephone’s Pomegranate Seeds (Half-Eaten)", 60),
+    ("Poseidon’s Mini Wave in a Bottle", 700),
+    ("Hercules’ Missing Lab Report", 90),
+    ("Odysseus’ Fake Beard Disguise", 500),
+    ("Hestia’s Cold Hearthstone", 100),
+    ("Eros’ Broken Arrowhead", 120),
+    ("Midas’ Rusty Coin (Still Smells Like Gold)", 800),
+    ("Satyr’s Empty Wine Jug", 40),
+    ("Medusa’s Stone Garden Gnome", 900),
+    ("Nemean Lion’s Shed Fur", 1200),
+    ("Pegasus’ Horseshoe (Size XXL)", 300),
+    ("Cerberus’ Chew Toy (Half-Eaten)", 250),
+    ("Prometheus’ Fireproof Gloves (Burnt Anyway)", 500),
+    ("Chimera’s Whisker", 400),
+    ("Harpies’ Left Wing Feather", 200),
+    ("Hydra’s Dental Floss", 150),
+    ("Achilles’ Running Sandals", 600),
+    ("Odysseus’ Fake Trojan Horse Keychain", 75),
+    ("Sirens’ Mixtape (All Screams)", 250),
+    ("Hermes’ Wing Repair Kit", 180),
+    ("Hades’ Empty Jar of Souls", 1000),
+    ("Zeus’ Cloud Pillow (Leaky)", 450),
+    ("Cyclops’ Reading Glasses (Monocle)", 200),
+    ("Athena’s Owl Feathers", 500),
+    ("Poseidon’s Miniature Trident (Cocktail Fork)", 80),
+    ("Apollo’s Sunglasses", 250),
+    ("Perseus’ Backpack of Rocks", 300),
+    ("Hercules’ Gym Membership Card", 40),
+    ("Oracle’s Broken Crystal Ball", 450),
+    ("Sisyphus’ Travel-Sized Boulder Polish", 150),
+    ("Pandora’s User Manual (Unreadable)", 2000),
+    ("Cerberus’ Flea Collar", 220),
+    ("Demeter’s Spoiled Harvest Basket", 120),
+    ("Spartan’s Broken Shield", 600),
+    ("Trojan Soldier’s Love Letter", 75),
+    ("Narcissus’ Mirror (Cracked)", 150),
+    ("Echo’s Broken Megaphone", 80),
+    ("Zeus’ Divorce Papers (Signed)", 300),
+    ("Hera’s Wedding Ring (Pawned)", 400),
+    ("Hermes’ Speed Limit Violation", 50),
+    ("Poseidon’s Message in a Bottle (Unread)", 200),
+    ("Hades’ Overdue Library Book", 125),
+    ("Apollo’s Out-of-Tune Recorder", 90),
+    ("Ares’ Blood-Stained Bandage", 150),
+    ("Medusa’s Pet Rock Collection", 600),
+    ("Daedalus’ Broken Blueprint", 700),
+    ("Icarus’ Wax Wings (Melted)", 800),
+    ("Muses’ Karaoke Microphone", 350),
+    ("Eros’ Empty Quiver", 100),
+    ("Heracles’ Empty Protein Shake Cup", 200),
+    ("Oracle’s Receipt for False Prophecy", 333)
+
 ]
 
 
@@ -348,6 +454,33 @@ items = [
 
 
 
-def get_item() -> dict[str, str | int]:
-    item = random.choice(items)
+def get_item(adventure_level: int = 1) -> dict[str, str | int]:
+    """Get a random item based on adventure level.
+    
+    Args:
+        adventure_level: The level of the adventure (1-100)
+        
+    Returns:
+        dict: Item with name and value
+    """
+    # Calculate the minimum value threshold based on adventure level
+    # At level 1: 0% of max value
+    # At level 100: 90% of max value
+    min_value_threshold = (adventure_level / 100) * 0.9
+    
+    # Get max value from all items
+    max_value = max(item[1] for item in items)
+    
+    # Calculate minimum value for this adventure level
+    min_value = int(max_value * min_value_threshold)
+    
+    # Filter items that are at or above the minimum value
+    eligible_items = [item for item in items if item[1] >= min_value]
+    
+    # If no items meet the criteria (shouldn't happen), use all items
+    if not eligible_items:
+        eligible_items = items
+    
+    # Randomly select an item from eligible items
+    item = random.choice(eligible_items)
     return {"name": item[0], "value": item[1]}

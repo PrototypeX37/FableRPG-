@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from decimal import Decimal
 import asyncio
 import random
@@ -144,7 +145,7 @@ class DragonBattle(Battle):
     async def start_battle(self):
         """Initialize and start the battle"""
         self.started = True
-        self.start_time = datetime.utcnow()
+        self.start_time = datetime.now(timezone.utc)
         
         # Save initial battle data to database for replay
         await self.save_battle_to_database()
@@ -162,7 +163,7 @@ class DragonBattle(Battle):
         # Add the initial message to the battle log
         await self.add_to_log(f"The battle against {self.dragon.name} has begun! 🐉")
         
-       # Add passive effect descriptions
+        # Add passive effect descriptions
         passive_descriptions = []
         for passive in self.dragon.passives:
             if passive == "Ice Armor":
@@ -1108,10 +1109,10 @@ class DragonBattle(Battle):
             effect_desc = "🔥🌎 **Global affliction** for 3 turns!"
             
         elif effect_type == "random_debuff":
+            # Apply a random debuff
             debuffs = ["dot", "stun", "curse"]
             selected_debuff = random.choice(debuffs)
             # Recursively apply the selected debuff
             return await self.apply_effect(target, selected_debuff, damage)
             
         return effect_desc
-

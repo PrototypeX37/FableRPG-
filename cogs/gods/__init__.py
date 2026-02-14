@@ -141,19 +141,14 @@ class Gods(commands.Cog):
             (This command has a cooldown of 3 minutes.)"""
         )
         god_roles = {
-            'Drakath': 1199302687083204649,
-            'Sepulchure': 1199303145306726410,
-            'Astraea': 1199303066227331163
+            'Hecate': 1415388751064076318,
+            'Thanatos': 1415388580171219094,
+            'Apollo': 1415388833037418677,
+            'Morpheus': 1415389046137422014
         }
 
         # Check if the user already has a god and handle reset points
         if not has_no_god(ctx):
-            if ctx.character_data["reset_points"] < 1:
-                return await ctx.send(_("You have no more reset points."))
-            if not await ctx.confirm(
-                    _("You already chose a god. This change now will cost you a reset point. Are you sure?")
-            ):
-                return
             try:
                 old_god = ctx.character_data["god"]
                 old_role_id = god_roles.get(old_god)
@@ -209,7 +204,7 @@ class Gods(commands.Cog):
             )
 
         # Get the target guild and check if the user is a member
-        guild_id = 1199287508794626078
+        guild_id = 1323388333589528638
         target_guild = self.bot.get_guild(guild_id)
 
         if target_guild:
@@ -254,9 +249,10 @@ class Gods(commands.Cog):
 
         old_god = ctx.character_data["god"]
         god_roles = {
-            'Drakath': 1199302687083204649,
-            'Sepulchure': 1199303145306726410,
-            'Astraea': 1199303066227331163
+            'Hecate': 1415388751064076318,
+            'Thanatos': 1415388580171219094,
+            'Apollo': 1415388833037418677,
+            'Morpheus': 1415389046137422014
         }
 
 

@@ -57,17 +57,18 @@ class Crates(commands.Cog):
         self.bot = bot
         self.crate = 0
         self.emotes = namedtuple(
-            "CrateEmotes", "common uncommon rare magic legendary item mystery fortune divine"
+            "CrateEmotes", "common uncommon rare magic legendary item mystery fortune divine materials"
         )(
-            common="<:F_common:1139514874016309260>",
-            uncommon="<:F_uncommon:1139514875828252702>",
-            rare="<:F_rare:1139514880517484666>",
-            magic="<:F_Magic:1139514865174720532>",
-            legendary="<:F_Legendary:1139514868400132116>",
-            item="<a:ItemAni:896715561550110721>",
-            mystery="<:F_mystspark:1139521536320094358>",
-            fortune="<:f_money:1146593710516224090>",
-            divine="<:f_divine:1169412814612471869>",
+            common="<:c_common:1405959169747587072>",
+            uncommon="<:c_uncommon:1405959270834638848>",
+            rare="<:c_rare:1405959260189229067>",
+            magic="<:c_magic:1405959234260045926>",
+            legendary="<:c_legendary:1405959222536966256>",
+            item="<a:ItemAni:>",
+            mystery="<:c_mystery:1405959250441666590>",
+            fortune="<:c_fortune:1405959213682917629>",
+            divine="<:c_divine:1405959193407651980>",
+            materials="<:c_mats:1405959241898004480>",
         )
 
     @has_char()
@@ -83,6 +84,7 @@ class Crates(commands.Cog):
             - **Magic crates** contain items with stats ranging from **30 to 55**.
             - **Legendary crates** contain items with stats ranging from **41 to 80**.
             - **Divine crates** contain items with stats ranging from **47 to 100**.
+            - **Materials crates** contain 3-10 random crafting materials.
             - **Mystery crates** contain a random crate type.
             - **Fortune Crates** contain either XP or money.
             
@@ -93,13 +95,10 @@ class Crates(commands.Cog):
             title=_("Your Crates"), color=discord.Color.blurple()
         ).set_author(name=ctx.disp, icon_url=ctx.author.display_avatar.url)
 
-        for rarity in ("common", "uncommon", "rare", "magic", "legendary", "mystery", "fortune", "divine"):
+        for rarity in ("common", "uncommon", "rare", "magic", "legendary", "mystery", "fortune", "divine", "materials"):
             amount = ctx.character_data[f"crates_{rarity}"]
             emote = getattr(self.emotes, rarity)
 
-            # Check if the author's ID is the specific ID
-            if ctx.author.id == 823030177025753100 and rarity == "fortune":
-                emote = "🥠"  # Change the emote for fortune rarity
 
             embed.add_field(
                 name=f"{emote} {rarity.title()}",
@@ -121,8 +120,60 @@ class Crates(commands.Cog):
     @commands.command(name="open", brief=_("Open a crate"))
     @locale_doc
     async def _open(
-            self, ctx, rarity: CrateRarity = "common", amount: IntFromTo(1, 100) = 1
+            self, ctx, arg1=None, arg2=None
     ):
+        # Define valid rarities and their shortcuts
+        valid_rarities = {
+            'c': 'common', 'common': 'common',
+            'u': 'uncommon', 'uncommon': 'uncommon',
+            'r': 'rare', 'rare': 'rare',
+            'm': 'magic', 'magic': 'magic',
+            'l': 'legendary', 'legendary': 'legendary',
+            'd': 'divine', 'divine': 'divine',
+            'f': 'fortune', 'fortune': 'fortune',
+            'myst': 'mystery', 'mystery': 'mystery',
+            'mat': 'materials', 'mats': 'materials', 'materials': 'materials'
+        }
+        
+        # Handle parameter ordering
+        if arg1 is None and arg2 is None:
+            # No args provided, use defaults
+            rarity = "common"
+            amount = 1
+        elif arg2 is None:
+            # Only one argument provided
+            if str(arg1).isdigit():
+                amount = max(1, min(100, int(arg1)))  # Clamp between 1-100
+                rarity = "common"
+            else:
+                # Check if it's a valid rarity shortcut or name
+                rarity_input = arg1.lower()
+                if rarity_input in valid_rarities:
+                    rarity = valid_rarities[rarity_input]
+                else:
+                    rarity = "common"  # Default to common if invalid rarity provided
+                amount = 1
+        else:
+            # Two arguments provided, check order
+            if str(arg1).isdigit() and str(arg2).lower() in valid_rarities:
+                amount = max(1, min(100, int(arg1)))
+                rarity = valid_rarities[str(arg2).lower()]
+            elif str(arg2).isdigit() and str(arg1).lower() in valid_rarities:
+                amount = max(1, min(100, int(arg2)))
+                rarity = valid_rarities[str(arg1).lower()]
+            else:
+                # Default to first arg as rarity, second as amount if possible
+                rarity = "common"
+                try:
+                    amount = max(1, min(100, int(arg1) if str(arg1).isdigit() else int(arg2) if str(arg2).isdigit() else 1))
+                    # Check if the other argument is a valid rarity
+                    other_arg = arg2 if str(arg1).isdigit() else arg1
+                    if other_arg.lower() in valid_rarities:
+                        rarity = valid_rarities[other_arg.lower()]
+                except (ValueError, TypeError):
+                    amount = 1
+
+        
         _(
             """`[rarity]` - the crate's rarity to open, can be common, uncommon, rare, magic or legendary; defaults to common
             `[amount]` - the amount of crates to open, may be in range from 1 to 100 at once
@@ -131,6 +182,7 @@ class Crates(commands.Cog):
             This command takes up a lot of space, so choose a spammy channel to open crates."""
         )
         try:
+            name = ctx.character_data["name"]
             if ctx.character_data[f"crates_{rarity}"] < amount:
                 return await ctx.send(
                     _(
@@ -156,17 +208,20 @@ class Crates(commands.Cog):
                         "legendary": 0,
                         "fortune": 0,
                         "divine": 0,
+                        "materials": 0,
                     }
 
                     for _i in range(amount):
                         rng = random.randint(0, 10000)
 
-                        if rng < 5:
+                        if rng < 3:
                             new_rarity = "divine"
-                        elif rng < 15:
+                        elif rng < 8:
                             new_rarity = "fortune"
-                        elif rng < 30:
+                        elif rng < 15:
                             new_rarity = "legendary"
+                        elif rng < 25:
+                            new_rarity = "materials"
                         elif rng < 200:
                             new_rarity = "magic"
                         elif rng < 1000:
@@ -176,13 +231,10 @@ class Crates(commands.Cog):
                         else:
                             new_rarity = "common"
 
-                        # if ctx.author.id == 708435868842459169:
-                        # new_rarity = "divine"
-
                         crates[new_rarity] += 1
 
                     await conn.execute(
-                        'UPDATE profile SET "crates_common"="crates_common"+$1, "crates_uncommon"="crates_uncommon"+$2, "crates_rare"="crates_rare"+$3, "crates_magic"="crates_magic"+$4, "crates_legendary"="crates_legendary"+$5, "crates_fortune"="crates_fortune"+$6, "crates_divine"="crates_divine"+$7 WHERE "user"=$8;',
+                        'UPDATE profile SET "crates_common"="crates_common"+$1, "crates_uncommon"="crates_uncommon"+$2, "crates_rare"="crates_rare"+$3, "crates_magic"="crates_magic"+$4, "crates_legendary"="crates_legendary"+$5, "crates_fortune"="crates_fortune"+$6, "crates_divine"="crates_divine"+$7, "crates_materials"="crates_materials"+$8 WHERE "user"=$9;',
                         crates["common"],
                         crates["uncommon"],
                         crates["rare"],
@@ -190,6 +242,7 @@ class Crates(commands.Cog):
                         crates["legendary"],
                         crates["fortune"],
                         crates["divine"],
+                        crates["materials"],
                         ctx.author.id,
                     )
 
@@ -205,7 +258,7 @@ class Crates(commands.Cog):
                             )
 
                     text = _(
-                        "You opened {mystery_amount} {mystery_emoji} and received:\n"
+                        "{name}, you opened {mystery_amount} {mystery_emoji} and received:\n"
                         "- {common_amount} {common_emoji}\n"
                         "- {uncommon_amount} {uncommon_emoji}\n"
                         "- {rare_amount} {rare_emoji}\n"
@@ -213,7 +266,9 @@ class Crates(commands.Cog):
                         "- {legendary_amount} {legendary_emoji}\n"
                         "- {fortune_amount} {fortune_emoji}\n"
                         "- {divine_amount} {divine_emoji}\n"
+                        "- {materials_amount} {materials_emoji}\n"
                     ).format(
+                        name=name,
                         mystery_amount=amount,
                         mystery_emoji=self.emotes.mystery,
                         common_amount=crates["common"],
@@ -230,6 +285,8 @@ class Crates(commands.Cog):
                         fortune_emoji=self.emotes.fortune,
                         divine_amount=crates["divine"],
                         divine_emoji=self.emotes.divine,
+                        materials_amount=crates["materials"],
+                        materials_emoji=self.emotes.materials,
                     )
 
                     await ctx.send(text)
@@ -277,8 +334,10 @@ class Crates(commands.Cog):
                                 await conn.execute('UPDATE profile SET "xp" = "xp" + $1 WHERE "user" = $2', random_xp,
                                                    user_id)
 
+                                name = ctx.character_data["name"]
+
                                 await ctx.send(
-                                    f"You opened a Fortune crate and gained **{random_xp}XP!**")
+                                    f"{name} opened a Fortune crate and gained **{random_xp}XP!**")
 
                                 await self.bot.public_log(
                                     f"**{ctx.author}** opened a fortune crate and gained **{random_xp} XP!**"
@@ -294,8 +353,9 @@ class Crates(commands.Cog):
 
                                 await conn.execute('UPDATE profile SET "money" = "money" + $1 WHERE "user" = $2', reward,
                                                    user_id)
+                                name = ctx.character_data["name"]
 
-                                await ctx.send(f"You opened a Fortune crate and found **${reward}!**")
+                                await ctx.send(f"{name} opened a Fortune crate and found **${reward}!**")
 
                                 await self.bot.public_log(
                                     f"**{ctx.author}** opened a fortune crate and received **${reward}!**"
@@ -309,6 +369,7 @@ class Crates(commands.Cog):
 
                 else:
                     items = []
+                    total_dragon_coins_gained = 0
                     for _i in range(amount):
                         # A number to detemine the crate item range
 
@@ -360,8 +421,41 @@ class Crates(commands.Cog):
                                 minstat, maxstat = (52, 56)
                             else:
                                 minstat, maxstat = (47, 51)
+                        elif rarity == "materials":
+                            # Materials crates are handled by the premiumshop cog
+                            premiumshop_cog = self.bot.get_cog('PremiumShop')
+                            if premiumshop_cog:
+                                success, message = await premiumshop_cog.open_materials_crate(ctx)
+                                if success:
+                                    await ctx.send(message)
+                                else:
+                                    await ctx.send(f"Error: {message}")
+                                return
+                            else:
+                                await ctx.send("Materials crate system not available.")
+                                return
 
 
+                        # Check for Dragon Coin chance on legendary crates (20% chance)
+                        dragon_coins_gained = 0
+                        if rarity == "legendary" and random.randint(1, 100) <= 20:
+                            dragon_coins_gained = random.randint(1, 15)
+                            await conn.execute(
+                                'UPDATE profile SET dragoncoins = dragoncoins + $1 WHERE "user" = $2;',
+                                dragon_coins_gained, ctx.author.id
+                            )
+                            if amount > 1:
+                                total_dragon_coins_gained += dragon_coins_gained
+                        # Check for Dragon Coin chance on divine crates (40% chance)
+                        elif rarity == "divine" and random.randint(1, 100) <= 40:
+                            dragon_coins_gained = random.randint(1, 50)
+                            await conn.execute(
+                                'UPDATE profile SET dragoncoins = dragoncoins + $1 WHERE "user" = $2;',
+                                dragon_coins_gained, ctx.author.id
+                            )
+                            if amount > 1:
+                                total_dragon_coins_gained += dragon_coins_gained
+                        
                         item = await self.bot.create_random_item(
                             minstat=minstat,
                             maxstat=maxstat,
@@ -382,7 +476,7 @@ class Crates(commands.Cog):
 
                     if amount == 1:
                         embed = discord.Embed(
-                            title=_("You gained an item!"),
+                            title=_(f"{name}, you gained an item!"),
                             description=_("You found a new item when opening a crate!"),
                             color=0xFF0000,
                         )
@@ -402,6 +496,15 @@ class Crates(commands.Cog):
                                 rarity=rarity,
                             )
                         )
+                        
+                        # Add Dragon Coin message if gained
+                        if dragon_coins_gained > 0:
+                            embed.add_field(
+                                name="🎉 Bonus Drachmas!",
+                                value=f"You also found **{dragon_coins_gained} <:drachma:14116449302160384618> Drachmas**!",
+                                inline=False
+                            )
+                        
                         await ctx.send(embed=embed)
                         if rarity == "legendary":
                             await self.bot.public_log(
@@ -434,20 +537,24 @@ class Crates(commands.Cog):
                         )
                         top = "\n".join([f"- {i}" for i in sorted(stats, reverse=True)[:5]])
                         average_stat = round(sum(stats_raw) / amount, 2)
-                        await ctx.send(
-                            _(
-                                "Successfully opened {amount} {rarity} crates. Average stat:"
-                                " {average_stat}\nMost common stats:\n```\n{most_common}\n```\nBest"
-                                " stats:\n```\n{top}\n```\nTypes:\n```\n{most_common_types}\n```"
-                            ).format(
-                                amount=amount,
-                                rarity=rarity,
-                                average_stat=average_stat,
-                                most_common=most_common,
-                                top=top,
-                                most_common_types=most_common_types,
-                            )
+                        message = _(
+                            "Successfully opened {amount} {rarity} crates. Average stat:"
+                            " {average_stat}\nMost common stats:\n```\n{most_common}\n```\nBest"
+                            " stats:\n```\n{top}\n```\nTypes:\n```\n{most_common_types}\n```"
+                        ).format(
+                            amount=amount,
+                            rarity=rarity,
+                            average_stat=average_stat,
+                            most_common=most_common,
+                            top=top,
+                            most_common_types=most_common_types,
                         )
+                        
+                        # Add Dragon Coin message if gained
+                        if total_dragon_coins_gained > 0:
+                            message += f"\n\n🎉 **Bonus Drachmas:** You also found **{total_dragon_coins_gained} <:drachma:1411644930216038461> Drachmas**!"
+                        
+                        await ctx.send(message)
                         if rarity == "legendary":
                             await self.bot.public_log(
                                 f"**{ctx.author}** opened {amount} legendary crates and received"
@@ -506,7 +613,7 @@ class Crates(commands.Cog):
 
             if amount == 1:
                 embed = discord.Embed(
-                    title=_("You gained an item!"),
+                    title=_("{name}, you gained an item!"),
                     description=_("You generated a new weapon!"),
                     color=0xFF0000,
                 )
@@ -649,13 +756,13 @@ class Crates(commands.Cog):
 
             # Send a confirmation message
             emotes = {
-                "common": "<:F_common:1139514874016309260>",
-                "uncommon": "<:F_uncommon:1139514875828252702>",
-                "rare": "<:F_rare:1139514880517484666>",
-                "magic": "<:F_Magic:1139514865174720532>",
-                "legendary": "<:F_Legendary:1139514868400132116>",
-                "mystery": "<:F_mystspark:1139521536320094358>",
-                "fortune": "<:f_money:1146593710516224090>"
+            "common": "<:c_common:1405959169747587072>",
+            "uncommon": "<:c_uncommon:1405959270834638848>",
+            "rare": "<:c_rare:1405959260189229067>",
+            "magic": "<:c_magic:1405959234260045926>",
+            "legendary": "<:c_legendary:1405959222536966256>",
+            "mystery": "<:c_mystery:1405959250441666590>",
+            "fortune": "<:c_fortune:1405959213682917629>",
             }
             await ctx.send(
                 _(f"{gift_user.mention} has received a gift by {ctx.author.mention}. It is a {emotes[rarity1]} {rarity1}!")
@@ -680,7 +787,10 @@ class Crates(commands.Cog):
             This command has a cooldown of 12 hours.
             """
         )
+
         import random
+        from datetime import datetime, timezone
+
         rarities = (
                 ["common"] * 890
                 + ["uncommon"] * 60
@@ -693,21 +803,32 @@ class Crates(commands.Cog):
         )
 
         emotes = {
-            "common": "<:F_common:1139514874016309260>",
-            "uncommon": "<:F_uncommon:1139514875828252702>",
-            "rare": "<:F_rare:1139514880517484666>",
-            "magic": "<:F_Magic:1139514865174720532>",
-            "legendary": "<:F_Legendary:1139514868400132116>",
-            "mystery": "<:F_mystspark:1139521536320094358>",
-            "fortune": "<:f_money:1146593710516224090>",
-            "divine": "<:f_divine:1169412814612471869>",
+            "common": "<:c_common:1405959169747587072>",
+            "uncommon": "<:c_uncommon:1405959270834638848>",
+            "rare": "<:c_rare:1405959260189229067>",
+            "magic": "<:c_magic:1405959234260045926>",
+            "legendary": "<:c_legendary:1405959222536966256>",
+            "mystery": "<:c_mystery:1405959250441666590>",
+            "fortune": "<:c_fortune:1405959213682917629>",
+            "divine": "<:c_divine:1405959193407651980>",
         }
+
+        # Check if current time is within bonus period
+        # Assuming server timezone - adjust as needed
+        current_time = datetime.now(timezone.utc)  # or whatever timezone your server uses
+
+        # Define bonus period: June 6th 1pm to June 7th 1am (2025)
+        bonus_start = datetime(2025, 6, 6, 13, 0, 0, tzinfo=timezone.utc)  # 1pm June 6th
+        bonus_end = datetime(2025, 6, 7, 1, 0, 0, tzinfo=timezone.utc)  # 1am June 7th
+
+        is_bonus_time = bonus_start <= current_time <= bonus_end
 
         # Check player's tier
         result = await self.bot.pool.fetchval('SELECT tier FROM profile WHERE "user" = $1;', ctx.author.id)
 
         # Prepare a list to store the final crates
         crates = []
+        bonus_crates = []
 
         # If tier >= 3, user gets 4 crates
         if result is not None and result >= 3:
@@ -716,60 +837,49 @@ class Crates(commands.Cog):
             rarity3 = random.choice(rarities)
             rarity4 = random.choice(rarities)
             crates = [rarity1, rarity2, rarity3, rarity4]
-
-            async with self.bot.pool.acquire() as conn:
-                # Update DB for each crate
-                for crate_rarity in crates:
-                    await conn.execute(
-                        f'UPDATE profile SET "crates_{crate_rarity}"="crates_{crate_rarity}"+1 WHERE "user"=$1;',
-                        ctx.author.id,
-                    )
-                    await self.bot.log_transaction(
-                        ctx,
-                        from_=1,
-                        to=ctx.author.id,
-                        subject="vote",
-                        data={"Rarity": crate_rarity, "Amount": 1},
-                        conn=conn,
-                    )
-
         else:
             # Otherwise, user gets 2 crates
             rarity1 = random.choice(rarities)
             rarity2 = random.choice(rarities)
-
-            # Example special case:
-            if ctx.author.id == 1062834718879535205:
-                rarity2 = "divine"
-
             crates = [rarity1, rarity2]
 
-            async with self.bot.pool.acquire() as conn:
-                # Update DB for each crate
-                for crate_rarity in crates:
-                    await conn.execute(
-                        f'UPDATE profile SET "crates_{crate_rarity}"="crates_{crate_rarity}"+1 WHERE "user"=$1;',
-                        ctx.author.id,
-                    )
-                    await self.bot.log_transaction(
-                        ctx,
-                        from_=1,
-                        to=ctx.author.id,
-                        subject="crates",
-                        data={"Rarity": crate_rarity, "Amount": 1},
-                        conn=conn,
-                    )
+        # Add bonus crates if within bonus time
+        if is_bonus_time:
+            level = rpgtools.xptolevel(ctx.character_data["xp"])
+            # 50% chance for 2 fortune crates, 50% chance for 1 divine crate
+            if level >= 5:
+                if random.choice([True, False]):
+                    bonus_crates = ["fortune", "fortune"]
+                else:
+                    bonus_crates = ["divine"]
+
+            crates.extend(bonus_crates)
+
+        # Update database for all crates
+        async with self.bot.pool.acquire() as conn:
+            for crate_rarity in crates:
+                await conn.execute(
+                    f'UPDATE profile SET "crates_{crate_rarity}"="crates_{crate_rarity}"+1 WHERE "user"=$1;',
+                    ctx.author.id,
+                )
+                # Use different subject for bonus crates if needed
+                subject = "vote_bonus" if crate_rarity in bonus_crates else "vote"
+                await self.bot.log_transaction(
+                    ctx,
+                    from_=1,
+                    to=ctx.author.id,
+                    subject=subject,
+                    data={"Rarity": crate_rarity, "Amount": 1},
+                    conn=conn,
+                )
 
         # --- Creating the embed ---
-
-        # Build a bullet list of crates or consolidate them
-        # This example simply lists them in separate lines
-        crate_lines = []
-        # Optional: we can count how many of each type the user got
         from collections import Counter
         crate_counts = Counter(crates)
+        name = ctx.character_data["name"]
 
         # Create lines like "2 x <:emote:> rare"
+        crate_lines = []
         for rarity, count in crate_counts.items():
             crate_lines.append(f"**{count}** x {emotes[rarity]} *{rarity}*")
 
@@ -777,7 +887,7 @@ class Crates(commands.Cog):
 
         embed = discord.Embed(
             title=_("Crates Claimed!"),
-            description=_("You’ve claimed your crates!"),
+            description=_(f"{name}, you've claimed your crates!"),
             color=ctx.author.color
         )
         embed.add_field(
@@ -786,7 +896,15 @@ class Crates(commands.Cog):
             inline=False
         )
 
-        # Optionally, you can add a footer or author
+        # Add bonus notification if applicable
+        if is_bonus_time and bonus_crates:
+            bonus_text = "2x Fortune" if len(bonus_crates) == 2 else "1x Divine"
+            embed.add_field(
+                name=_("🎉 Bonus Event Active!"),
+                value=_(f"You received an extra **{bonus_text}** crate!"),
+                inline=False
+            )
+
         embed.set_footer(text=_("Command on cooldown for 12 hours."))
 
         await ctx.send(embed=embed)
@@ -798,9 +916,49 @@ class Crates(commands.Cog):
             self,
             ctx,
             other: MemberWithCharacter,
-            amount: str = "1",  # accept "all" or int as string
-            rarity: CrateRarity = "common",
+            *args,
     ):
+        # Define valid rarities and their shortcuts
+        valid_rarities = {
+            'c': 'common', 'common': 'common',
+            'u': 'uncommon', 'uncommon': 'uncommon',
+            'r': 'rare', 'rare': 'rare',
+            'm': 'magic', 'magic': 'magic',
+            'l': 'legendary', 'legendary': 'legendary',
+            'd': 'divine', 'divine': 'divine',
+            'f': 'fortune', 'fortune': 'fortune',
+            'myst': 'mystery', 'mystery': 'mystery',
+            "mats": "materials",
+        }
+        
+        # Handle parameter ordering
+        if len(args) == 0:
+            # No additional args, use defaults
+            amount = "1"
+            rarity = "common"
+        elif len(args) == 1:
+            # Either amount or rarity
+            arg_lower = args[0].lower()
+            if arg_lower in valid_rarities:
+                rarity = valid_rarities[arg_lower]
+                amount = "1"
+            else:
+                amount = args[0]
+                rarity = "common"
+        else:
+            # Two arguments provided, check order
+            arg1_lower = args[0].lower()
+            arg2_lower = args[1].lower()
+            
+            if arg1_lower in valid_rarities:
+                rarity = valid_rarities[arg1_lower]
+                amount = args[1]
+            elif arg2_lower in valid_rarities:
+                rarity = valid_rarities[arg2_lower]
+                amount = args[0]
+            else:
+                amount = args[0]  # Default to first as amount if can't determine
+                rarity = "common"
         _(
             """`<other>` - A user with a character
             `[amount]` - A whole number greater than 0, or "all"
@@ -818,12 +976,14 @@ class Crates(commands.Cog):
         elif other == ctx.me:
             return await ctx.send(_("For me? I'm flattered, but I can't accept this..."))
 
+        name = ctx.character_data["name"]
+
         # 2) Resolve the "amount" if it's "all"
         try:
-            if amount.lower() == "all":
+            if isinstance(amount, str) and amount.lower() == "all":
                 current_crates = ctx.character_data[f"crates_{rarity}"]
                 if current_crates <= 0:
-                    return await ctx.send(_("You don't have any crates of this rarity."))
+                    return await ctx.send(_(f"{name}, you don't have any crates of this rarity."))
                 amount = current_crates
             else:
                 # Convert to int
@@ -835,7 +995,7 @@ class Crates(commands.Cog):
 
         # 3) Ensure the player has enough crates
         if ctx.character_data[f"crates_{rarity}"] < amount:
-            return await ctx.send(_("You don't have enough crates of this rarity."))
+            return await ctx.send(_(f"{name}, you don't have enough crates of this rarity."))
 
         # 4) Perform the trade
         async with self.bot.pool.acquire() as conn:
@@ -868,33 +1028,77 @@ class Crates(commands.Cog):
     @has_char()
     @user_cooldown(30)
     @commands.command(
-        aliases=["sellcrates", "sc"], brief=_("Sell crates to NPC for money")
+        aliases=["sellcrates", "sc"], 
+        brief=_("Sell crates to NPC for money"),
+        usage="[quantity=1] <rarity>"
     )
     @locale_doc
-    async def sellcrate(
-            self,
-            ctx,
-            quantity: IntGreaterThan(0),
-            rarity: CrateRarity,
-    ):
+    async def sellcrate(self, ctx, arg1, arg2: str = None):
         _(
-            """`<quantity>` - The quantity of crates to sell
-            `<rarity>` - The rarity of crate to sell. First letter of the rarity is also accepted.
+            """`[quantity=1]` - The quantity of crates to sell (defaults to 1)
+            `<rarity>` - The rarity of crate to sell. Can use full name or shortcuts:
+                        common(c), uncommon(u), rare(r), magic(m), legendary(l),
+                        divine(d), fortune(f), mystery(myst)
 
             Sell your crates to an NPC in exchange for money.
-            Example:
-            `{prefix}sellcrate 5 common`"""
+            Examples:
+            `{prefix}sellcrate common` - Sells 1 common crate
+            `{prefix}sellcrate 5 common` - Sells 5 common crates
+            `{prefix}sellcrate c` - Sells 1 common crate using shortcut"""
         )
+
+        # Handle argument order (quantity and rarity can be in any order)
+        valid_rarities = {
+            'c': 'common', 'common': 'common',
+            'u': 'uncommon', 'uncommon': 'uncommon',
+            'r': 'rare', 'rare': 'rare',
+            'm': 'magic', 'magic': 'magic',
+            'l': 'legendary', 'legendary': 'legendary',
+            'd': 'divine', 'divine': 'divine',
+            'f': 'fortune', 'fortune': 'fortune',
+            'myst': 'mystery', 'mystery': 'mystery',
+            'mat': 'materials', 'mats': 'materials', 'materials': 'materials'
+        }
+        
+        # Parse arguments
+        if arg2 is None:
+            # Only one argument provided, it must be the rarity
+            if arg1.lower() in valid_rarities:
+                quantity = 1
+                rarity = valid_rarities[arg1.lower()]
+            else:
+                await ctx.send(_(
+                    "Invalid rarity. Use: common(c), uncommon(u), rare(r), magic(m), "
+                    "legendary(l), divine(d), fortune(f), mystery(myst), or materials(mats/mat)"
+                ))
+                return
+        else:
+            # Two arguments provided, check order
+            if str(arg1).isdigit() and arg2.lower() in valid_rarities:
+                quantity = max(1, min(100, int(arg1)))
+                rarity = valid_rarities[arg2.lower()]
+            elif str(arg2).isdigit() and arg1.lower() in valid_rarities:
+                quantity = max(1, min(100, int(arg2)))
+                rarity = valid_rarities[arg1.lower()]
+            else:
+                await ctx.send(_(
+                    "Invalid arguments. Use `{prefix}sellcrate [quantity=1] <rarity>`.\n"
+                    "Example: `{prefix}sellcrate 5 common` or `{prefix}sellcrate c`"
+                ).format(prefix=ctx.clean_prefix))
+                return
+
         sell_price_per_crate = {
-            "common": 400,  # Adjust these values as needed
+            "common": 400,
             "uncommon": 900,
             "rare": 3500,
             "magic": 25000,
             "mystery": 1500,
+            "legendary": 100000,  # Base value for legendary crates
         }
+        name = ctx.character_data["name"]
 
-        if rarity == "legendary":
-            await ctx.send(_("Selling legendary crates is not allowed."))
+        if rarity == "divine":
+            await ctx.send(_("Selling divine crates is not allowed."))
             return
 
         if rarity not in sell_price_per_crate:
@@ -904,8 +1108,7 @@ class Crates(commands.Cog):
         if ctx.character_data[f"crates_{rarity}"] < quantity:
             await ctx.send(
                 _(
-                    "You don't have {quantity} {rarity} crate(s). Check"
-                    " `{prefix}crates`."
+                    "You don't have {quantity} {rarity} crate(s). Check `{prefix}crates`."
                 ).format(quantity=quantity, rarity=rarity, prefix=ctx.clean_prefix)
             )
             return
@@ -914,11 +1117,10 @@ class Crates(commands.Cog):
 
         if not await ctx.confirm(
                 _(
-                    "{author}, are you sure you want to sell **{quantity} {emoji}"
-                    " {rarity}** crate(s) for **${total_price:,.0f}**?\n\n"
+                    "{name}, are you sure you want to sell **{quantity} {emoji} {rarity}** crate(s) for **${total_price:,.0f}**?\n\n"
                     "You will receive **${total_price:,.0f}** for this transaction."
                 ).format(
-                    author=ctx.author.mention,
+                    name=name,
                     quantity=quantity,
                     emoji=getattr(self.emotes, rarity),
                     rarity=rarity,
@@ -956,24 +1158,25 @@ class Crates(commands.Cog):
                         conn=conn,
                     )
                 else:
-                    await ctx.send(_("You no longer have enough crates for this transaction. Sale cancelled."))
+                    await ctx.send(
+                        _("{name}, you no longer have enough crates for this transaction. Sale cancelled.").format(
+                            name=name)
+                    )
                     return
 
         except commands.CommandError as error:
             if "far too high for me to handle properly" in str(error):
                 # Suppress the error message and handle it gracefully
                 return
-
             # Re-raise the error if it's not the specific error you want to suppress
             raise
 
         await ctx.send(
             _(
-                "{author}, you've successfully sold **{quantity} {emoji} {rarity}**"
-                " crate(s) to the NPC for **${total_price:,.0f}**.\n\n"
+                "{name}, you've successfully sold **{quantity} {emoji} {rarity}** crate(s) to the NPC for **${total_price:,.0f}**.\n\n"
                 "You received **${total_price:,.0f}**."
             ).format(
-                author=ctx.author.mention,
+                name=name,
                 quantity=quantity,
                 emoji=getattr(self.emotes, rarity),
                 rarity=rarity,
@@ -1006,8 +1209,10 @@ class Crates(commands.Cog):
             `{prefix}offercrate 5 common 75000 @buyer#1234`
             `{prefix}oc 5 c 75000 @buyer#1234`"""
         )
+
+        name = ctx.character_data["name"]
         if buyer == ctx.author:
-            await ctx.send(_("You may not offer crates to yourself."))
+            await ctx.send(_(f"{name}, you may not offer crates to yourself."))
             return await self.bot.reset_cooldown(ctx)
         elif buyer == ctx.me:
             await ctx.send(_("No, I don't want any crates."))
@@ -1016,9 +1221,9 @@ class Crates(commands.Cog):
         if ctx.character_data[f"crates_{rarity}"] < quantity:
             await ctx.send(
                 _(
-                    "You don't have {quantity} {rarity} crate(s). Check"
+                    "{name}, you don't have {quantity} {rarity} crate(s). Check"
                     " `{prefix}crates`."
-                ).format(quantity=quantity, rarity=rarity, prefix=ctx.clean_prefix)
+                ).format(name=name, quantity=quantity, rarity=rarity, prefix=ctx.clean_prefix)
             )
             return await self.bot.reset_cooldown(ctx)
 

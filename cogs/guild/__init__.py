@@ -2,6 +2,7 @@
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
 Copyright (C) 2023-2024 Lunar (PrototypeX37)
+Copyright (C) 2026 Danaelis
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -20,6 +21,7 @@ import asyncio
 
 from contextlib import suppress
 from datetime import timedelta, datetime
+from typing import Union
 
 import discord
 from discord import Embed
@@ -599,7 +601,7 @@ class Guild(commands.Cog):
             Kicks a member from your guild. Officers cannot be kicked.
             If your guild is in an alliance which owns a city, the member will have its bonuses removed immediately.
 
-            If the member shares no server with you, you may use their [User ID](https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID-) as the member parameter.
+            If the member shares no server with you, you may use their [User ID](https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID-) as the member p>
 
             Only guild leaders and officers can use this command."""
         )
@@ -681,7 +683,7 @@ class Guild(commands.Cog):
             Change your guild's icon. The URL cannot exceed 60 characters.
             ⚠ This can be seen by anyone, do not use NSFW/innapropriate images. GIFs are not supported.
 
-            Having trouble finding short image URLs? Follow [this tutorial](https://wiki.idlerpg.xyz/index.php?title=Tutorial:_Short_Image_URLs) or just attach the image you want to use (png, jpg and gif are supported)!
+            Having trouble finding short image URLs? Follow [this tutorial](https://wiki.idlerpg.xyz/index.php?title=Tutorial:_Short_Image_URLs) or just attach the image you want to use (png, jpg a>
 
             Only guild leaders can use this command."""
         )
@@ -1139,7 +1141,7 @@ class Guild(commands.Cog):
                     )
                 )
 
-            # Confirm with the user
+           # Confirm with the user
             confirm_text = _(
                 "Upgrading will increase your limit to **${new_final}**)"
                 " at the cost of **${cost}**. Proceed?"
@@ -1461,20 +1463,42 @@ class Guild(commands.Cog):
                     f"**{guild1['name']}** and **{guild2['name']}** tied."
                 )
 
+    @has_char()
     @is_gm()
     @guild.command()
-    async def adventurereset(self, ctx):
-
-
-        guild_id = ctx.character_data["guild"]
-        keys_to_delete = await self.bot.redis.keys(f"guildcd:{guild_id}:*")
-
+    async def adventurereset(self, ctx, profile: Union[discord.Member, int] = None):
+        try:
+            # If no profile provided, use the command author
+            if profile is None:
+                profile_id = ctx.author.id
+            elif isinstance(profile, discord.Member):
+                profile_id = profile.id
+            else:
+                profile_id = profile
+            
+            # Query the database to get the guild for this profile
+            async with self.bot.pool.acquire() as conn:
+                guild_id = await conn.fetchval(
+                    "SELECT guild FROM profile WHERE user = $1", 
+                    profile_id
+                )
+            
+            if guild_id is None:
+                await ctx.send(f"No profile found for user ID {profile_id}.")
+                return
+            
+            # Get all cooldown keys for this guild
+            keys_to_delete = await self.bot.redis.keys(f"guildcd:{guild_id}:*")
+            
             # Delete each matching key
-        if keys_to_delete:
-            await ctx.bot.redis.delete(*keys_to_delete)
-            await ctx.send(f"All cooldown entries for guild ID {guild_id} have been deleted.")
-        else:
-            await ctx.send(f"No cooldown entries found for guild ID {guild_id}.")
+            if keys_to_delete:
+                await self.bot.redis.delete(*keys_to_delete)
+                await ctx.send(f"All cooldown entries for guild ID {guild_id} have been deleted.")
+            else:
+                await ctx.send(f"No cooldown entries found for guild ID {guild_id}.")
+                
+        except Exception as e:
+            await ctx.send(f"An error occurred: {e}")
 
     @is_guild_officer()
     @guild_cooldown(86400)
@@ -1519,15 +1543,28 @@ class Guild(commands.Cog):
                 timeout=timer,
             )
 
-            mins = timer / 60
+            # Convert seconds to hours, minutes, seconds
+            hours, remainder = divmod(timer, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            
+            # Create human-readable time string
+            time_parts = []
+            if hours > 0:
+                time_parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+            if minutes > 0 or hours > 0:  # Show minutes if there are any, or if we're showing hours
+                time_parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+            if seconds > 0 and hours == 0:  # Only show seconds if we're not showing hours
+                time_parts.append(f"{seconds} second{'s' if seconds != 1 else ''}")
+                
+            time_str = " ".join(time_parts)
 
             # Send the join message
             await ctx.send(
                 _(
                     "{author} seeks a guild adventure for **{guild}**! Click the button to"
-                    " join! Unlimited players can join in the next {mins} minutes. The minimum"
+                    " join! Unlimited players can join in the next {time}. The minimum"
                     " of players required is 3."
-                ).format(author=ctx.author.mention, guild=guild["name"]),
+                ).format(author=ctx.author.mention, guild=guild["name"], time=time_str),
                 view=view,
             )
 
@@ -1571,300 +1608,321 @@ class Guild(commands.Cog):
 
             adventure_types = [
                 {
-                    'name': 'Dragon Hunt',
-                    'description': 'Your guild embarks on a quest to slay the mighty dragon threatening the kingdom.',
+                    'name': 'Slay the Drakon',
+                    'description': 'Your guild marches under omen and torchlight to hunt a serpent-beast sent by bitter gods to scour the countryside.',
                     'events': [
-                        'The guild encounters a band of goblins and swiftly defeats them.',
-                        'A member finds a mysterious artifact in an ancient ruin.',
-                        'The guild is ambushed by bandits but manages to escape.',
-                        'A friendly wizard offers the guild a magical boon.',
-                        'The dragon appears and a fierce battle ensues.',
-                        'The guild sets up camp and tells stories by the fire.',
-                        'They find a village destroyed by the dragon.',
-                        'A merchant sells them rare potions at a discount.',
-                        'They cross a dangerous river with the help of a giant turtle.',
-                        'One member deciphers ancient runes that foretell their destiny.',
-                        'A thunderstorm forces the guild to take shelter in a cave.',
-                        'They rescue a kidnapped nobleman who rewards them handsomely.',
-                        'A bridge collapses, but the guild engineers a solution.',
-                        'They encounter a rival guild seeking the same dragon.',
-                        'An old hermit gives cryptic advice about the dragon.',
-                        'They find tracks leading directly to the dragon’s lair.',
-                        'The guild navigates through a labyrinthine forest.',
-                        'They are haunted by illusions created by mischievous spirits.',
-                        'A member\'s courage inspires the others during a tough challenge.',
-                        'They discover the dragon has offspring to protect.',
+                        'A pack of blood-eyed wolves, touched by Ares, rushes the road and is driven back.',
+                        'A scout finds a bronze votive in a ruined shrine—still warm with old offerings.',
+                        'Bandits claiming “tribute to a false king” ambush the rear, but your formation holds.',
+                        'A wandering priest blesses your weapons with oil and ash from a sacred hearth.',
+                        'The drakon coils from the mist, and the earth shakes as battle begins.',
+                        'By the fire, veterans trade tales of heroes and warn against hubris.',
+                        'You find a village scorched—stone melted like wax by monstrous breath.',
+                        'A peddler sells bitter draughts and bandages, swearing by Hermes it’s “a fair price.”',
+                        'A river blocks the path until an ancient turtle rises, bearing you across in silence.',
+                        'Someone reads carved sigils foretelling: “Only the steady hand survives the final strike.”',
+                        'A thunderstorm forces shelter in a cave painted with archaic hunts.',
+                        'You free a captive noble who vows a reward—and a favor in the Assembly.',
+                        'A bridge collapses; your engineers lash pine and rope into a passable span.',
+                        'A rival band of would-be heroes appears, chasing the same glory.',
+                        'An old hermit mutters: “Don’t kill it for pride. Kill it for balance.”',
+                        'Tracks of scorched grass lead straight toward a lair that reeks of brimstone.',
+                        'You navigate a forest like a labyrinth, where every path returns you to your own footprints.',
+                        'Mischief-spirits weave illusions—laughter in the dark, footsteps where none walk.',
+                        'One member’s courage steadies the line when fear threatens to break it.',
+                        'You discover eggs hidden beneath stone—proof the beast fights to protect its brood.',
                     ],
                 },
                 {
-                    'name': 'Treasure Expedition',
-                    'description': 'Your guild sets out to find the lost treasure of the pirate king.',
+                    'name': 'Vault of King Midas',
+                    'description': 'Your guild seeks a sealed treasury said to be cursed by old gold and guarded by those who died clutching it.',
                     'events': [
-                        'The guild sails through a storm and loses some supplies.',
-                        'They discover a map leading to a hidden island.',
-                        'A sea monster attacks the ship but is repelled.',
-                        'They find the treasure but it is guarded by undead pirates.',
-                        'The guild returns home with the treasure.',
-                        'They befriend a talking parrot that knows secrets.',
-                        'A mutiny nearly breaks out but is quickly quelled.',
-                        'They navigate treacherous reefs with expert sailing.',
-                        'An island tribe offers them shelter and guidance.',
-                        'They decode a series of riddles to unlock a vault.',
-                        'A cursed idol brings them misfortune until discarded.',
-                        'They race against another crew to reach the treasure first.',
-                        'A member falls overboard but is heroically rescued.',
-                        'They barter with merfolk for safe passage.',
-                        'An old sea chart reveals hidden hazards.',
-                        'They encounter ghost ships that vanish at dawn.',
-                        'A volcanic eruption forces them to flee an island.',
-                        'They hold a festive celebration after a major victory.',
-                        'They repair their ship after damage from coral reefs.',
-                        'A mysterious fog causes them to lose their way.',
+                        'A sea squall batters your ship; supplies spill into the foam like spilled coin.',
+                        'You recover a wax-sealed map marked with temple-stars and forbidden coves.',
+                        'A leviathan shadows the hull until harpoons and hymn drive it off.',
+                        'The vault is found—guarded by the restless dead, chained to their greed.',
+                        'You return with relics and a warning: “Never count blessings too loudly.”',
+                        'A talking raven follows you, repeating a single word: “Measure.”',
+                        'A near-mutiny erupts, quenched by oath and threat of divine punishment.',
+                        'Treacherous reefs force you to steer by torch-signal and prayer.',
+                        'An island clan offers shelter—if you swear not to steal from their sacred grove.',
+                        'Riddles carved into marble unlock a door that opens like a sigh.',
+                        'A gilded idol brings misfortune until cast into the sea with a curse.',
+                        'A rival crew races you under starlight, oars cutting water like blades.',
+                        'A member falls overboard; a dolphin surfaces beneath them like a guide.',
+                        'Merfolk demand tribute for passage: salt, silver, and a true name whispered.',
+                        'An old sea chart reveals hazards that “move” when watched.',
+                        'Ghost ships drift beside you at dawn, then vanish with the mist.',
+                        'A volcanic rumble forces flight—ash falls like black snow.',
+                        'A feast is held after victory; wine tastes sweeter when fear fades.',
+                        'You patch torn sails and splintered mast with rope and stubbornness.',
+                        'A white fog steals direction until you navigate by the constellations alone.',
                     ],
                 },
                 {
-                    'name': 'Rescue Mission',
-                    'description': 'Your guild is tasked with rescuing a kidnapped prince from a dark fortress.',
+                    'name': 'Free the Oracle',
+                    'description': 'Your guild is sworn to rescue an oracle taken by cultists and imprisoned within a fortress-temple of night.',
                     'events': [
-                        'The guild infiltrates the fortress under the cover of night.',
-                        'They disable traps set throughout the corridors.',
-                        'A guard almost raises the alarm but is subdued.',
-                        'They find a secret passage leading to the dungeon.',
-                        'An imprisoned sage provides valuable information.',
-                        'They encounter a powerful sorcerer and engage in a magical duel.',
-                        'A riddle blocks their path; solving it opens a hidden door.',
-                        'They disguise themselves as enemy soldiers.',
-                        'An ally inside the fortress aids their mission.',
-                        'They rescue the prince and escape through underground tunnels.',
-                        'A betrayal from within complicates their escape.',
-                        'They are chased by enemy forces but manage to evade them.',
-                        'The guild fights off a group of shadow creatures.',
-                        'They find valuable documents exposing a conspiracy.',
-                        'A dragon guards the final exit; they must outsmart it.',
-                        'They use a stolen airship to flee the fortress.',
-                        'An ancient artifact grants them temporary invisibility.',
-                        'They set traps to slow down pursuers.',
-                        'A daring leap across rooftops ensures their getaway.',
-                        'They are hailed as heroes upon returning the prince.',
+                        'You slip into the sanctuary under moonlight, moving between columns like shadows.',
+                        'Old traps bite at ankles and pride—your rogue disarms them with steady hands.',
+                        'A guard nearly raises the alarm, but a thrown pebble and a whisper saves you.',
+                        'You find a hidden stair descending behind a false fresco of smiling gods.',
+                        'A chained seer gives a prophecy for a price: “Speak no names inside.”',
+                        'A priest-sorcerer confronts you; the duel cracks mosaics and faith alike.',
+                        'A riddle blocks your path—answered with truth, it opens like a mouth.',
+                        'You steal robes and walk the halls as “devout,” heads bowed and blades hidden.',
+                        'An ally within leaves chalk marks—an old hero’s sign.',
+                        'You free the oracle and flee through catacombs that smell of myrrh and bones.',
+                        'A betrayal stings—someone sells your route for silver.',
+                        'Pursuers flood the tunnels; you scatter them with smoke and collapsing stone.',
+                        'Shadow-creatures gather where torches fail; you push through with song and steel.',
+                        'You seize documents exposing a conspiracy among nobles and priests.',
+                        'A guardian beast blocks the exit; you outwit it with offerings and distance.',
+                        'A stolen sky-chariot (or rope-lift) becomes your escape into the night wind.',
+                        'An ancient charm grants a brief veil of invisibility—just long enough.',
+                        'You set snares behind you: caltrops, oil, and collapsing beams.',
+                        'A rooftop leap over a courtyard saves the group by a breath.',
+                        'Back in the polis, you are hailed as heroes—and watched by jealous eyes.',
                     ],
                 },
                 {
-                    'name': 'Mystic Journey',
-                    'description': 'Your guild ventures into the Mystic Realms to retrieve a legendary relic.',
+                    'name': 'Quest for the Relic of Nike',
+                    'description': 'Your guild follows divine signs into strange border-realms to recover a relic that grants victory—but tests worth.',
                     'events': [
-                        'They enter a portal to a realm of endless sky.',
-                        'Gravity shifts, challenging their navigation skills.',
-                        'They negotiate with elemental spirits for safe passage.',
-                        'A member gains prophetic visions.',
-                        'They solve a puzzle that alters reality around them.',
-                        'They battle with creatures made of pure energy.',
-                        'A time distortion causes confusion among the guild.',
-                        'They find the relic but must choose between power and wisdom.',
-                        'A guardian tests their worthiness through trials.',
-                        'They experience illusions that test their resolve.',
-                        'An astral storm threatens to scatter them across dimensions.',
-                        'They learn ancient secrets about the universe.',
-                        'A paradox forces them to confront alternate versions of themselves.',
-                        'They receive a blessing that enhances their abilities.',
-                        'They must answer philosophical questions to proceed.',
-                        'They encounter a being that embodies chaos.',
-                        'The realm starts collapsing, and they must escape quickly.',
-                        'They forge an alliance with celestial beings.',
-                        'They witness the birth of a star.',
-                        'Upon returning, they realize time has moved differently.',
+                        'A shimmering threshold opens into an endless sky where islands drift like thoughts.',
+                        'Gravity shifts; each step feels negotiated with the world.',
+                        'Elemental daimones demand tribute before allowing safe passage.',
+                        'A member receives prophetic flashes: outcomes branching like olive limbs.',
+                        'A puzzle of rotating constellations alters reality around you.',
+                        'You battle beings of pure radiance that strike like lightning in silence.',
+                        'Time stutters; the same minute repeats until you act differently.',
+                        'You find the relic—then face a choice between power and wisdom.',
+                        'A guardian demands trials of courage, restraint, and mercy.',
+                        'Illusions tempt you with glory: crowns, cheers, and bloodless triumph.',
+                        'An astral storm threatens to scatter you across worlds like ash in wind.',
+                        'You learn an ancient secret: victory without virtue is a debt.',
+                        'A paradox forces you to face versions of yourselves who chose differently.',
+                        'A blessing strengthens your resolve—your hearts beat as one.',
+                        'Philosophical questions block the path; honest answers open it.',
+                        'A being of Chaos smiles and says: “Prove you can lose.”',
+                        'The realm fractures; you sprint for the threshold as it collapses.',
+                        'You forge an alliance with star-born spirits who speak in chords.',
+                        'You witness the birth of a star, and feel small—in a good way.',
+                        'You return to find time moved oddly: a night for you, days for others.',
                     ],
                 },
                 {
-                    'name': 'Underground Expedition',
-                    'description': 'Your guild explores ancient ruins beneath the city in search of lost knowledge.',
+                    'name': 'Katabasis: Ruins Below',
+                    'description': 'Your guild descends beneath the city into archaic ruins, seeking lost knowledge and a name forgotten by mortals.',
                     'events': [
-                        'They decipher old inscriptions that guide them deeper.',
-                        'A cave-in forces them to find an alternative route.',
-                        'They battle giant subterranean creatures.',
-                        'They find a hidden library filled with forbidden texts.',
-                        'Traps test their agility and wit.',
-                        'They encounter a subterranean civilization.',
-                        'A cursed artifact causes strange phenomena.',
-                        'They must cross an underground lake inhabited by a leviathan.',
-                        'They solve a centuries-old mystery.',
-                        'A maze confuses their sense of direction.',
-                        'They find evidence of an advanced ancient society.',
-                        'Magical darkness impedes their progress.',
-                        'They must perform a ritual to unlock a sealed door.',
-                        'They face a moral dilemma regarding the use of forbidden knowledge.',
-                        'An earthquake threatens to bury them alive.',
-                        'They discover a vein of precious minerals.',
-                        'They are pursued by shadowy figures.',
-                        'They uncover the resting place of a legendary hero.',
-                        'Ancient guardians challenge their right to be there.',
-                        'They emerge with newfound wisdom and artifacts.',
+                        'Inscriptions guide you deeper—warnings disguised as prayers.',
+                        'A cave-in forces a detour through narrow tunnels that breathe cold air.',
+                        'Subterranean beasts attack—pale, blind, and furious at torchlight.',
+                        'You discover a hidden library of clay tablets sealed in pitch.',
+                        'Traps test wit and agility: swinging blades, collapsing floors, poisoned darts.',
+                        'A buried civilization offers trade—salt, stories, and safe passage.',
+                        'A cursed relic warps sound; whispers crawl into your thoughts.',
+                        'An underground lake holds a slumbering leviathan—crossed in silence.',
+                        'A centuries-old mystery resolves when a statue’s eyes finally align.',
+                        'A maze confuses direction; chalk marks vanish as if licked clean.',
+                        'Evidence of an advanced society appears—gears, lenses, and star-maps.',
+                        'Magical darkness swallows flame; you navigate by touch and courage.',
+                        'A ritual at a sealed door demands blood, incense, and humility.',
+                        'A moral dilemma: keep forbidden knowledge, or seal it for the world’s safety.',
+                        'An earthquake shakes the halls—dust falls like snow from the ceiling.',
+                        'A vein of precious ore tempts greed; you take only what you need.',
+                        'Shadowy figures pursue you—silent sandals on stone.',
+                        'You find the resting place of a legendary hero, name scratched away.',
+                        'Ancient guardians challenge your right to be there with impossible riddles.',
+                        'You emerge with tablets, artifacts, and a wisdom that weighs in your hands.',
                     ],
                 },
                 {
-                    'name': 'Defend the Realm',
-                    'description': 'Your guild leads the defense against an invading army.',
+                    'name': 'Defend the Polis',
+                    'description': 'Your guild leads the defense of a city-state against an invading host—steel, omen, and strategy.',
                     'events': [
-                        'They fortify the city walls in preparation.',
-                        'A spy is caught and provides valuable intelligence.',
-                        'They train local militia to bolster defenses.',
-                        'An inspiring speech raises the morale of the defenders.',
-                        'They repel the first wave of attackers.',
-                        'They sabotage enemy siege equipment.',
-                        'A duel between champions decides a battle.',
-                        'They negotiate a temporary ceasefire.',
-                        'A traitor within their ranks is discovered.',
-                        'Reinforcements arrive just in time.',
-                        'They devise a clever strategy to outmaneuver the enemy.',
-                        'A nighttime raid disrupts enemy plans.',
-                        'They protect civilians during the chaos.',
-                        'A mystical barrier shields the city temporarily.',
-                        'They capture the enemy commander.',
-                        'They intercept enemy communications.',
-                        'Weather conditions hinder the enemy advance.',
-                        'They uncover a plot that extends beyond the invasion.',
-                        'Victory is achieved, and they are celebrated as heroes.',
-                        'They establish a lasting peace treaty.',
+                        'You strengthen walls and gates, stacking stone and resolve.',
+                        'A spy is captured and yields intelligence under oath to Hestia’s flame.',
+                        'You train militia—farmers learning spear-work in a single night.',
+                        'A speech lifts morale; fear becomes anger, anger becomes courage.',
+                        'You repel the first assault; the enemy learns your name.',
+                        'You sabotage siege engines with oil, rope, and daring.',
+                        'A duel between champions turns the tide of a skirmish.',
+                        'A temporary ceasefire is negotiated to retrieve the wounded.',
+                        'A traitor is uncovered among your ranks—shame burns hotter than fire.',
+                        'Reinforcements arrive at dawn like a blessing made flesh.',
+                        'You outmaneuver the host with false retreats and hidden trenches.',
+                        'A night raid wrecks the enemy’s supplies and confidence.',
+                        'You escort civilians to safety through backstreets and secret doors.',
+                        'A mystical barrier rises briefly—bought with prayer and sacrifice.',
+                        'You capture the commander; the army falters without its head.',
+                        'You intercept messages—plans scribbled in haste and arrogance.',
+                        'Weather turns against the invaders: mud, wind, and broken banners.',
+                        'You uncover a deeper plot—this war is a distraction for theft elsewhere.',
+                        'Victory is won; songs are written before the blood dries.',
+                        'A treaty is sealed—fragile as pottery, but real for now.',
                     ],
                 },
                 {
-                    'name': 'Cursed Forest',
-                    'description': 'Your guild ventures into a cursed forest to lift a dark enchantment.',
+                    'name': 'The Grove of Artemis',
+                    'description': 'Your guild enters a blighted sacred grove to lift a curse and restore the balance of beast and bow.',
                     'events': [
-                        'They navigate through thick, unnatural fog.',
-                        'Whispers in the wind test their sanity.',
-                        'They encounter a witch who offers cryptic help.',
-                        'An enchanted grove provides temporary respite.',
-                        'They are attacked by corrupted wildlife.',
-                        'They must break a curse on a trapped spirit.',
-                        'They find a hidden glade with healing properties.',
-                        'A puzzle involving enchanted trees blocks their path.',
-                        'They confront the source of the curse.',
-                        'They perform a ritual to cleanse the forest.',
-                        'They resist illusions meant to lead them astray.',
-                        'They collect rare herbs with magical properties.',
-                        'They find an ancient altar with dark powers.',
-                        'A member is momentarily possessed by a malevolent force.',
-                        'They discover the forest was once a thriving village.',
-                        'They receive aid from forest guardians.',
-                        'They set up protective wards for safety.',
-                        'They learn the curse is tied to a powerful relic.',
-                        'They face a moral choice impacting the forest\'s fate.',
-                        'The forest begins to heal as they lift the curse.',
+                        'Unnatural fog clings to your ankles, swallowing sound.',
+                        'Whispers in the leaves test sanity—promises, threats, old regrets.',
+                        'A witch-priestess offers help, but her price is truth.',
+                        'An enchanted clearing grants respite; wounds close faster here.',
+                        'Corrupted wildlife attacks—deer with black eyes, boars too bold.',
+                        'You break a curse binding a trapped nymph to a stone.',
+                        'A hidden spring heals you, tasting of moonlight.',
+                        'A puzzle of living trees blocks the path; the forest rearranges itself.',
+                        'You confront the source: a relic nailed to an altar like a wound.',
+                        'A cleansing ritual begins; smoke rises in shapes of running stags.',
+                        'Illusions lure you off-trail; you resist by holding hands and names.',
+                        'Rare herbs are gathered—useful for healing, dangerous in greed.',
+                        'An ancient altar hums with dark power; you choose what to destroy.',
+                        'A member is briefly possessed; you bring them back with song and fire.',
+                        'You learn the grove once sheltered a village—now only roots remember.',
+                        'Forest guardians appear—silent hunters who judge your intent.',
+                        'You set protective wards; the night feels less hungry.',
+                        'The curse is tied to a stolen relic; returning it shifts the air.',
+                        'A moral choice: punish the thief, or restore them with mercy.',
+                        'As the curse breaks, birds return—first one note, then a choir.',
                     ],
                 },
                 {
-                    'name': 'Skyship Voyage',
-                    'description': 'Your guild takes to the skies on a magical airship to explore floating islands.',
+                    'name': 'Voyage of the Winged Ship',
+                    'description': 'Your guild boards a blessed sky-vessel to chart floating isles and storm-temples above the world.',
                     'events': [
-                        'They fend off sky pirates boarding the ship.',
-                        'A mechanical failure requires quick repairs.',
-                        'They discover a floating island with ancient ruins.',
-                        'They encounter a flock of hostile sky creatures.',
-                        'They rescue travelers stranded on a cloud island.',
-                        'They navigate through a storm of magical energy.',
-                        'An onboard celebration boosts morale.',
-                        'They find a lost city above the clouds.',
-                        'They trade with sky nomads.',
-                        'They avoid a colossal flying beast.',
-                        'They explore a temple that defies gravity.',
-                        'They experience a time distortion at high altitude.',
-                        'They collect samples of rare airborne flora.',
-                        'They decode messages from an old captain\'s log.',
-                        'They survive an encounter with a sky kraken.',
-                        'They harness wind currents to increase speed.',
-                        'They face a dilemma when encountering a rival airship in distress.',
-                        'They map uncharted territories.',
-                        'They establish a skyport for future expeditions.',
-                        'They return with treasures and tales from the skies.',
+                        'Sky raiders swing aboard on ropes; you cut them loose into clouds.',
+                        'A mechanical failure forces frantic repairs mid-flight.',
+                        'A floating island holds ruins etched with star-math and prayers.',
+                        'A flock of hostile sky-beasts attacks, shrieking like bronze.',
+                        'You rescue travelers stranded on a cloudbank that’s slowly dissolving.',
+                        'A storm of raw magic spins the ship; compasses lie.',
+                        'A celebration on deck restores morale—laughter fights the thin air.',
+                        'You find a lost city above the clouds, silent and pristine.',
+                        'Sky nomads trade wind-silk and bottled thunder for coin and stories.',
+                        'You avoid a colossal flying beast by cutting engines and holding breath.',
+                        'A temple defies gravity; steps lead sideways, then up into nowhere.',
+                        'Time distorts at altitude; you lose an hour and gain a scar.',
+                        'You collect rare airborne flora that glows like blue fire.',
+                        'A captain’s log reveals betrayal, love, and a final warning.',
+                        'A sky-kraken rises from the storm; you survive by inches.',
+                        'You harness wind-currents to outrun danger.',
+                        'A rival ship is in distress; you choose whether to help or pass.',
+                        'You map uncharted routes—new lines drawn across the heavens.',
+                        'You establish a skyport for future expeditions, marked by a torch.',
+                        'You return with treasures and tales that sound like lies—until proven.',
                     ],
                 },
                 {
-                    'name': 'Tournament of Champions',
-                    'description': 'Your guild participates in a grand tournament to prove their prowess.',
+                    'name': 'Games of Ares',
+                    'description': 'Your guild enters the grand games to earn glory, coin, and the favor of watching gods.',
                     'events': [
-                        'They compete in archery contests.',
-                        'They engage in a grand melee battle.',
-                        'They solve intricate puzzles under time pressure.',
-                        'They form alliances with other competitors.',
-                        'A sabotage attempt is uncovered.',
-                        'They face a moral test of honor and integrity.',
-                        'They participate in magical duels.',
-                        'They impress the crowd with exceptional skill.',
-                        'They navigate a challenging obstacle course.',
-                        'They are offered bribes to throw a match.',
-                        'They attend a royal banquet with dignitaries.',
-                        'They uncover a plot to rig the tournament.',
-                        'They earn the favor of a noble patron.',
-                        'They are challenged by a mysterious masked competitor.',
-                        'They receive magical enhancements for the competition.',
-                        'They face trials that test their teamwork.',
-                        'They participate in a storytelling contest.',
-                        'They win the tournament and gain fame.',
-                        'They choose to share their prize with the less fortunate.',
-                        'They are invited to join an elite order of champions.',
+                        'Archery contests begin; arrows hum like bees in summer.',
+                        'A grand melee erupts; shields clash in a storm of bronze.',
+                        'A timed puzzle tests wits under pressure and jeering crowds.',
+                        'You form alliances—temporary, useful, and dangerous.',
+                        'A sabotage attempt is uncovered; honor demands response.',
+                        'A moral trial appears: win unfairly, or lose cleanly.',
+                        'Magical duels crack the arena stones with controlled lightning.',
+                        'The crowd roars at exceptional skill; fame tastes like iron.',
+                        'An obstacle course punishes arrogance and rewards teamwork.',
+                        'Bribes are offered to throw a match—gold whispering like snakes.',
+                        'A feast with dignitaries reveals politics sharper than spears.',
+                        'You uncover a plot to rig outcomes; the judges pretend not to see.',
+                        'A noble patron offers support… for a price later.',
+                        'A masked competitor challenges you—silent, skilled, unsettling.',
+                        'A priest offers “enhancements” that feel like curses in perfume.',
+                        'Trials demand teamwork; lone heroes fail loudly.',
+                        'A storytelling contest wins hearts—sometimes more useful than victory.',
+                        'You win the games, and the gods feel suddenly very close.',
+                        'You share prize with the poor; goodwill becomes a shield.',
+                        'An elite order invites you—glory’s door opens, and so does its trap.',
                     ],
                 },
                 {
-                    'name': 'Desert Caravan',
-                    'description': 'Your guild escorts a caravan across a perilous desert.',
+                    'name': 'Caravan of Helios',
+                    'description': 'Your guild escorts a sun-baked caravan across a perilous desert where mirages speak and sand devours roads.',
                     'events': [
-                        'They fend off raiders attacking the caravan.',
-                        'They navigate a sandstorm that obscures the path.',
-                        'They find an oasis and replenish supplies.',
-                        'They negotiate with desert nomads.',
-                        'They uncover ancient ruins buried in the sand.',
-                        'They encounter a mythical sandworm.',
-                        'They solve a conflict between caravan members.',
-                        'They survive extreme temperatures and scarce resources.',
-                        'They protect the caravan from nocturnal predators.',
-                        'They discover a hidden cache of treasure.',
-                        'They are guided by the stars when maps fail.',
-                        'They tell tales around the campfire.',
-                        'They avert a crisis when water supplies run low.',
-                        'They help a lost traveler find their way.',
-                        'They face a moral choice involving scarce resources.',
-                        'They experience a mirage that nearly leads them astray.',
-                        'They find ancient writings that tell of lost civilizations.',
-                        'They reach their destination against all odds.',
-                        'They are rewarded generously by the caravan leader.',
-                        'They establish new trade routes for future prosperity.',
+                        'Raiders strike at dusk; you form a shieldwall around the wagons.',
+                        'A sandstorm erases the horizon; the world becomes a bowl of dust.',
+                        'You find an oasis and ration water like it’s sacred wine.',
+                        'Desert nomads offer guidance—if you respect their laws.',
+                        'You uncover ruins buried in sand—columns like broken teeth.',
+                        'A mythical sandworm moves beneath you; the ground ripples alive.',
+                        'A dispute among merchants threatens to split the caravan.',
+                        'Heat tests endurance; you learn the value of shade and patience.',
+                        'Nocturnal predators circle the camp, eyes like embers.',
+                        'A hidden cache of treasure is found—temptation dressed as luck.',
+                        'Maps fail; stars become your only honest guide.',
+                        'Around the fire, tales are traded like currency.',
+                        'Water runs low; you avert panic with discipline and trust.',
+                        'You guide a lost traveler back—earning a blessing and a rumor.',
+                        'A moral choice: who drinks first when there isn’t enough?',
+                        'A mirage nearly leads you to doom; you snap out of it together.',
+                        'Ancient writing tells of a fallen city swallowed by pride and sand.',
+                        'You reach your destination; relief feels like a second life.',
+                        'The caravan leader rewards you generously—coin and connections.',
+                        'New trade routes are forged; the desert remembers your names.',
                     ],
                 },
                 {
-                    'name': 'Oceanic Odyssey',
-                    'description': 'Your guild sets sail to explore uncharted waters and discover hidden islands.',
+                    'name': 'Odyssey of Poseidon',
+                    'description': 'Your guild sails beyond known waters to chart hidden isles where monsters, nymphs, and old gods still linger.',
                     'events': [
-                        'They discover an island inhabited by friendly giants.',
-                        'A siren\'s song lures them towards dangerous rocks.',
-                        'They find a message in a bottle that leads to treasure.',
-                        'They help a stranded sea creature return to its family.',
-                        'They navigate through a maze of whirlpools.',
-                        'A ghost ship sails alongside them, offering cryptic warnings.',
-                        'They encounter a floating market with exotic goods.',
-                        'A stowaway is found onboard and shares valuable information.',
-                        'They witness a rare celestial event over the ocean.',
-                        'They are challenged to a race by a rival crew.',
-                        'They rescue sailors from a shipwreck.',
-                        'A water elemental tests their worthiness.',
-                        'They find an underwater cave filled with pearls.',
-                        'They must navigate using only the stars after instruments fail.',
-                        'A member befriends a dolphin that guides them.',
-                        'They survive a battle with pirates seeking the same treasure.',
-                        'They sail through a sea of bioluminescent creatures.',
-                        'They encounter a massive sea turtle that offers wisdom.',
-                        'They help to calm a raging storm with magical artifacts.',
-                        'They discover an island that appears only once every century.',
+                        'You discover an island of gentle giants who trade stonecraft for song.',
+                        'A siren’s hymn lures you toward jagged rocks; you plug ears and press on.',
+                        'A message in a bottle points toward treasure—and danger.',
+                        'You help a stranded sea-creature return home; it leaves a pearl as thanks.',
+                        'A maze of whirlpools forces you to choose paths like a riddle.',
+                        'A ghost ship sails beside you, offering warnings in dead languages.',
+                        'A floating market appears at dawn; it’s gone by noon.',
+                        'A stowaway is found; their information is valuable and suspicious.',
+                        'A rare celestial event crowns the sea in silver light.',
+                        'A rival crew challenges you to a race—pride with oars.',
+                        'You rescue sailors from a wreck; gratitude buys future help.',
+                        'A water spirit tests your worth: “Do you take, or do you tend?”',
+                        'An underwater cave yields pearls, but something watches from within.',
+                        'Instruments fail; you navigate by stars and instinct.',
+                        'A dolphin guides you through reefs like a friendly omen.',
+                        'Pirates attack; you defend what’s yours with clean fury.',
+                        'You sail through bioluminescent waters—stars beneath your keel.',
+                        'A massive sea turtle surfaces and offers slow, stubborn wisdom.',
+                        'You calm a raging storm with an artifact that smells of old temples.',
+                        'You find an island that appears only once a century—and you were on time.',
                     ],
                 },
-                # Include all other adventure types and their events here
-                # (As in previous messages)
             ]
+
 
             # Select a random adventure type
             adventure_type = random.choice(adventure_types)
 
             # Calculate adventure time based on difficulty
             time = timedelta(hours=difficulty * 0.05)
+
+            # Format time for display - handle days properly
+            def format_timedelta(td):
+                total_seconds = int(td.total_seconds())
+                days = total_seconds // 86400
+                hours = (total_seconds % 86400) // 3600
+                minutes = (total_seconds % 3600) // 60
+                seconds = total_seconds % 60
+                
+                parts = []
+                if days > 0:
+                    parts.append(f"{days}d")
+                if hours > 0 or days > 0:  # Show hours if there are any, or if showing days
+                    parts.append(f"{hours}h")
+                if minutes > 0 or hours > 0 or days > 0:  # Show minutes if there are any, or if showing hours/days
+                    parts.append(f"{minutes}m")
+                if seconds > 0 and days == 0:  # Only show seconds if not showing days
+                    parts.append(f"{seconds}s")
+                
+                return " ".join(parts) if parts else "0s"
+
+            formatted_time = format_timedelta(time)
 
             # Start the guild adventure with the selected adventure type
             await self.bot.start_guild_adventure(guild["id"], difficulty, time, adventure_type)
@@ -1896,7 +1954,7 @@ class Guild(commands.Cog):
             )
             embed.add_field(
                 name="Estimated Time",
-                value=f"**{time}**",
+                value=f"**{formatted_time}**",
                 inline=True
             )
             embed.set_footer(text="Good luck, adventurers!")
@@ -1934,8 +1992,6 @@ class Guild(commands.Cog):
             error_message += traceback.format_exc()
             await ctx.send(error_message)
             print(error_message)
-
-
 
     @has_guild()
     @guild.command(brief=_("View your guild adventure's status"))
@@ -2102,9 +2158,29 @@ class Guild(commands.Cog):
 
                     # Ensure each field has 1024 or fewer characters
                     if xp_summary:
-                        # Split into chunks to ensure no field exceeds 1024 characters
-                        chunk_size = 1024
-                        chunks = [xp_summary[i:i + chunk_size] for i in range(0, len(xp_summary), chunk_size)]
+                        # Join the XP summary into a single string
+                        xp_text = "\n".join(xp_summary)
+                        
+                        # Split into chunks to ensure no field exceeds 900 characters (safe limit)
+                        chunk_size = 900
+                        chunks = []
+                        current_chunk = ""
+                        
+                        for line in xp_summary:
+                            # If adding this line would exceed the limit, start a new chunk
+                            # This ensures we don't break in the middle of a user's XP entry
+                            if len(current_chunk) + len(line) + 1 > chunk_size:
+                                if current_chunk:
+                                    chunks.append(current_chunk.strip())
+                                current_chunk = line
+                            else:
+                                current_chunk += "\n" + line if current_chunk else line
+                        
+                        # Add the last chunk if it exists
+                        if current_chunk:
+                            chunks.append(current_chunk.strip())
+                        
+                        # Add fields for each chunk
                         for i, chunk in enumerate(chunks, 1):
                             xp_embed.add_field(
                                 name=f"XP Gains (Part {i})",
@@ -2161,13 +2237,35 @@ class Guild(commands.Cog):
 
 
             else:
+                # Format time for display - handle timedelta properly
+                def format_timedelta_display(td):
+                    total_seconds = int(td.total_seconds())
+                    days = total_seconds // 86400
+                    hours = (total_seconds % 86400) // 3600
+                    minutes = (total_seconds % 3600) // 60
+                    seconds = total_seconds % 60
+                    
+                    parts = []
+                    if days > 0:
+                        parts.append(f"{days}d")
+                    if hours > 0 or days > 0:  # Show hours if there are any, or if showing days
+                        parts.append(f"{hours}h")
+                    if minutes > 0 or hours > 0 or days > 0:  # Show minutes if there are any, or if showing hours/days
+                        parts.append(f"{minutes}m")
+                    if seconds > 0 and days == 0:  # Only show seconds if not showing days
+                        parts.append(f"{seconds}s")
+                    
+                    return " ".join(parts) if parts else "0s"
+
+                formatted_remain = format_timedelta_display(remain_time)
+                
                 await ctx.send(
                     _(
                         "Your guild is currently on an adventure: **{adventure_name}**.\n"
                         "Time remaining: `{remain}`"
                     ).format(
                         adventure_name=adventure_type['name'],
-                        remain=str(remain_time).split(".")[0],
+                        remain=formatted_remain,
                     )
                 )
         except Exception as e:
@@ -2175,7 +2273,7 @@ class Guild(commands.Cog):
             error_message = f"Error occurred: {e}\n"
             error_message += traceback.format_exc()
 
-            print(error_message)
+            await ctx.send(error_message)
 
     @has_guild()
     @guild.command(
@@ -2204,130 +2302,38 @@ class Guild(commands.Cog):
             )
             timers = f"{timers}\n{text}"
         if adv and not adv[2]:
+            # Format the time to make it more readable
+            remain_time = adv[1]
+            
+            # Format timedelta properly
+            def format_timedelta_display(td):
+                total_seconds = int(td.total_seconds())
+                days = total_seconds // 86400
+                hours = (total_seconds % 86400) // 3600
+                minutes = (total_seconds % 3600) // 60
+                seconds = total_seconds % 60
+                
+                parts = []
+                if days > 0:
+                    parts.append(f"{days}d")
+                if hours > 0 or days > 0:  # Show hours if there are any, or if showing days
+                    parts.append(f"{hours}h")
+                if minutes > 0 or hours > 0 or days > 0:  # Show minutes if there are any, or if showing hours/days
+                    parts.append(f"{minutes}m")
+                if seconds > 0 and days == 0:  # Only show seconds if not showing days
+                    parts.append(f"{seconds}s")
+                
+                return " ".join(parts) if parts else "0s"
+            
+            formatted_time = format_timedelta_display(remain_time)
+            
             text = _("Guild adventure is running and will be done after {time}").format(
-                time=adv[1]
+                time=formatted_time
             )
             timers = f"{timers}\n{text}"
         await ctx.send(f"```{timers}```")
 
-    '''
-    @has_guild()
-    @guild.command(brief=_("Show your progress in the ongoing event.")
-    @locale_doc
-    async def event(self, ctx):
-        _(
-            """Shows how many Pumpkins your guild currently has. Prizes can be claimed by the guild leader using `{prefix}guild claim <ID>`.
-            Your guild can gain more pumpkins from guild adventures."""
-        )
-        pumpkins = await self.bot.pool.fetchval(
-            'SELECT pumpkins FROM guild WHERE "id"=$1;', ctx.character_data["guild"]
-        )
-        val = int(pumpkins / 50000 * 10)
-        percent = round(pumpkins / 50000 * 100, 2)
-        if val > 10:
-            val = 10
-        progress = f"{'▣' * val}{'▢' * (10 - val)}"
-        await ctx.send(
-            _(
-                """\
-**Halloween 2019 🎃 👻**
-
-*Progress for best reward*
-{bar} {percent}% {pumpkins}/50,000 🎃
-
-*Prices for claiming*
-`(ID for {prefix}guild claim) Amount 🎃: Reward`
-**(1)** 1000 🎃: **$5000** Guild Bank Fill
-**(2)** 5000 🎃: **$27500** Guild Bank Fill
-**(3)** 10000 🎃: **$60000** Guild Bank Fill
-**(4)** 25000 🎃: **$175000** Guild Bank Fill
-
-**(5)** 37500 🎃: Halloween 2019 Guild Badge #1
-**(6)** 50000 🎃: Halloween 2019 Guild Badge #2
-
-**(7)** 10000 🎃: 2 additional guild member slots
-**(8)** 20000 🎃: 5 additional guild member slots
-**(9)** 35000 🎃: 8 additional guild member slots
-**(10)** 50000 🎃: 15 additional guild member slots
-*Please note that these will be **gone** if the leader uses `{prefix}updateguild`, so choose carefully*"""
-            ).format(
-                bar=progress, percent=percent, pumpkins=pumpkins, prefix=ctx.clean_prefix
-            )
-        )
-
-    @is_guild_leader()
-    @guild.command(brief=_("Claim an event reward"))
-    @locale_doc
-    async def claim(self, ctx, reward_id: IntFromTo(1, 10)):
-        _(
-            """`<reward_id>` - The reward's ID to claim, must be a number from 1 to 10.
-
-            Claim an reward for your guild. These rewards can be money added to the guild bank, additional guild member slots or special guild badges.
-            Rewards can be claimed multiple times. To see the full list of rewards, use `{prefix}guild event`.
-
-            Only guild leaders can use this command."""
-        )
-        reward = [
-            {"price": 1000, "reward": "money", "data": 5000},
-            {"price": 5000, "reward": "money", "data": 27500},
-            {"price": 10000, "reward": "money", "data": 60000},
-            {"price": 25000, "reward": "money", "data": 175000},
-            {
-                "price": 37500,
-                "reward": "badge",
-                "data": "https://idlerpg.xyz/halloween_2019_1.png",
-            },
-            {
-                "price": 50000,
-                "reward": "badge",
-                "data": "https://idlerpg.xyz/halloween_2019_2.png",
-            },
-            {"price": 10000, "reward": "members", "data": 2},
-            {"price": 20000, "reward": "members", "data": 5},
-            {"price": 35000, "reward": "members", "data": 8},
-            {"price": 50000, "reward": "members", "data": 15},
-        ][reward_id - 1]
-        async with self.bot.pool.acquire() as conn:
-            if (
-                await conn.fetchval(
-                    'SELECT pumpkins FROM guild WHERE "id"=$1;',
-                    ctx.character_data["guild"],
-                )
-                < reward["price"]
-            ):
-                return await ctx.send(
-                    _("You have insufficient pumpkins for this reward.")
-                )
-            await conn.execute(
-                'UPDATE guild SET "pumpkins"="pumpkins"-$1 WHERE "id"=$2;',
-                reward["price"],
-                ctx.character_data["guild"],
-            )
-            if reward["reward"] == "money":
-                await conn.execute(
-                    'UPDATE guild SET "money"="money"+$1 WHERE "id"=$2;',
-                    reward["data"],
-                    ctx.character_data["guild"],
-                )
-            elif reward["reward"] == "badge":
-                await conn.execute(
-                    'UPDATE guild SET "badges"=array_append("badges", $1) WHERE "id"=$2;',
-                    reward["data"],
-                    ctx.character_data["guild"],
-                )
-            elif reward["reward"] == "members":
-                await conn.execute(
-                    'UPDATE guild SET "memberlimit"="memberlimit"+$1 WHERE "id"=$2;',
-                    reward["data"],
-                    ctx.character_data["guild"],
-                )
-        await ctx.send(
-            _("Reward successfully claimed for **{amount}** 🎃!").format(
-                amount=reward["price"]
-            )
-        )
-        '''
-
 
 async def setup(bot):
     await bot.add_cog(Guild(bot))
+

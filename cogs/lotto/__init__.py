@@ -1,7 +1,10 @@
+
+
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
 Copyright (C) 2023-2024 Lunar (PrototypeX37)
+Copyright (C) 2025 Danaelis
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,426 +19,243 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
+
+
 import asyncio
 import datetime
-import decimal
+from dataclasses import dataclass
+from typing import Optional, List
 
-from collections import deque
-from decimal import Decimal
-
-import discord
-import random as random
-from discord.enums import ButtonStyle
-from discord.ext import commands
-from discord.http import handle_message_parameters
-from discord.ui.button import Button
-
-from classes.classes import Ranger, Reaper
-from classes.classes import from_string as class_from_string
-from classes.converters import IntGreaterThan, MemberWithCharacter
-from cogs.shard_communication import user_on_cooldown as user_cooldown
-from utils import random as randomm
-from utils.checks import has_char, has_money, is_gm
-from utils.i18n import _, locale_doc
-from utils.joins import SingleJoinView
 import asyncpg
+import discord
+from discord.ext import commands
+from discord import Interaction
+from discord.enums import ButtonStyle
+from discord.ui import View, Button
+from discord.http import handle_message_parameters
 
+from classes.converters import IntGreaterThan, MemberWithCharacter
+from utils.checks import has_char, is_gm
+from utils.i18n import _, locale_doc
 
-# Assuming you have a database connection pool (self.bot.pool) already set up
+# ----------------------
+# Configuration
+# ----------------------
+LOTTERY_CHANNEL_ID: int = 1404885918959140985
+LOTTERY_PING_ROLE_ID: int = 1405909212424306729
+HOUSE_CUT_PCT: int = 0
+MONEY_TABLE = 'profile'
+USER_COLUMN = 'user'
+MONEY_COLUMN = 'money'
 
+# ----------------------
+# Data helpers
+# ----------------------
+@dataclass
+class LotterySettings:
+    max_tickets: int
+    ticket_cost: int
+
+async def fetch_settings(conn: asyncpg.Connection) -> Optional[LotterySettings]:
+    row = await conn.fetchrow("SELECT maxtickets, ticketcost FROM lottodata")
+    if not row:
+        return None
+    return LotterySettings(int(row['maxtickets']), int(row['ticketcost']))
+
+async def fetch_user_tickets(conn: asyncpg.Connection, user_id: int) -> int:
+    val = await conn.fetchval("SELECT tickets FROM lottery WHERE id=$1", user_id)
+    return int(val or 0)
+
+async def sum_total_tickets(conn: asyncpg.Connection) -> int:
+    val = await conn.fetchval("SELECT COALESCE(SUM(tickets),0) FROM lottery")
+    return int(val or 0)
+
+async def upsert_user_tickets(conn: asyncpg.Connection, user_id: int, delta: int) -> int:
+    current = await fetch_user_tickets(conn, user_id)
+    new_amount = current + int(delta)
+    if current == 0 and delta > 0:
+        await conn.execute("INSERT INTO lottery (id, tickets) VALUES ($1,$2)", user_id, new_amount)
+    else:
+        await conn.execute("UPDATE lottery SET tickets=$1 WHERE id=$2", new_amount, user_id)
+    return new_amount
+
+async def credit_user_money(conn: asyncpg.Connection, user_id: int, amount: int):
+    updated = await conn.fetchval(
+        f'UPDATE "{MONEY_TABLE}" SET "{MONEY_COLUMN}"=COALESCE("{MONEY_COLUMN}",0)+$1 WHERE "{USER_COLUMN}"=$2 RETURNING 1;',
+        amount, user_id)
+    if updated is None:
+        try:
+            await conn.execute(f'INSERT INTO "{MONEY_TABLE}" ("{USER_COLUMN}","{MONEY_COLUMN}") VALUES ($1,0);', user_id)
+        except Exception:
+            pass
+        await conn.execute(
+            f'UPDATE "{MONEY_TABLE}" SET "{MONEY_COLUMN}"=COALESCE("{MONEY_COLUMN}",0)+$1 WHERE "{USER_COLUMN}"=$2;',
+            amount, user_id)
+
+async def debit_user_money(conn: asyncpg.Connection, user_id: int, amount: int):
+    await conn.execute(
+        f'UPDATE "{MONEY_TABLE}" SET "{MONEY_COLUMN}"=COALESCE("{MONEY_COLUMN}",0)-$1 WHERE "{USER_COLUMN}"=$2;',
+        amount, user_id)
+
+# ----------------------
+# Confirmation view
+# ----------------------
+class ConfirmView(View):
+    def __init__(self, author_id: int, timeout: float = 30.0):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+        self.value: Optional[bool] = None
+
+    async def interaction_check(self, interaction: Interaction) -> bool:
+        return interaction.user and interaction.user.id == self.author_id
+
+    @discord.ui.button(label=_('Confirm'), style=ButtonStyle.success)
+    async def confirm(self, interaction: Interaction, button: Button):
+        self.value = True
+        await interaction.response.defer()
+        self.stop()
+
+    @discord.ui.button(label=_('Cancel'), style=ButtonStyle.danger)
+    async def cancel(self, interaction: Interaction, button: Button):
+        self.value = False
+        await interaction.response.defer()
+        self.stop()
+
+# ----------------------
+# Cog
+# ----------------------
 class Lottery(commands.Cog):
-    def __init__(self, bot):
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    # GM: Start lotto
     @commands.command(hidden=True)
     @is_gm()
-    async def gmlotto(self, ctx, amount: int, tickets: int):
-        # Update the database with the new lottery settings
+    async def gmlotto(self, ctx, amount: Optional[int]=None, tickets: Optional[int]=None):
+        if amount is None or tickets is None:
+            return await ctx.send('Usage: `$gmlotto <ticket_cost> <max_tickets>`')
+        amount=int(amount); tickets=int(tickets)
+        async with self.bot.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute('DELETE FROM lottodata')
+                await conn.execute('INSERT INTO lottodata(maxtickets,ticketcost) VALUES($1,$2)', tickets, amount)
+        await ctx.send(f'Lottery updated: ticket ${amount}, max {tickets}')
+        channel=self.bot.get_channel(LOTTERY_CHANNEL_ID)
+        if channel:
+            embed=discord.Embed(title='Weekly Lotto Started!',
+                description=(f'**Ticket Cost:** ${amount}\n'
+                             f'**Max Tickets per Player:** {tickets}\n\n'
+                             'Use:\n'
+                             '`$lotto` — view info\n'
+                             '`$lotto buy <num>` — buy tickets'),
+                color=discord.Color.green())
+            await channel.send(embed=embed)
 
-        try:
-            async with self.bot.pool.acquire() as connection:
-                # Check if data already exists
-                existing_data = await connection.fetchrow("SELECT 1 FROM lottodata LIMIT 1")
-
-                if existing_data:
-                    # If data exists, remove it
-                    await connection.execute("DELETE FROM lottodata")
-
-                # Insert the new data
-                await connection.execute(
-                    "INSERT INTO lottodata (maxtickets, ticketcost) VALUES ($1, $2)",
-                    tickets, amount
-                )
-
-            await ctx.send(
-                f"Lottery settings updated. Ticket cost: **${amount}**, Max tickets per player: **{tickets}**")
-
-            # Send a message to the specified channel
-            lottery_channel_id = 1140207396459925596  # Replace with your desired channel ID
-            lottery_channel = self.bot.get_channel(lottery_channel_id)
-
-            if lottery_channel:
-                embed = discord.Embed(
-                    title="Weekly Lotto Started!",
-                    description=f"**Ticket Cost:** ${amount}\n**Max Tickets per Player:** {tickets}\n\nTo participate, use the commands:\n`$lotto` - View lottery information\n`$lotto buy [num_tickets]` - Purchase lottery tickets",
-                    color=0x00ff00
-                )
-                await lottery_channel.send(embed=embed)
-
-                # Tag the specified role after sending the embed
-                role_id = 1147199558766567559  # Replace with your desired role ID
-                role = ctx.guild.get_role(role_id)  # Retrieve the role object using role ID
-                if role:  # Check if role exists
-                    role_mention = role.mention  # Get the mention string of the role
-                    await ctx.send(f"{role_mention} Lottery announcement sent!")  # Send message with role mention
-                else:
-                    await ctx.send(
-                        "Error: Role not found. Please check the role ID.")  # Send error message if role not found
-
-
-            else:
-                await ctx.send("Error: Lottery channel not found. Please check the channel ID.")
-        except Exception as e:
-            await ctx.send(f"Error: {e}")
-
-    @commands.command(
-        hidden=True, aliases=["lt"], brief=_("Shows who owns how many tickets")
-    )
-    @is_gm()
-    async def lottotickets(self, ctx):
-        async with self.bot.pool.acquire() as connection:
-            rows = await connection.fetch('SELECT * FROM lottery')
-
-        results = []
-        total_tickets = 0  # Initialize total tickets counter
-        for row in rows:
-            user_id = row['id']
-            tickets = row['tickets']
-            user = self.bot.get_user(user_id)
-            display_name = user.display_name if user else f'Unknown User ({user_id})'
-            results.append(f'{display_name}: {tickets} tickets')
-            total_tickets += tickets  # Add tickets for the current user to total
-
-        results.append(f'============')  # Append total tickets to results
-        results.append(f'Total Tickets: {total_tickets}')  # Append total tickets to results
-
-        await ctx.send('\n'.join(results))
-
-
-    @commands.command(hidden=True)
-    @has_char()
-    @is_gm()
-    @has_char()
-    async def gmtickets(self, ctx, other: MemberWithCharacter, num_tickets: int = None):
-        try:
-            egg = True
-            if egg:
-                # Check if there is existing lottery data
-                async with self.bot.pool.acquire() as connection:
-                    existing_data = await connection.fetchrow("SELECT * FROM lottodata")
-                    user_tickets = await connection.fetchval("SELECT tickets FROM lottery WHERE id = $1",
-                                                             other.id)
-
-                if existing_data:
-                    # Fetch the current lottery settings from the database
-                    async with self.bot.pool.acquire() as connection:
-                        row = await connection.fetchrow("SELECT maxtickets, ticketcost FROM lottodata")
-
-                    if row:
-                        max_tickets = row['maxtickets']
-                        ticket_cost = row['ticketcost']
-                        usertickets = user_tickets or 0
-                        maxtickets = (user_tickets or 0) + num_tickets
-
-                        # Check if the user is trying to buy more tickets than the maximum limit
-
-                        if maxtickets > max_tickets:
-                            return await ctx.send(
-                                f"You cannot purchase more than {max_tickets} tickets total. You have {usertickets}.")
-
-                        if num_tickets is None:
-                            await ctx.send("Please provide a valid number of tickets to purchase.")
-                        else:
-                            # Fetch the current number of tickets the user has
-                            async with self.bot.pool.acquire() as connection:
-                                user_id = other.id
-                                user_tickets = await connection.fetchval("SELECT tickets FROM lottery WHERE id = $1",
-                                                                         user_id)
-
-                            # Calculate the total cost
-                            total_cost = num_tickets * ticket_cost
-                            #await ctx.send(f"{total_cost}")
-
-                            updated_tickets = 0  # Initialize the variable outside the if block
-
-
-
-                            if egg:
-                                # Execute buy logic if the user confirms
-                                async with self.bot.pool.acquire() as connection:
-                                    # If the user doesn't exist in the table, insert a new row
-                                    if user_tickets is None:
-                                        await connection.execute("INSERT INTO lottery (id, tickets) VALUES ($1, $2)",
-                                                                 user_id, num_tickets)
-                                    else:
-                                        # Update the number of tickets if the user already exists
-                                        await connection.execute("UPDATE lottery SET tickets = $1 WHERE id = $2",
-                                                                 user_tickets + num_tickets, user_id)
-
-                                        # Fetch the updated number of tickets
-                                    updated_tickets = await connection.fetchval(
-                                        "SELECT tickets FROM lottery WHERE id = $1", user_id)
-
-                                await ctx.send(
-                                    f"You have successfully gave {user_id} {num_tickets} tickets for the lottery. They now have {updated_tickets} tickets.")
-                                with handle_message_parameters(
-                                        content="**{gm}** added tickets to **{other}**.\n\nReason: *{reason}*".format(
-                                            gm=ctx.author,
-                                            other=other,
-                                            reason=f"<{ctx.message.jump_url}>",
-                                        )
-                                ) as params:
-                                    await self.bot.http.send_message(
-                                        self.bot.config.game.gm_log_channel,
-                                        params=params,
-                                    )
-                            else:
-                                await ctx.send("Purchase cancelled.")
-                    else:
-                        await ctx.send("No lottery settings found. Use $gmlotto to set them.")
-                else:
-                    await ctx.send("No lottery is currently running. Use $gmlotto to start a new lottery.")
-            else:
-                # Fetch and display lottery settings
-                async with self.bot.pool.acquire() as connection:
-                    row = await connection.fetchrow("SELECT maxtickets, ticketcost FROM lottodata")
-
-                if row:
-                    return
-
-                else:
-                    await ctx.send("No lottery settings found. Use $gmlotto to set them.")
-        except Exception as e:
-            await ctx.send(f"Error: {e}")
-
+    # Player lotto
     @commands.command()
     @has_char()
     @locale_doc
-    async def lotto(self, ctx, subcommand=None, num_tickets: int = None):
+    async def lotto(self, ctx, subcommand: Optional[str]=None, num_tickets: Optional[int]=None):
         _(
-            """Participate in the lottery by buying tickets or viewing lottery information.
+            """Participate in the lottery by buying tickets or viewing information.
 
-        **Usage:**
-        - `$lotto`: View current lottery settings and your tickets.
-        - `$lotto buy <num_tickets>`: Purchase lottery tickets.
+**Usage:**
+- `$lotto`: View current lottery settings and your ticket count.
+- `$lotto buy <num_tickets>`: Purchase lottery tickets.
 
-        **Parameters:**
-        - `[subcommand]`: Optional subcommand. Currently, only `'buy'` is supported.
-        - `[num_tickets]`: Number of tickets to buy when using the `'buy'` subcommand. Must be a positive integer.
-
-        **Details:**
-        - **Buying Tickets:**
-          - Use `$lotto buy <num_tickets>` to purchase lottery tickets.
-          - Each ticket costs a set amount defined in the current lottery settings.
-          - There is a maximum number of tickets you can purchase per player.
-          - The total cost is calculated as `num_tickets * ticket_cost`.
-          - You will be prompted for confirmation before the purchase is completed.
-          - If you do not have enough money, the purchase will be canceled.
-
-        - **Viewing Lottery Information:**
-          - Simply use `$lotto` to view the current lottery settings, your ticket count, total tickets sold, and the current prize pool.
-
-        **Notes:**
-        - If no lottery is currently running, you will be informed.
-        - **Game Masters** can start a new lottery using the `$gmlotto` command.
-        """
+**Notes:** Max tickets per player apply; you must have enough money to buy.
+"""
         )
-
         try:
-            if subcommand == 'buy':
-                # Check if there is existing lottery data
-                async with self.bot.pool.acquire() as connection:
-                    existing_data = await connection.fetchrow("SELECT * FROM lottodata")
-                    user_tickets = await connection.fetchval("SELECT tickets FROM lottery WHERE id = $1",
-                                                             ctx.author.id)
+            async with self.bot.pool.acquire() as conn:
+                settings = await fetch_settings(conn)
+            if not settings:
+                return await ctx.send('No lottery is currently running.')
 
-                if existing_data:
-                    # Fetch the current lottery settings from the database
-                    async with self.bot.pool.acquire() as connection:
-                        row = await connection.fetchrow("SELECT maxtickets, ticketcost FROM lottodata")
-
-                    if row:
-                        max_tickets = row['maxtickets']
-                        ticket_cost = row['ticketcost']
-                        usertickets = user_tickets or 0
-                        maxtickets = (user_tickets or 0) + num_tickets
-
-                        # Check if the user is trying to buy more tickets than the maximum limit
-
-                        if maxtickets > max_tickets:
-                            return await ctx.send(
-                                f"You cannot purchase more than {max_tickets} tickets total. You have {usertickets}.")
-
-                        if num_tickets is None or num_tickets <= 0:
-                            await ctx.send("Please provide a valid number of tickets to purchase.")
-                        elif num_tickets > max_tickets:
-                            await ctx.send(f"You cannot purchase more than {max_tickets} tickets total.")
-                        else:
-                            # Fetch the current number of tickets the user has
-                            async with self.bot.pool.acquire() as connection:
-                                user_id = ctx.author.id
-                                user_tickets = await connection.fetchval("SELECT tickets FROM lottery WHERE id = $1",
-                                                                         user_id)
-
-                            # Calculate the total cost
-                            total_cost = num_tickets * ticket_cost
-                            #await ctx.send(f"{total_cost}")
-
-                            updated_tickets = 0  # Initialize the variable outside the if block
-
-                            if ctx.character_data["money"] < total_cost:
-                                return await ctx.send(_("You are too poor."))
-
-                            # Ask for confirmation
-                            confirmation_message = (
-                                f"You are about to purchase **{num_tickets}** tickets for a total cost of **${total_cost}**.\n"
-                                f"Your current ticket count is **{user_tickets or 0}**. Do you want to proceed?"
-                            )
-
-                            if await ctx.confirm(confirmation_message):
-                                # Execute buy logic if the user confirms
-                                if ctx.character_data["money"] < total_cost:
-                                    return await ctx.send(_("You are too poor."))
-                                async with self.bot.pool.acquire() as connection:
-                                    await self.bot.pool.execute(
-                                        'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
-                                        total_cost,
-                                        ctx.author.id,
-                                    )
-                                async with self.bot.pool.acquire() as connection:
-                                    # If the user doesn't exist in the table, insert a new row
-                                    if user_tickets is None:
-                                        await connection.execute("INSERT INTO lottery (id, tickets) VALUES ($1, $2)",
-                                                                 user_id, num_tickets)
-                                    else:
-                                        # Update the number of tickets if the user already exists
-                                        await connection.execute("UPDATE lottery SET tickets = $1 WHERE id = $2",
-                                                                 user_tickets + num_tickets, user_id)
-
-                                        # Fetch the updated number of tickets
-                                    updated_tickets = await connection.fetchval(
-                                        "SELECT tickets FROM lottery WHERE id = $1", user_id)
-
-                                await ctx.send(
-                                    f"You have successfully purchased {num_tickets} tickets for the lottery. You now have {updated_tickets} tickets.")
-                            else:
-                                await ctx.send("Purchase cancelled.")
-                    else:
-                        await ctx.send("No lottery settings found. Use $gmlotto to set them.")
-                else:
-                    await ctx.send("No lottery is currently running. Use $gmlotto to start a new lottery.")
+            if (subcommand or '').lower()=='buy':
+                if not num_tickets or num_tickets<=0:
+                    return await ctx.send('Please provide a positive number of tickets.')
+                async with self.bot.pool.acquire() as conn:
+                    current=await fetch_user_tickets(conn, ctx.author.id)
+                if current+num_tickets>settings.max_tickets:
+                    return await ctx.send(f'Max {settings.max_tickets} tickets; you have {current}.')
+                total_cost=num_tickets*settings.ticket_cost
+                if ctx.character_data['money']<total_cost:
+                    return await ctx.send(_('You are too poor.'))
+                view=ConfirmView(author_id=ctx.author.id)
+                msg=await ctx.send(f'Buy **{num_tickets}** tickets for **${total_cost}**? You have **{current}** now.',view=view)
+                await view.wait(); await msg.edit(view=None)
+                if not view.value:
+                    return await ctx.send('Purchase cancelled.')
+                async with self.bot.pool.acquire() as conn:
+                    async with conn.transaction():
+                        await debit_user_money(conn, ctx.author.id, total_cost)
+                        updated=await upsert_user_tickets(conn, ctx.author.id, num_tickets)
+                await ctx.send(f'You purchased {num_tickets} tickets. You now have **{updated}**.')
             else:
-                # Fetch and display lottery settings
-                async with self.bot.pool.acquire() as connection:
-                    row = await connection.fetchrow("SELECT maxtickets, ticketcost FROM lottodata")
-
-                if row:
-                    max_tickets = row['maxtickets']
-                    ticket_cost = row['ticketcost']
-
-                    # Fetch and display user tickets from the lottery table
-                    async with self.bot.pool.acquire() as connection:
-                        user_tickets = await connection.fetch("SELECT id, tickets FROM lottery WHERE id = $1",
-                                                              ctx.author.id)
-
-                    # Fetch the total tickets and calculate the prize pool before releasing the connection
-                    async with self.bot.pool.acquire() as connection:
-                        total_tickets = await connection.fetchval("SELECT SUM(tickets) FROM lottery")
-
-                    # Calculate prize pool
-                    total_tickets = total_tickets or 0
-                    prize_pool = total_tickets * ticket_cost
-
-                    if user_tickets:
-                        tickets_info = "\n".join(
-                            [f"{self.bot.get_user(user['id']).display_name}: {user['tickets']} tickets" for user in
-                             user_tickets])
-                    else:
-                        # If user_tickets is empty, assume the user has 0 tickets
-                        tickets_info = f"{ctx.author.display_name}: 0 tickets"
-
-                    # Construct and send the embed
-                    embed = discord.Embed(title="Lottery Information", color=0x00ff00)
-                    embed.add_field(name="**Current Lottery Settings**",
-                                    value=f"Ticket Cost: ${ticket_cost}\nMax Tickets per Player: {max_tickets}")
-                    embed.add_field(name="**User Tickets**", value=tickets_info, inline=False)
-                    embed.add_field(name="**Total Tickets in the Lottery**", value=total_tickets, inline=False)
-                    embed.add_field(name="**Prize Pool**", value=f"${prize_pool}", inline=False)
-
-                    await ctx.send(embed=embed)
-
-                else:
-                    await ctx.send("No lottery settings found. Use $gmlotto to set them.")
+                async with self.bot.pool.acquire() as conn:
+                    my=await fetch_user_tickets(conn, ctx.author.id)
+                    total=await sum_total_tickets(conn)
+                gross=total*settings.ticket_cost
+                house=(gross*HOUSE_CUT_PCT)//100
+                prize=gross-house
+                embed=discord.Embed(title='Lottery Information',color=discord.Color.green())
+                embed.add_field(name='Ticket Cost',value=f'${settings.ticket_cost}')
+                embed.add_field(name='Max Per Player',value=str(settings.max_tickets))
+                embed.add_field(name='Your Tickets',value=str(my),inline=False)
+                embed.add_field(name='Total Tickets',value=str(total),inline=False)
+                embed.add_field(name='Current Prize Pool',value=f'${prize}',inline=False)
+                await ctx.send(embed=embed)
         except Exception as e:
-            await ctx.send(f"Error: {e}")
+            await ctx.send(f'Error: {e}')
 
-
-
+    # GM Draw
     @commands.command(hidden=True)
     @is_gm()
     async def gmdraw(self, ctx):
-        # Fetch the current lottery settings from the database
-        async with self.bot.pool.acquire() as connection:
-            row = await connection.fetchrow("SELECT maxtickets, ticketcost FROM lottodata")
-
-        if row:
-            max_tickets = row['maxtickets']
-            ticket_cost = row['ticketcost']
-
-            # Fetch all participants and their ticket counts
-            async with self.bot.pool.acquire() as connection:
-                participants = await connection.fetch("SELECT id, tickets FROM lottery")
-
-            if participants:
-                # Create a weighted list for random selection
-                weighted_list = []
-                for participant in participants:
-                    user_id = participant['id']
-                    tickets = participant['tickets']
-                    weighted_list.extend([user_id] * tickets)
-
-                if weighted_list:
-                    # Select a winner randomly from the weighted list
-                    winner_id = random.choice(weighted_list)
-
-                    # Notify the winner
-                    winner = await self.bot.fetch_user(winner_id)
-                    await ctx.send(f"Congratulations to {winner.mention}! You've won the lottery!")
-
-                    # Reset the lottery data
-                    async with self.bot.pool.acquire() as connection:
-                        await connection.execute("DELETE FROM lottodata")
-                        await connection.execute("DELETE FROM lottery")
-
-
-                    await ctx.send("Lottery data has been reset for the next round.")
-                else:
-                    await ctx.send("No participants found. Lotto ended with no winner.")
+        async with self.bot.pool.acquire() as conn:
+            settings=await fetch_settings(conn)
+        if not settings:
+            return await ctx.send('No settings found.')
+        async with self.bot.pool.acquire() as conn:
+            participants=await conn.fetch('SELECT id,tickets FROM lottery')
+        if not participants:
+            async with self.bot.pool.acquire() as conn:
+                await conn.execute('DELETE FROM lottodata')
+            return await ctx.send('No participants.')
+        weighted=[]; total=0
+        for p in participants:
+            t=int(p['tickets'] or 0)
+            total+=t
+            weighted.extend([int(p['id'])]*t)
+        if not weighted:
+            async with self.bot.pool.acquire() as conn:
+                async with conn.transaction():
+                    await conn.execute('DELETE FROM lottodata')
+                    await conn.execute('DELETE FROM lottery')
+            return await ctx.send('No valid tickets.')
+        import random as _r
+        winner_id=_r.choice(weighted)
+        gross=total*settings.ticket_cost; cut=(gross*HOUSE_CUT_PCT)//100; prize=gross-cut
+        try:
+            async with self.bot.pool.acquire() as conn:
+                async with conn.transaction():
+                    await credit_user_money(conn, winner_id, prize)
                     try:
-                        async with self.bot.pool.acquire() as connection:
-                            await connection.execute("DELETE FROM lottodata")
-                    except Exception as e:
-                        pass
-            else:
-                await ctx.send("No participants found. Lotto ended with no winner.")
-                try:
-                    async with self.bot.pool.acquire() as connection:
-                        await connection.execute("DELETE FROM lottodata")
-                except Exception as e:
-                    pass
-        else:
-            await ctx.send("No lottery settings found. Use $gmlotto to set them.")
-
+                        async with conn.transaction():
+                            await conn.execute('INSERT INTO lottery_payouts(winner_id,prize,drawn_at) VALUES($1,$2,NOW())',winner_id,prize)
+                    except Exception: pass
+                    await conn.execute('DELETE FROM lottodata')
+                    await conn.execute('DELETE FROM lottery')
+        except Exception as e:
+            diag=getattr(e,'message',str(e))
+            return await ctx.send(f'Error paying winner: {diag}')
+        try:
+            user=await self.bot.fetch_user(winner_id)
+            mention=user.mention if user else f'<@{winner_id}>'
+        except Exception:
+            mention=f'<@{winner_id}>'
+        await ctx.send(f'🎉 Congratulations {mention}! You’ve won **${prize}**!\n(Tickets: {total}, Cost: ${settings.ticket_cost}, Cut: {HOUSE_CUT_PCT}%)')
 
 async def setup(bot):
     await bot.add_cog(Lottery(bot))

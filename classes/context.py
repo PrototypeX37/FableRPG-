@@ -1,31 +1,12 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-
 from __future__ import annotations
-
 import asyncio
-
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Union
 
 import discord
-
 from discord.ext import commands
 
 from classes.errors import NoChoice
@@ -39,7 +20,7 @@ class Confirmation(discord.ui.View):
     def __init__(
         self,
         text: str,
-        ctx: Context,
+        ctx: "Context",  # forward reference (Context is defined below)
         future: asyncio.Future,
         user: discord.User,
         *args,
@@ -50,11 +31,9 @@ class Confirmation(discord.ui.View):
         self.ctx = ctx
         self.future = future
         self.allowed_user = user
-        self.message: discord.Message | None = None
+        self.message: Optional[discord.Message] = None
 
-    async def start(
-        self,
-    ) -> None:
+    async def start(self) -> None:
         self.message = await self.ctx.send(
             embed=discord.Embed(
                 title=_("Confirmation"),
@@ -65,36 +44,46 @@ class Confirmation(discord.ui.View):
         )
 
     def cleanup(self) -> None:
-        asyncio.create_task(self.message.delete())
+        if self.message:
+            # Fire and forget; ignore if already gone/closed
+            async def _delete():
+                try:
+                    await self.message.delete()
+                except Exception:
+                    pass
+            asyncio.create_task(_delete())
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if self.allowed_user.id == interaction.user.id:
             return True
-        else:
-            asyncio.create_task(
-                interaction.response.send_message(
-                    _("This command was not initiated by you."), ephemeral=True
-                )
+        asyncio.create_task(
+            interaction.response.send_message(
+                _("This command was not initiated by you."), ephemeral=True
             )
-            return False
+        )
+        return False
 
     async def on_timeout(self) -> None:
         self.cleanup()
-        self.future.set_exception(NoChoice(_("You didn't choose anything.")))
+        if not self.future.done():
+            self.future.set_exception(NoChoice(_("You didn't choose anything.")))
 
     @discord.ui.button(emoji="❌", style=discord.ButtonStyle.red, row=0)
-    async def no(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ) -> None:
-        self.future.set_result(False)
+    async def no(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        # Defer to avoid "interaction failed" toast; the message will be deleted anyway.
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+        if not self.future.done():
+            self.future.set_result(False)
         self.stop()
         self.cleanup()
 
     @discord.ui.button(emoji="✔️", style=discord.ButtonStyle.green, row=0)
-    async def yes(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ) -> None:
-        self.future.set_result(True)
+    async def yes(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+        if not self.future.done():
+            self.future.set_result(True)
         self.stop()
         self.cleanup()
 
@@ -102,11 +91,11 @@ class Confirmation(discord.ui.View):
 class Context(commands.Context):
     """
     A custom version of the default Context.
-    We use it to provide a shortcut to the display name and
-    for escaping massmentions in ctx.send.
+    Provides a shortcut to the display name and
+    safely resets cooldowns on declined confirmations.
     """
 
-    bot: Bot
+    bot: "Bot"
 
     @property
     def disp(self) -> str:
@@ -118,22 +107,28 @@ class Context(commands.Context):
     async def confirm(
         self,
         message: str,
-        timeout: int = 20,
-        user: discord.User | discord.Member | None = None,
+        timeout: int = 60,
+        user: Union[discord.User, discord.Member, None] = None,
     ) -> bool:
         future: asyncio.Future[bool] = asyncio.Future()
         await Confirmation(
             message, self, future, user=user or self.author, timeout=timeout
         ).start()
-        confirmed = await future
+
+        try:
+            confirmed = await future
+        except NoChoice:
+            # Timeout -> treat as declined and reset cooldowns
+            confirmed = False
 
         if confirmed:
-            return confirmed
-        else:
-            await self.bot.reset_cooldown(self)
-            if self.command.root_parent:
-                if self.command.root_parent.name == "guild":
-                    await self.bot.reset_guild_cooldown(self)
-                elif self.command.root_parent.name == "alliance":
-                    await self.bot.reset_alliance_cooldown(self)
-            return False
+            return True
+
+        # Reset cooldowns on decline
+        await self.bot.reset_cooldown(self)
+        if self.command and self.command.root_parent:
+            if self.command.root_parent.name == "guild":
+                await self.bot.reset_guild_cooldown(self)
+            elif self.command.root_parent.name == "alliance":
+                await self.bot.reset_alliance_cooldown(self)
+        return False

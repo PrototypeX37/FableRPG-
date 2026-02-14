@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 # battles/types/pvp.py
 import asyncio
 import random
@@ -60,7 +61,10 @@ class PvPBattle(Battle):
     async def start_battle(self):
         """Start the battle"""
         self.started = True
-        self.start_time = datetime.datetime.utcnow()
+        self.start_time = datetime.datetime.now(timezone.utc)
+        
+        # Save initial battle data to database for replay
+        await self.save_battle_to_database()
         
         # For simple battles, we just need to calculate stats once
         if self.simple:
@@ -116,6 +120,9 @@ class PvPBattle(Battle):
         log_text = "\n\n".join([f"**Action #{i}**\n{msg}" for i, msg in self.log])
         embed.add_field(name="Battle Log", value=log_text or "Battle starting...", inline=False)
         
+        # Add battle ID to footer for GM replay functionality
+        embed.set_footer(text=f"Battle ID: {self.battle_id}")
+        
         return embed
     
     async def update_display(self):
@@ -147,20 +154,30 @@ class PvPBattle(Battle):
             
             # Update database with win and money transfer
             async with self.ctx.bot.pool.acquire() as conn:
+                # Award PvP wins regardless of money
                 await conn.execute(
-                    'UPDATE profile SET "pvpwins"="pvpwins"+1, "money"="money"+$1 WHERE'
-                    ' "user"=$2;',
-                    self.money * 2,
+                    'UPDATE profile SET "pvpwins"="pvpwins"+1 WHERE "user"=$1;',
                     winner.id,
                 )
-                await self.ctx.bot.log_transaction(
-                    self.ctx,
-                    from_=loser.id,
-                    to=winner.id,
-                    subject="Battle Bet",
-                    data={"Gold": self.money},
-                    conn=conn,
-                )
+                
+                # Handle money rewards if there's money involved
+                if self.money > 0:
+                    await conn.execute(
+                        'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                        self.money * 2,
+                        winner.id,
+                    )
+                    await self.ctx.bot.log_transaction(
+                        self.ctx,
+                        from_=loser.id,
+                        to=winner.id,
+                        subject="Battle Bet",
+                        data={"Gold": self.money},
+                        conn=conn,
+                    )
+            
+            # Save final battle state to database for replay
+            await self.save_battle_to_database()
             
             return (winner, loser)
         
@@ -180,6 +197,8 @@ class PvPBattle(Battle):
                     self.player1.user.id,
                     self.player2.user.id
                 )
+            # Save final battle state to database for replay
+            await self.save_battle_to_database()
             return None
         else:
             # Determine winner based on remaining HP percentage
@@ -200,20 +219,30 @@ class PvPBattle(Battle):
         
         # Update database with win and money transfer
         async with self.ctx.bot.pool.acquire() as conn:
+            # Award PvP wins regardless of money
             await conn.execute(
-                'UPDATE profile SET "pvpwins"="pvpwins"+1, "money"="money"+$1 WHERE'
-                ' "user"=$2;',
-                self.money * 2,
+                'UPDATE profile SET "pvpwins"="pvpwins"+1 WHERE "user"=$1;',
                 winner.id,
             )
-            await self.ctx.bot.log_transaction(
-                self.ctx,
-                from_=loser.id,
-                to=winner.id,
-                subject="Battle Bet",
-                data={"Gold": self.money},
-                conn=conn,
-            )
+            
+            # Handle money rewards if there's money involved
+            if self.money > 0:
+                await conn.execute(
+                    'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                    self.money * 2,
+                    winner.id,
+                )
+                await self.ctx.bot.log_transaction(
+                    self.ctx,
+                    from_=loser.id,
+                    to=winner.id,
+                    subject="Battle Bet",
+                    data={"Gold": self.money},
+                    conn=conn,
+                )
+        
+        # Save final battle state to database for replay
+        await self.save_battle_to_database()
         
         return (winner, loser)
     

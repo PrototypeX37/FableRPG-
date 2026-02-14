@@ -1,0 +1,238 @@
+[bot]
+version = "4.17.1"
+token = ""
+initial_extensions = [
+    "cogs.locale",
+    "cogs.owner",
+    "cogs.game_master",
+    "cogs.gambling",
+    "cogs.adventure",
+    "cogs.ranks",
+    "cogs.trading",
+    "cogs.miscellaneous",
+    "cogs.server",
+    "cogs.profile",
+    "cogs.battles",
+    "cogs.help",
+    #"cogs.vote",
+    "cogs.crates",
+    "cogs.patreon",
+    "cogs.store",
+    "cogs.marriage",
+    "cogs.guild",
+    "cogs.tournament",
+    "cogs.classes",
+    "cogs.images",
+    "cogs.global_events",
+    "cogs.raid",
+    "cogs.gods",
+    "cogs.transaction",
+    "cogs.races",
+    "cogs.hungergames",
+    "cogs.maths",
+    "cogs.shard_communication",
+    "cogs.alliance",
+    "cogs.trivia",
+    "cogs.chess",
+    "cogs.werewolf",
+    "cogs.scheduler",
+    "cogs.error_handler",
+    "cogs.russian",
+    "cogs.story",
+    "cogs.cah",
+    "cogs.chatgpt",
+    "cogs.battleships",
+    "cogs.warmap",
+    "cogs.reload",
+    "cogs.lotto",
+    "cogs.DragonSlots",
+    "cogs.custom",
+    "cogs.fableassistant",
+    "cogs.testcog",
+    "cogs.patreonstuff",
+    "cogs.horrorraid",
+    "cogs.astraeatrials",
+    "cogs.soulforge",
+    "cogs.soulforgedefender",
+    "cogs.soulforgeextension",
+    "cogs.transaction",
+    "cogs.shotgunroulette",
+    "cogs.pets",
+    "cogs.simplebattle",
+    "cogs.shotgunroulette",
+    "cogs.buyorders",
+    "cogs.singleplayerwerewolf",
+    "cogs.monstermanager",
+    "cogs.PatreonCore",
+    "cogs.amuletcrafting",
+    "cogs.profilecustomization",
+    "cogs.process_splice"
+]
+global_prefix = "$"
+owner_id = 0
+is_beta = true
+is_custom = false
+global_cooldown = 3
+donator_cooldown = 2
+
+[external]
+patreon_token = "my secret patreon token" 
+imgur_token = "We dont need this"
+openai = "Your OpenAI Key"
+okapi_token = "my secret okapi token"
+traviapi = "just a secret"
+base_url = "Your Baseurl if any"
+okapi_url = "http://127.0.0.1:3000" 
+proxy_url = "http://my.proxy" #not required
+proxy_auth = "proxy-auth-key" # not required
+
+[[external.donator_roles]]
+id = 1234
+tier = "basic"
+
+[database]
+postgres_name = "Fable"
+postgres_user = "postgres"
+postgres_password = "Password"
+postgres_host = "localhost"
+postgres_port = 5432
+redis_host = "localhost"
+redis_port = 6379
+redis_database = 0
+redis_shard_announce_channel = "guild_channel"
+
+[second_database]
+postgres_name = "IdleRPG"
+postgres_user = "postgres"
+postgres_password = "Password"
+postgres_host = "localhost"
+postgres_port = 5432
+
+[statistics]
+topggtoken = "topggtoken"# Not Required
+dbltoken = "dbltoken" # Not Required
+bfdtoken = "bfdtoken" # Not Required
+join_channel = 1075381105412292658
+sentry_url = "https://whatever.sentry.url" # Not Required
+
+[launcher]
+additional_shards = 1
+shards_per_cluster = 2
+
+# Important Stuff
+[game]
+game_masters = [295173706496475136, 708435868842459169, 700801066593419335, 635319019083137057, 384534935068737536, 598004694060892183, 118234287425191938]
+owner_ids = [295173706496475136, 708435868842459169]
+banned_guilds = [961703553829863445]
+support_server_id = 1199287508794626078
+raid_channel = 1199297906755252234
+gm_log_channel = 1199299210059710504
+helpme_channel = 1199299210059710504
+official_tournament_channel_id = 1199300078796537967
+bot_event_channel = 1199299905466925136
+primary_colour = 16759808
+member_role = 1199287508857540701
+support_team_role = 1199288874581639249
+
+[cities]
+    [cities.vopnafjor]
+    name = "Vopnafjor"
+    thief = true
+    raid = true
+    trade = true
+    adventure = true
+    tier = 4
+
+    [cities.medriguen]
+    name = "Medriguen"
+    thief = false
+    raid = true
+    trade = true
+    adventure = true
+    tier = 3
+
+    [cities.sulitere]
+    name = "Sulitere"
+    thief = true
+    raid = true
+    trade = true
+    adventure = false
+    tier = 3
+
+    [cities.mopra]
+    name = "Mopra"
+    thief = true
+    raid = true
+    trade = false
+    adventure = false
+    tier = 2
+
+    [cities.setrond]
+    name = "Setrond"
+    thief = true
+    raid = false
+    trade = true
+    adventure = false
+    tier = 2
+
+    [cities.armeles]
+    name = "Armeles"
+    thief = false
+    raid = false
+    trade = true
+    adventure = true
+    tier = 2
+
+    [cities.weyeowen]
+    name = "Weyeowen"
+    thief = true
+    raid = false
+    trade = false
+    adventure = false
+    tier = 1
+
+    [cities.oltash]
+    name = "Oltash"
+    thief = false
+    raid = false
+    trade = true
+    adventure = false
+    tier = 1
+
+    [cities.kryvansk]
+    name = "Kryvansk"
+    thief = false
+    raid = true
+    trade = false
+    adventure = false
+    tier = 1
+
+    [cities.drutsk]
+    name = "Drutsk"
+    thief = false
+    raid = false
+    trade = false
+    adventure = true
+    tier = 1
+
+[[gods]]
+name = "Astraea"
+user = 635319019083137057
+description = "**Alignment: Good** - Astraea is a goddess of kindness and healing. Her devotees pray for her blessings to bring comfort, aid, and positive outcomes to those in need. She embodies benevolence and strives to alleviate suffering in the world"
+boundary_low = 0.9
+boundary_high = 1.1
+
+[[gods]]
+name = "Sepulchure"
+user = 384534935068737536
+description = "**Alignment: Evil** - Sepulchure is a malevolent deity associated with darkness and destruction. His followers seek his favor to sow chaos, spread fear, and bring about ruin. Sepulchure revels in the suffering of others and encourages acts of malevolence."
+boundary_low = 0.75
+boundary_high = 1.5
+
+[[gods]]
+name = "Drakath"
+user = 700801066593419335
+description = "**Alignment: Chaos** - Drakath, the chaotic deity, embodies the thrill of unpredictability and upheaval. Followers celebrate the untamed essence of existence, finding liberation in disrupting norms and embracing disorder. In Drakath's realm, change is revered, and the uncharted path is the most revered journey."
+boundary_low = 0.3
+boundary_high = 2.0
+

@@ -1,7 +1,8 @@
+
+
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,8 +17,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-
 from __future__ import annotations
 
 from enum import Enum
@@ -33,18 +32,27 @@ class GameClass(Enum):
                 out[-1] += char
         return " ".join(out)
 
-    def get_class_line(self) -> type[GameClass]:
+    def get_class_line(self) -> type['GameClass']:
         return self.__class__
 
     def get_class_line_name(self) -> str:
         return self.__class__.__name__
 
-    def in_class_line(self, class_line: type[GameClass]) -> bool:
+    def in_class_line(self, class_line: type['GameClass']) -> bool:
         return class_line == self.__class__
 
     def class_grade(self) -> int:
         return self.value + 1
 
+
+class Tank(GameClass):
+    Protector = 0
+    Guardian = 1
+    Bulwark = 2
+    Defender = 3
+    Vanguard = 4
+    Fortress = 5
+    Titan = 6
 
 class Warrior(GameClass):
     Grunt = 0
@@ -97,6 +105,7 @@ class Paragon(GameClass):
     Paragon = 6
 
 
+
 class Paladin(GameClass):
     Squire = 0
     FootKnight = 1
@@ -147,7 +156,7 @@ class Reaper(GameClass):
     GrimReaper = 6
 
 
-def get_class_evolves(class_: type[GameClass]) -> list[GameClass]:
+def get_class_evolves(class_: type['GameClass']) -> list['GameClass']:
     return list(class_.__members__.values())
 
 
@@ -163,6 +172,7 @@ ALL_CLASSES = {
                   + list(Paladin.__members__.values())
                   + list(Reaper.__members__.values())
                   + list(SantasHelper.__members__.values())
+                  + list(Tank.__members__.values())
 }
 
 ALL_CLASSES_TYPES = {
@@ -176,16 +186,17 @@ ALL_CLASSES_TYPES = {
     "Paladin": Paladin,
     "Reaper": Reaper,
     "SantasHelper": SantasHelper,
+    "Tank": Tank,
 }
 
 
-def from_string(class_: str) -> GameClass | None:
+def from_string(class_: str) -> 'GameClass' | None:
     return ALL_CLASSES.get(class_, None)
 
 
-def get_name(class_: type[GameClass]) -> str:
+def get_name(class_: type['GameClass']) -> str:
     return class_.__name__
 
 
-def get_first_evolution(class_: type[GameClass]) -> GameClass:
+def get_first_evolution(class_: type['GameClass']) -> 'GameClass':
     return list(class_.__members__.values())[0]
