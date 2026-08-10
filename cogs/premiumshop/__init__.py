@@ -52,7 +52,6 @@ ITEMS: Dict[str, Dict[str, Any]] = {
     "petage":     {"name": "Pet Age Potion",          "price": 200,  "short": "petage"},
     "petspeed":   {"name": "Pet Speed Growth Potion", "price": 300,  "short": "petspeed"},
     "petxp":      {"name": "Pet XP Potion",           "price": 1200, "short": "petxp"},
-    "petreset":   {"name": "Pet Reset Skill Potion",  "price": 550,  "short": "petreset"},
     "legendary":  {"name": "Legendary Crate",         "price": 500,  "short": "legendary"},
     "divine":     {"name": "Divine Crate",            "price": 1000, "short": "divine"},
     "materials":  {"name": "Materials Crate",         "price": 450,  "short": "materials"},
@@ -62,7 +61,6 @@ ITEMS: Dict[str, Dict[str, Any]] = {
     "pet age potion":           {"name": "Pet Age Potion",          "price": 200,  "short": "petage"},
     "pet speed growth potion":  {"name": "Pet Speed Growth Potion", "price": 300,  "short": "petspeed"},
     "pet xp potion":            {"name": "Pet XP Potion",           "price": 1200, "short": "petxp"},
-    "pet reset skill potion":   {"name": "Pet Reset Skill Potion",  "price": 550,  "short": "petreset"},
     "legendary crate":          {"name": "Legendary Crate",         "price": 500,  "short": "legendary"},
     "divine crate":             {"name": "Divine Crate",            "price": 1000, "short": "divine"},
     "materials crate":          {"name": "Materials Crate",         "price": 450,  "short": "materials"},
@@ -79,11 +77,141 @@ CONSUMABLE_DB_TYPES = {
     "petage":   "pet_age_potion",
     "petspeed": "pet_speed_growth_potion",
     "petxp":    "pet_xp_potion",
-    "petreset": "pet_skill_reset_potion",  # confirm this exact string in your DB/consumer
 }
+
+SHOP_ORDER = (
+    "petage",
+    "petspeed",
+    "petxp",
+    "legendary",
+    "divine",
+    "materials",
+    "pethouse",
+    "petext",
+)
 
 TIER_REWARDS = {1: 350, 2: 800, 3: 1600, 4: 3500}
 REDEEM_COOLDOWN_SECONDS = 40 * 24 * 60 * 60  # 3,456,000
+
+
+class PremiumShopSelect(discord.ui.Select):
+    def __init__(self, view: "PremiumShopView"):
+        self.shop_view = view
+        options = []
+        emoji_map = {
+            "petage": "🧪",
+            "petspeed": "⚡",
+            "petxp": "🔮",
+            "legendary": "📦",
+            "divine": "✨",
+            "materials": "🧰",
+            "pethouse": "🏛️",
+            "petext": "🧱",
+        }
+        for key in SHOP_ORDER:
+            item = ITEMS[key]
+            options.append(
+                discord.SelectOption(
+                    label=item["name"],
+                    description=f"{item['price']} drachmas | {key}",
+                    value=key,
+                    emoji=emoji_map.get(key, "🛒"),
+                )
+            )
+        super().__init__(
+            placeholder="Choose a premium item...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.shop_view.ctx.author.id:
+            return await interaction.response.send_message("This is not your shop menu.", ephemeral=True)
+        self.shop_view.selected = self.values[0]
+        await self.shop_view.refresh()
+        await interaction.response.edit_message(embed=self.shop_view.embed(), view=self.shop_view)
+
+
+class PremiumShopView(discord.ui.View):
+    def __init__(self, cog: "PremiumShop", ctx: commands.Context, dragoncoins: int):
+        super().__init__(timeout=90)
+        self.cog = cog
+        self.ctx = ctx
+        self.dragoncoins = dragoncoins
+        self.selected = SHOP_ORDER[0]
+        self.add_item(PremiumShopSelect(self))
+
+    async def refresh(self):
+        self.dragoncoins = await self.cog._safe_fetch_dragoncoins(self.ctx.author.id)
+
+    def embed(self) -> discord.Embed:
+        embed = self.cog.shop_embed(self.ctx, self.dragoncoins)
+        item = ITEMS[self.selected]
+        embed.add_field(
+            name="Selected",
+            value=(
+                f"**{item['name']}**\n"
+                f"Price: **{item['price']}** <:drachma:1411644930216038461>\n"
+                f"Key: `{self.selected}`"
+            ),
+            inline=False,
+        )
+        return embed
+
+    async def refresh_message(self):
+        await self.refresh()
+        try:
+            await self.message.edit(embed=self.embed(), view=self)  # type: ignore[attr-defined]
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+            pass
+
+    async def buy(self, interaction: discord.Interaction, amount: int):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message("This is not your shop menu.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        item = ITEMS[self.selected]
+        if self.selected == "pethouse":
+            amount = 1
+        pool = getattr(self.cog.bot, "pool", None)
+        if not pool:
+            await interaction.followup.send("The shop is currently unavailable. Please try again later.", ephemeral=True)
+            return
+        profile_exists = await pool.fetchval('SELECT 1 FROM profile WHERE "user" = $1;', self.ctx.author.id)
+        if not profile_exists:
+            await interaction.followup.send("You need a character profile first.", ephemeral=True)
+            return
+        try:
+            await self.cog.dragoncoinbuy.callback(self.cog, self.ctx, self.selected, amount=amount)
+        except Exception as exc:
+            log.exception("Premium shop button purchase failed")
+            await interaction.followup.send(f"Purchase failed: {exc}", ephemeral=True)
+            return
+        await self.refresh_message()
+        await interaction.followup.send(
+            f"Shop refreshed after selecting **{amount}x {item['name']}**.",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Buy x1", style=discord.ButtonStyle.green, row=1)
+    async def buy_one(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self.buy(interaction, 1)
+
+    @discord.ui.button(label="Buy x5", style=discord.ButtonStyle.primary, row=1)
+    async def buy_five(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self.buy(interaction, 5)
+
+    @discord.ui.button(label="Buy x10", style=discord.ButtonStyle.primary, row=1)
+    async def buy_ten(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self.buy(interaction, 10)
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.red, row=1)
+    async def close(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message("This is not your shop menu.", ephemeral=True)
+        await interaction.message.delete()
+        self.stop()
 
 # =========================
 # Cog
@@ -140,8 +268,6 @@ class PremiumShop(commands.Cog):
               "Doubles growth speed for a specific pet"),
             _("<:splicepotion:1405960928301809764> **Pet XP Potion** — 1200 (`petxp`)\n"
               "Gives a pet permanent x2 XP multiplier"),
-            _("<:PetResetSkillPotion:1419382150842810529> **Pet Reset Skill Potion** — 550 (`petreset`)\n"
-              "Refunds SP for one learned skill on a pet"),
             _("<:c_legendary:1405959222536966256> **Legendary Crate** — 500 (`legendary`)\n"
               "Items with stats ~41–80; rarely drachmas"),
             _("<:f_divine:1405959418163630211> **Divine Crate** — 1000 (`divine`)\n"
@@ -176,10 +302,10 @@ class PremiumShop(commands.Cog):
             chunks.append(cur.rstrip())
         return chunks
 
-    async def _send_shop_embed(self, ctx: commands.Context, dragoncoins: int) -> None:
+    def shop_embed(self, ctx: commands.Context, dragoncoins: int) -> discord.Embed:
         description = _(
             "Welcome to the Drachma Shop!\n\n"
-            "**Buy:** `{prefix}drachmabuy <item> [amount]`\n"
+            "**Buy:** choose an item below, or use `{prefix}drachmabuy <item> [amount]`\n"
             "**Currency:** <:drachma:1411644930216038461> Drachmas\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         ).format(prefix=ctx.clean_prefix)
@@ -208,11 +334,17 @@ class PremiumShop(commands.Cog):
                 )
         embed.set_footer(text=_("Premium Shop • Use {prefix}dcbuy to purchase").format(prefix=ctx.clean_prefix))
         embed.set_thumbnail(url=THUMBNAIL_URL)
+        return embed
 
+    async def _send_shop_embed(self, ctx: commands.Context, dragoncoins: int) -> None:
+        embed = self.shop_embed(ctx, dragoncoins)
+        view = PremiumShopView(self, ctx, dragoncoins)
         try:
-            await ctx.send(embed=embed)
+            message = await ctx.send(embed=view.embed(), view=view)
+            view.message = message
         except discord.Forbidden:
             # plaintext fallback if embeds blocked
+            blocks = self._shop_item_blocks()
             lines = [
                 _("**Drachma Shop**"),
                 _("Your Drachmas: **{coins}** <:drachma:1411644930216038461>").format(coins=dragoncoins),
@@ -279,7 +411,7 @@ class PremiumShop(commands.Cog):
                 _(
                     "Invalid item. Available items: "
                     "petage/pet age potion, petspeed/pet speed growth potion, "
-                    "petxp/pet xp potion, petreset/pet reset skill potion, "
+                    "petxp/pet xp potion, "
                     "legendary/legendary crate, divine/divine crate, materials/materials crate, "
                     "pethouse/pet house, petext/pet extension."
                 )
@@ -704,7 +836,15 @@ class PremiumShop(commands.Cog):
 
     # ---------- Materials crate helper + command ----------
 
-    async def open_materials_crate(self, ctx: commands.Context):
+    async def open_materials_crate(self, ctx: commands.Context, consume_crate: bool = None):
+        """
+        Open one Materials Crate and grant 3-10 crafting materials.
+
+        Notes:
+        - When called from the generic `open` crate command, pass
+          `consume_crate=True` so this helper decrements the materials crate.
+        - When called from `openmaterials`, we also consume one crate here.
+        """
         amulet_cog = self.bot.get_cog("AmuletCrafting")
         if not amulet_cog:
             return False, "AmuletCrafting system not available."
@@ -713,19 +853,36 @@ class PremiumShop(commands.Cog):
         if not pool:
             return False, "Service unavailable. Try again later."
 
+        # Auto-detect if the caller already consumed the crate (e.g. crates.$open).
+        if consume_crate is None:
+            cmd_name = getattr(getattr(ctx, "command", None), "qualified_name", "") or ""
+            consume_crate = cmd_name != "open"
+
         async with pool.acquire() as conn:
             async with conn.transaction():
-                crates = await conn.fetchval(
-                    'SELECT COALESCE(crates_materials, 0) FROM profile WHERE "user" = $1;',
-                    ctx.author.id,
-                )
-                if crates <= 0:
-                    return False, "You don't have any Materials Crates."
-
-                await conn.execute(
-                    'UPDATE profile SET crates_materials = COALESCE(crates_materials, 0) - 1 WHERE "user" = $1;',
-                    ctx.author.id,
-                )
+                if consume_crate:
+                    remaining_crates = await conn.fetchval(
+                        """
+                        UPDATE profile
+                        SET crates_materials = COALESCE(crates_materials, 0) - 1
+                        WHERE "user" = $1 AND COALESCE(crates_materials, 0) >= 1
+                        RETURNING COALESCE(crates_materials, 0);
+                        """,
+                        ctx.author.id,
+                    )
+                    if remaining_crates is None:
+                        return False, "You don't have any Materials Crates."
+                else:
+                    remaining_crates = await conn.fetchval(
+                        """
+                        SELECT COALESCE(crates_materials, 0)
+                        FROM profile
+                        WHERE "user" = $1
+                        """,
+                        ctx.author.id,
+                    )
+                    if remaining_crates is None:
+                        return False, "Profile not found."
 
                 material_count = random.randint(3, 10)
                 materials_gained: List[str] = []
@@ -734,31 +891,57 @@ class PremiumShop(commands.Cog):
                     resource = amulet_cog.get_random_resource()
                     if not resource:
                         continue
-                    give = amulet_cog.give_crafting_resource
-                    if callable(give):
-                        res = give(ctx.author.id, resource, 1)
-                        if hasattr(res, "__await__"):
-                            await res
+
+                    existing = await conn.fetchrow(
+                        """
+                        SELECT amount
+                        FROM crafting_resources
+                        WHERE user_id = $1 AND resource_type = $2
+                        """,
+                        ctx.author.id,
+                        resource,
+                    )
+                    if existing:
+                        await conn.execute(
+                            """
+                            UPDATE crafting_resources
+                            SET amount = amount + 1
+                            WHERE user_id = $1 AND resource_type = $2
+                            """,
+                            ctx.author.id,
+                            resource,
+                        )
+                    else:
+                        await conn.execute(
+                            """
+                            INSERT INTO crafting_resources (user_id, resource_type, amount)
+                            VALUES ($1, $2, 1)
+                            """,
+                            ctx.author.id,
+                            resource,
+                        )
                     materials_gained.append(resource.replace("_", " ").title())
 
                 if not materials_gained:
-                    await conn.execute(
-                        'UPDATE profile SET crates_materials = COALESCE(crates_materials, 0) + 1 WHERE "user" = $1;',
-                        ctx.author.id,
-                    )
+                    if consume_crate:
+                        await conn.execute(
+                            'UPDATE profile SET crates_materials = COALESCE(crates_materials, 0) + 1 WHERE "user" = $1;',
+                            ctx.author.id,
+                        )
                     return False, "Something went wrong while generating materials. Your crate was not consumed."
 
         pretty = "• " + ", ".join(materials_gained)
         msg = (
             "<:c_mats:1405959241898004480> **Materials Crate opened!**\n\n"
-            f"You found **{len(materials_gained)}** crafting materials:\n{pretty}"
+            f"You found **{len(materials_gained)}** crafting materials:\n{pretty}\n\n"
+            f"Remaining Materials Crates: **{int(remaining_crates)}**"
         )
         return True, msg
 
     @commands.command(name="openmaterials", hidden=True, brief=_("Open one Materials Crate"))
     @has_char()
     async def cmd_open_materials(self, ctx: commands.Context):
-        ok, message = await self.open_materials_crate(ctx)
+        ok, message = await self.open_materials_crate(ctx, consume_crate=True)
         await ctx.send(message if ok else f"⚠️ {message}")
 
 

@@ -24,9 +24,58 @@ from classes.converters import IntGreaterThan
 from classes.items import ItemType, Hand
 from cogs.shard_communication import user_on_cooldown as user_cooldown
 from utils.checks import has_char, has_money, is_gm
+from utils.divine_familiars import (
+    DIVINE_SHARDS_PER_EGG,
+    award_divine_shards,
+    ensure_divine_familiar_tables,
+    get_familiar_display_name,
+    resolve_familiar_key,
+)
 from utils.i18n import _, locale_doc
 from utils.joins import JoinView, SingleJoinView
 from cogs.antiscript import daily_command_limit
+
+
+PVE_DIVINE_SHARD_PITY_TIERS = (
+    (60, 2),
+    (80, 3),
+    (100, 5),
+)
+
+
+def _get_pve_divine_shard_pity_state(
+    base_chance_pct: int,
+    no_shard_wins: int,
+    pity_tiers=PVE_DIVINE_SHARD_PITY_TIERS,
+):
+    base_chance = max(0, min(100, int(base_chance_pct or 0)))
+    miss_streak = max(0, int(no_shard_wins or 0))
+
+    pity_multiplier = 1
+    active_threshold = None
+    next_threshold = None
+    next_multiplier = None
+
+    for threshold, multiplier in pity_tiers:
+        threshold = max(0, int(threshold))
+        multiplier = max(1, int(multiplier))
+        if miss_streak >= threshold:
+            pity_multiplier = multiplier
+            active_threshold = threshold
+            continue
+        if next_threshold is None:
+            next_threshold = threshold
+            next_multiplier = multiplier
+
+    return {
+        "base_chance_pct": base_chance,
+        "effective_chance_pct": min(100, int(base_chance * pity_multiplier)),
+        "pity_multiplier": pity_multiplier,
+        "pity_active": pity_multiplier > 1,
+        "active_threshold": active_threshold,
+        "next_threshold": next_threshold,
+        "next_multiplier": next_multiplier,
+    }
 
 
 class PetEggSelect(Select):
@@ -679,6 +728,20 @@ class CouplesTowerView(discord.ui.View):
                 await self.on_cancel()
 
 class Battles(commands.Cog):
+    DIVINE_PVE_SHARD_CHANCE_PCT = 2
+    DIVINE_PVE_SHARD_PITY_TIERS = PVE_DIVINE_SHARD_PITY_TIERS
+    PVE_ELEMENT_EMOJIS = {
+        "Light": "🌟",
+        "Dark": "🌑",
+        "Corrupted": "🌀",
+        "Nature": "🌿",
+        "Electric": "⚡",
+        "Water": "💧",
+        "Fire": "🔥",
+        "Wind": "💨",
+        "Earth": "🌍",
+    }
+
     def __init__(self, bot):
         self.bot = bot
         self.forceleg = False
@@ -713,10 +776,334 @@ class Battles(commands.Cog):
         
         # Initialize database tables
         asyncio.create_task(self.initialize_tables())
+
+    @staticmethod
+    def _split_message_chunks(text: str, limit: int = 1900) -> list[str]:
+        text = str(text)
+        if len(text) <= limit:
+            return [text]
+
+        chunks: list[str] = []
+        current = ""
+        for line in text.splitlines(keepends=True):
+            if len(line) > limit:
+                if current:
+                    chunks.append(current)
+                    current = ""
+                for i in range(0, len(line), limit):
+                    chunks.append(line[i:i + limit])
+                continue
+
+            if len(current) + len(line) > limit:
+                chunks.append(current)
+                current = line
+            else:
+                current += line
+
+        if current:
+            chunks.append(current)
+        return chunks or [text[:limit]]
+
+    async def _send_long_text(self, ctx, text: str) -> None:
+        for chunk in self._split_message_chunks(text):
+            await ctx.send(chunk)
+
+    async def _ensure_divine_pve_pity_table(self, conn) -> None:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pve_divine_familiar_pity (
+                user_id BIGINT NOT NULL,
+                familiar_key TEXT NOT NULL,
+                no_shard_wins INTEGER NOT NULL DEFAULT 0,
+                updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (user_id, familiar_key)
+            );
+            """
+        )
+
+    async def _get_divine_pve_pity_no_shard_wins(
+        self, conn, user_id: int, familiar_key: str
+    ) -> int:
+        value = await conn.fetchval(
+            """
+            SELECT no_shard_wins
+            FROM pve_divine_familiar_pity
+            WHERE user_id = $1 AND familiar_key = $2;
+            """,
+            user_id,
+            familiar_key,
+        )
+        return int(value or 0)
+
+    async def _set_divine_pve_pity_no_shard_wins(
+        self, conn, user_id: int, familiar_key: str, value: int
+    ) -> None:
+        normalized = max(0, int(value))
+        await conn.execute(
+            """
+            INSERT INTO pve_divine_familiar_pity (user_id, familiar_key, no_shard_wins)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id, familiar_key)
+            DO UPDATE
+            SET no_shard_wins = EXCLUDED.no_shard_wins,
+                updated_at = NOW();
+            """,
+            user_id,
+            familiar_key,
+            normalized,
+        )
+
+    @staticmethod
+    def _resolve_divine_familiar_key_for_monster(monster) -> str | None:
+        monster_name = str(monster.get("name", "")).strip()
+        if not monster_name:
+            return None
+        return resolve_familiar_key(monster_name)
+
+    async def _ensure_pve_monster_encounter_table(self, conn) -> None:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pve_monster_encounters (
+                user_id BIGINT NOT NULL,
+                monster_name TEXT NOT NULL,
+                monster_level INTEGER NOT NULL,
+                monster_element TEXT,
+                encounter_count INTEGER NOT NULL DEFAULT 0,
+                first_seen TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                last_seen TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (user_id, monster_name, monster_level)
+            );
+            """
+        )
+
+    async def _record_pve_monster_encounter(
+        self, conn, user_id: int, monster: dict, monster_level: int
+    ) -> tuple[int, int]:
+        await self._ensure_pve_monster_encounter_table(conn)
+
+        monster_name = str(monster.get("name", "Unknown Monster")).strip() or "Unknown Monster"
+        monster_element = str(monster.get("element", "Unknown")).strip() or "Unknown"
+        level_count = int(
+            await conn.fetchval(
+                """
+                INSERT INTO pve_monster_encounters (
+                    user_id,
+                    monster_name,
+                    monster_level,
+                    monster_element,
+                    encounter_count
+                )
+                VALUES ($1, $2, $3, $4, 1)
+                ON CONFLICT (user_id, monster_name, monster_level)
+                DO UPDATE
+                SET encounter_count = pve_monster_encounters.encounter_count + 1,
+                    monster_element = EXCLUDED.monster_element,
+                    last_seen = NOW()
+                RETURNING encounter_count;
+                """,
+                user_id,
+                monster_name,
+                int(monster_level),
+                monster_element,
+            )
+            or 1
+        )
+        total_count = int(
+            await conn.fetchval(
+                """
+                SELECT COALESCE(SUM(encounter_count), 0)
+                FROM pve_monster_encounters
+                WHERE user_id = $1 AND monster_name = $2;
+                """,
+                user_id,
+                monster_name,
+            )
+            or level_count
+        )
+        return level_count, total_count
+
+    async def _get_pve_egg_chance(self, ctx, monster_level: int) -> float | None:
+        if monster_level >= 12:
+            return None
+
+        base_egg_chance = 0.50 - ((monster_level - 1) / 9) * 0.45
+        final_egg_chance = base_egg_chance
+
+        ranger_egg_bonuses = {
+            "Caretaker": 0.02,
+            "Tamer": 0.04,
+            "Trainer": 0.06,
+            "Bowman": 0.08,
+            "Hunter": 0.10,
+            "Warden": 0.13,
+            "Ranger": 0.15,
+        }
+
+        async with self.bot.pool.acquire() as conn:
+            profile = await conn.fetchrow('SELECT class FROM profile WHERE "user"=$1;', ctx.author.id)
+
+        if profile and profile.get("class"):
+            best_bonus = 0.0
+            for cls in profile["class"]:
+                if cls in ranger_egg_bonuses:
+                    best_bonus = max(best_bonus, ranger_egg_bonuses[cls])
+
+            bonus_multiplier = 1.0 - ((monster_level - 1) / 9) * (1 / 3)
+            final_egg_chance += best_bonus * bonus_multiplier
+
+        return max(0.0, min(1.0, final_egg_chance))
+
+    def _build_pve_found_embed(
+        self,
+        ctx,
+        monster: dict,
+        monster_level: int,
+        level_encounter_count: int,
+        total_encounter_count: int,
+        egg_chance: float | None,
+        divine_familiar_key: str | None,
+    ) -> discord.Embed:
+        monster_name = monster.get("name", "Unknown Monster")
+        monster_element = monster.get("element", "Unknown")
+        element_emoji = self.PVE_ELEMENT_EMOJIS.get(monster_element, "❓")
+
+        found_embed = discord.Embed(
+            title=_("Monster Found!"),
+            description=_("A Level {level} **{monster}** has appeared! Prepare to fight..")
+                        .format(level=monster_level, monster=monster_name),
+            color=self.bot.config.game.primary_colour,
+        )
+
+        stats_lines = [
+            f"**Element:** {element_emoji} {monster_element}",
+            f"**HP:** {monster.get('hp', 'Unknown')}",
+            f"**Attack:** {monster.get('attack', 'Unknown')}",
+            f"**Defense:** {monster.get('defense', 'Unknown')}",
+        ]
+        found_embed.add_field(name="Monster Details", value="\n".join(stats_lines), inline=False)
+
+        encounter_word = "time" if total_encounter_count == 1 else "times"
+        reward_lines = [f"Found by you: **{total_encounter_count} {encounter_word}**"]
+        if level_encounter_count != total_encounter_count:
+            level_word = "time" if level_encounter_count == 1 else "times"
+            reward_lines.append(
+                f"At Level {monster_level}: **{level_encounter_count} {level_word}**"
+            )
+        if egg_chance is not None:
+            reward_lines.append(f"Egg chance on victory: **{egg_chance:.1%}**")
+
+        if divine_familiar_key:
+            familiar_name = get_familiar_display_name(divine_familiar_key)
+            reward_lines.append(
+                f"Divine shard roll: **{familiar_name}** ({self.DIVINE_PVE_SHARD_CHANCE_PCT}% base)"
+            )
+
+        found_embed.add_field(name="Your History", value="\n".join(reward_lines), inline=False)
+
+        monster_url = monster.get("url")
+        if monster_url:
+            found_embed.set_thumbnail(url=monster_url)
+
+        found_embed.set_footer(text=f"Track eggs and pets with {ctx.clean_prefix}pets")
+        return found_embed
+
+    async def _roll_pve_divine_shard_fallback(self, conn, user_id: int, familiar_key: str):
+        await ensure_divine_familiar_tables(conn)
+        await self._ensure_divine_pve_pity_table(conn)
+
+        current_no_shard_wins = await self._get_divine_pve_pity_no_shard_wins(
+            conn,
+            user_id,
+            familiar_key,
+        )
+        roll_pity_state = _get_pve_divine_shard_pity_state(
+            self.DIVINE_PVE_SHARD_CHANCE_PCT,
+            current_no_shard_wins,
+            self.DIVINE_PVE_SHARD_PITY_TIERS,
+        )
+        did_shard_drop = random.random() < (
+            roll_pity_state["effective_chance_pct"] / 100.0
+        )
+
+        if did_shard_drop:
+            shard_total = await award_divine_shards(conn, user_id, familiar_key, 1)
+            pity_no_shard_wins = 0
+            await self._set_divine_pve_pity_no_shard_wins(conn, user_id, familiar_key, 0)
+        else:
+            shard_total = await award_divine_shards(conn, user_id, familiar_key, 0)
+            pity_no_shard_wins = current_no_shard_wins + 1
+            await self._set_divine_pve_pity_no_shard_wins(
+                conn,
+                user_id,
+                familiar_key,
+                pity_no_shard_wins,
+            )
+
+        current_pity_state = _get_pve_divine_shard_pity_state(
+            self.DIVINE_PVE_SHARD_CHANCE_PCT,
+            pity_no_shard_wins,
+            self.DIVINE_PVE_SHARD_PITY_TIERS,
+        )
+
+        return {
+            "did_shard_drop": did_shard_drop,
+            "roll_pity_state": roll_pity_state,
+            "current_pity_state": current_pity_state,
+            "shard_total": int(shard_total),
+            "pity_no_shard_wins": pity_no_shard_wins,
+        }
+
+    async def _send_pve_divine_shard_update(self, ctx, familiar_key: str, shard_result) -> None:
+        familiar_name = get_familiar_display_name(familiar_key)
+        roll_pity_state = shard_result["roll_pity_state"]
+        current_pity_state = shard_result["current_pity_state"]
+
+        chance_text = f"{roll_pity_state['base_chance_pct']}% chance"
+        if roll_pity_state["pity_active"]:
+            chance_text = (
+                f"{roll_pity_state['effective_chance_pct']}% chance, pity x"
+                f"{roll_pity_state['pity_multiplier']} active after "
+                f"{roll_pity_state['active_threshold']} misses"
+            )
+
+        if shard_result["did_shard_drop"]:
+            status_line = f"**{familiar_name}** +1 shard ({chance_text})"
+        else:
+            status_line = f"**{familiar_name}** no shard ({chance_text})"
+
+        pity_line = f"Pity: **{shard_result['pity_no_shard_wins']} misses**"
+        if current_pity_state["next_threshold"] is not None:
+            pity_line += (
+                f"\nNext tier: **x{current_pity_state['next_multiplier']}** at "
+                f"**{current_pity_state['next_threshold']}** misses"
+            )
+        else:
+            pity_line += (
+                f"\nCurrent tier: **x{current_pity_state['pity_multiplier']}** "
+                f"(max pity tier active)"
+            )
+
+        embed = discord.Embed(
+            title="Divine Familiar Shard",
+            description=(
+                status_line
+                + f"\nNow: **{shard_result['shard_total']}/{DIVINE_SHARDS_PER_EGG}**"
+                + f"\n{pity_line}"
+            ),
+            color=discord.Color.gold(),
+        )
+        embed.set_footer(
+            text=f"Track progress with `{ctx.clean_prefix}pets divineshards`"
+        )
+        await ctx.send(embed=embed)
     
     async def initialize_tables(self):
         """Initialize database tables for battles"""
         async with self.bot.pool.acquire() as conn:
+            await self._ensure_divine_pve_pity_table(conn)
+            await self._ensure_pve_monster_encounter_table(conn)
+            await ensure_divine_familiar_tables(conn)
+
             # Create couples battle tower table if it doesn't exist
             
             # Create battletower table if it doesn't exist (for regular battle tower)
@@ -728,6 +1115,137 @@ class Battles(commands.Cog):
                     dialoguetoggle BOOLEAN DEFAULT FALSE
                 )
             """)
+
+            # Ice Dragon tables
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ice_dragon_abilities (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    ability_type TEXT NOT NULL,
+                    description TEXT,
+                    dmg INTEGER,
+                    effect TEXT,
+                    chance DOUBLE PRECISION,
+                    UNIQUE (name, ability_type)
+                );
+                """
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ice_dragon_stages (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    min_level INTEGER NOT NULL,
+                    max_level INTEGER NOT NULL,
+                    base_multiplier DOUBLE PRECISION NOT NULL,
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    element TEXT NOT NULL DEFAULT 'Water',
+                    move_names TEXT[] NOT NULL DEFAULT '{}',
+                    passive_names TEXT[] NOT NULL DEFAULT '{}'
+                );
+                """
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ice_dragon_drops (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    item_type TEXT NOT NULL,
+                    min_stat INTEGER NOT NULL,
+                    max_stat INTEGER NOT NULL,
+                    base_chance DOUBLE PRECISION NOT NULL,
+                    max_chance DOUBLE PRECISION NOT NULL,
+                    is_global BOOLEAN NOT NULL DEFAULT TRUE,
+                    dragon_stage_id INTEGER,
+                    element TEXT NOT NULL DEFAULT 'Water',
+                    min_level INTEGER,
+                    max_level INTEGER
+                );
+                """
+            )
+            await conn.execute(
+                "ALTER TABLE ice_dragon_stages ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT TRUE;"
+            )
+            await conn.execute(
+                "ALTER TABLE ice_dragon_drops ADD COLUMN IF NOT EXISTS is_global BOOLEAN NOT NULL DEFAULT TRUE;"
+            )
+            await conn.execute(
+                "ALTER TABLE ice_dragon_drops ADD COLUMN IF NOT EXISTS dragon_stage_id INTEGER;"
+            )
+
+            abilities_count = await conn.fetchval("SELECT COUNT(*) FROM ice_dragon_abilities")
+            if abilities_count == 0:
+                ability_seed = [
+                    ("Ice Breath", "move", "Effect: freeze. Damage: 600. Chance: 30%", 600, "freeze", 0.3),
+                    ("Tail Sweep", "move", "Effect: aoe. Damage: 400. Chance: 40%", 400, "aoe", 0.4),
+                    ("Frost Bite", "move", "Effect: dot. Damage: 300. Chance: 30%", 300, "dot", 0.3),
+                    ("Frosty Ice Burst", "move", "Effect: random_debuff. Damage: 800. Chance: 30%", 800, "random_debuff", 0.3),
+                    ("Minion Army", "move", "Effect: summon_adds. Damage: 200. Chance: 30%", 200, "summon_adds", 0.3),
+                    ("Frost Spears", "move", "Effect: dot. Damage: 500. Chance: 40%", 500, "dot", 0.4),
+                    ("Soul Reaver", "move", "Effect: stun. Damage: 1000. Chance: 30%", 1000, "stun", 0.3),
+                    ("Death Note", "move", "Effect: curse. Damage: 700. Chance: 30%", 700, "curse", 0.3),
+                    ("Dark Shadows", "move", "Effect: aoe_dot. Damage: 900. Chance: 40%", 900, "aoe_dot", 0.4),
+                    ("Void Blast", "move", "Effect: aoe_stun. Damage: 1200. Chance: 30%", 1200, "aoe_stun", 0.3),
+                    ("Soul Crusher", "move", "Effect: death_mark. Damage: 1000. Chance: 30%", 1000, "death_mark", 0.3),
+                    ("Armageddon", "move", "Effect: global_dot. Damage: 800. Chance: 40%", 800, "global_dot", 0.4),
+                    ("Reality Shatter", "move", "Effect: dimension_tear. Damage: 1500. Chance: 30%", 1500, "dimension_tear", 0.3),
+                    ("Soul Harvest", "move", "Effect: soul_drain. Damage: 1200. Chance: 30%", 1200, "soul_drain", 0.3),
+                    ("Void Storm", "move", "Effect: void_explosion. Damage: 1000. Chance: 40%", 1000, "void_explosion", 0.4),
+                    ("Time Freeze", "move", "Effect: time_stop. Damage: 2000. Chance: 30%", 2000, "time_stop", 0.3),
+                    ("Eternal Damnation", "move", "Effect: eternal_curse. Damage: 1500. Chance: 30%", 1500, "eternal_curse", 0.3),
+                    ("Apocalypse", "move", "Effect: world_ender. Damage: 1200. Chance: 40%", 1200, "world_ender", 0.4),
+                    ("Ice Armor", "passive", "Reduces all damage by 20%.", None, None, None),
+                    ("Corruption", "passive", "Reduces shields/armor by 20%.", None, None, None),
+                    ("Void Fear", "passive", "Reduces attack power by 20%.", None, None, None),
+                    ("Aspect of death", "passive", "Reduces attack and defense by 30%.", None, None, None),
+                    ("Void Corruption", "passive", "Reduces all stats by 25% and inflicts void damage.", None, None, None),
+                    ("Soul Devourer", "passive", "Steals 15% of damage dealt as health.", None, None, None),
+                    ("Eternal Winter", "passive", "Freezes all healing and reduces damage by 40%.", None, None, None),
+                    ("Death's Embrace", "passive", "10% chance to instantly kill on any hit.", None, None, None),
+                    ("Reality Bender", "passive", "Randomly negates 50% of attacks and reflects damage.", None, None, None),
+                ]
+                await conn.executemany(
+                    "INSERT INTO ice_dragon_abilities (name, ability_type, description, dmg, effect, chance) "
+                    "VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (name, ability_type) DO NOTHING",
+                    ability_seed,
+                )
+
+            stages_count = await conn.fetchval("SELECT COUNT(*) FROM ice_dragon_stages")
+            if stages_count == 0:
+                stage_seed = [
+                    ("Frostbite Wyrm", 1, 5, 1.0, "Water", ["Ice Breath", "Tail Sweep", "Frost Bite"], ["Ice Armor"]),
+                    ("Corrupted Ice Dragon", 6, 10, 1.15, "Water", ["Frosty Ice Burst", "Minion Army", "Frost Spears"], ["Corruption"]),
+                    ("Permafrost", 11, 15, 1.25, "Water", ["Soul Reaver", "Death Note", "Dark Shadows"], ["Void Fear"]),
+                    ("Absolute Zero", 16, 20, 1.5, "Water", ["Void Blast", "Soul Crusher", "Armageddon"], ["Aspect of death"]),
+                    ("Void Tyrant", 21, 25, 2.0, "Water", ["Reality Shatter", "Soul Harvest", "Void Storm"], ["Void Corruption", "Soul Devourer"]),
+                    ("Eternal Frost", 26, 30, 3.0, "Water", ["Time Freeze", "Eternal Damnation", "Apocalypse"], ["Eternal Winter", "Death's Embrace", "Reality Bender"]),
+                ]
+                await conn.executemany(
+                    "INSERT INTO ice_dragon_stages (name, min_level, max_level, base_multiplier, element, move_names, passive_names) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (name) DO NOTHING",
+                    stage_seed,
+                )
+
+            drops_count = await conn.fetchval("SELECT COUNT(*) FROM ice_dragon_drops")
+            if drops_count == 0:
+                drops_seed = [
+                    ("Frostbite Blade", "Sword", 20, 70, 0.001, 0.005, "Water"),
+                    ("Ice Shard Dagger", "Dagger", 20, 70, 0.001, 0.005, "Water"),
+                    ("Glacial Axe", "Axe", 20, 70, 0.001, 0.005, "Water"),
+                    ("Frozen Spear", "Spear", 20, 70, 0.001, 0.005, "Water"),
+                    ("Permafrost Hammer", "Hammer", 20, 70, 0.001, 0.005, "Water"),
+                    ("Crystal Wand", "Wand", 20, 70, 0.001, 0.005, "Water"),
+                    ("Arctic Shield", "Shield", 20, 70, 0.001, 0.005, "Water"),
+                    ("Dragon's Breath Bow", "Bow", 40, 150, 0.0005, 0.0025, "Water"),
+                    ("Frost Giant's Scythe", "Scythe", 40, 150, 0.0005, 0.0025, "Water"),
+                    ("Absolute Zero Mace", "Mace", 40, 150, 0.0005, 0.0025, "Water"),
+                ]
+                await conn.executemany(
+                    "INSERT INTO ice_dragon_drops (name, item_type, min_stat, max_stat, base_chance, max_chance, element) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (name) DO NOTHING",
+                    drops_seed,
+                )
 
     def load_data_files(self):
         """Load all necessary data files for battles"""
@@ -1841,7 +2359,7 @@ class Battles(commands.Cog):
         except Exception as e:
             import traceback
             error_message = f"An error occurred during the battletower battle: {e}\n{traceback.format_exc()}"
-            await ctx.send(error_message)
+            await self._send_long_text(ctx, error_message)
             print(error_message)
             await self.remove_player_from_fight(ctx.author.id)
             await self.bot.reset_cooldown(ctx)
@@ -1998,7 +2516,7 @@ class Battles(commands.Cog):
             import traceback
             error_message = f"Error occurred: {e}\n"
             error_message += traceback.format_exc()
-            await ctx.send(error_message)
+            await self._send_long_text(ctx, error_message)
             print(error_message)
 
     @has_char()
@@ -2377,7 +2895,7 @@ class Battles(commands.Cog):
             spawn_legendary = player_level >= 5 and (random.random() < legendary_spawn_chance)
 
             # Optional force legendary (kept from your logic)
-            if getattr(self, "forceleg", False) and ctx.author.id == 295173706496475136:
+            if getattr(self, "forceleg", False) and ctx.author.id == 524674960153903126:
                 spawn_legendary = True
 
             if spawn_legendary:
@@ -2434,14 +2952,26 @@ class Battles(commands.Cog):
                 monster = random.choice(pool)
         else:
             monster = monster_override
-            levelchoice = levelchoice_override
+            levelchoice = int(levelchoice_override or monster.get("level", 1) or 1)
 
         # Show found monster
-        found_embed = discord.Embed(
-            title=_("Monster Found!"),
-            description=_("A Level {level} **{monster}** has appeared! Prepare to fight..")
-                        .format(level=levelchoice, monster=monster["name"]),
-            color=self.bot.config.game.primary_colour,
+        divine_familiar_key = self._resolve_divine_familiar_key_for_monster(monster)
+        async with self.bot.pool.acquire() as conn:
+            level_encounter_count, total_encounter_count = await self._record_pve_monster_encounter(
+                conn,
+                ctx.author.id,
+                monster,
+                levelchoice,
+            )
+        egg_chance = await self._get_pve_egg_chance(ctx, levelchoice)
+        found_embed = self._build_pve_found_embed(
+            ctx,
+            monster,
+            levelchoice,
+            level_encounter_count,
+            total_encounter_count,
+            egg_chance,
+            divine_familiar_key,
         )
         await searching_message.edit(embed=found_embed)
         await asyncio.sleep(4)
@@ -2466,35 +2996,25 @@ class Battles(commands.Cog):
 
             # Player victory: egg chance (non-legendary)
             if result and getattr(result, "name", None) == "Player" and levelchoice < 12:
-                base_egg_chance = 0.50 - ((levelchoice - 1) / 9) * 0.45  # 50% -> 5%
-                final_egg_chance = base_egg_chance
+                final_egg_chance = egg_chance
+                if final_egg_chance is None:
+                    final_egg_chance = await self._get_pve_egg_chance(ctx, levelchoice)
 
-                # Ranger bonuses (take best one present)
-                ranger_egg_bonuses = {
-                    "Caretaker": 0.02,
-                    "Tamer": 0.04,
-                    "Trainer": 0.06,
-                    "Bowman": 0.08,
-                    "Hunter": 0.10,
-                    "Warden": 0.13,
-                    "Ranger": 0.15,
-                }
-
-                async with self.bot.pool.acquire() as conn:
-                    profile = await conn.fetchrow('SELECT class FROM profile WHERE "user"=$1;', ctx.author.id)
-
-                if profile and profile.get('class'):
-                    best_bonus = 0.0
-                    for cls in profile['class']:
-                        if cls in ranger_egg_bonuses:
-                            best_bonus = max(best_bonus, ranger_egg_bonuses[cls])
-
-                    # scale ranger bonus down as level rises (your formula)
-                    bonus_multiplier = 1.0 - ((levelchoice - 1) / 9) * (1/3)
-                    final_egg_chance += best_bonus * bonus_multiplier
-
-                if random.random() < final_egg_chance:
+                if final_egg_chance is not None and random.random() < final_egg_chance:
                     await self.handle_egg_drop(ctx, monster, levelchoice)
+
+            if divine_familiar_key:
+                async with self.bot.pool.acquire() as conn:
+                    shard_result = await self._roll_pve_divine_shard_fallback(
+                        conn,
+                        ctx.author.id,
+                        divine_familiar_key,
+                    )
+                await self._send_pve_divine_shard_update(
+                    ctx,
+                    divine_familiar_key,
+                    shard_result,
+                )
 
             # Dispatch completion event
             self.bot.dispatch("PVE_completion", ctx, True)
@@ -2502,7 +3022,7 @@ class Battles(commands.Cog):
         except Exception as e:
             import traceback
             msg = f"Error occurred: {e}\n{traceback.format_exc()}"
-            await ctx.send(msg)
+            await self._send_long_text(ctx, msg)
             print(msg)
             await self.bot.reset_cooldown(ctx)
 
@@ -2516,7 +3036,7 @@ class Battles(commands.Cog):
             pet_and_egg_count = await conn.fetchval(
                 """
                 SELECT 
-                    (SELECT COUNT(*) FROM monster_pets WHERE user_id = $1) +
+                    (SELECT COUNT(*) FROM monster_pets WHERE user_id = $1 AND COALESCE(in_house, FALSE) = FALSE) +
                     (SELECT COUNT(*) FROM monster_eggs WHERE user_id = $1 AND hatched = FALSE) +
                     (SELECT COUNT(*) FROM splice_requests WHERE user_id = $1 AND status = 'pending')
                 """,
@@ -2525,7 +3045,13 @@ class Battles(commands.Cog):
 
             # Capacity by tier
             total_allowed = 10
-            tier = ctx.character_data.get("tier", 0)
+            try:
+                tier = int(ctx.character_data.get("tier", 0) or 0)
+            except (TypeError, ValueError):
+                try:
+                    tier = int(float(ctx.character_data.get("tier", 0) or 0))
+                except (TypeError, ValueError):
+                    tier = 0
             if tier == 1:
                 total_allowed = 12
             elif tier == 2:
@@ -2547,6 +3073,7 @@ class Battles(commands.Cog):
                            "IV", happiness, hunger, equipped, url
                     FROM monster_pets 
                     WHERE user_id = $1
+                      AND COALESCE(in_house, FALSE) = FALSE
                     """,
                     ctx.author.id
                 )
@@ -2705,7 +3232,7 @@ class Battles(commands.Cog):
                         f"**{ctx.author}** obtained a {monster['name']} egg with {iv_percentage:.2f}% IV!"
                     )
             except Exception as e:
-                await ctx.send(str(e))
+                await self._send_long_text(ctx, str(e))
 
     @commands.command(brief="Scout ahead to see what monster you'll face")
     @has_char()
@@ -3060,7 +3587,7 @@ class Battles(commands.Cog):
         except Exception as e:
             import traceback
             error_message = f"An unexpected error occurred: {e}\n{traceback.format_exc()}"
-            await ctx.send(error_message[:1900] + "..." if len(error_message) > 1900 else error_message)
+            await self._send_long_text(ctx, error_message)
 
     @commands.group(name="battlesettings", aliases=["battleconfig", "bconfig"])
     @is_gm()
@@ -3426,7 +3953,10 @@ class Battles(commands.Cog):
                                 
                                 await asyncio.sleep(1)  # 1 second delay between turns for faster battles
                             except Exception as e:
-                                await ctx.send(f"⚠️ Error in turn {turn_count}: {str(e)}\n```{traceback.format_exc()}```")
+                                await self._send_long_text(
+                                    ctx,
+                                    f"⚠️ Error in turn {turn_count}: {str(e)}\n{traceback.format_exc()}",
+                                )
                                 break
                         
                         # Get the battle result
@@ -3434,12 +3964,16 @@ class Battles(commands.Cog):
                         victory = await battle.end_battle()
                         
                     except Exception as e:
-                        await ctx.send(f"⚠️ Error in dragon battle: {str(e)}\n```{traceback.format_exc()}```")
+                        await self._send_long_text(
+                            ctx,
+                            f"⚠️ Error in dragon battle: {str(e)}\n{traceback.format_exc()}",
+                        )
                         return
                     
                     # Handle rewards
                     if victory is True:  # Players won
-                        await self._handle_dragon_victory(ctx, view.party_members)
+                        stage_id = getattr(battle, "dragon_stage_id", None)
+                        await self._handle_dragon_victory(ctx, view.party_members, stage_id=stage_id)
                     elif victory is False:  # Players lost
                         await self._handle_dragon_defeat(ctx, view.party_members)
                     else:  # Draw
@@ -3454,9 +3988,26 @@ class Battles(commands.Cog):
                 await message.edit(content="Party formation timed out!", embed=None, view=None)
                 await self.bot.reset_cooldown(ctx)
         except Exception as e:
-            await ctx.send(e)
+            await self._send_long_text(ctx, str(e))
     
-    async def _handle_dragon_victory(self, ctx, party_members):
+    async def _get_ice_dragon_drops(self):
+        async with self.bot.pool.acquire() as conn:
+            return await conn.fetch(
+                "SELECT id, name, item_type, min_stat, max_stat, base_chance, max_chance, is_global, dragon_stage_id, "
+                "element, min_level, max_level "
+                "FROM ice_dragon_drops ORDER BY id ASC"
+            )
+
+    async def _get_ice_dragon_stage_id(self, level: int):
+        async with self.bot.pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT id FROM ice_dragon_stages "
+                "WHERE enabled IS TRUE AND min_level <= $1 AND max_level >= $1 "
+                "ORDER BY min_level ASC, max_level ASC, id ASC LIMIT 1",
+                level,
+            )
+
+    async def _handle_dragon_victory(self, ctx, party_members, stage_id=None):
         """Handle rewards for defeating the dragon"""
         # Get current dragon level
         dragon_stats = await self.battle_factory.dragon_ext.get_dragon_stats_from_database(self.bot)
@@ -3512,6 +4063,29 @@ class Battles(commands.Cog):
         # Give rewards to each party member
         reward_text = ""
         weapon_rewards_text = ""
+        level_bonus = min(0.08, (old_level - 1) * 0.003)  # 0.3% bonus per level, max 8%
+        if stage_id is None:
+            try:
+                stage_id = await self._get_ice_dragon_stage_id(old_level)
+            except Exception:
+                stage_id = None
+        try:
+            all_drops = await self._get_ice_dragon_drops()
+        except Exception:
+            all_drops = []
+        eligible_drops = []
+        for drop in all_drops:
+            if not drop["is_global"] and stage_id is not None and drop["dragon_stage_id"] != stage_id:
+                continue
+            if not drop["is_global"] and stage_id is None:
+                continue
+            min_level = drop["min_level"]
+            max_level = drop["max_level"]
+            if min_level is not None and old_level < min_level:
+                continue
+            if max_level is not None and old_level > max_level:
+                continue
+            eligible_drops.append(drop)
         try:
             async with self.bot.pool.acquire() as conn:
                 for idx, member in enumerate(party_members):
@@ -3555,61 +4129,35 @@ class Battles(commands.Cog):
                         # Record in reward text
                         reward_text += f"• {member.mention}: {member_money} 💰, {member_xp} XP\n"
                         
-                        # ICE DRAGON WEAPON REWARDS
-                        # Roll for weapon rewards for each player
-                        
-                        # Define ice dragon themed weapon names and types
-                        # Drop rates increase slightly with dragon level (max +8% at level 30+)
-                        level_bonus = min(0.08, (old_level - 1) * 0.003)  # 0.3% bonus per level, max 8%
-                        
-                        ice_dragon_weapons = [
-                            # 1-handed weapons (90-100 stats) - 1% chance each + level bonus (max 5% total)
-                            {"name": "Frostbite Blade", "type": ItemType.Sword, "min_stat": 20, "max_stat": 70, "chance": min(0.005, 0.001 + level_bonus)},
-                            {"name": "Ice Shard Dagger", "type": ItemType.Dagger, "min_stat": 20, "max_stat": 70, "chance": min(0.005, 0.001 + level_bonus)},
-                            {"name": "Glacial Axe", "type": ItemType.Axe, "min_stat": 20, "max_stat": 70, "chance": min(0.005, 0.001 + level_bonus)},
-                            {"name": "Frozen Spear", "type": ItemType.Spear, "min_stat": 20, "max_stat": 70, "chance": min(0.005, 0.001 + level_bonus)},
-                            {"name": "Permafrost Hammer", "type": ItemType.Hammer, "min_stat": 20, "max_stat": 70, "chance": min(0.005, 0.001 + level_bonus)},
-                            {"name": "Crystal Wand", "type": ItemType.Wand, "min_stat": 20, "max_stat": 70, "chance": min(0.005, 0.001 + level_bonus)},
-                            {"name": "Arctic Shield", "type": ItemType.Shield, "min_stat": 20, "max_stat": 70, "chance": min(0.005, 0.001 + level_bonus)},
-                            
-                            # 2-handed weapons (100-200 stats) - 0.5% chance each + level bonus (max 2.5% total)
-                            {"name": "Dragon's Breath Bow", "type": ItemType.Bow, "min_stat": 40, "max_stat": 150, "chance": min(0.0025, 0.0005 + level_bonus)},
-                            {"name": "Frost Giant's Scythe", "type": ItemType.Scythe, "min_stat": 40, "max_stat": 150, "chance": min(0.0025, 0.0005 + level_bonus)},
-                            {"name": "Absolute Zero Mace", "type": ItemType.Mace, "min_stat": 40, "max_stat": 150, "chance": min(0.0025, 0.0005 + level_bonus)},
-                        ]
-                        
-                        # Calculate total drop chance for display
-                        total_chance_1h = min(0.05, 0.01 + level_bonus) * 7
-                        total_chance_2h = min(0.025, 0.005 + level_bonus) * 3
-                        total_chance = total_chance_1h + total_chance_2h
+                        # ICE DRAGON WEAPON REWARDS (DB-driven)
                         try:
-                        # Roll for each weapon type
-                            for weapon in ice_dragon_weapons:
-                                if random.random() < weapon["chance"]:
+                            for drop in eligible_drops:
+                                effective_chance = min(drop["max_chance"], drop["base_chance"] + level_bonus)
+                                if random.random() < effective_chance:
                                     try:
-                                        # Player won this weapon!
-                                        stat = random.randint(weapon["min_stat"], weapon["max_stat"])
-                                        hand = weapon["type"].get_hand().value
+                                        stat = random.randint(drop["min_stat"], drop["max_stat"])
+                                        item_type = ItemType.from_string(drop["item_type"])
+                                        if not item_type:
+                                            continue
+                                        hand = item_type.get_hand().value
+                                        element = drop["element"] or "Water"
                                         
-                                        # Create the weapon
-                                        item = await self.bot.create_item(
-                                            name=weapon["name"],
-                                            value=10000,  # Value based on stat
-                                            type_=weapon["type"].value,
-                                            damage=stat if weapon["type"] != ItemType.Shield else 0,
-                                            armor=stat if weapon["type"] == ItemType.Shield else 0,
+                                        await self.bot.create_item(
+                                            name=drop["name"],
+                                            value=10000,
+                                            type_=item_type.value,
+                                            damage=stat if item_type != ItemType.Shield else 0,
+                                            armor=stat if item_type == ItemType.Shield else 0,
                                             hand=hand,
                                             owner=member,
-                                            element="Water",  # Ice dragon weapons are Water element
+                                            element=element,
                                             conn=conn
                                         )
                                         
-                                        # Add to weapon rewards text with rarity indicator
                                         weapon_type_display = "2H" if hand == "both" else "1H"
-                                        rarity_emoji = "🌟" if hand == "both" else "⭐"  # 2H weapons are rarer
-                                        weapon_rewards_text += f"{rarity_emoji} **{member.mention}** found **{weapon['name']}** ({weapon_type_display}) with {stat} stats!\n"
+                                        rarity_emoji = "🌟" if hand == "both" else "⭐"
+                                        weapon_rewards_text += f"{rarity_emoji} **{member.mention}** found **{drop['name']}** ({weapon_type_display}) with {stat} stats!\n"
                                     except Exception as e:
-                                        # Log error but continue with other rewards
                                         print(f"Error creating ice dragon weapon for {member.display_name}: {e}")
                                         continue
                         except Exception as e:
@@ -3658,13 +4206,20 @@ class Battles(commands.Cog):
                 )
             else:
                 # Add a note about the weapon drop system with drop rate info
-                level_bonus = min(0.08, (old_level - 1) * 0.003)
-                base_chance_1h = min(0.09, 0.01 + level_bonus)
-                base_chance_2h = min(0.045, 0.005 + level_bonus)
-                total_chance = base_chance_1h * 7 + base_chance_2h * 3
+                total_chance_1h = 0.0
+                total_chance_2h = 0.0
+                for drop in eligible_drops:
+                    item_type = ItemType.from_string(drop["item_type"])
+                    if not item_type:
+                        continue
+                    effective_chance = min(drop["max_chance"], drop["base_chance"] + level_bonus)
+                    if item_type.get_hand().value == "both":
+                        total_chance_2h += effective_chance
+                    else:
+                        total_chance_1h += effective_chance
                 embed.add_field(
                     name="❄️ Ice Dragon Loot",
-                    value=f"No legendary weapons were found this time. Keep challenging the dragon for a chance at rare ice-themed weapons!\n\n**Drop Rates:**\n• 1H Weapons: {base_chance_1h:.1%} each (7 types, 90-100 stats)\n• 2H Weapons: {base_chance_2h:.1%} each (3 types, 100-200 stats)",
+                    value=f"No legendary weapons were found this time. Keep challenging the dragon for a chance at rare ice-themed weapons!\n\n**Drop Rates:**\n• 1H Total: {total_chance_1h:.1%}\n• 2H Total: {total_chance_2h:.1%}",
                     inline=False
                 )
             
@@ -4030,7 +4585,7 @@ class Battles(commands.Cog):
             view = CouplesTowerView(author, partner, on_join, on_cancel)
             await original_message.edit(embed=embed, view=view)
         except Exception as e:
-            await ctx.send(e)
+            await self._send_long_text(ctx, str(e))
 
     @couples_battletower.command(name="progress")
     @has_char()
@@ -4338,7 +4893,7 @@ class Battles(commands.Cog):
             view = CouplesTowerView(author, partner, on_join, on_cancel)
             await original_message.edit(embed=embed, view=view)
         except Exception as e:
-            await ctx.send(e)
+            await self._send_long_text(ctx, str(e))
 
     async def display_couples_dialogue(self, ctx, level, author, partner, dialogue_only=False):
         """Display dialogue for couples battle tower levels"""
@@ -4351,7 +4906,7 @@ class Battles(commands.Cog):
             # Page 1: Level introduction with romantic theme
             intro_embed = discord.Embed(
                 title=f"💕 Floor {level}: {level_info['title']} 💕",
-                description=f"*The Tower of Eternal Bonds hums with ancient magic as you and your beloved step forward...*\n\n{level_info['story']}",
+                description=f"*The Heraean Spire of Sacred Vows hums with ancient magic as you and your beloved step forward...*\n\n{level_info['story']}",
                 color=discord.Color.magenta()
             )
             intro_embed.set_footer(text=f"💑 Together, you face the challenge ahead... 💑")
@@ -4361,7 +4916,7 @@ class Battles(commands.Cog):
             # Page 2: The challenge with dramatic presentation
             challenge_embed = discord.Embed(
                 title=f"⚔️ The Challenge That Awaits ⚔️",
-                description=f"*The air crackles with anticipation as the tower's guardians prepare to test your love...*\n\n{level_info['dialogue_start']}",
+                description=f"*The air crackles with anticipation as Olympian wardens prepare to test your love...*\n\n{level_info['dialogue_start']}",
                 color=discord.Color.dark_red()
             )
             challenge_embed.set_footer(text=f"🔥 Your love will be tested... 🔥")
@@ -4405,7 +4960,7 @@ class Battles(commands.Cog):
                 # For Level 30 and other reward levels, show special reward page instead
                 reward_embed = discord.Embed(
                     title=f"🌟 The Ultimate Reward 🌟",
-                    description="*At the tower's peak, you find not enemies to fight, but a divine altar surrounded by pure light...*",
+                    description="*At the spire's summit, you find not enemies to fight, but a divine altar surrounded by pure light...*",
                     color=discord.Color.gold()
                 )
                 reward_embed.add_field(name="✨ Divine Choice", value="*You will be offered three sacred blessings: Power, Wealth, or Youth. But remember - the greatest treasure is what you already possess.*", inline=False)
@@ -4695,7 +5250,7 @@ class Battles(commands.Cog):
 
         embed = discord.Embed(
             title="💕 Couples Battle Tower 💕",
-            description="**The Tower of Eternal Bonds**\n30-floor challenge for married couples!",
+            description="**The Heraean Spire of Sacred Vows**\n30-floor challenge for married couples!",
             color=discord.Color.magenta()
         )
         

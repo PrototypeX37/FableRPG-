@@ -27,7 +27,7 @@ class BattleFactory:
         self.element_ext = ElementExtension()
         self.class_ext = ClassBuffExtension()
         self.pet_ext = PetExtension()
-        self.dragon_ext = DragonExtension()
+        self.dragon_ext = DragonExtension(bot)
         self.settings = BattleSettings(bot)
         
     async def initialize(self):
@@ -372,7 +372,13 @@ class BattleFactory:
                     )
                     enemy_team.add_combatant(enemy_combatant)
             
-            return CouplesTowerBattle(ctx, [player_team, enemy_team], level=level, **kwargs)
+            return CouplesTowerBattle(
+                ctx,
+                [player_team, enemy_team],
+                level=level,
+                level_data=level_data,
+                **kwargs,
+            )
         except Exception as e:
             import traceback
             error_msg = f"🚨 **FACTORY ERROR for Level {level}**:\n```\n{traceback.format_exc()}\n```"

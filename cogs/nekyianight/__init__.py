@@ -288,7 +288,7 @@ class Underworld(commands.Cog):
         rows = await self.bot.pool.fetch(
             """SELECT item_key, title, cost_bones, cost_obols, stock_remaining, emoji
             FROM event_shop
-            WHERE enabled
+            WHERE enabled AND item_key <> 'pet_skill_reset_potion'
             ORDER BY sort_order, title;"""
         )
 
@@ -314,7 +314,6 @@ class Underworld(commands.Cog):
             "pet_age_potion":       _("Hastens a companion’s years."),
             "pet_speed_growth_potion": _("Quickens a companion’s growth."),
             "reset_potion": _("A draught to rewrite your fate—refunds your stat allocation once."),
-            "pet_skill_reset_potion": _("A draught to forget one technique and reclaim its power."),
         }
 
         for idx, r in enumerate(rows, 1):
@@ -356,7 +355,7 @@ class Underworld(commands.Cog):
         rows = await self.bot.pool.fetch(
             """SELECT item_key, title, cost_bones, cost_obols, stock_remaining, emoji
             FROM event_shop
-            WHERE enabled
+            WHERE enabled AND item_key <> 'pet_skill_reset_potion'
             ORDER BY sort_order, title;"""
         )
         if not rows:
@@ -388,6 +387,8 @@ class Underworld(commands.Cog):
 
         key   = item["item_key"]
         title = item["title"]
+        if key == "pet_skill_reset_potion":
+            return await ctx.send(_("This item has been removed from the game."))
 
         async with self.bot.pool.acquire() as conn:
             try:
@@ -498,8 +499,8 @@ class Underworld(commands.Cog):
             await conn.execute('UPDATE profile SET resetpotion = COALESCE(resetpotion, 0) + 1 WHERE "user"=$1;', uid)
         elif key == "bundle_obol":
             await conn.execute('UPDATE profile SET funeral_bundles = funeral_bundles + 1 WHERE "user"=$1;', uid)
-        elif key in {"pet_xp_potion", "pet_age_potion", "pet_speed_growth_potion", "pet_skill_reset_potion"}:
-            await self._grant_consumable(conn, uid, key, 1)  # <-- supports the new key
+        elif key in {"pet_xp_potion", "pet_age_potion", "pet_speed_growth_potion"}:
+            await self._grant_consumable(conn, uid, key, 1)
 
         else:
             # Unknown key: no-op

@@ -2082,30 +2082,75 @@
     ],
     "11": [
         {
-            "name": "Drakath",
+            "name": "Typhon",
             "hp": 15000,
             "attack": 4000,
             "defense": 2500,
-            "element": "Corrupted",
-            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Pngtreelightning_source_lightning_effect_purple_3916970.png",
+            "element": "Wind",
+            "url": "https://i.imgur.com/B3bRxqx.png",
             "ispublic": true
         },
         {
-            "name": "Astraea",
+            "name": "Bessie",
             "hp": 18000,
             "attack": 3500,
             "defense": 2500,
-            "element": "Light",
-            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_5z90r962trs71_1-Photoroom.png",
+            "element": "Water",
+            "url": "https://i.imgur.com/ROfiOzu.png",
             "ispublic": true
         },
         {
-            "name": "Sepulchure",
+            "name": "Arachne",
             "hp": 16000,
             "attack": 3000,
             "defense": 3000,
+            "element": "Electric",
+            "url": "https://i.imgur.com/faY4xBn.png",
+            "ispublic": true
+        },
+        {
+            "name": "Asterius",
+            "hp": 17000,
+            "attack": 3250,
+            "defense": 2750,
+            "element": "Nature",
+            "url": "https://i.imgur.com/XVYnePd.png",
+            "ispublic": true
+        },
+        {
+            "name": "Sorinveil",
+            "hp": 25000,
+            "attack": 3500,
+            "defense": 4500,
+            "element": "Light",
+            "url": "https://i.imgur.com/zemuDC9.png",
+            "ispublic": true
+        },
+        {
+            "name": "Vaion",
+            "hp": 15000,
+            "attack": 7000,
+            "defense": 2500,
             "element": "Dark",
-            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_wakai-quketsuki-sepulchuredoomknightdoomblade-Photoroom.png",
+            "url": "https://i.imgur.com/nC06jIp.png",
+            "ispublic": true
+        },
+        {
+            "name": "Astrephiel",
+            "hp": 18000,
+            "attack": 4000,
+            "defense": 6000,
+            "element": "Corrupted",
+            "url": "https://i.imgur.com/IbKng92.png",
+            "ispublic": true
+        },
+        {
+            "name": "Mayeia",
+            "hp": 19000,
+            "attack": 5000,
+            "defense": 5000,
+            "element": "Fire",
+            "url": "https://i.imgur.com/y2SclKj.png",
             "ispublic": true
         }
     ]

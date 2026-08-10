@@ -24,8 +24,29 @@ from discord.enums import ButtonStyle
 from discord.interactions import Interaction
 
 from utils.checks import is_god
+from utils.divine_familiars import DIVINE_FAMILIARS, award_divine_shards
 from utils.i18n import _
 import random as randomm
+
+
+DIVINE_SHARD_RAID_PROC_CHANCE = 0.15
+DIVINE_SHARD_FAMILIAR_KEY = "astraea_familiar"
+SPECIAL_ROLE_REWARD_WEIGHT = 2
+
+
+def pick_weighted_reward_target(candidates, *favored_roles):
+    favored_ids = {
+        getattr(role, "id", role)
+        for role in favored_roles
+        if getattr(role, "id", role) is not None
+    }
+    weights = [
+        SPECIAL_ROLE_REWARD_WEIGHT
+        if getattr(candidate, "id", candidate) in favored_ids
+        else 1
+        for candidate in candidates
+    ]
+    return randomm.choices(candidates, weights=weights, k=1)[0]
 
 
 # ---------- Reusable decision UI ----------
@@ -164,7 +185,6 @@ class ApolloSong(commands.Cog):
             await ctx.send(embed=opening, view=join_view)
 
             # ---- Countdown ----
-            await asyncio.sleep(300); await ctx.send("**Hold fast my Chosen. The Subduing Song shall begin soon.**")
             await asyncio.sleep(300); await ctx.send("**The earth shakes beneath your feet… The song begins in 10 minutes.**")
             await asyncio.sleep(300); await ctx.send("**A foul stench permeates the air... 5 minutes remain.**")
             await asyncio.sleep(180); await ctx.send("**A glimpse of scales, the eerie glow of Python’s eyes... 2 minutes to raise your voices.**")
@@ -199,6 +219,7 @@ class ApolloSong(commands.Cog):
                             race=profile["race"],
                             guild=profile["guild"],
                             god=profile["god"],
+                            xp=profile["xp"],
                             conn=conn,
                         )
                     except ValueError:
@@ -829,7 +850,7 @@ class ApolloSong(commands.Cog):
                 await ctx.send(embed=win)
 
                 users = [u.id for u in (raid_stats.keys() or participants)]
-                lucky = randomm.choice(users)
+                lucky = pick_weighted_reward_target(users, champion, priest)
 
                 async with self.bot.pool.acquire() as conn:
                     luck_val = await conn.fetchval('SELECT luck FROM profile WHERE "user"=$1;', lucky)
@@ -855,6 +876,22 @@ class ApolloSong(commands.Cog):
                     users,
                 )
                 await ctx.send(f"💰 All participants receive **${cash}**!")
+
+                if participants and randomm.random() < DIVINE_SHARD_RAID_PROC_CHANCE:
+                    shard_target = pick_weighted_reward_target(participants, champion, priest)
+                    familiar_key = DIVINE_SHARD_FAMILIAR_KEY
+                    familiar_name = DIVINE_FAMILIARS[familiar_key]["name"]
+                    async with self.bot.pool.acquire() as conn:
+                        shard_total = await award_divine_shards(
+                            conn,
+                            shard_target.id,
+                            familiar_key,
+                            1,
+                        )
+                    await ctx.send(
+                        f"✨ Apollo’s light grants **1 {familiar_name} shard** to {shard_target.mention}! "
+                        f"Now: **{shard_total}/20**"
+                    )
             else:
                 await ctx.send("💔 The Song falters—Python slithers back into the caverns. The Temple endures… for now.")
 

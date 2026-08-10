@@ -143,6 +143,7 @@ class CrateRarity(commands.Converter):
             "myst": "mystery",
             "f": "fortune",
             "d": "divine",
+            "mat": "materials",
             "mats": "materials",
         }
         rarity = rarities.get(stuff, stuff)

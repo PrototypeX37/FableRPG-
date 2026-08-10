@@ -5,3 +5,5 @@ config.toml
 config.toml.save
 patreon_config.json
 *.env
+.DS_Store
+**/.DS_Store

@@ -204,6 +204,240 @@ class AmuletTypeView(ui.View):
             pass
 
 
+def amulet_get(row, key, default=None):
+    try:
+        return row[key]
+    except Exception:
+        return default
+
+
+class OwnedAmuletSelect(ui.Select):
+    def __init__(self, view: "AmuletManagerView"):
+        self.manager_view = view
+        options = []
+        start = view.page * view.page_size
+        for offset, amulet in enumerate(view.current_page_items()):
+            index = start + offset
+            equipped = "Equipped" if amulet_get(amulet, "equipped", False) else "Stored"
+            type_name = str(amulet_get(amulet, "type", "?")).title()
+            tier = amulet_get(amulet, "tier", "?")
+            options.append(
+                discord.SelectOption(
+                    label=f"T{tier} {type_name} (ID: {amulet_get(amulet, 'id', '?')})",
+                    description=(
+                        f"{equipped} | HP +{amulet_get(amulet, 'hp', 0)} | "
+                        f"ATK +{amulet_get(amulet, 'attack', 0)} | DEF +{amulet_get(amulet, 'defense', 0)}"
+                    )[:100],
+                    value=str(index),
+                    emoji="✅" if amulet_get(amulet, "equipped", False) else "💎",
+                )
+            )
+        super().__init__(
+            placeholder="Choose an owned amulet...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.manager_view.ctx.author.id:
+            return await interaction.response.send_message("This is not your amulet menu.", ephemeral=True)
+        self.manager_view.index = int(self.values[0])
+        await interaction.response.edit_message(embed=self.manager_view.embed(), view=self.manager_view)
+
+
+class AmuletManagerView(ui.View):
+    def __init__(self, cog: "AmuletCrafting", ctx: commands.Context, amulets):
+        super().__init__(timeout=90)
+        self.cog = cog
+        self.ctx = ctx
+        self.amulets = list(amulets)
+        self.index = 0
+        self.page = 0
+        self.page_size = 25
+        if self.amulets:
+            self.add_item(OwnedAmuletSelect(self))
+
+    def total_pages(self) -> int:
+        if not self.amulets:
+            return 1
+        return max(1, (len(self.amulets) + self.page_size - 1) // self.page_size)
+
+    def current_page_items(self):
+        start = self.page * self.page_size
+        return self.amulets[start:start + self.page_size]
+
+    def selected_amulet(self):
+        if not self.amulets:
+            return None
+        self.index = min(self.index, len(self.amulets) - 1)
+        return self.amulets[self.index]
+
+    async def refresh(self):
+        async with self.cog.bot.pool.acquire() as conn:
+            self.amulets = await conn.fetch(
+                """
+                SELECT *
+                FROM amulets
+                WHERE user_id = $1
+                ORDER BY equipped DESC, tier DESC, id DESC
+                """,
+                self.ctx.author.id,
+            )
+        self.index = min(self.index, max(0, len(self.amulets) - 1))
+        self.page = min(self.page, self.total_pages() - 1)
+        for item in list(self.children):
+            if isinstance(item, OwnedAmuletSelect):
+                self.remove_item(item)
+        if self.amulets:
+            self.add_item(OwnedAmuletSelect(self))
+
+    def embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"💎 {self.ctx.author.display_name}'s Amulets",
+            color=discord.Color.blurple(),
+        )
+        if not self.amulets:
+            embed.description = (
+                "You don't own any amulets yet.\n\n"
+                f"Use `{self.ctx.clean_prefix}amulet available` or the **Recipes** button to browse craftable amulets."
+            )
+            return embed
+
+        amulet = self.selected_amulet()
+        type_name = str(amulet_get(amulet, "type", "?")).title()
+        tier = amulet_get(amulet, "tier", "?")
+        equipped = bool(amulet_get(amulet, "equipped", False))
+        embed.description = (
+            f"Selected **Tier {tier} {type_name} Amulet**\n"
+            f"ID: `{amulet_get(amulet, 'id', '?')}`\n"
+            f"Status: {'✅ Equipped' if equipped else 'Stored'}"
+        )
+        embed.add_field(
+            name="Stats",
+            value=(
+                f"❤️ HP: +{amulet_get(amulet, 'hp', 0)}\n"
+                f"⚔️ Attack: +{amulet_get(amulet, 'attack', 0)}\n"
+                f"🛡️ Defense: +{amulet_get(amulet, 'defense', 0)}"
+            ),
+            inline=False,
+        )
+        embed.set_footer(
+            text=(
+                f"Showing {self.index + 1}/{len(self.amulets)} owned amulet(s) | "
+                f"Page {self.page + 1}/{self.total_pages()}"
+            )
+        )
+        return embed
+
+    async def refresh_message(self):
+        await self.refresh()
+        try:
+            await self.message.edit(embed=self.embed(), view=self)  # type: ignore[attr-defined]
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+            pass
+
+    async def set_equipped(self, interaction: discord.Interaction, equipped: bool):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message("This is not your amulet menu.", ephemeral=True)
+        amulet = self.selected_amulet()
+        if not amulet:
+            return await interaction.response.send_message("You don't own any amulets yet.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        amulet_id = int(amulet_get(amulet, "id"))
+        async with self.cog.bot.pool.acquire() as conn:
+            async with conn.transaction():
+                fresh = await conn.fetchrow(
+                    "SELECT * FROM amulets WHERE id=$1 AND user_id=$2 FOR UPDATE;",
+                    amulet_id,
+                    self.ctx.author.id,
+                )
+                if not fresh:
+                    await interaction.followup.send("You don't own this amulet anymore.", ephemeral=True)
+                    await self.refresh_message()
+                    return
+                if equipped:
+                    await conn.execute(
+                        "UPDATE amulets SET equipped=false WHERE user_id=$1 AND equipped=true;",
+                        self.ctx.author.id,
+                    )
+                    await conn.execute("UPDATE amulets SET equipped=true WHERE id=$1;", amulet_id)
+                    message = f"Equipped Tier {fresh['tier']} {fresh['type'].title()} amulet."
+                else:
+                    if not fresh["equipped"]:
+                        await interaction.followup.send("This amulet is not equipped.", ephemeral=True)
+                        await self.refresh_message()
+                        return
+                    await conn.execute("UPDATE amulets SET equipped=false WHERE id=$1;", amulet_id)
+                    message = f"Unequipped Tier {fresh['tier']} {fresh['type'].title()} amulet."
+        await self.refresh_message()
+        await interaction.followup.send(message, ephemeral=True)
+
+    @ui.button(label="Equip", style=discord.ButtonStyle.green, emoji="✅", row=1)
+    async def equip(self, interaction: discord.Interaction, _button: ui.Button):
+        await self.set_equipped(interaction, True)
+
+    @ui.button(label="Unequip", style=discord.ButtonStyle.secondary, emoji="↩️", row=1)
+    async def unequip(self, interaction: discord.Interaction, _button: ui.Button):
+        await self.set_equipped(interaction, False)
+
+    @ui.button(label="Recipes", style=discord.ButtonStyle.primary, emoji="🔨", row=1)
+    async def recipes(self, interaction: discord.Interaction, _button: ui.Button):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message("This is not your amulet menu.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        await self.cog.view_available.callback(self.cog, self.ctx)
+        await interaction.followup.send("Recipe browser opened.", ephemeral=True)
+
+    @ui.button(label="Resources", style=discord.ButtonStyle.primary, emoji="🧰", row=1)
+    async def resources(self, interaction: discord.Interaction, _button: ui.Button):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message("This is not your amulet menu.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        await self.cog.view_resources.callback(self.cog, self.ctx)
+        await interaction.followup.send("Resources sent.", ephemeral=True)
+
+    @ui.button(label="Previous", style=discord.ButtonStyle.gray, emoji="◀️", row=2)
+    async def previous_page(self, interaction: discord.Interaction, _button: ui.Button):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message("This is not your amulet menu.", ephemeral=True)
+        if self.page > 0:
+            self.page -= 1
+            self.index = self.page * self.page_size
+            await self.refresh()
+            await interaction.response.edit_message(embed=self.embed(), view=self)
+        else:
+            await interaction.response.defer()
+
+    @ui.button(label="Next", style=discord.ButtonStyle.gray, emoji="▶️", row=2)
+    async def next_page(self, interaction: discord.Interaction, _button: ui.Button):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message("This is not your amulet menu.", ephemeral=True)
+        if self.page < self.total_pages() - 1:
+            self.page += 1
+            self.index = self.page * self.page_size
+            await self.refresh()
+            await interaction.response.edit_message(embed=self.embed(), view=self)
+        else:
+            await interaction.response.defer()
+
+    @ui.button(label="Help", style=discord.ButtonStyle.gray, emoji="❔", row=3)
+    async def help(self, interaction: discord.Interaction, _button: ui.Button):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message("This is not your amulet menu.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        await self.cog.amulet_help.callback(self.cog, self.ctx)
+        await interaction.followup.send("Help sent.", ephemeral=True)
+
+    @ui.button(label="Close", style=discord.ButtonStyle.red, row=3)
+    async def close(self, interaction: discord.Interaction, _button: ui.Button):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message("This is not your amulet menu.", ephemeral=True)
+        await interaction.message.delete()
+        self.stop()
+
+
 class AmuletCrafting(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -671,7 +905,19 @@ class AmuletCrafting(commands.Cog):
     @has_char()
     async def amulet(self, ctx):
         """Base command for amulet system"""
-        await ctx.send("Available commands: `available`, `craft`, `equip`, `unequip`, `recipe`, `resources`, `help`, `sell`")
+        async with self.bot.pool.acquire() as conn:
+            amulets = await conn.fetch(
+                """
+                SELECT *
+                FROM amulets
+                WHERE user_id = $1
+                ORDER BY equipped DESC, tier DESC, id DESC
+                """,
+                ctx.author.id,
+            )
+        view = AmuletManagerView(self, ctx, amulets)
+        message = await ctx.send(embed=view.embed(), view=view)
+        view.message = message
 
     @amulet.command(name="available")
     @has_char()

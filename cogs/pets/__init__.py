@@ -21,6 +21,16 @@ from discord.ext import commands, tasks
 from utils import misc as rpgtools
 from utils.i18n import _, locale_doc
 from utils.checks import has_char, is_gm
+from utils.divine_familiars import (
+    DIVINE_FAMILIARS,
+    DIVINE_SHARDS_PER_EGG,
+    craft_divine_egg,
+    ensure_divine_familiar_tables,
+    get_familiar_display_name,
+    format_familiar_display_name,
+    get_divine_shard_counts,
+    resolve_familiar_key,
+)
 from cogs.shard_communication import user_on_cooldown as user_cooldown
 
 # =====================================================================================
@@ -174,14 +184,92 @@ class PetSelect(discord.ui.Select):
         view.index = int(self.values[0])
         await view.send_page(interaction)
 
+class PetFoodSelect(discord.ui.Select):
+    def __init__(self, parent_view: "PetPaginator", pet_id: int):
+        self.parent_view = parent_view
+        self.pet_id = pet_id
+        care_cog = parent_view.cog.bot.get_cog("PetsCare")
+        food_types = getattr(care_cog, "FOOD_TYPES", {})
+
+        options = []
+        for key, food in food_types.items():
+            label = key.replace("_", " ").title()
+            tier_note = " | Warrior+" if food.get("tier_required") else ""
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    description=(
+                        f"${int(food['cost']):,} | Hunger +{food['hunger']} | "
+                        f"Happy +{food['happiness']}{tier_note}"
+                    ),
+                    value=key,
+                    emoji="🍖" if key != "treats" else "🍬",
+                )
+            )
+
+        super().__init__(
+            placeholder="Choose food for this pet...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        food_key = self.values[0]
+        await self.parent_view.run_pet_command(
+            interaction,
+            "feed",
+            self.pet_id,
+            food_type=food_key.replace("_", " "),
+            done_message=f"Food selected: **{food_key.replace('_', ' ').title()}**.",
+        )
+        view = self.view
+        if view:
+            for child in view.children:
+                child.disabled = True
+            try:
+                await interaction.message.edit(view=view)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+class PetFoodView(discord.ui.View):
+    def __init__(self, parent_view: "PetPaginator", pet_id: int):
+        super().__init__(timeout=45)
+        self.parent_view = parent_view
+        self.pet_id = pet_id
+        self.add_item(PetFoodSelect(parent_view, pet_id))
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.gray, emoji="❌", row=1)
+    async def cancel_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if interaction.user.id != self.parent_view.author.id:
+            return await interaction.response.send_message("This is not your pet menu.", ephemeral=True)
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="Feed cancelled.", view=self)
+
 class PetPaginator(discord.ui.View):
-    def __init__(self, pets, author: discord.abc.User, cog_instance: commands.Cog):
+    def __init__(
+        self,
+        pets,
+        author: discord.abc.User,
+        cog_instance: commands.Cog,
+        ctx: commands.Context | None = None,
+        *,
+        actions_enabled: bool = True,
+    ):
         super().__init__(timeout=60)
         self.pets = pets
         self.author = author
         self.cog = cog_instance
+        self.ctx = ctx
+        self.actions_enabled = actions_enabled and ctx is not None
         self.index = 0
         self.message: discord.Message | None = None
+        if not self.actions_enabled:
+            for child in list(self.children):
+                if isinstance(child, discord.ui.Button) and child.label != "Close":
+                    self.remove_item(child)
         if pets:
             self.add_item(PetSelect(pets))
 
@@ -268,6 +356,108 @@ class PetPaginator(discord.ui.View):
     def get_embed(self) -> discord.Embed:
         return self._embed_for(self.pets[self.index])
 
+    def selected_pet_id(self) -> int:
+        return int(safe_get(self.pets[self.index], "id", 0))
+
+    async def refresh_selected_pet(self) -> None:
+        pet_id = self.selected_pet_id()
+        async with self.cog.bot.pool.acquire() as conn:
+            pet = await conn.fetchrow(
+                """
+                SELECT *
+                FROM monster_pets
+                WHERE user_id = $1 AND id = $2
+                """,
+                self.author.id,
+                pet_id,
+            )
+        if pet:
+            self.pets[self.index] = pet
+
+    async def refresh_message(self) -> None:
+        if not self.message:
+            return
+        try:
+            await self.message.edit(embed=self.get_embed(), view=self)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+    def get_group_command(self, name: str) -> commands.Command | None:
+        group = getattr(self.cog, "pets", None)
+        if group is None or not hasattr(group, "get_command"):
+            return None
+        return group.get_command(name)
+
+    async def run_pet_command(
+        self,
+        interaction: discord.Interaction,
+        command_name: str,
+        *args,
+        done_message: str | None = None,
+        refresh: bool = True,
+        **kwargs,
+    ) -> None:
+        if interaction.user.id != self.author.id:
+            return await interaction.response.send_message("This is not your pet menu.", ephemeral=True)
+        if self.ctx is None:
+            return await interaction.response.send_message("This pet menu cannot run actions.", ephemeral=True)
+
+        command = self.get_group_command(command_name)
+        if command is None:
+            return await interaction.response.send_message(
+                f"That pet action is not loaded yet. Try reloading the pet cogs.",
+                ephemeral=True,
+            )
+
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
+        original_command = self.ctx.command
+        self.ctx.command = command
+        try:
+            if not command.enabled:
+                raise commands.DisabledCommand(f"{command.qualified_name} command is disabled")
+            for predicate in command.checks:
+                allowed = await discord.utils.maybe_coroutine(predicate, self.ctx)
+                if not allowed:
+                    raise commands.CheckFailure(f"The checks for {command.qualified_name} failed.")
+            if command._buckets.valid:
+                current = datetime.now(timezone.utc).timestamp()
+                bucket = command._buckets.get_bucket(self.ctx, current)
+                if bucket is not None:
+                    retry_after = bucket.update_rate_limit(current)
+                    if retry_after:
+                        raise commands.CommandOnCooldown(bucket, retry_after, command._buckets.type)
+
+            callback = command.callback
+            if command.cog is not None:
+                await callback(command.cog, self.ctx, *args, **kwargs)
+            else:
+                await callback(self.ctx, *args, **kwargs)
+        except commands.CommandOnCooldown as exc:
+            await interaction.followup.send(
+                f"⏳ `{command.qualified_name}` is on cooldown. Try again in **{timedelta(seconds=int(exc.retry_after))}**.",
+                ephemeral=True,
+            )
+            return
+        except commands.CommandError as exc:
+            await interaction.followup.send(f"❌ {exc}", ephemeral=True)
+            return
+        except Exception as exc:
+            logger = getattr(self.cog.bot, "logger", None)
+            if logger:
+                logger.exception("Pet action button failed")
+            await interaction.followup.send(f"❌ Pet action failed: {exc}", ephemeral=True)
+            return
+        finally:
+            self.ctx.command = original_command
+
+        if refresh and command_name != "release":
+            await self.refresh_selected_pet()
+            await self.refresh_message()
+        if done_message:
+            await interaction.followup.send(done_message, ephemeral=True)
+
     async def send_page(self, interaction: discord.Interaction):
         embed = self.get_embed()
         if self.message is None:
@@ -277,7 +467,58 @@ class PetPaginator(discord.ui.View):
         else:
             await interaction.response.edit_message(embed=embed, view=self)
 
-    @discord.ui.button(label="Close", style=discord.ButtonStyle.red, row=1)
+    @discord.ui.button(label="Feed", style=discord.ButtonStyle.green, emoji="🍖", row=1)
+    async def feed_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if interaction.user.id != self.author.id:
+            return await interaction.response.send_message("This is not your pet menu.", ephemeral=True)
+        care_cog = self.cog.bot.get_cog("PetsCare")
+        if not care_cog or not getattr(care_cog, "FOOD_TYPES", None):
+            return await interaction.response.send_message("Pet feeding is not loaded yet.", ephemeral=True)
+        pet = self.pets[self.index]
+        pet_id = self.selected_pet_id()
+        await interaction.response.send_message(
+            f"Choose food for **{safe_get(pet, 'name', 'this pet')}**.",
+            view=PetFoodView(self, pet_id),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Pet", style=discord.ButtonStyle.primary, emoji="🐾", row=1)
+    async def pet_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self.run_pet_command(interaction, "pet", self.selected_pet_id(), done_message="Pet interaction sent.")
+
+    @discord.ui.button(label="Play", style=discord.ButtonStyle.primary, emoji="🎾", row=1)
+    async def play_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self.run_pet_command(interaction, "play", self.selected_pet_id(), done_message="Play session sent.")
+
+    @discord.ui.button(label="Train", style=discord.ButtonStyle.secondary, emoji="🏋️", row=1)
+    async def train_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self.run_pet_command(interaction, "train", self.selected_pet_id(), done_message="Training session sent.")
+
+    @discord.ui.button(label="Status", style=discord.ButtonStyle.secondary, emoji="📊", row=1)
+    async def status_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self.run_pet_command(
+            interaction,
+            "status",
+            self.selected_pet_id(),
+            done_message="Status sent.",
+            refresh=False,
+        )
+
+    @discord.ui.button(label="Treat", style=discord.ButtonStyle.green, emoji="🍬", row=2)
+    async def treat_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self.run_pet_command(interaction, "treat", self.selected_pet_id(), done_message="Treat sent.")
+
+    @discord.ui.button(label="Release", style=discord.ButtonStyle.red, emoji="💔", row=2)
+    async def release_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self.run_pet_command(
+            interaction,
+            "release",
+            self.selected_pet_id(),
+            done_message="Release confirmation opened.",
+            refresh=False,
+        )
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.red, row=3)
     async def close_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
         if interaction.user.id != self.author.id:
             return await interaction.response.send_message("This is not your pet list.", ephemeral=True)
@@ -359,17 +600,26 @@ class Pets(commands.Cog):
         member: discord.Member | None,
         guild: discord.Guild | None,
     ) -> int:
+        try:
+            tier_value = int(tier) if tier is not None else 0
+        except (TypeError, ValueError):
+            try:
+                # Some rows may hold values like "4.0"; normalize them to integer tiers.
+                tier_value = int(float(tier))
+            except (TypeError, ValueError):
+                tier_value = 0
+
         maxslot = 20
         if guild and guild.id == 1199287508794626078 and getattr(member, "premium_since", None):
             maxslot = max(maxslot, 22)
-        if tier == 1:
+        if tier_value == 1:
             maxslot = max(maxslot, 22)
-        elif tier == 2:
+        elif tier_value == 2:
             maxslot = 24
-        elif tier == 3:
+        elif tier_value == 3:
             maxslot = 27
-        elif tier == 4:
-            maxslot = 35
+        elif tier_value == 4:
+            maxslot = 25
         return maxslot
 
     async def _active_pet_item_count(
@@ -450,7 +700,7 @@ class Pets(commands.Cog):
                     SELECT *
                     FROM monster_pets
                     WHERE user_id = $1 AND COALESCE(in_house, FALSE) = FALSE
-                    ORDER BY id
+                    ORDER BY equipped DESC, id
                     """,
                     ctx.author.id,
                 )
@@ -467,7 +717,7 @@ class Pets(commands.Cog):
                         await ctx.send("You don't have any pets.")
                     return
 
-            view = PetPaginator(pets, ctx.author, self)
+            view = PetPaginator(pets, ctx.author, self, ctx)
             embed = view.get_embed()
             view.message = await ctx.send(embed=embed, view=view)
         except Exception as e:
@@ -535,7 +785,7 @@ class Pets(commands.Cog):
                 )
                 await ctx.send(embed=overview)
 
-            view = PetPaginator(housed_pets, ctx.author, self)
+                view = PetPaginator(housed_pets, ctx.author, self, ctx, actions_enabled=False)
             if not housed_pets:
                 return await ctx.send(_("🏛️ Your Pet Oikos is currently empty."))
 
@@ -1373,6 +1623,133 @@ class Pets(commands.Cog):
         embed = view.get_embed()
         view.message = await ctx.send(embed=embed, view=view)
 
+    @pets.command(name="divineshards", aliases=["dshards"], brief=_("Check your divine familiar shard progress"))
+    async def divineshards(self, ctx):
+        async with self.bot.pool.acquire() as conn:
+            await ensure_divine_familiar_tables(conn)
+            shard_counts = await get_divine_shard_counts(conn, ctx.author.id)
+
+        embed = discord.Embed(
+            title="✨ Divine Familiar Shards",
+            description="Collect shards from Spring PvE and god raids. Craft an egg at 20 shards.",
+            color=discord.Color.gold(),
+        )
+
+        progress_emoji_by_key = {
+            "astraea_familiar": "🟨",     # Sorinveil
+            "sepulchure_familiar": "🟦",  # Vaion
+            "drakath_familiar": "⬜",     # Astrephiel
+            "primordial_familiar": "🟪",  # Mayeia
+        }
+
+        for key, familiar in DIVINE_FAMILIARS.items():
+            current = int(shard_counts.get(key, 0))
+            required = max(1, int(DIVINE_SHARDS_PER_EGG))
+            if current <= 0:
+                progress_slots = 0
+            else:
+                # Ceil scaling so any non-zero shard progress shows at least one filled block.
+                progress_slots = min(10, max(1, (current * 10 + required - 1) // required))
+            fill_emoji = progress_emoji_by_key.get(key, "🟪")
+            progress_bar = (fill_emoji * progress_slots) + ("⬛" * (10 - progress_slots))
+            embed.add_field(
+                name=format_familiar_display_name(familiar),
+                value=f"**{current}/{DIVINE_SHARDS_PER_EGG}**\n{progress_bar}",
+                inline=False,
+            )
+
+        embed.set_footer(
+            text=f"Craft: {ctx.clean_prefix}pets divinecraft <familiar name>"
+        )
+        await ctx.send(embed=embed)
+
+    @pets.command(name="divinecraft", aliases=["dcraft"], brief=_("Craft a divine familiar egg from shards"))
+    async def divinecraft(self, ctx, *, familiar_input: str):
+        familiar_key = resolve_familiar_key(familiar_input)
+        if familiar_key is None:
+            valid = ", ".join([cfg["name"] for cfg in DIVINE_FAMILIARS.values()])
+            return await ctx.send(
+                _("Unknown divine familiar. Valid options: {valid}").format(valid=valid)
+            )
+
+        async with self.bot.pool.acquire() as conn:
+            await self._ensure_pet_house_columns(conn)
+            await ensure_divine_familiar_tables(conn)
+
+            tier = await conn.fetchval(
+                "SELECT tier FROM profile WHERE profile.user = $1",
+                ctx.author.id,
+            )
+            member = (
+                ctx.guild.get_member(ctx.author.id)
+                if getattr(ctx, "guild", None)
+                else None
+            )
+            maxslot = self._calc_inventory_limit(
+                tier,
+                member,
+                getattr(ctx, "guild", None),
+            )
+            active_count = await self._active_pet_item_count(conn, ctx.author.id)
+            if active_count >= maxslot:
+                return await ctx.send(
+                    _("Your active inventory is full (**{count}/{limit}**).").format(
+                        count=active_count,
+                        limit=maxslot,
+                    )
+                )
+
+            result = await craft_divine_egg(
+                conn,
+                ctx.author.id,
+                familiar_key,
+                shards_required=DIVINE_SHARDS_PER_EGG,
+            )
+
+        if not result.get("ok"):
+            remaining = int(result.get("remaining", 0))
+            needed = max(0, DIVINE_SHARDS_PER_EGG - remaining)
+            familiar_name = get_familiar_display_name(familiar_key)
+            if result.get("error") == "not_enough_shards":
+                return await ctx.send(
+                    _(
+                        "You need **{needed}** more shard(s) for **{name}** "
+                        "(currently **{current}/{required}**)."
+                    ).format(
+                        needed=needed,
+                        name=familiar_name,
+                        current=remaining,
+                        required=DIVINE_SHARDS_PER_EGG,
+                    )
+                )
+            return await ctx.send(_("Could not craft this divine egg right now."))
+
+        stats = result["stats"]
+        familiar = result["familiar"]
+        embed = discord.Embed(
+            title="🐣 Divine Egg Crafted",
+            description=(
+                f"Crafted **{format_familiar_display_name(familiar)} Egg** from shards.\n"
+                f"Remaining shards: **{result['remaining']}**"
+            ),
+            color=discord.Color.green(),
+        )
+        embed.add_field(
+            name="Stats",
+            value=(
+                f"HP: **{stats['hp']}**\n"
+                f"ATK: **{stats['attack']}**\n"
+                f"DEF: **{stats['defense']}**\n"
+                f"IV: **{stats['iv_percent']:.2f}%**"
+            ),
+            inline=True,
+        )
+        embed.add_field(name="Element", value=f"**{familiar['element']}**", inline=True)
+        embed.add_field(name="Egg ID", value=f"`{result['egg_id']}`", inline=True)
+        if familiar.get("url"):
+            embed.set_thumbnail(url=familiar["url"])
+        await ctx.send(embed=embed)
+
     @pets.command(brief=_("Equip a pet to fight alongside you in battles"))
     async def equip(self, ctx, pet_id: int):
         try:
@@ -1557,7 +1934,7 @@ class Pets(commands.Cog):
                             pass
         except Exception as e:
             print(f"Error in check_egg_hatches: {e}")
-            user = self.bot.get_user(295173706496475136)
+            user = self.bot.get_user(524674960153903126)
             if user:
                 try:
                     await user.send(f"Error in check_egg_hatches: {e}")
@@ -1948,6 +2325,19 @@ class Pets(commands.Cog):
                     "• `$pets house` - View pets stored in your Oikos\n"
                     "• `$pets store <id>` / `$pets unstore <id>` - Move pets in/out of Oikos\n"
                     "• `$pets housename`, `$pets houseimage`, `$pets housemotto`, `$pets housetheme` - Customize your Oikos"
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name=_("🌳 Skills & Training"),
+                value=_(
+                    "• `$pets train [pet_id]` - Train a pet for XP, trust, and level progress\n"
+                    "• `$pets skillshelp` - View the pet skills and leveling help\n"
+                    "• `$pets skilllist [element]` - View all elements or one element's skill tree\n"
+                    "• `$pets skills [pet_id]` - View a pet's learned skills and progress\n"
+                    "• `$pets skillinfo [pet_id] <skill name>` - View detailed skill info\n"
+                    "• `$pets learn [pet_id] <skill name>` - Learn a skill for a pet\n"
+                    "• `$pets unlearn [pet_id] <skill name>` - Unlearn a skill and refund SP"
                 ),
                 inline=False,
             )

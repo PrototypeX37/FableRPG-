@@ -25,11 +25,23 @@ from discord.ext import commands
 
 from classes.classes import Ritualist, from_string
 from classes.converters import IntGreaterThan
+from classes.errors import NoChoice
 from cogs.shard_communication import next_day_cooldown
 from cogs.shard_communication import user_on_cooldown as user_cooldown
 from utils import random
 from utils.checks import has_char, has_god, has_no_god
 from utils.i18n import _, locale_doc
+from utils.loot import (
+    LootSelectionView,
+    acquire_loot_locks,
+    delete_user_loot,
+    fetch_user_loot,
+    loot_value,
+    release_loot_locks,
+    reserve_loot_action_cooldown,
+    reset_loot_action_cooldown,
+    unique_loot_ids,
+)
 
 
 class Gods(commands.Cog):
@@ -37,9 +49,101 @@ class Gods(commands.Cog):
         self.bot = bot
         self.bot.gods = {god["user"]: god for god in self.bot.config.gods}
 
+    async def perform_sacrifice_loot(
+        self,
+        ctx,
+        selected_loot_ids: list[int],
+        requested_count: int | None = None,
+        reserve_cooldown: bool = False,
+    ) -> None:
+        if reserve_cooldown:
+            retry_after = await reserve_loot_action_cooldown(self.bot, ctx.author.id)
+            if retry_after:
+                return await ctx.send(
+                    _(
+                        "You are already using loot. Try again in {seconds} seconds."
+                    ).format(seconds=int(retry_after))
+                )
+
+        selected_loot_ids = unique_loot_ids(selected_loot_ids)
+        requested_count = requested_count or len(selected_loot_ids)
+
+        async with self.bot.pool.acquire() as conn:
+            available_loot = await fetch_user_loot(conn, ctx.author.id, selected_loot_ids)
+
+        if not available_loot:
+            await reset_loot_action_cooldown(self.bot, ctx)
+            return await ctx.send(
+                _("Those loot item(s) were already used by another action.")
+            )
+
+        selected_loot_ids = [int(item["id"]) for item in available_loot]
+        locks, blocked = await acquire_loot_locks(
+            self.bot, ctx.author.id, selected_loot_ids, "sacrifice"
+        )
+        if blocked:
+            await reset_loot_action_cooldown(self.bot, ctx)
+            return await ctx.send(
+                _(
+                    "Loot item(s) `{loot_ids}` are already being used. Finish or"
+                    " cancel the other loot action first."
+                ).format(loot_ids=", ".join([str(loot_id) for loot_id in blocked]))
+            )
+
+        try:
+            async with self.bot.pool.acquire() as conn:
+                async with conn.transaction():
+                    deleted_loot = await delete_user_loot(
+                        conn, ctx.author.id, selected_loot_ids
+                    )
+                    if not deleted_loot:
+                        await reset_loot_action_cooldown(self.bot, ctx)
+                        return await ctx.send(
+                            _("Those loot item(s) were already used by another action.")
+                        )
+
+                    count = len(deleted_loot)
+                    value = loot_value(deleted_loot)
+                    for class_ in ctx.character_data["class"]:
+                        c = from_string(class_)
+                        if c and c.in_class_line(Ritualist):
+                            value = round(value * Decimal(1 + 0.05 * c.class_grade()))
+
+                    value = int(value)
+                    await conn.execute(
+                        'UPDATE profile SET "favor"="favor"+$1 WHERE "user"=$2;',
+                        value,
+                        ctx.author.id,
+                    )
+
+                    await self.bot.log_transaction(
+                        ctx,
+                        from_=ctx.author.id,
+                        to=2,
+                        subject="sacrifice",
+                        data={"Item-Count": count, "Amount": value},
+                        conn=conn,
+                    )
+        finally:
+            await release_loot_locks(self.bot, locks)
+
+        skipped = requested_count - count
+        additional = _(
+            " Skipped `{amount}` because they did not belong to you or were already"
+            " used."
+        ).format(amount=skipped)
+        await ctx.send(
+            _(
+                "You prayed to {god}, and they accepted your {count} sacrificed loot"
+                " item(s). Your standing with the god has increased by **{points}**"
+                " points."
+            ).format(god=ctx.character_data["god"], count=count, points=value)
+            + (additional if skipped else "")
+        )
+
     @has_god()
     @has_char()
-    @user_cooldown(180)
+    @user_cooldown(180, identifier="sacrificeexchange")
     @commands.command(brief=_("Sacrifice loot for favor"))
     @locale_doc
     async def sacrifice(self, ctx, *loot_ids: int):
@@ -53,77 +157,47 @@ class Gods(commands.Cog):
 
             Only players, who follow a God can use this command."""
         )
+        none_given = len(loot_ids) == 0
+        requested_loot_ids = unique_loot_ids(loot_ids)
+
         async with self.bot.pool.acquire() as conn:
-            if not loot_ids:
-                value, count = await conn.fetchval(
-                    'SELECT (SUM("value"), COUNT(*)) FROM loot WHERE "user"=$1;',
-                    ctx.author.id,
-                )
-                if count == 0:
-                    await self.bot.reset_cooldown(ctx)
-                    return await ctx.send(_("You don't have any loot."))
-                if not await ctx.confirm(
-                    _(
-                        "This will sacrifice all of your loot and give {value} favor."
-                        " Continue?"
-                    ).format(value=value)
-                ):
-                    return
-            else:
-                value, count = await conn.fetchval(
-                    'SELECT (SUM("value"), COUNT("value")) FROM loot WHERE "id"=ANY($1)'
-                    ' AND "user"=$2;',
-                    loot_ids,
-                    ctx.author.id,
-                )
-
-                if not count:
-                    await self.bot.reset_cooldown(ctx)
-                    return await ctx.send(
-                        _(
-                            "You don't own any loot items with the IDs: {itemids}"
-                        ).format(
-                            itemids=", ".join([str(loot_id) for loot_id in loot_ids])
-                        )
-                    )
-            class_ = ctx.character_data["class"]
-            for class_ in ctx.character_data["class"]:
-                c = from_string(class_)
-                if c and c.in_class_line(Ritualist):
-                    value = round(value * Decimal(1 + 0.05 * c.class_grade()))
-
-            if len(loot_ids) > 0:
-                await conn.execute(
-                    'DELETE FROM loot WHERE "id"=ANY($1) AND "user"=$2;',
-                    loot_ids,
-                    ctx.author.id,
-                )
-            else:
-                await conn.execute('DELETE FROM loot WHERE "user"=$1;', ctx.author.id)
-            await conn.execute(
-                'UPDATE profile SET "favor"="favor"+$1 WHERE "user"=$2;',
-                value,
-                ctx.author.id,
+            available_loot = await fetch_user_loot(
+                conn, ctx.author.id, None if none_given else requested_loot_ids
             )
 
-            value = float(value)
-            value = int(value)
-
-
-            await self.bot.log_transaction(
-                ctx,
-                from_=ctx.author.id,
-                to=2,
-                subject="sacrifice",
-                data={"Item-Count": count, "Amount": value},
-                conn=conn,
+        if not available_loot:
+            await reset_loot_action_cooldown(self.bot, ctx)
+            if none_given:
+                return await ctx.send(_("You don't have any loot."))
+            return await ctx.send(
+                _("You don't own any loot items with the IDs: {itemids}").format(
+                    itemids=", ".join([str(loot_id) for loot_id in requested_loot_ids])
+                )
             )
-        await ctx.send(
-            _(
-                "You prayed to {god}, and they accepted your {count} sacrificed loot"
-                " item(s). Your standing with the god has increased by **{points}**"
-                " points."
-            ).format(god=ctx.character_data["god"], count=count, points=value)
+
+        if none_given:
+            try:
+                selected_loot_ids = await LootSelectionView(
+                    ctx,
+                    available_loot,
+                    title=_("Select loot to sacrifice"),
+                    placeholder=_("Choose loot to sacrifice"),
+                ).prompt()
+            except NoChoice:
+                await reset_loot_action_cooldown(self.bot, ctx)
+                return await ctx.send(_("You didn't choose anything."))
+
+            if not selected_loot_ids:
+                await reset_loot_action_cooldown(self.bot, ctx)
+                return await ctx.send(_("Cancelled."))
+        else:
+            selected_loot_ids = [int(item["id"]) for item in available_loot]
+
+        requested_count = (
+            len(selected_loot_ids) if none_given else len(requested_loot_ids)
+        )
+        await self.perform_sacrifice_loot(
+            ctx, selected_loot_ids, requested_count=requested_count
         )
 
     @has_char()

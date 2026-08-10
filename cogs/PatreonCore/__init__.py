@@ -14,6 +14,15 @@ from cogs.shard_communication import user_on_cooldown as user_cooldown
 
 class PatreonCore(commands.Cog):
     """Cog for syncing Patreon pledges with Discord roles"""
+    # Monthly weapon-token distribution knobs for `redeemweapontokens`.
+    # Edit these values to change payout math.
+    WEAPON_TOKEN_BASE = 1
+    WEAPON_TOKEN_BOOSTER_MIN = 2
+    WEAPON_TOKEN_TIER_MINIMUMS = {
+        1: 2,
+        2: 3,
+        3: 5,  # Tier 3+ uses this minimum
+    }
 
     def __init__(self, bot):
         self.bot = bot
@@ -29,6 +38,7 @@ class PatreonCore(commands.Cog):
         # Campaign and guild settings
         self.patreon_campaign_id = 11352402  # Will be populated on first API call
         self.guild_id = 1323388333589528638  # Support server ID
+        self.booster_role_id = 1405906986507178066  # Support server booster role
         self.check_interval = 60 * 30  # Check every 30 minutes
 
         # Discord Patreon role ID -> internal tier level
@@ -50,6 +60,8 @@ class PatreonCore(commands.Cog):
         self.patrons_data = {}
         self.patreon_tier_map = {}
         self.last_updated = None
+        self.manual_tier_overrides = {}
+        self.pending_tier_validations = {}
 
         # Configurable log channel
         self.log_channel_id = None
@@ -83,7 +95,7 @@ class PatreonCore(commands.Cog):
         snapshot: dict[str, list[str]] = {}
         async for member in guild.fetch_members(limit=None):
             tier_level, matched_roles = self._member_tier_from_roles(member)
-            await self.update_patron_tier_in_db(member.id, tier_level)
+            await self.update_patron_tier_in_db(member.id, tier_level, source="discord_roles")
             if tier_level >= 1:
                 snapshot[str(member.id)] = matched_roles
         return snapshot
@@ -152,6 +164,50 @@ class PatreonCore(commands.Cog):
             return highest
         return self._tier_level_from_entitled_tiers(tier_ids)
 
+    def _to_int(self, value, default=0):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _normalize_user_id(self, value):
+        parsed = self._to_int(value, None)
+        if parsed is None:
+            raise ValueError(f"Invalid user id: {value}")
+        return parsed
+
+    def _user_key(self, user_id):
+        return str(self._normalize_user_id(user_id))
+
+    def _utcnow_iso(self):
+        return datetime.now(timezone.utc).isoformat()
+
+    def get_manual_tier_override(self, user_id):
+        return self.manual_tier_overrides.get(self._user_key(user_id))
+
+    def set_manual_tier_override(self, user_id, tier, setter_id=None):
+        key = self._user_key(user_id)
+        payload = {
+            "tier": self._to_int(tier, 0),
+            "set_at": self._utcnow_iso(),
+        }
+        if setter_id is not None:
+            payload["set_by"] = self._to_int(setter_id, 0)
+        self.manual_tier_overrides[key] = payload
+
+        pending = self.pending_tier_validations.get(key)
+        if pending and self._to_int(pending.get("proposed_tier"), -1) == payload["tier"]:
+            self.pending_tier_validations.pop(key, None)
+        self._save_config()
+
+    def clear_manual_tier_override(self, user_id):
+        key = self._user_key(user_id)
+        had_override = self.manual_tier_overrides.pop(key, None) is not None
+        had_pending = self.pending_tier_validations.pop(key, None) is not None
+        if had_override or had_pending:
+            self._save_config()
+        return had_override
+
     def _load_config(self):
         """Load configuration from file"""
         try:
@@ -183,6 +239,10 @@ class PatreonCore(commands.Cog):
                 self.tier_role_mapping = config.get('tier_role_mapping', {})
                 self.tier_level_mapping = config.get('tier_level_mapping', self.tier_level_mapping)
                 self.role_driven_sync = config.get('role_driven_sync', self.role_driven_sync)
+                overrides = config.get("manual_tier_overrides", self.manual_tier_overrides)
+                pending = config.get("pending_tier_validations", self.pending_tier_validations)
+                self.manual_tier_overrides = overrides if isinstance(overrides, dict) else {}
+                self.pending_tier_validations = pending if isinstance(pending, dict) else {}
 
                 print("[PatreonCore] Configuration loaded successfully.")
         except Exception as e:
@@ -204,6 +264,8 @@ class PatreonCore(commands.Cog):
                 'tier_role_mapping': self.tier_role_mapping,
                 'tier_level_mapping': self.tier_level_mapping,
                 'role_driven_sync': self.role_driven_sync,
+                'manual_tier_overrides': self.manual_tier_overrides,
+                'pending_tier_validations': self.pending_tier_validations,
             }
 
             with open(self.config_file, 'w') as f:
@@ -611,37 +673,141 @@ class PatreonCore(commands.Cog):
         except Exception as e:
             print(f"[PatreonCore] Error sending log message: {e}")
 
-    async def update_patron_tier_in_db(self, discord_id, tier_level):
-        """Update the patron's tier in the database"""
+    async def _queue_pending_tier_validation(self, user_id, current_tier, proposed_tier, source):
+        key = self._user_key(user_id)
+        source_label = str(source or "unknown")
+        current_tier = self._to_int(current_tier, 0)
+        proposed_tier = self._to_int(proposed_tier, 0)
+        existing = self.pending_tier_validations.get(key)
+        if (
+            existing is not None
+            and self._to_int(existing.get("current_tier"), -1) == current_tier
+            and self._to_int(existing.get("proposed_tier"), -1) == proposed_tier
+            and str(existing.get("source")) == source_label
+        ):
+            return
+        should_notify = True
+        now_iso = self._utcnow_iso()
+        self.pending_tier_validations[key] = {
+            "current_tier": current_tier,
+            "proposed_tier": proposed_tier,
+            "source": source_label,
+            "detected_at": existing.get("detected_at", now_iso) if existing else now_iso,
+            "updated_at": now_iso,
+        }
+        self._save_config()
+        if should_notify:
+            await self._notify_pending_tier_validation(self._to_int(user_id, 0))
+
+    async def _notify_pending_tier_validation(self, user_id):
+        pending = self.pending_tier_validations.get(self._user_key(user_id))
+        if not pending:
+            return
+        source = str(pending.get("source", "unknown"))
+        source_display = {
+            "patreon_api": "Patreon API",
+            "patreon_api_removed": "Patreon API (missing patron)",
+            "discord_roles": "Discord role sync",
+        }.get(source, source)
+        current_tier = self._to_int(pending.get("current_tier"), 0)
+        proposed_tier = self._to_int(pending.get("proposed_tier"), 0)
+        message = (
+            f"⚠️ Pending tier validation for <@{user_id}> (`{user_id}`)\n"
+            f"Current locked tier: `{current_tier}` | Incoming tier: `{proposed_tier}` from `{source_display}`.\n"
+            f"Use `tierapprove {user_id}` to accept or `tierreject {user_id}` to keep the locked tier."
+        )
+        if self.log_channel_id:
+            channel = self.bot.get_channel(self.log_channel_id)
+            if channel:
+                try:
+                    await channel.send(message)
+                    return
+                except Exception as e:
+                    print(f"[PatreonCore] Error notifying pending tier validation: {e}")
+        guild = self.bot.get_guild(self.guild_id) if self.guild_id else None
+        if guild and guild.system_channel:
+            try:
+                await guild.system_channel.send(message)
+                return
+            except Exception as e:
+                print(f"[PatreonCore] Error notifying in system channel: {e}")
+        print(f"[PatreonCore] {message}")
+
+    async def update_patron_tier_in_db(self, discord_id, tier_level, source="unknown", force=False, conn=None):
+        """Update the patron tier in DB while respecting manual overrides."""
         try:
-            # Convert discord_id to int if it's a string
-            user_id = int(discord_id) if isinstance(discord_id, str) else discord_id
+            user_id = self._normalize_user_id(discord_id)
+            desired_tier = self._to_int(tier_level, 0)
+            if conn is None:
+                async with self.bot.pool.acquire() as owned_conn:
+                    return await self.update_patron_tier_in_db(
+                        user_id,
+                        desired_tier,
+                        source=source,
+                        force=force,
+                        conn=owned_conn,
+                    )
 
-            # Try to update the tier in the database
+            row = await conn.fetchrow(
+                'SELECT "tier" FROM profile WHERE "user" = $1',
+                user_id,
+            )
+            if row is None:
+                return "missing_profile"
 
-                # Using the bot's connection pool
-            async with self.bot.pool.acquire() as conn:
-                    # First check if the user exists in the database
-                user_exists = await conn.fetchval(
-                    'SELECT EXISTS(SELECT 1 FROM profile WHERE "user" = $1)',
-                    user_id
-                )
+            current_tier = self._to_int(row["tier"], 0)
+            override = self.get_manual_tier_override(user_id)
 
-                if user_exists:
+            if override and not force and source != "manual":
+                locked_tier = self._to_int(override.get("tier"), current_tier)
+
+                # Enforce locked tier in DB if something else changed it.
+                if current_tier != locked_tier:
                     await conn.execute(
                         'UPDATE profile SET "tier" = $1 WHERE "user" = $2',
-                        tier_level, user_id
+                        locked_tier,
+                        user_id,
                     )
+                    current_tier = locked_tier
                     try:
                         await self.bot.clear_donator_cache(user_id)
                     except Exception:
                         pass
-                    print(f"[PatreonCore] Updated tier for user {user_id} to {tier_level}")
+
+                if desired_tier != locked_tier:
+                    await self._queue_pending_tier_validation(
+                        user_id=user_id,
+                        current_tier=locked_tier,
+                        proposed_tier=desired_tier,
+                        source=source,
+                    )
+                    print(
+                        f"[PatreonCore] Blocked tier overwrite for {user_id}: "
+                        f"locked {locked_tier}, incoming {desired_tier} from {source}."
+                    )
+                    return "pending_validation"
+                return "locked_no_change"
+
+            if current_tier == desired_tier:
+                return "unchanged"
+
+            await conn.execute(
+                'UPDATE profile SET "tier" = $1 WHERE "user" = $2',
+                desired_tier,
+                user_id,
+            )
+            try:
+                await self.bot.clear_donator_cache(user_id)
+            except Exception:
+                pass
+            print(f"[PatreonCore] Updated tier for user {user_id} to {desired_tier} (source={source})")
+            return "updated"
 
         except Exception as e:
             print(f"[PatreonCore] Error updating database for user {discord_id}: {e}")
             import traceback
             print(traceback.format_exc())
+            return "error"
 
     @tasks.loop(minutes=30)
     async def update_roles(self):
@@ -739,15 +905,23 @@ class PatreonCore(commands.Cog):
 
                     tier_level = max(tier_level_from_api, tier_level_from_roles)
 
-                    # Update the database with tier level
-                    await self.update_patron_tier_in_db(member_id, tier_level)
+                    # Update the database with tier level.
+                    await self.update_patron_tier_in_db(
+                        member_id,
+                        tier_level,
+                        source="patreon_api",
+                    )
 
                 except Exception as e:
                     print(f"[PatreonCore] Error updating roles for member {member_id}: {e}")
 
             # Patrons no longer returned by API should lose patron tier in DB.
             for removed_member_id in previous_member_ids - set(new_data.keys()):
-                await self.update_patron_tier_in_db(removed_member_id, 0)
+                await self.update_patron_tier_in_db(
+                    removed_member_id,
+                    0,
+                    source="patreon_api_removed",
+                )
 
             # Update stored data
             self.patrons_data = new_data
@@ -908,6 +1082,8 @@ class PatreonCore(commands.Cog):
             value="Role-driven" if self.role_driven_sync else "Patreon API",
             inline=True,
         )
+        embed.add_field(name="Manual Overrides", value=str(len(self.manual_tier_overrides)), inline=True)
+        embed.add_field(name="Pending Validations", value=str(len(self.pending_tier_validations)), inline=True)
 
         if self.log_channel_id:
             log_channel = self.bot.get_channel(self.log_channel_id)
@@ -1019,6 +1195,189 @@ class PatreonCore(commands.Cog):
             if count < len(self.patrons_data):
                 embed.set_footer(text=f"Showing {count} of {len(self.patrons_data)} patrons")
             await ctx.send(embed=embed)
+
+    @commands.command(hidden=True)
+    @is_gm()
+    async def tierpending(self, ctx):
+        """List pending tier changes blocked by manual overrides."""
+        if not self.pending_tier_validations:
+            return await ctx.send("✅ No pending tier validations.")
+
+        lines = []
+        for user_key, payload in sorted(self.pending_tier_validations.items(), key=lambda x: x[0]):
+            user_id = self._to_int(user_key, 0)
+            current_tier = self._to_int(payload.get("current_tier"), 0)
+            proposed_tier = self._to_int(payload.get("proposed_tier"), 0)
+            source = payload.get("source", "unknown")
+            detected_at = payload.get("detected_at", "unknown")
+            lines.append(
+                f"`{user_id}`: `{current_tier}` -> `{proposed_tier}` from `{source}` at `{detected_at}`"
+            )
+
+        header = "**Pending Tier Validations**\n"
+        chunk = header
+        for line in lines:
+            if len(chunk) + len(line) + 1 > 1900:
+                await ctx.send(chunk)
+                chunk = line + "\n"
+            else:
+                chunk += line + "\n"
+        if chunk.strip():
+            await ctx.send(chunk)
+
+    @commands.command(hidden=True)
+    @is_gm()
+    async def tierapprove(self, ctx, user_id: int):
+        """Approve pending external tier for a manually overridden user."""
+        key = self._user_key(user_id)
+        pending = self.pending_tier_validations.get(key)
+        if not pending:
+            return await ctx.send(f"❌ No pending validation for `{user_id}`.")
+
+        proposed_tier = self._to_int(pending.get("proposed_tier"), 0)
+        source = str(pending.get("source", "unknown"))
+        status = await self.update_patron_tier_in_db(
+            user_id,
+            proposed_tier,
+            source=f"gm_approved:{source}",
+            force=True,
+        )
+        if status == "missing_profile":
+            return await ctx.send(f"❌ User `{user_id}` has no profile row.")
+        if status == "error":
+            return await ctx.send(f"❌ Failed to apply approved tier for `{user_id}`. Check logs.")
+
+        self.set_manual_tier_override(user_id, proposed_tier, setter_id=ctx.author.id)
+        self.pending_tier_validations.pop(key, None)
+        self._save_config()
+        await ctx.send(
+            f"✅ Approved tier update for `{user_id}`. "
+            f"Tier is now `{proposed_tier}` and remains manually locked."
+        )
+
+    @commands.command(hidden=True)
+    @is_gm()
+    async def tierreject(self, ctx, user_id: int):
+        """Reject pending external tier and keep locked tier."""
+        key = self._user_key(user_id)
+        pending = self.pending_tier_validations.get(key)
+        if not pending:
+            return await ctx.send(f"❌ No pending validation for `{user_id}`.")
+
+        override = self.get_manual_tier_override(user_id)
+        locked_tier = self._to_int(
+            override.get("tier") if override else pending.get("current_tier"),
+            0,
+        )
+        self.pending_tier_validations.pop(key, None)
+        self._save_config()
+        await self.update_patron_tier_in_db(
+            user_id,
+            locked_tier,
+            source="manual",
+            force=True,
+        )
+        await ctx.send(
+            f"✅ Rejected pending tier update for `{user_id}`. "
+            f"Kept locked tier `{locked_tier}`."
+        )
+
+    @commands.command(hidden=True, aliases=["tierunlock", "cleartierlock"])
+    @is_gm()
+    async def cleartieroverride(self, ctx, user_id: int):
+        """Remove manual tier lock so Patreon sync can update this user automatically."""
+        had_override = self.clear_manual_tier_override(user_id)
+        if had_override:
+            await ctx.send(
+                f"✅ Cleared manual tier override for `{user_id}`. "
+                "Patreon sync can update this user again."
+            )
+        else:
+            await ctx.send(f"ℹ️ No manual tier override found for `{user_id}`.")
+
+    @commands.command(hidden=True)
+    @is_gm()
+    async def checktier(self, ctx, user_id: int):
+        """Show current tier state for one user (DB tier + override + pending validation)."""
+        row = await self.bot.pool.fetchrow(
+            'SELECT "user", "name", "tier" FROM profile WHERE "user" = $1',
+            user_id,
+        )
+        if row is None:
+            return await ctx.send(f"❌ No profile found for `{user_id}`.")
+
+        db_tier = self._to_int(row["tier"], 0)
+        name = row["name"] or "Unknown"
+        override = self.get_manual_tier_override(user_id)
+        pending = self.pending_tier_validations.get(self._user_key(user_id))
+
+        lines = [
+            f"**Tier State for `{user_id}` ({name})**",
+            f"Database tier: `{db_tier}`",
+        ]
+
+        if override:
+            lines.append(
+                "Manual override: "
+                f"`{self._to_int(override.get('tier'), db_tier)}` "
+                f"(set_at: `{override.get('set_at', 'unknown')}`; "
+                f"set_by: `{override.get('set_by', 'unknown')}`)"
+            )
+        else:
+            lines.append("Manual override: `none`")
+
+        if pending:
+            lines.append(
+                "Pending validation: "
+                f"`{self._to_int(pending.get('current_tier'), db_tier)}` -> "
+                f"`{self._to_int(pending.get('proposed_tier'), db_tier)}` "
+                f"from `{pending.get('source', 'unknown')}` "
+                f"(detected: `{pending.get('detected_at', 'unknown')}`)"
+            )
+        else:
+            lines.append("Pending validation: `none`")
+
+        await ctx.send("\n".join(lines))
+
+    @commands.command(hidden=True, aliases=["tiersover0", "tierlistall"])
+    @is_gm()
+    async def tierlist(self, ctx):
+        """List all users in profile with tier > 0."""
+        rows = await self.bot.pool.fetch(
+            '''
+            SELECT "user", "name", COALESCE("tier", 0) AS tier
+            FROM profile
+            WHERE COALESCE("tier", 0) > 0
+            ORDER BY tier DESC, "name" ASC NULLS LAST, "user" ASC
+            '''
+        )
+        if not rows:
+            return await ctx.send("No users with tier > 0 found.")
+
+        tier_counts = {}
+        for row in rows:
+            tier_val = self._to_int(row["tier"], 0)
+            tier_counts[tier_val] = tier_counts.get(tier_val, 0) + 1
+
+        summary = " | ".join(
+            [f"T{tier}:{count}" for tier, count in sorted(tier_counts.items(), key=lambda x: x[0])]
+        )
+        header = f"**Users with tier > 0: {len(rows)}** ({summary})\n"
+
+        chunk = header
+        for row in rows:
+            uid = self._to_int(row["user"], 0)
+            uname = row["name"] or "Unknown"
+            tier_val = self._to_int(row["tier"], 0)
+            line = f"`{uid}` | Tier `{tier_val}` | {uname}\n"
+            if len(chunk) + len(line) > 1900:
+                await ctx.send(chunk)
+                chunk = line
+            else:
+                chunk += line
+
+        if chunk.strip():
+            await ctx.send(chunk)
 
     @commands.command()
     @is_gm()
@@ -1193,60 +1552,106 @@ class PatreonCore(commands.Cog):
             await ctx.send(f"❌ Error during tier check: ```{error_message[:1500]}```")
             print(error_message)
             
+    async def _is_support_server_booster(self, user_id: int) -> bool:
+        guild = self.bot.get_guild(self.guild_id)
+        if guild is None:
+            support_server_id = getattr(getattr(self.bot.config, "game", None), "support_server_id", None)
+            if support_server_id:
+                guild = self.bot.get_guild(int(support_server_id))
+        if guild is None:
+            return False
+
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return False
+
+        booster_role = guild.get_role(self.booster_role_id)
+        if booster_role is not None and booster_role in member.roles:
+            return True
+        return member.premium_since is not None
+
+    def _monthly_weapon_token_amount(self, tier: int, is_booster: bool) -> int:
+        amount = self.WEAPON_TOKEN_BASE
+
+        if is_booster:
+            amount = max(amount, self.WEAPON_TOKEN_BOOSTER_MIN)
+
+        if tier >= 3:
+            amount = max(amount, self.WEAPON_TOKEN_TIER_MINIMUMS.get(3, amount))
+        elif tier == 2:
+            amount = max(amount, self.WEAPON_TOKEN_TIER_MINIMUMS.get(2, amount))
+        elif tier >= 1:
+            amount = max(amount, self.WEAPON_TOKEN_TIER_MINIMUMS.get(1, amount))
+
+        return amount
+
+    def _monthly_weapon_token_distribution_text(self) -> str:
+        tier1 = self.WEAPON_TOKEN_TIER_MINIMUMS.get(1, self.WEAPON_TOKEN_BASE)
+        tier2 = self.WEAPON_TOKEN_TIER_MINIMUMS.get(2, tier1)
+        tier3 = self.WEAPON_TOKEN_TIER_MINIMUMS.get(3, tier2)
+        return (
+            f"Distribution: {self.WEAPON_TOKEN_BASE} (normal), "
+            f"{tier1} (tier 1), {tier2} (tier 2), {tier3} (tier 3+). "
+            f"Booster minimum: {self.WEAPON_TOKEN_BOOSTER_MIN}."
+        )
+
     @commands.command()
     @user_cooldown(2764800)  # 32 days in seconds (32 * 24 * 60 * 60)
     async def redeemweapontokens(self, ctx):
-        """Redeem 5 weapon tokens if you're a patron (tier 1 or higher)."""
-        # Check if the user has tier 1 or higher in the database
+        """Redeem monthly weapon tokens (3/5/7/10) based on tier and booster status."""
         async with self.bot.pool.acquire() as conn:
-            patron_tier = await conn.fetchval(
-                'SELECT "tier" FROM profile WHERE "user"=$1',
-                ctx.author.id
+            row = await conn.fetchrow(
+                'SELECT COALESCE("tier", 0) AS tier, COALESCE("weapontoken", 0) AS weapontoken FROM profile WHERE "user"=$1',
+                ctx.author.id,
             )
-            
-            # If tier is None or less than 1, deny the request and reset cooldown
-            if patron_tier is None or patron_tier < 1:
+            if row is None:
                 await self.bot.reset_cooldown(ctx)
-                return await ctx.send("❌ You need to be a patron (tier 1 or higher) to redeem weapon tokens!")
-            
-            # Add 5 weapon tokens to their account
+                return await ctx.send("❌ You need to create a character before redeeming weapon tokens.")
+
+            patron_tier = self._to_int(row["tier"], 0)
+            is_booster = await self._is_support_server_booster(ctx.author.id)
+            tokens_to_add = self._monthly_weapon_token_amount(patron_tier, is_booster)
+
             try:
-                # Update weapon tokens
                 await conn.execute(
-                    'UPDATE profile SET "weapontoken"="weapontoken"+5 WHERE "user"=$1',
-                    ctx.author.id
+                    'UPDATE profile SET "weapontoken"="weapontoken"+$1 WHERE "user"=$2',
+                    tokens_to_add,
+                    ctx.author.id,
                 )
-                
-                # Get new weapon token balance for confirmation message
+
                 new_balance = await conn.fetchval(
-                    'SELECT "weapontoken" FROM profile WHERE "user"=$1',
-                    ctx.author.id
+                    'SELECT COALESCE("weapontoken", 0) FROM profile WHERE "user"=$1',
+                    ctx.author.id,
                 )
-                
-                # Log the redemption if log channel is set
+
                 if self.log_channel_id:
                     log_channel = self.bot.get_channel(self.log_channel_id)
                     if log_channel:
-                        await log_channel.send(f"⚔️ **Weapon Token Redemption**: {ctx.author.mention} ({ctx.author.id}) redeemed 5 weapon tokens as a Tier {patron_tier} Patron.")
-                
-                # Create an embed for a nice response
+                        await log_channel.send(
+                            "⚔️ **Weapon Token Redemption**: "
+                            f"{ctx.author.mention} ({ctx.author.id}) redeemed {tokens_to_add} weapon tokens "
+                            f"(tier={patron_tier}, booster={'yes' if is_booster else 'no'})."
+                        )
+
                 embed = discord.Embed(
                     title="⚔️ Weapon Tokens Redeemed!",
-                    description=f"Thank you for supporting us as a patron!",
-                    color=0x3CB371  # Medium sea green
+                    description="Your monthly weapon token redemption is complete.",
+                    color=0x3CB371,
                 )
-                embed.add_field(name="Tokens Added", value="5", inline=True)
+                embed.add_field(name="Tokens Added", value=str(tokens_to_add), inline=True)
                 embed.add_field(name="New Balance", value=f"{new_balance:,}", inline=True)
                 embed.add_field(name="Patron Tier", value=f"Tier {patron_tier}", inline=True)
-                embed.set_footer(text="You can redeem weapon tokens once every 32 days.")
-                
+                embed.add_field(name="Server Booster", value="Yes" if is_booster else "No", inline=True)
+                embed.set_footer(text=self._monthly_weapon_token_distribution_text())
+
                 await ctx.send(embed=embed)
-                
+
             except Exception as e:
-                # Reset cooldown so they can try again if error occurs
-                self.bot.reset_cooldown(ctx)
+                await self.bot.reset_cooldown(ctx)
                 await ctx.send(f"❌ Error updating your weapon tokens: {e}")
-                # Log the error
                 print(f"[PatreonCore] Error in redeemweapontokens for {ctx.author.id}: {e}")
 
 

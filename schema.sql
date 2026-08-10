@@ -240,6 +240,21 @@ ALTER SEQUENCE public.coupon_id_seq OWNED BY public.coupon.id;
 
 
 --
+-- Name: daily_command_attachments; Type: TABLE; Schema: public; Owner: jens
+--
+
+CREATE TABLE public.daily_command_attachments (
+    user_id bigint NOT NULL,
+    command_name text NOT NULL,
+    "position" integer NOT NULL,
+    created_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+
+ALTER TABLE public.daily_command_attachments OWNER TO jens;
+
+
+--
 -- Name: defenses; Type: TABLE; Schema: public; Owner: jens
 --
 
@@ -321,18 +336,6 @@ ALTER TABLE public.guild_id_seq OWNER TO jens;
 ALTER SEQUENCE public.guild_id_seq OWNED BY public.guild.id;
 
 
---
--- Name: helpme; Type: TABLE; Schema: public; Owner: jens
---
-
-CREATE TABLE public.helpme (
-    id bigint NOT NULL
-);
-
-
-ALTER TABLE public.helpme OWNER TO jens;
-
---
 -- Name: inventory; Type: TABLE; Schema: public; Owner: jens
 --
 
@@ -774,6 +777,14 @@ ALTER TABLE ONLY public.coupon
 
 
 --
+-- Name: daily_command_attachments daily_command_attachments_pkey; Type: CONSTRAINT; Schema: public; Owner: jens
+--
+
+ALTER TABLE ONLY public.daily_command_attachments
+    ADD CONSTRAINT daily_command_attachments_pkey PRIMARY KEY (user_id, command_name);
+
+
+--
 -- Name: defenses defenses_pkey; Type: CONSTRAINT; Schema: public; Owner: jens
 --
 
@@ -789,15 +800,6 @@ ALTER TABLE ONLY public.guild
     ADD CONSTRAINT guild_pkey PRIMARY KEY (id);
 
 
---
--- Name: helpme helpme_pkey; Type: CONSTRAINT; Schema: public; Owner: jens
---
-
-ALTER TABLE ONLY public.helpme
-    ADD CONSTRAINT helpme_pkey PRIMARY KEY (id);
-
-
---
 -- Name: inventory inventory_pkey; Type: CONSTRAINT; Schema: public; Owner: jens
 --
 
@@ -889,6 +891,13 @@ CREATE INDEX allitems_id_idx ON public.allitems USING btree (id);
 --
 
 CREATE INDEX allitems_owner_idx ON public.allitems USING btree (owner);
+
+
+--
+-- Name: daily_command_attachments_user_position_idx; Type: INDEX; Schema: public; Owner: jens
+--
+
+CREATE INDEX daily_command_attachments_user_position_idx ON public.daily_command_attachments USING btree (user_id, "position");
 
 
 --
@@ -1132,4 +1141,3 @@ GRANT SELECT ON TABLE public.profile TO prest;
 --
 -- PostgreSQL database dump complete
 --
-

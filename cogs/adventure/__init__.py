@@ -40,6 +40,7 @@ from cogs.shard_communication import user_on_cooldown as user_cooldown
 from utils import items
 from utils import misc as rpgtools
 from utils import random
+from utils import checks as check_utils
 from utils.checks import has_adventure, has_char, has_no_adventure, is_class
 from utils.i18n import _, locale_doc
 from utils.maze import Cell, Maze
@@ -166,6 +167,7 @@ ADVENTURE_NAMES: dict[int, str] = {
 BLESS_DURATION_SECONDS = 86400
 BLESS_ACCEPT_TIMEOUT_SECONDS = 60
 BLESS_MULTIPLIER_REDIS_KEY_PREFIX = "bless:"  # distinct from cooldown keys
+BLESS_LEGACY_MAX_VALUE = 5.0  # sanity cap for migrating old unscoped bless keys
 
 DIRECTION = Literal["n", "e", "s", "w"]
 ALL_DIRECTIONS: set[DIRECTION] = {"n", "e", "s", "w"}
@@ -525,9 +527,113 @@ class Adventure(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-        # Your narrative table is huge; keep it as-is from your existing file.
-        # For this rewrite, we keep the attribute name the same so the rest of your code works.
-        self.ADVENTURE_EVENTS: dict[str, list[str]] = {}
+        # Keep a non-empty narrative pool so status output always shows story text.
+        self.ADVENTURE_EVENTS: dict[str, list[str]] = self._build_default_adventure_events()
+
+    @staticmethod
+    def _build_default_adventure_events() -> dict[str, list[str]]:
+        return {
+            "tier_1": [
+                "At dawn in Athena's olive groves, an owl guided you to a forgotten votive altar.",
+                "A satyr band challenged you to a dance duel before granting safe passage.",
+                "You returned a stolen laurel wreath to Apollo's shrine and earned a lucky omen.",
+                "Naiads at a village spring demanded a song before revealing a hidden trail.",
+                "Hermes' mile-stones shifted overnight; you solved the riddle and found the true road.",
+                "A temple steward asked you to calm sacred geese terrorizing the agora.",
+                "During the Dionysia procession, runaway masks came alive and scattered through town.",
+                "You helped a bronze-smith relight Hephaestus' forge after mischievous sparks fled.",
+            ],
+            "tier_2": [
+                "In a ruined temple of Ares, animated hoplite statues tested your formation.",
+                "You crossed a canyon bridge while harpies shredded the ropes above.",
+                "A lamia's illusion market tried to trade your memories for gold.",
+                "Bandits carrying stolen votives sought refuge in a desecrated sanctuary.",
+                "A cursed amphora split open, releasing shades bound by broken oaths.",
+                "In moonlit catacombs, you disabled spear traps built by paranoid kings.",
+                "A manticore blocked the pass, demanding tribute in riddles and blood.",
+                "You escorted pilgrims through a forest where dryads accused mortals of arson.",
+            ],
+            "tier_3": [
+                "You hunted the spoor of a lion with hide harder than forged bronze.",
+                "At a marsh of bronze reeds, Stymphalian birds descended in shrieking waves.",
+                "A hydra's severed necks hissed prophecies each time your blade struck true.",
+                "In Knossos' deeper halls, the labyrinth shifted to mirror your fears.",
+                "You rowed between Scylla's teeth and Charybdis' breath with a splintered mast.",
+                "An oracle in Delphi spoke in broken meter, warning of a titan cult.",
+                "You wrestled a sacred bull maddened by Hera's unending spite.",
+                "At Persephone's boundary gate, a ferryman accepted only exact coin and courage.",
+            ],
+            "tier_4": [
+                "A blood-moon rite in Hecate's circle tried to rewrite a city's fate thread.",
+                "Priests of Nyx opened a rift that bled nightmares into waking streets.",
+                "You shattered obsidian anchors binding an elder giant beneath a polis.",
+                "A warhost of oathbreakers rose from their tombs seeking delayed vengeance.",
+                "At a temple of the Moirai, severed threads twisted into paradox beasts.",
+                "Typhon's cultists forged storm idols that called lightning without rain.",
+                "You broke an Erinyes tribunal by proving a king's hidden perjury.",
+                "A sanctum of mirrors cloned your every strike into hostile phantoms.",
+            ],
+            "tier_5": [
+                "The sky cracked as titan chains loosened across mountain peaks.",
+                "A serpent colossus fed on sacrificial smoke and grew with every prayer.",
+                "You halted a rite meant to drown Olympia beneath Poseidon's wrath.",
+                "At a fallen oracle, future and past collided into one battlefield.",
+                "A plague born from Apollo's broken altar spread through bronze camps.",
+                "You stormed a citadel where giant-forged engines hurled burning boulders.",
+                "A dead demigod's spear still commanded armies from beyond the grave.",
+                "In Tartarus' upper caverns, imprisoned horrors bargained with your name.",
+            ],
+            "tier_6": [
+                "Chronos' fractures spilled unfinished timelines into your path.",
+                "Rivers of Oceanus flooded inland, carrying creatures from elder seas.",
+                "In Erebus' dark, sound itself turned predatory and hunted heartbeats.",
+                "You crossed a bridge of star-iron as constellations fell like arrows.",
+                "A titan embryo stirred beneath Etna, warping fire and stone alike.",
+                "Gaia's roots rose through fortress floors and crushed entire legions.",
+                "You fought through a storm where each bolt remembered a different war.",
+                "At the edge of Hyperion's light, shadows learned to burn.",
+            ],
+            "tier_7": [
+                "The Moirai's loom began weaving your victories and defeats at once.",
+                "Ananke's decree made every choice costly, but never impossible.",
+                "You entered an archive where myths rewrote themselves as you read.",
+                "A choir of forgotten heroes demanded you justify your legend.",
+                "At Nyx's veil, stars rearranged into warnings only you could read.",
+                "A law of nature awakened and refused to obey Olympus any longer.",
+                "You battled in nested dreams where waking felt like a rumor.",
+                "Chronicle-spirits tried to erase your name from every epic.",
+            ],
+            "tier_8": [
+                "Geometry failed inside a temple built before Euclid and memory.",
+                "Contradictory prophecies manifested as warriors from impossible lineages.",
+                "An anti-oracle undid truth and falsehood with the same breath.",
+                "You crossed domains where fire froze and ice remembered rage.",
+                "A godless equation consumed miracles and spat out silence.",
+                "The concept of war detached from Ares and sought a new master.",
+                "You sealed a breach where language itself became a hostile force.",
+                "Even divine relics lost names until you re-consecrated them in blood and ash.",
+            ],
+            "tier_9": [
+                "Infinity folded into itself above Olympus, birthing impossible horizons.",
+                "Titan hearts beat beneath reality, shaking heaven and underworld alike.",
+                "You fought beings that existed as both prophecy and aftermath.",
+                "All known constellations vanished, replaced by predatory signs.",
+                "A throne of null-light offered you dominion over endings.",
+                "Primordial chants from Chaos unmade every oath in earshot.",
+                "You held a collapsing front where time moved in opposing directions.",
+                "At the brink of non-being, your banner remained visible to the gods.",
+            ],
+            "tier_10": [
+                "At creation's edge, Chaos itself tested whether cosmos deserved to continue.",
+                "The final war between Olympian order and primordial night erupted around you.",
+                "Every fate-thread converged into a single strike you had to choose.",
+                "You witnessed the end of all myths and forged one more with your hands.",
+                "Zeus' thunder failed; your resolve became the last law standing.",
+                "The underworld gates burst open, and you sealed them from within the storm.",
+                "A being from the world's final moment tried to crown you its herald.",
+                "When existence faltered, your name became the line that held reality together.",
+            ],
+        }
 
     # ----------
     # Bless helpers
@@ -535,26 +641,38 @@ class Adventure(commands.Cog):
 
     @staticmethod
     def _bless_key(user_id: int) -> str:
-        # Bless effect key (for XP multiplier on status)
+        # Beta behavior: bless value stored as bare user id.
+        return str(user_id)
+
+    @staticmethod
+    def _legacy_bless_key(user_id: int) -> str:
+        # Older EoO behavior: prefixed bless key.
         return f"{BLESS_MULTIPLIER_REDIS_KEY_PREFIX}{user_id}"
 
     async def get_blessed_value(self, user_id: int) -> float:
-        val = await self.bot.redis.get(self._bless_key(user_id))
-        if not val:
+        value = await self.bot.redis.get(self._bless_key(user_id))
+        if not value:
+            # Backward compatibility: prefixed keys created by earlier EoO bless.
+            value = await self.bot.redis.get(self._legacy_bless_key(user_id))
+        if value is None:
             return 1.0
         try:
-            return float(val)
-        except Exception:
+            parsed = float(value)
+        except (TypeError, ValueError):
             return 1.0
+        if 1.0 < parsed <= BLESS_LEGACY_MAX_VALUE:
+            return parsed
+        return 1.0
 
     async def get_blessing_ttl(self, user_id: int) -> int:
-        ttl = await self.bot.redis.execute_command("TTL", self._bless_key(user_id))
-        # Redis TTL returns:
-        #  -2: key does not exist
-        #  -1: exists without expire (shouldn't happen for bless)
-        if ttl in (-2, -1) or ttl is None:
+        ttl = await self.bot.redis.ttl(self._bless_key(user_id))
+        if ttl is None or int(ttl) <= 0:
+            # Backward compatibility: prefixed keys created by earlier EoO bless.
+            ttl = await self.bot.redis.ttl(self._legacy_bless_key(user_id))
+        try:
+            return max(0, int(ttl))
+        except (TypeError, ValueError):
             return 0
-        return int(ttl)
 
     # ----------
     # Commands
@@ -678,27 +796,35 @@ class Adventure(commands.Cog):
                     conn=conn,
                 )
 
-    @has_char()
     @commands.command(aliases=["isblessed"], brief=_("check your bless"))
     @locale_doc
-    async def checkbless(self, ctx: Context, user: discord.Member | None = None):
-        if not user:
-            user = ctx.author
+    async def checkbless(self, ctx: Context, user: discord.Member = None):
+        try:
+            if not user:
+                user = ctx.author
 
-        value = await self.get_blessed_value(user.id)
-        ttl = await self.get_blessing_ttl(user.id)
+            value = await self.get_blessed_value(user.id)
+            ttl = await self.get_blessing_ttl(user.id)
+        except Exception:
+            return await ctx.send(
+                _("I couldn't check blessing status right now. Please try again in a moment.")
+            )
 
-        if ttl <= 0 or value == 1.0:
-            return await ctx.send(_("{name} has no current blessing.").format(name=user.display_name))
+        try:
+            if ttl <= 0 or value == 1.0:
+                return await ctx.send(_("{name} has no current blessing.").format(name=user.display_name))
 
-        hours, remainder = divmod(ttl, 3600)
-        minutes, _ = divmod(remainder, 60)
-
-        await ctx.send(
-            _(
-                "{name} is blessed with a value of {value} for the next {hours} hours and {minutes} minutes!"
-            ).format(name=user.display_name, value=value, hours=hours, minutes=minutes)
-        )
+            hours, remainder = divmod(ttl, 3600)
+            minutes, _seconds = divmod(remainder, 60)
+            await ctx.send(
+                _(
+                    "{name} is blessed with a value of {value} for the next {hours} hours and {minutes} minutes!"
+                ).format(name=user.display_name, value=value, hours=hours, minutes=minutes)
+            )
+        except Exception:
+            return await ctx.send(
+                _("I couldn't format blessing status right now. Please try again in a moment.")
+            )
 
     # IMPORTANT CHANGE:
     # - We force the cooldown identifier to be exactly "bless" so Redis key becomes cd:<id>:bless.
@@ -719,89 +845,159 @@ class Adventure(commands.Cog):
             """
         )
 
-        # Compute paladin grade multiplier
-        grade = 0
-        for class_ in ctx.character_data.get("class", []):
-            c = class_from_string(class_)
-            if c and c.in_class_line(Paladin):
-                grade = max(grade, c.class_grade())
-        bless_multiplier = grade * 0.25 + 1
-
-        if ctx.author.id == blessed_user.id:
-            await ctx.send(_("You cannot bless yourself!"))
-            return await self.bot.reset_cooldown(ctx)
-
-        # If already blessed, do not consume cooldown
-        current_value = await self.bot.redis.get(self._bless_key(blessed_user.id))
-        if current_value:
-            await ctx.send(_("{user} is already blessed!").format(user=blessed_user.mention))
-            return await self.bot.reset_cooldown(ctx)
-
-        embed = discord.Embed(
-            title=_('🌟 Bless Confirmation 🌟'),
-            description=_(
-                "{target}, {author} wants to bestow a blessing upon you. Do you accept?"
-            ).format(target=blessed_user.mention, author=ctx.author.mention),
-            color=0x4CAF50,
-        )
-        embed.set_thumbnail(url="https://i.ibb.co/cDH4MMT/bless-spell-baldursgate3-wiki-guide-150px-2.png")
-        embed.add_field(name=_("User"), value=blessed_user.mention, inline=True)
-        embed.add_field(name=_("Blessing Value"), value=str(bless_multiplier), inline=True)
-        embed.set_footer(text=_("Requested by {name}").format(name=str(ctx.author)))
-        embed.timestamp = ctx.message.created_at
-
-        embed_msg = await ctx.send(embed=embed)
-
-        # Confirm flow
         try:
-            confirmation_prompt = _("{user} Please react below to confirm or decline.").format(user=blessed_user.mention)
-            accepted = await ctx.confirm(message=confirmation_prompt, user=blessed_user, timeout=BLESS_ACCEPT_TIMEOUT_SECONDS)
-            if not accepted:
+            grade = 0
+            class_data = ctx.character_data["class"]
+            if isinstance(class_data, str):
+                class_data = [class_data]
+            for class_ in class_data:
+                c = class_from_string(class_)
+                if c and c.in_class_line(Paladin):
+                    grade = max(grade, c.class_grade())
+            bless_multiplier = grade * 0.25 + 1
+
+            if ctx.author.id == blessed_user.id:
+                await ctx.send(_("You cannot bless yourself!"))
+                return await self.bot.reset_cooldown(ctx)
+
+            # Beta behavior: key by user id.
+            # Also check prefixed legacy EoO key so duplicates are blocked.
+            current_bless_value = await self.bot.redis.get(self._bless_key(blessed_user.id))
+            if not current_bless_value:
+                current_bless_value = await self.bot.redis.get(self._legacy_bless_key(blessed_user.id))
+            if current_bless_value:
+                await ctx.send(_("{user} is already blessed!").format(user=blessed_user.mention))
+                return await self.bot.reset_cooldown(ctx)
+
+            embed_msg = None
+            embed = discord.Embed(
+                title=_("🌟 Bless Confirmation 🌟"),
+                description=_(
+                    "{target}, {author} wants to bestow a blessing upon you. Do you accept?"
+                ).format(target=blessed_user.mention, author=ctx.author.mention),
+                color=0x4CAF50,
+            )
+            embed.set_thumbnail(
+                url="https://i.ibb.co/cDH4MMT/bless-spell-baldursgate3-wiki-guide-150px-2.png"
+            )
+            embed.add_field(name=_("User"), value=blessed_user.mention, inline=True)
+            embed.add_field(name=_("Blessing Value"), value=str(bless_multiplier), inline=True)
+            embed.set_footer(text=_("Requested by {name}").format(name=str(ctx.author)))
+            if getattr(ctx, "message", None) is not None and getattr(ctx.message, "created_at", None) is not None:
+                embed.timestamp = ctx.message.created_at
+
+            try:
+                embed_msg = await ctx.send(embed=embed)
+            except (discord.Forbidden, discord.HTTPException):
+                embed_msg = None
+
+            confirmation_prompt = _("{user} Please react below to confirm or decline.").format(
+                user=blessed_user.mention
+            )
+            try:
+                if not await ctx.confirm(
+                    message=confirmation_prompt,
+                    user=blessed_user,
+                    timeout=BLESS_ACCEPT_TIMEOUT_SECONDS,
+                ):
+                    if embed_msg is not None:
+                        try:
+                            await embed_msg.delete()
+                        except Exception:
+                            pass
+                    await ctx.send(_("Blessing cancelled."))
+                    return await self.bot.reset_cooldown(ctx)
+            except Exception:
+                await self.bot.reset_cooldown(ctx)
+                if embed_msg is not None:
+                    try:
+                        await embed_msg.delete()
+                    except Exception:
+                        pass
+                return await ctx.send(_("Blessing timed out."))
+
+            if embed_msg is not None:
                 try:
                     await embed_msg.delete()
                 except Exception:
                     pass
-                await ctx.send(_("Blessing cancelled."))
+
+            # Re-check after confirm (race safe).
+            current_bless_value = await self.bot.redis.get(self._bless_key(blessed_user.id))
+            if not current_bless_value:
+                current_bless_value = await self.bot.redis.get(self._legacy_bless_key(blessed_user.id))
+            if current_bless_value:
+                await ctx.send(_("{user} is already blessed!").format(user=blessed_user.mention))
                 return await self.bot.reset_cooldown(ctx)
+
+            await self.bot.redis.setex(
+                self._bless_key(blessed_user.id),
+                int(BLESS_DURATION_SECONDS),
+                bless_multiplier,
+            )
+            await ctx.send(
+                _("{user} has been blessed by {by}!").format(
+                    user=blessed_user.mention,
+                    by=ctx.author.mention,
+                )
+            )
         except Exception:
-            # Any timeout/error: don't consume cooldown
-            try:
-                await embed_msg.delete()
-            except Exception:
-                pass
             await self.bot.reset_cooldown(ctx)
-            return await ctx.send(_("Blessing timed out."))
+            return await ctx.send(
+                _("Blessing failed due to an internal error. Please try again.")
+            )
 
-        try:
-            await embed_msg.delete()
-        except Exception:
-            pass
+    @bless.error
+    async def bless_error(self, ctx: Context, error: Exception):
+        # Ensure bless failures are always visible to users.
+        if isinstance(error, commands.MissingRequiredArgument):
+            await self.bot.reset_cooldown(ctx)
+            return await ctx.send(_("Usage: `{prefix}bless @user`").format(prefix=ctx.clean_prefix))
 
-        # Re-check after confirm (race-condition safe)
-        current_value = await self.bot.redis.get(self._bless_key(blessed_user.id))
-        if current_value:
-            await ctx.send(_("{user} is already blessed!").format(user=blessed_user.mention))
-            return await self.bot.reset_cooldown(ctx)
+        if isinstance(error, commands.BadArgument):
+            await self.bot.reset_cooldown(ctx)
+            return await ctx.send(_("Please mention a valid member to bless."))
 
-        # Store bless effect as its own key (separate from cooldown)
-        await self.bot.redis.setex(self._bless_key(blessed_user.id), BLESS_DURATION_SECONDS, bless_multiplier)
-        await ctx.send(_("{user} has been blessed by {by}!").format(user=blessed_user.mention, by=ctx.author.mention))
+        if isinstance(error, commands.CommandOnCooldown):
+            return await ctx.send(
+                _("You are on cooldown. Try again in {time}.").format(
+                    time=timedelta(seconds=int(error.retry_after))
+                )
+            )
+
+        if isinstance(error, commands.CheckFailure):
+            if isinstance(error, check_utils.NoCharacter):
+                return await ctx.send(_("You don't have a character yet."))
+            if isinstance(error, check_utils.WrongClass):
+                return await ctx.send(_("Only Paladins can use `{prefix}bless`.").format(prefix=ctx.clean_prefix))
+            return await ctx.send(_("You can't use this command right now."))
+
+        if isinstance(error, commands.CommandInvokeError):
+            return await ctx.send(_("Blessing failed due to an internal error. Please try again."))
+
+        return await ctx.send(_("Blessing failed. Please try again."))
 
     def get_adventure_narrative(self, adventure_level: int, adventure_name: str, success: bool = True) -> str:
         # You can keep your existing narrative logic.
         tier = f"tier_{min(10, max(1, (adventure_level - 1) // 10 + 1))}"
-        events = self.ADVENTURE_EVENTS.get(tier, [])
+        events = self.ADVENTURE_EVENTS.get(tier) or self.ADVENTURE_EVENTS.get("tier_1", [])
         if not events:
-            return _("Your tale is unwritten...")
+            events = [
+                _("The path twisted with danger at every turn."),
+                _("You kept moving despite relentless resistance."),
+                _("An unexpected encounter changed the course of your mission."),
+                _("You pressed forward when retreat seemed easier."),
+            ]
 
         num_events = 4 if success else 2
         # Guard: avoid sample larger than population
         num_events = min(num_events, len(events))
         chosen_events = random.sample(events, num_events)
 
+        intro = _("In **{adventure}**:").format(adventure=adventure_name)
         if success:
-            return "• " + "\n\n• ".join(chosen_events) + "\n\n" + _("Against all odds, you emerged victorious!")
-        return "• " + "\n\n• ".join(chosen_events) + "\n\n" + _("Unfortunately, you didn't survive what came next...")
+            return intro + "\n• " + "\n\n• ".join(chosen_events) + "\n\n" + _("Against all odds, you emerged victorious!")
+        return intro + "\n• " + "\n\n• ".join(chosen_events) + "\n\n" + _("Unfortunately, you didn't survive what came next...")
 
     @has_char()
     @has_adventure()
@@ -940,6 +1136,44 @@ class Adventure(commands.Cog):
                 conn=conn,
             )
 
+        summer_reward_text = ""
+        summer_cog = (
+            self.bot.get_cog("SummerOlympics")
+            or self.bot.get_cog("SummerEvent")
+            or self.bot.get_cog("Summer")
+        )
+        if summer_cog is not None:
+            try:
+                summer_reward = await summer_cog.award_adventure_meters(
+                    ctx.author.id, num
+                )
+            except Exception as exc:
+                self.bot.logger.warning(
+                    "Summer marathon meter award failed for user %s on adventure %s: %r",
+                    ctx.author.id,
+                    num,
+                    exc,
+                    exc_info=True,
+                )
+                summer_reward = None
+            if summer_reward:
+                finish_text = ""
+                if summer_reward["just_finished"]:
+                    finish_text = "\n☀️ You crossed Apollo's marathon finish line!"
+                    if summer_reward["finish_rank"] == 1:
+                        finish_text += " You are the marathon winner!"
+                summer_reward_text = (
+                    "🏃 Summer Marathon: this adventure gave you **{meters_awarded:,}m** "
+                    "({meters:,}/{total:,}m total){finish}\n"
+                ).format(
+                    meters_awarded=summer_reward["meters_awarded"],
+                    meters=summer_reward["meters"],
+                    total=summer_cog.MARATHON_DISTANCE_METERS
+                    if hasattr(summer_cog, "MARATHON_DISTANCE_METERS")
+                    else 42195,
+                    finish=finish_text,
+                )
+
         await ctx.send(
             embed=discord.Embed(
                 title=_('Adventure Completed'),
@@ -953,6 +1187,7 @@ class Adventure(commands.Cog):
                     "{stat}"
                     "💎 Value: **{value}**\n"
                     "⭐ Experience: **{xp}**\n"
+                    "{summer}"
                 ).format(
                     narrative=self.get_adventure_narrative(num, ADVENTURE_NAMES.get(num, str(num)), True),
                     gold=gold,
@@ -963,6 +1198,7 @@ class Adventure(commands.Cog):
                     else (_("⚔️ Damage: **{damage}**\n").format(damage=item["damage"]) if item.get("damage") else _("🛡️ Armor: **{armor}**\n").format(armor=item.get("armor"))),
                     value=item["value"],
                     xp=int(xp),
+                    summer=summer_reward_text,
                     prefix=ctx.clean_prefix,
                     storage_type=storage_type,
                 ),

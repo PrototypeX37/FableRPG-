@@ -2,11 +2,13 @@
 """GreekCard cog
 
 What this cog provides
-- $greekcard [@user|id|discordtag] : renders the GreekCard image
+- $greekcard / $gc / $p [@user|id|discordtag] : renders the GreekCard image
 - $gcbg <direct i.imgur.com link ending with .png/.jpg/.jpeg/.webp> : set background
 - $gcbg (with image attachment) : set background from upload
 - $gcbg view : show current background
 - $gcbg remove : clear to default
+- $gctext <color|reset> : set text color on your GreekCard
+- $gcbadges [choices|reset] : view/set badges to display (max 4)
 
 Requirements
 - Table: greekcard_settings (created separately via psql)
@@ -31,12 +33,14 @@ Fixes included
 import io
 import re
 import time
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, List, Set, Tuple
 
 import discord
 from discord.ext import commands
 from discord.ext.commands import BucketType
+from classes.badges import Badge
 from utils import misc as rpgtools
+from utils import colors as color_utils
 
 
 from PIL import Image, ImageDraw, ImageFont
@@ -57,13 +61,111 @@ FONT_TITLE_PATH = "assets/fonts/CaesarDressing-Regular.ttf"
 FONT_TEXT_PATH = "assets/fonts/GFSDidot-Regular.ttf"
 FONT_TEXT_BOLD_PATH = "assets/fonts/GFSDidot-Bold.ttf"
 
-# 4) Badge icons (bits -> icon URL)
-# Dragon badge removed for now.
-BADGE_ICONS = {
-    0: "https://i.imgur.com/RiZ8Xd3.png",  # Most PvP wins
-    1: "https://i.imgur.com/mTil6hG.png",  # Richest
-    2: "https://i.imgur.com/q8CyQLz.png",  # Splicer (most splice requests)
-    3: "https://i.imgur.com/tvbXKW3.png",  # The lover (top of love board)
+# 4) Badge metadata
+BADGE_DEFINITIONS = {
+    "pvp": {
+        "name": "Most PvP Wins",
+        "icon": "https://i.imgur.com/RiZ8Xd3.png",
+        "bit": 0,
+    },
+    "richest": {
+        "name": "Richest",
+        "icon": "https://i.imgur.com/mTil6hG.png",
+        "bit": 1,
+    },
+    "splicer": {
+        "name": "Master Splicer",
+        "icon": "https://i.imgur.com/q8CyQLz.png",
+        "bit": 2,
+    },
+    "lover": {
+        "name": "The Lover",
+        "icon": "https://i.imgur.com/tvbXKW3.png",
+        "bit": 3,
+    },
+    "enigma_champion": {
+        "name": "Apollo's Enigma Champion",
+        "icon": "https://i.imgur.com/CDwnFiG.png",
+        "bit": None,
+        "profile_badge": "ENIGMA_CHAMPION",
+    },
+    "divine_favor": {
+        "name": "Bearer of Divine Favor",
+        "icon": "https://i.imgur.com/GGajR4O.png",
+        "bit": None,
+    },
+    "agon_top1": {
+        "name": "Agon Absolute #1",
+        "icon": "https://i.imgur.com/QUuSrK8.png",
+        "bit": None,
+    },
+    "agon_top2": {
+        "name": "Agon Absolute #2",
+        "icon": "https://i.imgur.com/DERvk1g.png",
+        "bit": None,
+    },
+    "agon_top3": {
+        "name": "Agon Absolute #3",
+        "icon": "https://i.imgur.com/PGMsl0r.png",
+        "bit": None,
+    },
+}
+BADGE_ORDER = [
+    "pvp",
+    "richest",
+    "splicer",
+    "lover",
+    "enigma_champion",
+    "divine_favor",
+    "agon_top1",
+    "agon_top2",
+    "agon_top3",
+]
+
+BADGE_ALIASES = {
+    "1": "pvp",
+    "pvp": "pvp",
+    "pvpwins": "pvp",
+    "arena": "pvp",
+    "2": "richest",
+    "richest": "richest",
+    "rich": "richest",
+    "money": "richest",
+    "3": "splicer",
+    "splicer": "splicer",
+    "splice": "splicer",
+    "4": "lover",
+    "lover": "lover",
+    "love": "lover",
+    "lovescore": "lover",
+    "5": "enigma_champion",
+    "enigma": "enigma_champion",
+    "enigmachampion": "enigma_champion",
+    "apolloenigma": "enigma_champion",
+    "apolloenigmachampion": "enigma_champion",
+    "6": "divine_favor",
+    "divinefavor": "divine_favor",
+    "divinefavour": "divine_favor",
+    "divine": "divine_favor",
+    "bearerofdivinefavor": "divine_favor",
+    "bearerofdivinefavour": "divine_favor",
+    "favor": "divine_favor",
+    "favour": "divine_favor",
+    "6": "agon_top1",
+    "agontop1": "agon_top1",
+    "agon1": "agon_top1",
+    "7": "agon_top2",
+    "agontop2": "agon_top2",
+    "agon2": "agon_top2",
+    "8": "agon_top3",
+    "agontop3": "agon_top3",
+    "agon3": "agon_top3",
+}
+
+AGON_POOL_LABELS = {
+    1: "Chrysos (Pool A)",
+    2: "Argyros (Pool B)",
+    3: "Chalkos (Pool C)",
 }
 
 # 5) Pet element frames
@@ -115,6 +217,10 @@ def is_direct_image_link(url: str) -> bool:
     return bool(u) and u.lower().endswith(IMG_EXTS)
 
 
+def normalize_token(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+
 def safe_int(v, default=0) -> int:
     try:
         return int(v)
@@ -142,6 +248,8 @@ class GreekCard(commands.Cog):
         self._fonts = None
         self._img_cache: Dict[str, Tuple[float, Image.Image]] = {}
         self._cache_ttl = 60 * 20  # 20 minutes
+        self._settings_schema_ready = False
+        self._settings_extended_schema = False
 
     # -----------------
     # Fonts
@@ -268,7 +376,45 @@ class GreekCard(commands.Cog):
     # -----------------
     # DB helpers
     # -----------------
+    async def _ensure_settings_schema(self, conn):
+        if self._settings_schema_ready:
+            return
+
+        has_text_color = await conn.fetchval(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_name='greekcard_settings' AND column_name='text_color'
+            """
+        )
+        has_visible_badges = await conn.fetchval(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_name='greekcard_settings' AND column_name='visible_badges'
+            """
+        )
+
+        if has_text_color and has_visible_badges:
+            self._settings_extended_schema = True
+            self._settings_schema_ready = True
+            return
+
+        try:
+            await conn.execute(
+                """
+                ALTER TABLE greekcard_settings
+                ADD COLUMN IF NOT EXISTS text_color character varying(32),
+                ADD COLUMN IF NOT EXISTS visible_badges text[] DEFAULT ARRAY[]::text[]
+                """
+            )
+            self._settings_extended_schema = True
+        except Exception:
+            self._settings_extended_schema = False
+        self._settings_schema_ready = True
+
     async def _ensure_settings_row(self, conn, user_id: int):
+        await self._ensure_settings_schema(conn)
         await conn.execute(
             """
             INSERT INTO greekcard_settings (user_id)
@@ -282,13 +428,84 @@ class GreekCard(commands.Cog):
         await self._ensure_settings_row(conn, user_id)
         return await conn.fetchrow("SELECT * FROM greekcard_settings WHERE user_id=$1", user_id)
 
-    async def _get_badge_top_users(self, conn) -> Dict[int, Optional[int]]:
-        """Compute top user for each badge category (dragon removed)."""
-        top: Dict[int, Optional[int]] = {0: None, 1: None, 2: None, 3: None}
+    def _badge_key_from_token(self, token: str) -> Optional[str]:
+        normalized = normalize_token(token)
+        if not normalized:
+            return None
+        if normalized in BADGE_ALIASES:
+            return BADGE_ALIASES[normalized]
+        for key, badge in BADGE_DEFINITIONS.items():
+            if normalized in {normalize_token(key), normalize_token(badge["name"])}:
+                return key
+        return None
 
-        top[0] = await conn.fetchval('SELECT "user" FROM profile ORDER BY pvpwins DESC NULLS LAST, xp DESC LIMIT 1')
-        top[1] = await conn.fetchval('SELECT "user" FROM profile ORDER BY money DESC NULLS LAST, xp DESC LIMIT 1')
-        top[3] = await conn.fetchval('SELECT "user" FROM profile ORDER BY lovescore DESC NULLS LAST, xp DESC LIMIT 1')
+    def _selected_badges_from_settings(self, settings) -> List[str]:
+        if not settings:
+            return []
+        values = settings.get("visible_badges") or []
+        if isinstance(values, str):
+            values = [values]
+
+        selected: List[str] = []
+        for entry in values:
+            key = self._badge_key_from_token(str(entry))
+            if key and key not in selected:
+                selected.append(key)
+        return selected[:4]
+
+    def _get_unlocked_badges(self, profile, badge_top: Dict[str, Set[int]], user_id: int) -> List[str]:
+        unlocked: List[str] = []
+        for key in BADGE_ORDER:
+            badge = BADGE_DEFINITIONS[key]
+            bit = badge.get("bit")
+            profile_badge = badge.get("profile_badge")
+            has_top = user_id in badge_top.get(key, set())
+            has_bit = bit_is_set(profile.get("badges"), bit) if bit is not None else False
+            has_profile_badge = False
+            if profile_badge is not None:
+                try:
+                    profile_badge_value = getattr(Badge, str(profile_badge), None)
+                    has_profile_badge = bool(
+                        profile_badge_value
+                        and Badge.from_db(profile.get("badges")) & profile_badge_value
+                    )
+                except Exception:
+                    has_profile_badge = False
+            if has_top or has_bit or has_profile_badge:
+                unlocked.append(key)
+        return unlocked
+
+    def _get_text_fill(self, settings) -> Tuple[int, int, int, int]:
+        raw = settings.get("text_color") if settings else None
+        if raw:
+            try:
+                rgba = color_utils.parse(str(raw))
+                return (rgba.red, rgba.green, rgba.blue, 255)
+            except Exception:
+                pass
+        return (255, 255, 255, 255)
+
+    async def _get_badge_top_users(self, conn) -> Dict[str, Set[int]]:
+        """Compute top users for each dynamic badge category."""
+        top: Dict[str, Set[int]] = {key: set() for key in BADGE_ORDER}
+
+        top_pvp = await conn.fetchval(
+            'SELECT "user" FROM profile ORDER BY pvpwins DESC NULLS LAST, xp DESC NULLS LAST LIMIT 1'
+        )
+        if top_pvp is not None:
+            top["pvp"].add(int(top_pvp))
+
+        top_richest = await conn.fetchval(
+            'SELECT "user" FROM profile ORDER BY money DESC NULLS LAST, xp DESC NULLS LAST LIMIT 1'
+        )
+        if top_richest is not None:
+            top["richest"].add(int(top_richest))
+
+        top_lover = await conn.fetchval(
+            'SELECT "user" FROM profile ORDER BY lovescore DESC NULLS LAST, xp DESC NULLS LAST LIMIT 1'
+        )
+        if top_lover is not None:
+            top["lover"].add(int(top_lover))
 
         splicer_user = None
         for col in ("user_id", "user", "requester", "requester_id", "author_id"):
@@ -300,9 +517,107 @@ class GreekCard(commands.Cog):
                     break
             except Exception:
                 continue
-        top[2] = splicer_user
+        if splicer_user is not None:
+            top["splicer"].add(int(splicer_user))
+
+        try:
+            divine_rows = await conn.fetch(
+                """
+                WITH favor_ranked AS (
+                    SELECT
+                        "god",
+                        "user",
+                        "favor",
+                        ROW_NUMBER() OVER (
+                            PARTITION BY "god"
+                            ORDER BY "favor" DESC NULLS LAST, "xp" DESC NULLS LAST, "user" ASC
+                        ) AS pos
+                    FROM profile
+                    WHERE COALESCE(TRIM("god"), '') <> ''
+                )
+                SELECT "user"
+                FROM favor_ranked
+                WHERE pos = 1
+                ORDER BY "favor" DESC NULLS LAST
+                LIMIT 4
+                """
+            )
+            for row in divine_rows:
+                uid = row.get("user")
+                if uid is not None:
+                    top["divine_favor"].add(int(uid))
+        except Exception:
+            pass
+
+        # Agon historical badges: unlocked if player ever finished absolute top 1/2/3.
+        try:
+            agon_rows = await conn.fetch(
+                """
+                SELECT user_id, final_rank
+                FROM agon_results
+                WHERE pool_tier = 1
+                  AND final_rank IN (1, 2, 3)
+                """
+            )
+            for row in agon_rows:
+                uid = int(row["user_id"])
+                final_rank = int(row["final_rank"])
+                if final_rank == 1:
+                    top["agon_top1"].add(uid)
+                elif final_rank == 2:
+                    top["agon_top2"].add(uid)
+                elif final_rank == 3:
+                    top["agon_top3"].add(uid)
+        except Exception:
+            pass
 
         return top
+
+    def _parse_badge_selection_input(self, raw: str) -> Tuple[List[str], List[str]]:
+        raw = (raw or "").strip()
+        if not raw:
+            return [], []
+
+        whole = self._badge_key_from_token(raw)
+        if whole:
+            return [whole], []
+
+        parts = [p.strip() for p in raw.split(",")] if "," in raw else raw.split()
+        selected: List[str] = []
+        invalid: List[str] = []
+        for part in parts:
+            if not part:
+                continue
+            key = self._badge_key_from_token(part)
+            if key is None:
+                invalid.append(part)
+                continue
+            if key not in selected:
+                selected.append(key)
+        return selected, invalid
+
+    async def _send_gc_help(self, ctx):
+        badge_lines = []
+        for idx, key in enumerate(BADGE_ORDER, start=1):
+            badge_lines.append(f"{idx}. {BADGE_DEFINITIONS[key]['name']} (`{key}`)")
+
+        msg = (
+            "**GreekCard Help**\n"
+            "`$gc [@user|id|discordtag]` - View your (or another player's) GreekCard\n"
+            "`$gc help` - Show this help\n"
+            "`$gcbg <direct i.imgur.com link>` - Set card background\n"
+            "`$gcbg` with image attachment - Set background from upload\n"
+            "`$gcbg view` / `$gcbg remove` - View/remove background\n"
+            "`$gctext <color>` - Set GreekCard text color (`#RRGGBB`, `rgb(...)`, css name)\n"
+            "`$gctext reset` - Reset text color\n"
+            "`$gcbadges` - Show unlocked badges + current badge picks\n"
+            "`$gcbadges <choices>` - Pick badges to show (max 4)\n"
+            "`$gcbadges reset` - Auto-show first 4 unlocked badges\n\n"
+            "**Badge choices**\n"
+            + "\n".join(badge_lines)
+            + "\n\nExample: `$gcbadges 1,3,5` or `$gcbadges pvp,splicer,divine_favor`"
+        )
+        await ctx.send(msg)
 
     # ============================
     # COMMANDS
@@ -376,10 +691,134 @@ class GreekCard(commands.Cog):
 
         await ctx.send("✅ GreekCard background set!")
 
-    @commands.command(name="greekcard")
+    @commands.command(name="gctext", aliases=["gctextcolor", "gctextcolour"])
+    async def gctext(self, ctx, *, colour: str = None):
+        """Set the GreekCard text color, or reset it."""
+        if not colour:
+            return await ctx.send(
+                "Usage: `$gctext <color>` (examples: `#ffd700`, `rgb(255,215,0)`, `gold`) or `$gctext reset`."
+            )
+
+        colour = (colour or "").strip()
+        lowered = colour.lower()
+
+        async with self.bot.pool.acquire() as conn:
+            await self._ensure_settings_row(conn, ctx.author.id)
+            if not self._settings_extended_schema:
+                return await ctx.send(
+                    "❌ GreekCard text colors require DB columns `text_color` and `visible_badges` on `greekcard_settings`."
+                )
+
+            if lowered in {"reset", "clear", "default", "none", "off"}:
+                await conn.execute(
+                    "UPDATE greekcard_settings SET text_color=NULL, updated_at=NOW() WHERE user_id=$1",
+                    ctx.author.id,
+                )
+                return await ctx.send("✅ GreekCard text color reset to default.")
+
+            try:
+                rgba = color_utils.parse(colour)
+            except Exception:
+                return await ctx.send(
+                    "❌ Invalid color. Use `#RGB`, `#RRGGBB`, `rgb(r,g,b)`, `rgba(r,g,b,a)` or a CSS color name."
+                )
+
+            hex_colour = f"#{rgba.red:02x}{rgba.green:02x}{rgba.blue:02x}"
+            await conn.execute(
+                "UPDATE greekcard_settings SET text_color=$1, updated_at=NOW() WHERE user_id=$2",
+                hex_colour,
+                ctx.author.id,
+            )
+
+        await ctx.send(f"✅ GreekCard text color set to `{hex_colour}`.")
+
+    @commands.command(name="gcbadges", aliases=["gcbadge"])
+    async def gcbadges(self, ctx, *, picks: str = None):
+        """View or set which badges appear on your GreekCard (max 4)."""
+        async with self.bot.pool.acquire() as conn:
+            profile = await conn.fetchrow('SELECT * FROM profile WHERE "user"=$1', ctx.author.id)
+            if not profile:
+                return await ctx.send("You do not have a character yet.")
+
+            settings = await self._get_settings(conn, ctx.author.id)
+            badge_top = await self._get_badge_top_users(conn)
+
+            unlocked = self._get_unlocked_badges(profile, badge_top, ctx.author.id)
+            selected = self._selected_badges_from_settings(settings)
+            selected = [key for key in selected if key in unlocked][:4]
+
+            if not picks:
+                lines = []
+                for idx, key in enumerate(BADGE_ORDER, start=1):
+                    badge = BADGE_DEFINITIONS[key]
+                    state = "Unlocked" if key in unlocked else "Locked"
+                    selected_marker = " [Selected]" if key in selected else ""
+                    lines.append(f"{idx}. {badge['name']} (`{key}`) - {state}{selected_marker}")
+
+                active = selected if selected else unlocked[:4]
+                active_names = (
+                    ", ".join(BADGE_DEFINITIONS[key]["name"] for key in active)
+                    if active
+                    else "None unlocked yet"
+                )
+                return await ctx.send(
+                    "GreekCard badges (max 4 shown):\n"
+                    + "\n".join(lines)
+                    + f"\n\nCurrently displayed: {active_names}\n"
+                    "Set with: `$gcbadges 1,3,5` or `$gcbadges pvp,splicer,divine_favor`\n"
+                    "Use `$gcbadges reset` to clear manual picks."
+                )
+
+            lowered = picks.strip().lower()
+            if lowered in {"reset", "clear", "default", "auto", "none"}:
+                if not self._settings_extended_schema:
+                    return await ctx.send(
+                        "❌ GreekCard badge picks require DB columns `text_color` and `visible_badges` on `greekcard_settings`."
+                    )
+                await conn.execute(
+                    "UPDATE greekcard_settings SET visible_badges=ARRAY[]::text[], updated_at=NOW() WHERE user_id=$1",
+                    ctx.author.id,
+                )
+                return await ctx.send("✅ Badge selection reset. GreekCard will auto-show up to 4 unlocked badges.")
+
+            selected_keys, invalid = self._parse_badge_selection_input(picks)
+            if invalid:
+                return await ctx.send(
+                    "❌ Unknown badge choice(s): "
+                    + ", ".join(f"`{item}`" for item in invalid)
+                    + ". Use `$gcbadges` to see valid options."
+                )
+            if not selected_keys:
+                return await ctx.send("❌ No valid badges selected. Use `$gcbadges` to list options.")
+            if len(selected_keys) > 4:
+                return await ctx.send("❌ You can only select up to 4 badges.")
+
+            locked = [key for key in selected_keys if key not in unlocked]
+            if locked:
+                locked_names = ", ".join(BADGE_DEFINITIONS[key]["name"] for key in locked)
+                return await ctx.send(f"❌ You have not unlocked: {locked_names}.")
+
+            if not self._settings_extended_schema:
+                return await ctx.send(
+                    "❌ GreekCard badge picks require DB columns `text_color` and `visible_badges` on `greekcard_settings`."
+                )
+
+            await conn.execute(
+                "UPDATE greekcard_settings SET visible_badges=$1, updated_at=NOW() WHERE user_id=$2",
+                selected_keys,
+                ctx.author.id,
+            )
+
+        names = ", ".join(BADGE_DEFINITIONS[key]["name"] for key in selected_keys)
+        await ctx.send(f"✅ GreekCard badges updated: {names}")
+
+    @commands.command(name="greekcard", aliases=["gc", "p", "profile", "me"])
     @commands.cooldown(1, 30, BucketType.user)
     async def greekcard(self, ctx, *, target: str = None):
         """Render the GreekCard for yourself or someone else."""
+
+        if target and target.strip().lower() in {"help", "h", "?"}:
+            return await self._send_gc_help(ctx)
 
         try:
             user = await self._resolve_target_user(ctx, target)
@@ -387,6 +826,8 @@ class GreekCard(commands.Cog):
             return await ctx.send("Unknown User")
 
         fonts = self._get_fonts()
+        agon_rank_text = "N/A"
+        agon_streak_text = None
 
         async with self.bot.pool.acquire() as conn:
             profile = await conn.fetchrow('SELECT * FROM profile WHERE "user"=$1', user.id)
@@ -437,7 +878,102 @@ class GreekCard(commands.Cog):
             rank_love = await conn.fetchval("SELECT COUNT(*)+1 FROM profile WHERE lovescore > $1", profile["lovescore"])
             rank_pvp = await conn.fetchval("SELECT COUNT(*)+1 FROM profile WHERE pvpwins > $1", profile["pvpwins"])
 
+            rank_bt = None
+            rank_couples_bt = None
+            try:
+                bt_row = await conn.fetchrow(
+                    "SELECT level, prestige FROM battletower WHERE id=$1",
+                    user.id,
+                )
+                if bt_row:
+                    rank_bt = await conn.fetchval(
+                        """
+                        SELECT COUNT(*) + 1
+                        FROM battletower
+                        WHERE (prestige > $1) OR (prestige = $1 AND level > $2)
+                        """,
+                        safe_int(bt_row.get("prestige"), 0),
+                        safe_int(bt_row.get("level"), 0),
+                    )
+            except Exception:
+                rank_bt = None
+
+            try:
+                couples_row = await conn.fetchrow(
+                    """
+                    SELECT current_level, prestige
+                    FROM couples_battle_tower
+                    WHERE partner1_id=$1 OR partner2_id=$1
+                    ORDER BY prestige DESC NULLS LAST, current_level DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    user.id,
+                )
+                if couples_row:
+                    rank_couples_bt = await conn.fetchval(
+                        """
+                        SELECT COUNT(*) + 1
+                        FROM couples_battle_tower
+                        WHERE (prestige > $1) OR (prestige = $1 AND current_level > $2)
+                        """,
+                        safe_int(couples_row.get("prestige"), 0),
+                        safe_int(couples_row.get("current_level"), 0),
+                    )
+            except Exception:
+                rank_couples_bt = None
+
+            try:
+                agon_entry = await conn.fetchrow(
+                    """
+                    SELECT e.season_id,
+                           e.pool_tier,
+                           CASE
+                               WHEN e.season_id = m.current_season_id
+                                AND UPPER(COALESCE(m.phase, 'STOPPED')) = 'ACTIVE'
+                                AND NOW() >= m.active_end - INTERVAL '2 hours'
+                                AND NOW() < m.active_end
+                               THEN COALESCE(e.veiled_rank, e.rank_pos)
+                               ELSE e.rank_pos
+                           END AS rank_pos
+                    FROM agon_entries e
+                    LEFT JOIN agon_meta m ON m.id = 1
+                    WHERE e.user_id = $1
+                    ORDER BY e.season_id DESC
+                    LIMIT 1
+                    """,
+                    user.id,
+                )
+                agon_stats = await conn.fetchrow(
+                    """
+                    SELECT top_pool_top10_streak
+                    FROM agon_user_stats
+                    WHERE user_id = $1
+                    """,
+                    user.id,
+                )
+                streak = safe_int(agon_stats.get("top_pool_top10_streak"), 0) if agon_stats else 0
+
+                if agon_entry:
+                    pool_tier = safe_int(agon_entry.get("pool_tier"), 0)
+                    rank_pos = safe_int(agon_entry.get("rank_pos"), 0)
+                    pool_label = AGON_POOL_LABELS.get(pool_tier, f"Pool {pool_tier}")
+                    agon_rank_text = f"Rank {rank_pos} in {pool_label}"
+                    if pool_tier == 1 and rank_pos <= 10 and streak > 0:
+                        agon_streak_text = f"Top 10 for {streak} season(s)"
+                elif streak > 0:
+                    agon_streak_text = f"Top 10 for {streak} season(s)"
+            except Exception:
+                pass
+
             badge_top = await self._get_badge_top_users(conn)
+
+        unlocked_badges = self._get_unlocked_badges(profile, badge_top, user.id)
+        selected_badges = self._selected_badges_from_settings(settings)
+        selected_badges = [key for key in selected_badges if key in unlocked_badges][:4]
+        visible_badges = selected_badges if selected_badges else unlocked_badges[:4]
+
+        rank_bt_text = f"#{rank_bt}" if rank_bt else "N/A"
+        rank_couples_bt_text = f"#{rank_couples_bt}" if rank_couples_bt else "N/A"
 
         # Background selection
         bg_url = clean_url(settings.get("background") if settings else None)
@@ -458,6 +994,10 @@ class GreekCard(commands.Cog):
             card = Image.new("RGBA", (CARD_W, CARD_H), (18, 18, 22, 255))
 
         draw = ImageDraw.Draw(card)
+        text_fill = self._get_text_fill(settings)
+
+        def draw_text(xy, text, font):
+            draw.text(xy, text, font=font, fill=text_fill)
 
         # -----------------
         # Layout
@@ -485,8 +1025,10 @@ class GreekCard(commands.Cog):
         RANK_X, RANK_Y = 650, 235
         BADGE_X, BADGE_Y = 650, 420
 
-        PET_FRAME_SCALE = 1.50       # 1.00 = same as box, >1 bigger, <1 smaller
-        PET_FRAME_OFFSET = (0, 0)     # (x, y) frame shift inside the pet box
+        PET_FRAME_SCALE = 1.515
+        PET_FRAME_OFFSET = (0, 45)
+        PET_IMAGE_OFFSET = (0, 82)
+        PET_BLOCK_OFFSET = (0, -90)
 
 
         # Avatar
@@ -503,9 +1045,9 @@ class GreekCard(commands.Cog):
         if isinstance(classes, str):
             classes = [classes]
 
-        draw.text((NAME_X, NAME_Y), str(name_text), font=fonts["title_xl"], fill="white")
-        draw.text((NAME_X, NAME_Y + 55), f"Race: {race}", font=fonts["text"], fill="white")
-        draw.text((NAME_X, NAME_Y + 85), f"Class: {' / '.join(classes)}", font=fonts["text"], fill="white")
+        draw_text((NAME_X, NAME_Y), str(name_text), font=fonts["title_xl"])
+        draw_text((NAME_X, NAME_Y + 55), f"Race: {race}", font=fonts["text"])
+        draw_text((NAME_X, NAME_Y + 85), f"Class: {' / '.join(classes)}", font=fonts["text"])
 
         # Stats two columns
         level = rpgtools.xptolevel(profile["xp"])
@@ -518,11 +1060,11 @@ class GreekCard(commands.Cog):
         col2_x = NAME_X + 210
         y = STATS_Y
 
-        draw.text((col1_x, y), f"Level: {level}", font=fonts["text_bold"], fill="white")
-        draw.text((col1_x, y + 32), f"God: {god}", font=fonts["text"], fill="white")
+        draw_text((col1_x, y), f"Level: {level}", font=fonts["text_bold"])
+        draw_text((col1_x, y + 32), f"God: {god}", font=fonts["text"])
 
-        draw.text((col2_x, y), f"ATK: {atk}", font=fonts["text_bold"], fill="white")
-        draw.text((col2_x, y + 32), f"DEF: {deff}", font=fonts["text_bold"], fill="white")
+        draw_text((col2_x, y), f"ATK: {atk}", font=fonts["text_bold"])
+        draw_text((col2_x, y + 32), f"DEF: {deff}", font=fonts["text_bold"])
 
 
         # Spouse / Love / Children
@@ -537,12 +1079,12 @@ class GreekCard(commands.Cog):
 
         love_score = safe_int(profile.get("lovescore"), 0)
 
-        draw.text((NAME_X, LOVE_Y), f"Spouse: {spouse_name}", font=fonts["text"], fill="white")
-        draw.text((NAME_X, LOVE_Y + 30), f"Love: {love_score}", font=fonts["text"], fill="white")
-        draw.text((NAME_X, LOVE_Y + 60), f"Children: {children_count}", font=fonts["text"], fill="white")
+        draw_text((NAME_X, LOVE_Y), f"Spouse: {spouse_name}", font=fonts["text"])
+        draw_text((NAME_X, LOVE_Y + 30), f"Love: {love_score}", font=fonts["text"])
+        draw_text((NAME_X, LOVE_Y + 60), f"Children: {children_count}", font=fonts["text"])
 
         # Equipment
-        draw.text((EQUIP_X, EQUIP_Y), "Equipment", font=fonts["title_h"], fill="white")
+        draw_text((EQUIP_X, EQUIP_Y), "Equipment", font=fonts["title_h"])
 
         right_hand = None
         left_hand = None
@@ -573,8 +1115,8 @@ class GreekCard(commands.Cog):
             arm = safe_int(it.get("armor"), 0)
             return f"{name} ({dmg + arm})"
 
-        draw.text((EQUIP_X, EQUIP_Y + 42), f"Right Hand: {fmt_item(right_hand)}", font=fonts["small"], fill="white")
-        draw.text((EQUIP_X, EQUIP_Y + 67), f"Left Hand:  {fmt_item(left_hand)}", font=fonts["small"], fill="white")
+        draw_text((EQUIP_X, EQUIP_Y + 42), f"Right Hand: {fmt_item(right_hand)}", font=fonts["small"])
+        draw_text((EQUIP_X, EQUIP_Y + 67), f"Left Hand:  {fmt_item(left_hand)}", font=fonts["small"])
 
         if amulet:
             am_type = amulet.get("type") or "Amulet"
@@ -583,22 +1125,27 @@ class GreekCard(commands.Cog):
             am_def = safe_int(amulet.get("defense"), 0)
             am_hp = safe_int(amulet.get("hp"), 0)
 
-            draw.text((EQUIP_X, EQUIP_Y + 100), f"Amulet: {am_type} (T{am_tier})", font=fonts["text"], fill="white")
-            draw.text((EQUIP_X, EQUIP_Y + 130), f"+ATK {am_atk}   +DEF {am_def}   +HP {am_hp}", font=fonts["small"], fill="white")
+            draw_text((EQUIP_X, EQUIP_Y + 100), f"Amulet: {am_type} (T{am_tier})", font=fonts["text"])
+            draw_text((EQUIP_X, EQUIP_Y + 130), f"+ATK {am_atk}   +DEF {am_def}   +HP {am_hp}", font=fonts["small"])
         else:
-            draw.text((EQUIP_X, EQUIP_Y + 100), "Amulet: None", font=fonts["text"], fill="white")
+            draw_text((EQUIP_X, EQUIP_Y + 100), "Amulet: None", font=fonts["text"])
 
         # Rankings
-        draw.text((RANK_X, RANK_Y), "Rankings", font=fonts["title_h"], fill="white")
+        draw_text((RANK_X, RANK_Y), "Rankings", font=fonts["title_h"])
         c1x = RANK_X
         c2x = RANK_X + 220
-        draw.text((c1x, RANK_Y + 45), f"💰 Rich: #{rank_rich}", font=fonts["text"], fill="white")
-        draw.text((c2x, RANK_Y + 45), f"⭐ XP: #{rank_xp}", font=fonts["text"], fill="white")
-        draw.text((c1x, RANK_Y + 78), f"❤️ Love: #{rank_love}", font=fonts["text"], fill="white")
-        draw.text((c2x, RANK_Y + 78), f"⚔ PvP: #{rank_pvp}", font=fonts["text"], fill="white")
+        draw_text((c1x, RANK_Y + 45), f"💰 Rich: #{rank_rich}", font=fonts["text"])
+        draw_text((c2x, RANK_Y + 45), f"⭐ XP: #{rank_xp}", font=fonts["text"])
+        draw_text((c1x, RANK_Y + 78), f"❤️ Love: #{rank_love}", font=fonts["text"])
+        draw_text((c2x, RANK_Y + 78), f"⚔ PvP: #{rank_pvp}", font=fonts["text"])
+        draw_text((c1x, RANK_Y + 111), f"🏰 BT: {rank_bt_text}", font=fonts["small"])
+        draw_text((c2x, RANK_Y + 111), f"💞 Couples BT: {rank_couples_bt_text}", font=fonts["small"])
+        draw_text((c1x, RANK_Y + 136), f"🏛 Agon: {agon_rank_text}", font=fonts["small"])
+        if agon_streak_text:
+            draw_text((c1x, RANK_Y + 160), f"🌟 {agon_streak_text}", font=fonts["small"])
 
         # -----------------
-        # Pet block (bigger image + one-column specs) with scalable frame
+        # Pet block with decorative frame
         # -----------------
         if pet:
             pet_name = pet.get("name") or "Pet"
@@ -608,70 +1155,129 @@ class GreekCard(commands.Cog):
             pet_def = safe_int(pet.get("defense"), 0)
 
             # Text (right of pet image)
-            draw.text((PET_TEXT_X, PET_TEXT_Y), f"Pet: {pet_name}", font=fonts["title_h"], fill="white")
-            draw.text((PET_TEXT_X, PET_TEXT_Y + 40), f"Element: {pet_el}", font=fonts["text"], fill="white")
-            draw.text((PET_TEXT_X, PET_TEXT_Y + 70), f"HP: {pet_hp}", font=fonts["text"], fill="white")
-            draw.text((PET_TEXT_X, PET_TEXT_Y + 100), f"ATK: {pet_atk}", font=fonts["text"], fill="white")
-            draw.text((PET_TEXT_X, PET_TEXT_Y + 130), f"DEF: {pet_def}", font=fonts["text"], fill="white")
+            draw_text((PET_TEXT_X, PET_TEXT_Y), f"Pet: {pet_name}", font=fonts["title_h"])
+            draw_text((PET_TEXT_X, PET_TEXT_Y + 40), f"Element: {pet_el}", font=fonts["text"])
+            draw_text((PET_TEXT_X, PET_TEXT_Y + 70), f"HP: {pet_hp}", font=fonts["text"])
+            draw_text((PET_TEXT_X, PET_TEXT_Y + 100), f"ATK: {pet_atk}", font=fonts["text"])
+            draw_text((PET_TEXT_X, PET_TEXT_Y + 130), f"DEF: {pet_def}", font=fonts["text"])
 
             # Pet image
             pet_url = (pet.get("url") or pet.get("image_url") or "").strip()
             pimg = await self._load_image_url(pet_url)
 
-            # Create the pet box regardless, so we can still show a frame even if image fails
-            block = Image.new("RGBA", PET_IMG_SIZE, (0, 0, 0, 0))
-
-            # Paste pet image centered (if exists)
-            if pimg:
-                # Fit inside box while preserving ratio
-                pimg = pimg.convert("RGBA")
-                pimg.thumbnail(PET_IMG_SIZE)
-
-                px = (PET_IMG_SIZE[0] - pimg.size[0]) // 2
-                py = (PET_IMG_SIZE[1] - pimg.size[1]) // 2
-                block.paste(pimg, (px, py), pimg)
-
-            # Frame overlay (same frame, scalable)
             frame_url = PET_FRAMES.get(pet_el) or PET_FRAMES.get(pet_el.title()) or PET_FRAMES.get(pet_el.capitalize())
             frame = await self._load_image_url(frame_url) if frame_url else None
-            if frame:
-                frame = frame.convert("RGBA")
 
-                fw = max(1, int(PET_IMG_SIZE[0] * PET_FRAME_SCALE))
-                fh = max(1, int(PET_IMG_SIZE[1] * PET_FRAME_SCALE))
-                frame = frame.resize((fw, fh))
+            if pimg or frame:
+                resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
 
-                fx = (PET_IMG_SIZE[0] - fw) // 2 + PET_FRAME_OFFSET[0]
-                fy = (PET_IMG_SIZE[1] - fh) // 2 + PET_FRAME_OFFSET[1]
+                # Configuration
+                FRAME_PADDING_PERCENT = 0.10  # 10% bigger (0.15 = 15%, 0.20 = 20%)
 
-                # paste with alpha, do NOT alpha_composite (sizes differ)
-                block.paste(frame, (fx, fy), frame)
+                # Process pet image - fit inside the pet box
+                pet_w, pet_h = PET_IMG_SIZE
+                rendered_pet = None
+                pet_natural_w = pet_natural_h = 0
 
-            # Final paste to card
-            card.paste(block, (PET_IMG_X, PET_IMG_Y), block)
+                if pimg:
+                    pimg = pimg.convert("RGBA")
+                    pimg.thumbnail(PET_IMG_SIZE, resample=resample)
+                    pet_natural_w, pet_natural_h = pimg.size
+                    rendered_pet = pimg
+                else:
+                    # No pet image, use full box size for frame reference
+                    pet_natural_w, pet_natural_h = PET_IMG_SIZE
+
+                # Calculate padding once and use a top-anchored layout.
+                padding = int(max(pet_natural_w, pet_natural_h) * FRAME_PADDING_PERCENT)
+
+                # Process frame - scale based on actual pet size + padding
+                rendered_frame = None
+                if frame:
+                    frame = frame.convert("RGBA")
+
+                    # Calculate frame size: pet size + padding on all sides
+                    base_frame_w = pet_natural_w + (padding * 2)
+                    base_frame_h = pet_natural_h + (padding * 2)
+
+                    # Keep previous user tuning knobs active.
+                    frame_w = max(1, int(base_frame_w * PET_FRAME_SCALE))
+                    frame_h = max(1, int(base_frame_h * PET_FRAME_SCALE))
+
+                    # Resize frame to fit around pet
+                    frame = frame.resize((frame_w, frame_h), resample=resample)
+                    rendered_frame = frame
+
+                # Create composite layer
+                if rendered_frame:
+                    frame_w, frame_h = rendered_frame.size
+                else:
+                    frame_w = frame_h = 0
+
+                # Top-anchored system:
+                # frame starts at Y=0 (+ offset), pet starts at Y=padding.
+                base_comp_w = max(pet_natural_w + (padding * 2), frame_w)
+                base_comp_h = max(pet_natural_h + (padding * 2), frame_h)
+                pet_x = (base_comp_w - pet_natural_w) // 2 + PET_IMAGE_OFFSET[0]
+                pet_y = (padding if rendered_frame else 0) + PET_IMAGE_OFFSET[1]
+
+                if rendered_frame:
+                    frame_x = (base_comp_w - frame_w) // 2 + PET_FRAME_OFFSET[0]
+                    frame_y = PET_FRAME_OFFSET[1]
+                else:
+                    frame_x = frame_y = 0
+
+                # Expand bounds if offsets push content outside the base composite.
+                min_x = min(0, pet_x, frame_x if rendered_frame else 0)
+                min_y = min(0, pet_y, frame_y if rendered_frame else 0)
+                max_x = max(base_comp_w, pet_x + pet_natural_w, (frame_x + frame_w) if rendered_frame else base_comp_w)
+                max_y = max(base_comp_h, pet_y + pet_natural_h, (frame_y + frame_h) if rendered_frame else base_comp_h)
+                comp_w = max_x - min_x
+                comp_h = max_y - min_y
+                composite = Image.new("RGBA", (comp_w, comp_h), (0, 0, 0, 0))
+                pet_x -= min_x
+                pet_y -= min_y
+
+                # Draw pet first, then frame on top so the frame is always visible.
+                if rendered_pet:
+                    composite.alpha_composite(rendered_pet, (pet_x, pet_y))
+
+                if rendered_frame:
+                    frame_x -= min_x
+                    frame_y -= min_y
+                    composite.alpha_composite(rendered_frame, (frame_x, frame_y))
+
+                # Paste composite onto card (global block offset).
+                # Use clipping instead of clamping so manual offsets stay respected.
+                paste_x = PET_IMG_X + (pet_w - comp_w) // 2 + PET_BLOCK_OFFSET[0]
+                paste_y = PET_IMG_Y + PET_BLOCK_OFFSET[1]
+
+                src_x = max(0, -paste_x)
+                src_y = max(0, -paste_y)
+                dst_x = max(0, paste_x)
+                dst_y = max(0, paste_y)
+                copy_w = min(comp_w - src_x, CARD_W - dst_x)
+                copy_h = min(comp_h - src_y, CARD_H - dst_y)
+
+                if copy_w > 0 and copy_h > 0:
+                    composite_crop = composite.crop((src_x, src_y, src_x + copy_w, src_y + copy_h))
+                    card.alpha_composite(composite_crop, (dst_x, dst_y))
 
         else:
-            draw.text((PET_TEXT_X, PET_TEXT_Y), "Pet: None Equipped", font=fonts["title_h"], fill="white")
+            draw_text((PET_TEXT_X, PET_TEXT_Y), "Pet: None Equipped", font=fonts["title_h"])
 
 
         # Badges
-        draw.text((BADGE_X, BADGE_Y), "Badges", font=fonts["title_h"], fill="white")
-
-        to_show = []
-        for bit, icon_url in BADGE_ICONS.items():
-            top_uid = badge_top.get(bit)
-            is_top = (top_uid == user.id) if top_uid else False
-            has_bit = bit_is_set(profile.get("badges"), bit)
-            if is_top or has_bit:
-                to_show.append((bit, icon_url))
+        draw_text((BADGE_X, BADGE_Y), "Badges", font=fonts["title_h"])
 
         icon_size = 64
         pad = 10
         gx, gy = BADGE_X, BADGE_Y + 45
 
-        for idx, (_, icon_url) in enumerate(to_show[:10]):
-            ix = gx + (idx % 5) * (icon_size + pad)
-            iy = gy + (idx // 5) * (icon_size + pad)
+        for idx, key in enumerate(visible_badges[:4]):
+            icon_url = BADGE_DEFINITIONS[key]["icon"]
+            ix = gx + (idx % 4) * (icon_size + pad)
+            iy = gy + (idx // 4) * (icon_size + pad)
             icon = await self._load_image_url(icon_url)
             if icon:
                 icon = icon.resize((icon_size, icon_size))

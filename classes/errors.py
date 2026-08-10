@@ -1,5 +1,5 @@
-import discord
+from discord.ext import commands
 
 
-class NoChoice(discord.ext.commands.CommandInvokeError):
+class NoChoice(commands.CommandInvokeError):
     pass

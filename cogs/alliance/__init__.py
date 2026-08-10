@@ -876,6 +876,7 @@ class Alliance(commands.Cog):
                     classes=profile["class"],
                     race=profile["race"],
                     guild=profile["guild"],
+                    xp=profile["xp"],
                     conn=conn,
                 )
                 if u not in attacking_users:

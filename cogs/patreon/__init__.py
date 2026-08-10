@@ -163,7 +163,7 @@ class Patreon(commands.Cog):
     @user_cooldown(600)
     @commands.command()
     async def message(self, ctx, email):
-        user_id = 295173706496475136  # Replace with the specific user ID
+        user_id = 524674960153903126  # Owner/support contact user ID
 
         try:
             # Fetch the user from Discord's servers
@@ -232,18 +232,15 @@ class Patreon(commands.Cog):
 
         await ctx.send(_("Item reset."))
 
-    @is_patron()
     @has_char()
-    @commands.command(brief=_("[basic] Change an item's name"))
+    @commands.command(brief=_("Change an item's name"))
     @locale_doc
     async def weaponname(self, ctx, itemid: int, *, newname: str):
         _(
             """`<itemid>` - The ID of the item to rename
             `<newname>` - The name to give the item, must be shorter than 40 characters
 
-            Change an item's name. Once an item is renamed, it can no longer be sold.
-
-            Only basic (or above) tier patrons can use this command."""
+            Change an item's name. Once an item is renamed, it can no longer be sold."""
         )
         if len(newname) > 40:
             return await ctx.send(_("Name too long."))
@@ -286,9 +283,8 @@ class Patreon(commands.Cog):
         )
         await ctx.send(f"You have {weapontoken_value} tokens left")
 
-    @is_patron("bronze")
     @has_char()
-    @commands.command(brief=_("[bronze] Change an item's type"))
+    @commands.command(aliases=["weaponchange"], brief=_("Change an item's type"))
     @locale_doc
     async def weapontype(self, ctx, itemid: int, new_type: str.title):
         _(
@@ -300,7 +296,7 @@ class Patreon(commands.Cog):
             You may not change a two-handed item into a one-handed one, or vice versa.
             This proves useful for merging items.
 
-            Only bronze (or above) tier patrons can use this command."""
+            Requires weapon tokens for stronger weapons unless your profile tier is 4."""
         )
 
         # First, fetch the current value of weapontoken for the user
@@ -338,9 +334,19 @@ class Patreon(commands.Cog):
                     )
                 )
             stat = item["damage"] or item["armor"]
-            result = await self.bot.pool.fetchval('SELECT tier FROM profile WHERE "user" = $1;', ctx.author.id)
+            raw_tier = await conn.fetchval(
+                'SELECT tier FROM profile WHERE "user" = $1;',
+                ctx.author.id,
+            )
+            try:
+                tier = int(raw_tier or 0)
+            except (TypeError, ValueError):
+                try:
+                    tier = int(float(raw_tier or 0))
+                except (TypeError, ValueError):
+                    tier = 0
 
-            if result != 4:
+            if tier != 4:
 
                 if item["hand"] == "both" and stat > 40:
                     weapontoken_value = await self.bot.pool.fetchval(
@@ -403,10 +409,9 @@ class Patreon(commands.Cog):
             )
         )
 
-    @is_patron("gold")
-    @has_char()
     @next_day_cooldown()
-    @commands.command(brief=_("[gold] Receive a daily booster"))
+    @has_char()
+    @commands.command(aliases=["boosterdaily"], brief=_("Receive a daily booster"))
     @locale_doc
     async def donatordaily(self, ctx):
         _(

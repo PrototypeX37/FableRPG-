@@ -160,6 +160,28 @@ def xptolevel(xp):
     return 50
 
 
+def statpoints_for_level(level):
+    """Return total earned stat points at a given level."""
+    try:
+        level = int(level)
+    except (TypeError, ValueError):
+        return 0
+    return max(level // 2, 0)
+
+
+def gained_statpoints(old_level, new_level):
+    """Return newly earned stat points between two levels."""
+    try:
+        old_level = int(old_level)
+    except (TypeError, ValueError):
+        old_level = 0
+    try:
+        new_level = int(new_level)
+    except (TypeError, ValueError):
+        new_level = 0
+    return max(statpoints_for_level(new_level) - statpoints_for_level(old_level), 0)
+
+
 def xptonextlevel(xp):
     level = xptolevel(xp)
     if level == 100:

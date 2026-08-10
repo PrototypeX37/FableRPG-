@@ -31,6 +31,8 @@ import discord
 from discord.ext import commands
 
 from cogs.scheduler import Timer
+from classes.classes import Ranger, SantasHelper, Thief
+from classes.classes import from_string as class_from_string
 from utils.eval import evaluate as _evaluate
 from utils.i18n import _, locale_doc
 from utils.misc import nice_join
@@ -446,13 +448,17 @@ class Sharding(commands.Cog):
                 # Status lines handled separately (always shown)
                 "pve",
                 "bt fight",
+                "btower fight",
+                "battletower fight",
+                "battletower_fight",
+                "battle tower fight",
                 "dragonchallenge party",
                 "dragon challenge party",
                 "dragonparty",
                 "dragon party",
             }),
             ("❤️ Family", {"date", "child", "familyevent", "marriage"}),
-            ("✨ Class", {"class", "bless", "steal", "scout"}),
+            ("✨ Class", {"class", "bless", "steal", "scout", "gift"}),
             ("🧑‍🎤 Character", {"race", "follow", "redeemcd", "redeemweapontokens"}),
             ("🐾 Pets", {
                 "pets feed", "pets train", "pets treat", "pets pet", "pets play",
@@ -467,6 +473,51 @@ class Sharding(commands.Cog):
                 SECTION_MAP[norm_cmd(c)] = sec_name
 
         SECTION_ORDER = [name for name, _ in SECTIONS] + ["📦 Other"]
+        TRACKED_COMMANDS: List[tuple[str, List[str]]] = [
+            ("pve", ["pve"]),
+            ("battletower fight", [
+                "battletower fight",
+                "battle tower fight",
+                "bt fight",
+                "btower fight",
+                "battletower_fight",
+            ]),
+            ("dragonchallenge party", [
+                "dragonchallenge party",
+                "dragon challenge party",
+                "dragonparty",
+                "dragon party",
+            ]),
+            ("date", ["date"]),
+            ("child", ["child"]),
+            ("familyevent", ["familyevent"]),
+            ("marriage", ["marriage"]),
+            ("class", ["class"]),
+            ("bless", ["bless"]),
+            ("steal", ["steal"]),
+            ("scout", ["scout"]),
+            ("gift", ["gift"]),
+            ("race", ["race"]),
+            ("follow", ["follow"]),
+            ("redeemcd", ["redeemcd"]),
+            ("redeemweapontokens", ["redeemweapontokens"]),
+            ("pets feed", ["pets feed"]),
+            ("pets train", ["pets train"]),
+            ("pets treat", ["pets treat"]),
+            ("pets pet", ["pets pet"]),
+            ("pets play", ["pets play"]),
+            ("splice", ["splice", "pets splice"]),
+            ("daily", ["daily"]),
+            ("boosterdaily", ["boosterdaily"]),
+            ("cratesdaily", ["cratesdaily"]),
+            ("trade", ["trade"]),
+            ("trader", ["trader"]),
+        ]
+        CLASS_REQUIREMENTS = {
+            "scout": Ranger,
+            "steal": Thief,
+            "gift": SantasHelper,
+        }
 
         # --- 1) Load Redis cooldowns
         combined: Dict[str, Dict[str, Any]] = {}
@@ -580,7 +631,54 @@ class Sharding(commands.Cog):
         for sec in buckets:
             buckets[sec].sort(key=lambda x: int(x.get("ttl", 0)))
 
-        # --- 5) Render embed
+        # --- 5) Build "commands left to use" list
+        async def has_required_class(display_name: str) -> bool:
+            req_class = CLASS_REQUIREMENTS.get(display_name)
+            if req_class is None:
+                return True
+
+            if not getattr(ctx, "character_data", None):
+                ctx.character_data = await self.bot.pool.fetchrow(
+                    'SELECT * FROM profile WHERE "user"=$1;',
+                    ctx.author.id,
+                )
+            if not ctx.character_data:
+                return False
+
+            player_classes = [
+                c
+                for raw_class in (ctx.character_data.get("class") or [])
+                if (c := class_from_string(raw_class))
+            ]
+            return any(c.in_class_line(req_class) for c in player_classes)
+
+        active_cooldown_cmds = set(combined.keys())
+        prefix = getattr(ctx, "clean_prefix", "$")
+        commands_left_to_use: List[str] = []
+
+        for display_name, aliases in TRACKED_COMMANDS:
+            resolved_commands = [
+                cmd for alias in aliases if (cmd := self.bot.get_command(alias)) is not None
+            ]
+            if not resolved_commands:
+                continue
+
+            # Include both alias text and canonical command names.
+            # This avoids alias/canonical cooldown key mismatches (e.g. boosterdaily -> donatordaily).
+            tracked_norms = {norm_cmd(a) for a in aliases}
+            for cmd in resolved_commands:
+                tracked_norms.add(norm_cmd(getattr(cmd, "name", "")))
+                tracked_norms.add(norm_cmd(getattr(cmd, "qualified_name", "")))
+
+            if active_cooldown_cmds.intersection(tracked_norms):
+                continue
+
+            if not await has_required_class(display_name):
+                continue
+
+            commands_left_to_use.append(f"• `{prefix}{display_name}`")
+
+        # --- 6) Render embed
         embed = discord.Embed(title=_("Cooldowns"), color=discord.Color.blurple())
 
         # Always show Running section
@@ -621,6 +719,30 @@ class Sharding(commands.Cog):
             for i, chunk in enumerate(chunks):
                 name = sec if i == 0 else f"{sec} (cont.)"
                 embed.add_field(name=name, value=chunk, inline=False)
+
+        # Add spacing + second title section
+        left_chunks: List[str] = []
+        left_lines = commands_left_to_use or ["• None"]
+        buf: List[str] = []
+        buf_len = 0
+        for line in left_lines:
+            if buf and buf_len + len(line) + 1 > 1024:
+                left_chunks.append("\n".join(buf))
+                buf = [line]
+                buf_len = len(line) + 1
+            else:
+                buf.append(line)
+                buf_len += len(line) + 1
+        if buf:
+            left_chunks.append("\n".join(buf))
+
+        if len(embed.fields) < 24 and left_chunks:
+            embed.add_field(name="\u200b", value="\u200b", inline=False)
+            for i, chunk in enumerate(left_chunks):
+                if len(embed.fields) >= 25:
+                    break
+                section_name = "Commands left to use" if i == 0 else "Commands left to use (cont.)"
+                embed.add_field(name=section_name, value=chunk, inline=False)
 
         if not any_cd:
             embed.set_footer(text=_("No active cooldowns."))

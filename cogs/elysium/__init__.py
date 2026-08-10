@@ -30,11 +30,32 @@ from classes.classes import Raider
 from classes.classes import from_string as class_from_string
 from classes.converters import IntGreaterThan
 from cogs.shard_communication import user_on_cooldown as user_cooldown
+from utils.divine_familiars import DIVINE_FAMILIARS, award_divine_shards
 from utils.i18n import _, locale_doc
 from utils.joins import JoinView
 from utils.checks import is_god
 
 import random as randomm
+
+
+DIVINE_SHARD_RAID_PROC_CHANCE = 0.15
+DIVINE_SHARD_FAMILIAR_KEY = "sepulchure_familiar"
+SPECIAL_ROLE_REWARD_WEIGHT = 2
+
+
+def pick_weighted_reward_target(candidates, *favored_roles):
+    favored_ids = {
+        getattr(role, "id", role)
+        for role in favored_roles
+        if getattr(role, "id", role) is not None
+    }
+    weights = [
+        SPECIAL_ROLE_REWARD_WEIGHT
+        if getattr(candidate, "id", candidate) in favored_ids
+        else 1
+        for candidate in candidates
+    ]
+    return randomm.choices(candidates, weights=weights, k=1)[0]
 
 
 # ---------- UI components ----------
@@ -388,6 +409,7 @@ class Elysium(commands.Cog):
                             race=profile["race"],
                             guild=profile["guild"],
                             god=profile["god"],
+                            xp=profile["xp"],
                             conn=conn,
                         )
                     except ValueError:
@@ -1067,7 +1089,7 @@ class Elysium(commands.Cog):
                 progress = 100
 
                 users = [u.id for u in raid] or [p.id for p in participants]
-                random_user = randomm.choice(users)
+                random_user = pick_weighted_reward_target(users, champion, priest)
 
                 async with self.bot.pool.acquire() as conn:
                     luck_query = await conn.fetchval(
@@ -1129,6 +1151,22 @@ class Elysium(commands.Cog):
                 await ctx.send(
                     f"💰 All participants receive **${cash_reward}** for their devotion!"
                 )
+
+                if participants and randomm.random() < DIVINE_SHARD_RAID_PROC_CHANCE:
+                    shard_target = pick_weighted_reward_target(participants, champion, priest)
+                    familiar_key = DIVINE_SHARD_FAMILIAR_KEY
+                    familiar_name = DIVINE_FAMILIARS[familiar_key]["name"]
+                    async with self.bot.pool.acquire() as conn:
+                        shard_total = await award_divine_shards(
+                            conn,
+                            shard_target.id,
+                            familiar_key,
+                            1,
+                        )
+                    await ctx.send(
+                        f"✨ Death grants **1 {familiar_name} shard** to {shard_target.mention}! "
+                        f"Now: **{shard_total}/20**"
+                    )
             else:
                 await ctx.send("💔 The requiem failed to reach completion. The veil holds as Tartaros prevails.")
 

@@ -35,20 +35,24 @@ from typing import Optional, Callable, Dict, List
 import discord
 from discord.ext import commands
 
-# Reset reference: 01:00 in UT+2 (same as your $daily reset logic)
+# Reset reference: 01:00 in UTC+2 (same as your $daily reset logic)
 RESET_TZ = timezone(timedelta(hours=2))  # UTC+2
 RESET_HOUR = 1
 
 
 def period_key(now_utc: Optional[datetime] = None) -> int:
-    """Return yyyymmdd for the current 'day' in reset timezone (UTC-2)."""
+    """Return yyyymmdd for the current AntiScript day in reset timezone (UTC+2)."""
     now_utc = now_utc or datetime.now(timezone.utc)
     local = now_utc.astimezone(RESET_TZ)
+    # Keep the period boundary aligned with RESET_HOUR (not midnight).
+    today_reset = local.replace(hour=RESET_HOUR, minute=0, second=0, microsecond=0)
+    if local < today_reset:
+        local = local - timedelta(days=1)
     return local.year * 10000 + local.month * 100 + local.day
 
 
 def next_reset_unix(now_utc: Optional[datetime] = None) -> int:
-    """Return unix timestamp for the next reset moment (1am UTC-2)."""
+    """Return unix timestamp for the next reset moment (1am UTC+2)."""
     now_utc = now_utc or datetime.now(timezone.utc)
     local = now_utc.astimezone(RESET_TZ)
 
@@ -67,6 +71,34 @@ def fmt_blocked(command_key: str) -> str:
     return f"You've reached the daily threshold for `{command_key}`. This will reset <t:{ts}:R>."
 
 
+def daily_command_limit(command_key: str, limit: int) -> Callable:
+    """
+    Decorator to block a command after N uses per day (reset at 1am UTC+2).
+    Kept near module top so other cogs can import it even during reload cycles.
+    """
+
+    async def predicate(ctx: commands.Context) -> bool:
+        cog: Optional["AntiScript"] = ctx.bot.get_cog("AntiScript")
+        if cog is None:
+            return True  # fail-open if cog missing
+
+        normalized_key = cog.normalize_command_key(command_key)
+        ok = await cog.check_and_increment_command_use(
+            user_id=ctx.author.id,
+            command_name=normalized_key,
+            limit=limit,
+            increment=0,  # check only; increment happens on successful completion
+        )
+        if ok:
+            setattr(ctx, "_antiscript_track_info", (normalized_key, int(limit)))
+            return True
+
+        await ctx.send(fmt_blocked(normalized_key))
+        return False
+
+    return commands.check(predicate)
+
+
 class AntiScript(commands.Cog):
     """
     AntiScript:
@@ -79,14 +111,28 @@ class AntiScript(commands.Cog):
     # Keep these in one place so help + stats stay consistent
     DAILY_LIMITS: Dict[str, int] = {
         "pve": 36,
+        "springpve": 36,
         "battletower_fight": 108,
         "steal": 18,
+    }
+    COMMAND_ALIASES: Dict[str, str] = {
+        "springpve": "springpve",
+        "spve": "springpve",
+        "battletower": "battletower_fight",
+        "battletowerfight": "battletower_fight",
+        "battletower_fight": "battletower_fight",
     }
 
     STARTERPACK_ONCE_KEY = "starterpack_claim"  # for display purposes only
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    @classmethod
+    def normalize_command_key(cls, command_key: str) -> str:
+        raw = str(command_key or "").strip().lower()
+        raw = raw.replace("-", "_").replace(" ", "_")
+        return cls.COMMAND_ALIASES.get(raw, raw)
 
     # -------------------------
     # Per-command daily limit
@@ -114,9 +160,10 @@ class AntiScript(commands.Cog):
         increment: int = 1,
     ) -> bool:
         """
-        Returns True if allowed (and increments usage),
+        Returns True if allowed (and optionally increments usage),
         False if blocked (already at/over limit).
         """
+        normalized_key = self.normalize_command_key(command_name)
         p = period_key()
         async with self.bot.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -126,12 +173,15 @@ class AntiScript(commands.Cog):
                 WHERE user_id=$1 AND command=$2 AND period=$3
                 """,
                 user_id,
-                command_name,
+                normalized_key,
                 p,
             )
             uses = int(row["uses"]) if row else 0
             if uses >= limit:
                 return False
+
+            if increment <= 0:
+                return True
 
             await conn.execute(
                 """
@@ -142,11 +192,36 @@ class AntiScript(commands.Cog):
                               updated_at = NOW()
                 """,
                 user_id,
-                command_name,
+                normalized_key,
                 p,
                 increment,
             )
             return True
+
+    @commands.Cog.listener()
+    async def on_command_completion(self, ctx: commands.Context):
+        track_info = getattr(ctx, "_antiscript_track_info", None)
+        if not track_info:
+            return
+        setattr(ctx, "_antiscript_track_info", None)
+        command_key, limit = track_info
+
+        try:
+            await self.check_and_increment_command_use(
+                user_id=ctx.author.id,
+                command_name=command_key,
+                limit=int(limit),
+                increment=1,
+            )
+        except Exception:
+            # Best effort only: never break command completion flow.
+            pass
+
+    @commands.Cog.listener()
+    async def on_command_error(self, ctx: commands.Context, error: Exception):
+        # Ensure pending flag never leaks between commands.
+        if getattr(ctx, "_antiscript_track_info", None):
+            setattr(ctx, "_antiscript_track_info", None)
 
     # -------------------------
     # Starterpack once per Discord account
@@ -187,6 +262,7 @@ class AntiScript(commands.Cog):
         # Build limits text
         limits_lines = [
             f"- `$pve`: **{self.DAILY_LIMITS['pve']} / day**",
+            f"- `$springpve`: **{self.DAILY_LIMITS['springpve']} / day**",
             f"- `$battletower fight`: **{self.DAILY_LIMITS['battletower_fight']} / day**",
             f"- `$steal`: **{self.DAILY_LIMITS['steal']} / day**",
             f"- `$starterpack claim`: **once per Discord account**",
@@ -198,7 +274,7 @@ class AntiScript(commands.Cog):
             "- `$gmantiscript wipeuser <user>` (today + starterpack)",
             "- `$gmantiscript stats <user> [command_key]`",
             "",
-            "**command_key values:** `pve`, `battletower_fight`, `steal`",
+            "**command_key values:** `pve`, `springpve` (alias: `spve`), `battletower_fight`, `steal`",
         ]
 
         await ctx.send(
@@ -228,6 +304,7 @@ class AntiScript(commands.Cog):
     @gmantiscript.command(name="resetcmd")
     @commands.has_permissions(administrator=True)
     async def gm_resetcmd(self, ctx: commands.Context, user: discord.User, command_key: str):
+        normalized_key = self.normalize_command_key(command_key)
         p = period_key()
         async with self.bot.pool.acquire() as conn:
             await conn.execute(
@@ -236,10 +313,12 @@ class AntiScript(commands.Cog):
                 WHERE user_id=$1 AND command=$2 AND period=$3
                 """,
                 user.id,
-                command_key,
+                normalized_key,
                 p,
             )
-        await ctx.send(f"Reset daily usage for {user.mention} on `{command_key}` (period {p}).")
+        await ctx.send(
+            f"Reset daily usage for {user.mention} on `{normalized_key}` (period {p})."
+        )
 
     @gmantiscript.command(name="resetstarter")
     @commands.has_permissions(administrator=True)
@@ -280,6 +359,7 @@ class AntiScript(commands.Cog):
 
         async with self.bot.pool.acquire() as conn:
             if command_key:
+                normalized_key = self.normalize_command_key(command_key)
                 row = await conn.fetchrow(
                     """
                     SELECT uses
@@ -287,14 +367,14 @@ class AntiScript(commands.Cog):
                     WHERE user_id=$1 AND command=$2 AND period=$3
                     """,
                     user.id,
-                    command_key,
+                    normalized_key,
                     p,
                 )
                 uses = int(row["uses"]) if row else 0
                 await ctx.send(
                     f"**AntiScript stats** for {user.mention}\n"
                     f"- Period: `{p}` (resets <t:{ts}:R>)\n"
-                    f"- `{command_key}` used: **{uses}** time(s) today"
+                    f"- `{normalized_key}` used: **{uses}** time(s) today"
                 )
                 return
 
@@ -326,33 +406,6 @@ class AntiScript(commands.Cog):
             f"- Period: `{p}` (resets <t:{ts}:R>)\n"
             + "\n".join(lines)
         )
-
-
-# -------------------------
-# Decorator: daily command limit
-# -------------------------
-def daily_command_limit(command_key: str, limit: int) -> Callable:
-    """
-    Decorator to block a command after N uses per day (reset at 1am UTC-2).
-    """
-    async def predicate(ctx: commands.Context) -> bool:
-        cog: Optional[AntiScript] = ctx.bot.get_cog("AntiScript")
-        if cog is None:
-            return True  # fail-open if cog missing
-
-        ok = await cog.check_and_increment_command_use(
-            user_id=ctx.author.id,
-            command_name=command_key,
-            limit=limit,
-            increment=1,
-        )
-        if ok:
-            return True
-
-        await ctx.send(fmt_blocked(command_key))
-        return False
-
-    return commands.check(predicate)
 
 
 async def setup(bot: commands.Bot):

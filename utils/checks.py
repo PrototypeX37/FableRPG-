@@ -151,12 +151,6 @@ class AlreadyRaiding(commands.CheckFailure):
     pass
 
 
-class NoOpenHelpRequest(commands.CheckFailure):
-    """Exception raised when a user tries to edit/remove an open help request but none exists."""
-
-    pass
-
-
 class ImgurUploadError(commands.CheckFailure):
     """Exception raised when an Imgur upload failed to return a short URL."""
 
@@ -521,28 +515,59 @@ async def guild_has_money(bot: "Bot", guildid: int, money: int) -> bool:
     return res >= money
 
 
+async def user_is_gm(bot: "Bot", user: discord.abc.User | int) -> bool:
+    user_id = int(getattr(user, "id", user))
+
+    owner_ids = getattr(bot, "owner_ids", None) or set()
+    try:
+        if user_id in {int(x) for x in owner_ids}:
+            return True
+    except (TypeError, ValueError):
+        pass
+
+    owner_target = user if hasattr(user, "id") else discord.Object(id=user_id)
+    try:
+        if await bot.is_owner(owner_target):
+            return True
+    except Exception:
+        pass
+
+    gm_ids = getattr(bot.config.game, "game_masters", []) or []
+    try:
+        if user_id in {int(x) for x in gm_ids}:
+            return True
+    except (TypeError, ValueError):
+        pass
+
+    gm_cache = getattr(bot, "_gm_cache", None)
+    if gm_cache is not None and user_id in gm_cache:
+        return True
+
+    pool = getattr(bot, "pool", None)
+    if not pool:
+        return False
+
+    try:
+        is_db_gm = await pool.fetchval(
+            "SELECT 1 FROM game_masters WHERE user_id = $1",
+            user_id,
+        )
+    except Exception:
+        return False
+
+    if not is_db_gm:
+        return False
+
+    if gm_cache is None:
+        gm_cache = set()
+        setattr(bot, "_gm_cache", gm_cache)
+    gm_cache.add(user_id)
+    return True
+
+
 def is_gm() -> "_CheckDecorator":
     async def predicate(ctx: Context) -> bool:
-        user_id = int(ctx.author.id)
-
-        owner_ids = getattr(ctx.bot, "owner_ids", None) or set()
-        try:
-            if user_id in {int(x) for x in owner_ids}:
-                return True
-        except (TypeError, ValueError):
-            pass
-
-        try:
-            if await ctx.bot.is_owner(ctx.author):
-                return True
-        except Exception:
-            pass
-
-        gm_ids = getattr(ctx.bot.config.game, "game_masters", []) or []
-        try:
-            return user_id in {int(x) for x in gm_ids}
-        except (TypeError, ValueError):
-            return False
+        return await user_is_gm(ctx.bot, ctx.author)
 
     return commands.check(predicate)
 
@@ -585,10 +610,23 @@ def _parse_donator_rank(role: str) -> DonatorRank:
         raise ValueError(f"Unknown donator tier: {role!r}") from exc
 
 
-def _rank_from_profile_tier(tier: int | None) -> DonatorRank | None:
-    if tier is None:
+def _coerce_tier_int(value: object | None) -> int | None:
+    if value is None or isinstance(value, bool):
         return None
-    return _PROFILE_TIER_TO_DONATOR_RANK.get(int(tier))
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+
+def _rank_from_profile_tier(tier: object | None) -> DonatorRank | None:
+    tier_value = _coerce_tier_int(tier)
+    if tier_value is None:
+        return None
+    return _PROFILE_TIER_TO_DONATOR_RANK.get(tier_value)
 
 
 def _normalize_rank(value: object | None) -> DonatorRank | None:
@@ -718,7 +756,9 @@ async def user_is_patron(bot: "Bot", user: discord.User, role: str = "basic") ->
     patreon_core = bot.get_cog("PatreonCore")
     if patreon_core is not None:
         try:
-            cached_tier = int(patreon_core.get_cached_tier_for_user(user.id))
+            cached_tier = _coerce_tier_int(
+                patreon_core.get_cached_tier_for_user(user.id)
+            )
             best_rank = _max_rank(best_rank, _rank_from_profile_tier(cached_tier))
             api_mode_active = (
                 not getattr(patreon_core, "role_driven_sync", True)
@@ -788,16 +828,5 @@ def is_supporter() -> "_CheckDecorator":
             return False
         member_roles = [int(i) for i in member.get("roles", [])]
         return ctx.bot.config.game.support_team_role in member_roles
-
-    return commands.check(predicate)
-
-
-def has_open_help_request() -> "_CheckDecorator":
-    async def predicate(ctx: Context) -> bool:
-        response = await ctx.bot.redis.execute_command("GET", f"helpme:{ctx.guild.id}")
-        if not response:
-            raise NoOpenHelpRequest()
-        ctx.helpme = response.decode()
-        return True
 
     return commands.check(predicate)

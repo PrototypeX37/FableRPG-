@@ -6345,7 +6345,7 @@ class CouplesTowerBattle(TowerBattle):
         partners = [c for c in self.player_team.combatants if not c.is_pet]
         
         if len(partners) < 2:
-            await self.add_to_log("💔 Mirror of Truth requires both partners to be present!")
+            await self.add_to_log("💔 Mirror of Aletheia requires both partners to be present!")
             return False
             
         # Randomly pick one partner to be possessed
@@ -6359,7 +6359,7 @@ class CouplesTowerBattle(TowerBattle):
         # Create a minimal Truth Demon with None user (it's an NPC)
         self.truth_demon = Combatant(
             user=None,
-            name="Truth Demon",
+            name="Aletheia Daimon",
             hp=Decimal('1'),
             max_hp=Decimal('1'),
             damage=Decimal('1'),
@@ -6371,8 +6371,8 @@ class CouplesTowerBattle(TowerBattle):
         # Add Truth Demon to enemy team
         self.enemy_team.combatants.append(self.truth_demon)
         
-        await self.add_to_log("🪞 **THE MIRROR OF TRUTH AWAKENS!** 🪞")
-        await self.add_to_log(f"👻 **POSSESSION!** A Truth Demon seizes control of {self.possessed_partner.name}!")
+        await self.add_to_log("🪞 **THE MIRROR OF ALETHEIA AWAKENS!** 🪞")
+        await self.add_to_log(f"👻 **POSSESSION!** An Aletheia Daimon seizes control of {self.possessed_partner.name}!")
         await self.add_to_log(f"🛡️ {self.defender_partner.name} must survive for {self.possession_turn_limit} turns without killing their beloved!")
         await self.add_to_log("⚠️ **TIP:** Consider unequipping weapons to reduce damage and avoid accidentally killing your partner!")
         
@@ -6651,8 +6651,10 @@ class CouplesTowerBattle(TowerBattle):
     
     async def create_possession_embed(self):
         """Special embed for Level 23 Mirror of Truth possession battle"""
+        level_title = self.level_data.get("title") if isinstance(self.level_data, dict) else None
+        level_title = level_title or "Mirror of Aletheia"
         embed = discord.Embed(
-            title=f"Couples Battle Tower: Level 23 - The Mirror of Truth",
+            title=f"Couples Battle Tower: Level 23 - {level_title}",
             description=f"🪞 **{self.possessed_partner.name} is possessed! {self.defender_partner.name} must survive {self.possession_turn_limit - self.possession_turns} more turns!** 🪞",
             color=discord.Color.dark_purple()
         )
@@ -7175,9 +7177,11 @@ class CouplesTowerBattle(TowerBattle):
 
     async def create_multi_enemy_embed(self):
         """Special embed for levels with multiple active enemies like Level 13"""
+        level_title = self.level_data.get("title") if isinstance(self.level_data, dict) else None
+        level_title = level_title or "Labyrinth of Apate"
         embed = discord.Embed(
-            title=f"Couples Battle Tower: Level {self.level} - The Maze of Misunderstanding",
-            description="🗣️ **Multiple Confusion Sprites swirl around you, making coordination deadly!** 🗣️",
+            title=f"Couples Battle Tower: Level {self.level} - {level_title}",
+            description="🗣️ **Multiple Apate Sprites swirl around you, making coordination deadly!** 🗣️",
             color=discord.Color.orange()
         )
         

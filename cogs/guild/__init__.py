@@ -1501,7 +1501,6 @@ class Guild(commands.Cog):
             await ctx.send(f"An error occurred: {e}")
 
     @is_guild_officer()
-    @guild_cooldown(86400)
     @guild.command(brief=_("Start a guild adventure"))
     @locale_doc
     async def adventure(self, ctx, timer: int = 600):
@@ -1518,12 +1517,28 @@ class Guild(commands.Cog):
             Only guild leaders and officers can use this command.
             (This command has a guild cooldown of 1 hour.)"""
         )
+        cooldown_key = f"guildcd:{ctx.character_data['guild']}:{ctx.command.qualified_name}"
+        cooldown_set = False
+        adventure_started = False
+
         try:
             if timer > 86400:
                 return await ctx.send("Timer cannot exceed 1 day")
+
+            ttl = await self.bot.redis.execute_command("TTL", cooldown_key)
+            if ttl != -2:
+                if ttl == -1:
+                    ttl = 3600
+                    await self.bot.redis.execute_command("EXPIRE", cooldown_key, ttl)
+                return await ctx.send(
+                    _("{cmd} is on cooldown and will be available after {time}").format(
+                        cmd=ctx.command.qualified_name,
+                        time=timedelta(seconds=int(ttl)),
+                    )
+                )
+
             # Check if the guild is already on an adventure
             if await self.bot.get_guild_adventure(ctx.character_data["guild"]):
-                await self.bot.reset_guild_cooldown(ctx)
                 return await ctx.send(
                     _(
                         "Your guild is already on an adventure! Use `{prefix}guild status`"
@@ -1535,6 +1550,39 @@ class Guild(commands.Cog):
             guild = await self.bot.pool.fetchrow(
                 'SELECT * FROM guild WHERE "id"=$1;', ctx.character_data["guild"]
             )
+            if not guild:
+                return await ctx.send(_("No guild found."))
+
+            if guild["channel"]:
+                guild_channel = self.bot.get_channel(guild["channel"])
+                if guild_channel is None:
+                    try:
+                        guild_channel = await self.bot.fetch_channel(guild["channel"])
+                    except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                        guild_channel = None
+
+                if guild_channel is None:
+                    return await ctx.send(
+                        _(
+                            "Your guild channel is invalid or unavailable. Set a valid one"
+                            " with `{prefix}guild channel` and try again."
+                        ).format(prefix=ctx.clean_prefix)
+                    )
+
+                perms = guild_channel.permissions_for(guild_channel.guild.me)
+                if not perms.send_messages:
+                    return await ctx.send(
+                        _(
+                            "I can't post in your guild channel {channel}. Please fix my"
+                            " permissions there and try again."
+                        ).format(channel=guild_channel.mention)
+                    )
+
+            # Only arm the cooldown after the command has passed all validation checks.
+            await self.bot.redis.execute_command(
+                "SET", cooldown_key, ctx.command.qualified_name, "EX", 3600
+            )
+            cooldown_set = True
 
             # Create a view for joining the adventure
             view = JoinView(
@@ -1602,6 +1650,7 @@ class Guild(commands.Cog):
             # Check if enough players joined
             if len(joined) < 3:
                 await self.bot.reset_guild_cooldown(ctx)
+                cooldown_set = False
                 return await ctx.send(
                     _("You didn't get enough other players for the guild adventure.")
                 )
@@ -1926,6 +1975,7 @@ class Guild(commands.Cog):
 
             # Start the guild adventure with the selected adventure type
             await self.bot.start_guild_adventure(guild["id"], difficulty, time, adventure_type)
+            adventure_started = True
 
             # Update the guild's money and fetch the channel ID
             gold = 1000  # Define how gold is calculated or fetched
@@ -1987,6 +2037,8 @@ class Guild(commands.Cog):
             # Send the embed to the command invoker
             await ctx.send(embed=embed)
         except Exception as e:
+            if cooldown_set and not adventure_started:
+                await self.bot.reset_guild_cooldown(ctx)
             import traceback
             error_message = f"Error occurred: {e}\n"
             error_message += traceback.format_exc()
@@ -2336,4 +2388,3 @@ class Guild(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(Guild(bot))
-

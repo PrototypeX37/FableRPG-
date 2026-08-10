@@ -638,6 +638,7 @@ class TalosEngine(BaseEngine):
                     classes=profile.get("class"),
                     race=profile.get("race"),
                     guild=profile.get("guild"),
+                    xp=profile.get("xp"),
                     conn=conn,
                 )
                 xp = int(profile.get("xp", 0) or 0)
@@ -897,11 +898,8 @@ class LadonRaid(commands.Cog):
 
     # ------- LADON -------
 
-    @commands.command(hidden=True, brief="Start a Ladon (pet) raid")
-    @is_gm()
-    @raid_channel()
     async def spawn_ladon(self, ctx: commands.Context, element: str, hp: int, crate_rarity: str = "legendary"):
-        """Usage: $spawn_ladon <element> <hp> [crate_rarity]"""
+        """Usage: $spawn ladon <element> <hp> [crate_rarity]."""
         element = element.title()
         if element not in ELEMENTS:
             return await ctx.send(f"Invalid element. Choose from: {', '.join(ELEMENTS)}")
@@ -948,11 +946,8 @@ class LadonRaid(commands.Cog):
 
     # ------- TALOS -------
 
-    @commands.command(hidden=True, brief="Start a Talos raid")
-    @is_gm()
-    @raid_channel()
     async def spawn_talos(self, ctx: commands.Context, hp: int):
-        """Usage: $spawn_talos <hp>"""
+        """Usage: $spawn talos <hp>."""
         try: await ctx.message.delete()
         except Exception: pass
 

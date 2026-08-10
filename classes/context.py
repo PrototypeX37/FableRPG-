@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Optional, Union
 
+import aiohttp
 import discord
 from discord.ext import commands
 
@@ -96,6 +97,11 @@ class Context(commands.Context):
     """
 
     bot: "Bot"
+    RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
+    RETRYABLE_NETWORK_ERRNOS = {54, 104}  # ECONNRESET (macOS/Linux)
+    DEFAULT_HTTP_RETRIES = 3
+    DEFAULT_HTTP_RETRY_DELAY = 0.75
+    MAX_HTTP_RETRY_DELAY = 10.0
 
     @property
     def disp(self) -> str:
@@ -103,6 +109,59 @@ class Context(commands.Context):
 
     def __repr__(self):
         return "<Context>"
+
+    async def send(self, *args, **kwargs):
+        # Files are not always safe to resend after a failed request.
+        if kwargs.get("file") is not None or kwargs.get("files"):
+            return await super().send(*args, **kwargs)
+
+        retries = max(
+            0, int(kwargs.pop("_http_retries", self.DEFAULT_HTTP_RETRIES))
+        )
+        base_delay = float(
+            kwargs.pop("_http_retry_delay", self.DEFAULT_HTTP_RETRY_DELAY)
+        )
+
+        attempt = 0
+        while True:
+            try:
+                return await super().send(*args, **kwargs)
+            except discord.RateLimited as exc:
+                if attempt >= retries:
+                    raise
+                retry_after = getattr(exc, "retry_after", None)
+                if not retry_after:
+                    retry_after = base_delay * (2**attempt)
+                await asyncio.sleep(min(float(retry_after), self.MAX_HTTP_RETRY_DELAY))
+                attempt += 1
+            except discord.HTTPException as exc:
+                status = getattr(exc, "status", None)
+                if status not in self.RETRYABLE_HTTP_STATUSES or attempt >= retries:
+                    raise
+                retry_after = getattr(exc, "retry_after", None)
+                if not retry_after:
+                    retry_after = base_delay * (2**attempt)
+                await asyncio.sleep(min(float(retry_after), self.MAX_HTTP_RETRY_DELAY))
+                attempt += 1
+            except (
+                aiohttp.ClientConnectionError,
+                aiohttp.ServerDisconnectedError,
+                asyncio.TimeoutError,
+                ConnectionResetError,
+            ):
+                if attempt >= retries:
+                    raise
+                retry_after = base_delay * (2**attempt)
+                await asyncio.sleep(min(float(retry_after), self.MAX_HTTP_RETRY_DELAY))
+                attempt += 1
+            except OSError as exc:
+                if getattr(exc, "errno", None) not in self.RETRYABLE_NETWORK_ERRNOS:
+                    raise
+                if attempt >= retries:
+                    raise
+                retry_after = base_delay * (2**attempt)
+                await asyncio.sleep(min(float(retry_after), self.MAX_HTTP_RETRY_DELAY))
+                attempt += 1
 
     async def confirm(
         self,

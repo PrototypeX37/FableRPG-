@@ -13,7 +13,23 @@ import random
 import json
 import aiohttp
 from cogs.shard_communication import user_on_cooldown as user_cooldown
-from utils.checks import has_char, is_gm, is_patreon
+from utils.checks import has_char, is_patreon, user_is_gm
+
+SPLICE_FULFILL_ROLE_ID = 1516534394029084773
+
+
+def can_fulfill_splice():
+    async def predicate(ctx: commands.Context) -> bool:
+        if await user_is_gm(ctx.bot, ctx.author):
+            return True
+
+        return any(
+            role.id == SPLICE_FULFILL_ROLE_ID
+            for role in getattr(ctx.author, "roles", [])
+        )
+
+    return commands.check(predicate)
+
 
 class SpliceStatusPaginator(discord.ui.View):
     """A paginator for splice status entries using a dropdown menu for navigation"""
@@ -435,7 +451,6 @@ class Soulforge(commands.Cog):
             description=f"The raven Morrigan appears in a swirl of shadows, golden eyes fixed upon {name}.",
             color=0x7d2aad
         )
-        
         embed.add_field(
             name="Your Progress",
             value=f"**Eidolith Shards:** {shards}/10 [{shard_progress}]\n**Alchemist's Primer:** {primer_status}\n**Gold (2.5M):** {gold_status} ({money:,} gold available)",
@@ -1410,7 +1425,7 @@ class Soulforge(commands.Cog):
                 )
 
             unspliceable_pets = ["Sepulchure", "Astraea", "Drakath", "Ultra Sepulchure", "Ultra Astraea",
-                                 "Ultra Drakath"]
+                                 "Ultra Drakath", "Typhon", "Arachne", "Asterius", "Bessie", "Sorinveil", "Mayeia", "Vaion", "Astrephiel"]
 
             if not pet1_data:
                 await self.bot.reset_cooldown(ctx)
@@ -2448,7 +2463,7 @@ class Soulforge(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
-    @is_gm()
+    @can_fulfill_splice()
     @commands.command(name="splice_fulfill", brief="Fulfill a splice request by creating an egg")
     async def splice_fulfill(
         self,

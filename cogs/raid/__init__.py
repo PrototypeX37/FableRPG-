@@ -2,6 +2,7 @@
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
 Copyright (C) 2023-2024 Lunar (PrototypeX37)
+Copyright (C) 2026 Danaelis
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -380,12 +381,12 @@ class Raid(commands.Cog):
             send_messages=False, read_messages=True
         )
 
-        self.auto_raid_check.start()
+        # Autoraid loop intentionally disabled.
 
 
     def cog_unload(self):
-
-        self.auto_raid_check.cancel()
+        if self.auto_raid_check.is_running():
+            self.auto_raid_check.cancel()
 
     def getfinaldmg(self, damage: Decimal, defense):
         return v if (v := damage - defense) > 0 else 0
@@ -439,6 +440,8 @@ class Raid(commands.Cog):
     @tasks.loop(minutes=30)
     async def auto_raid_check(self):
         """Check if a raid needs to be spawned and spawn it if needed."""
+        # Legacy auto raid scheduling intentionally disabled.
+        return
         try:
             await self.bot.wait_until_ready()
             
@@ -680,6 +683,7 @@ class Raid(commands.Cog):
                         classes=profile["class"],
                         race=profile["race"],
                         guild=profile["guild"],
+                        xp=profile["xp"],
                         conn=conn,
                     )
                     if raid_hp == 17776:
@@ -1125,11 +1129,145 @@ class Raid(commands.Cog):
 
 
 
+    def _parse_positive_int(self, value: str, field_name: str) -> int:
+        try:
+            out = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"`{field_name}` must be a positive integer.")
+        if out <= 0:
+            raise ValueError(f"`{field_name}` must be a positive integer.")
+        return out
+
+    async def _dispatch_unified_spawn(self, ctx, args):
+        """
+        Unified spawn entry:
+        - $spawn <hp> [rarity] [raid_hp]                         (legacy Ragnarok/Scylla)
+        - $spawn ragnarok <hp> [rarity] [raid_hp]
+        - $spawn charybdis <hp> [rarity]
+        - $spawn echidna <hp> [rarity]
+        - $spawn death <hp> [rarity]
+        - $spawn ladon <element> <hp> [crate_rarity]
+        - $spawn talos <hp>
+        """
+        parts = [str(x).strip() for x in args if str(x).strip()]
+        if not parts:
+            raise ValueError(
+                "Usage: `$spawn <hp> [rarity] [raid_hp]` or "
+                "`$spawn <boss> ...` (bosses: ragnarok, charybdis, echidna, death, ladon, talos)."
+            )
+
+        allowed_rarities = {"magic", "legendary", "rare", "uncommon", "common", "mystery", "fortune", "divine"}
+        first = parts[0].lower()
+        alias_map = {
+            "rag": "ragnarok",
+            "ragnarok": "ragnarok",
+            "scylla": "ragnarok",
+            "chary": "charybdis",
+            "charybdis": "charybdis",
+            "echidna": "echidna",
+            "death": "death",
+            "spring": "death",
+            "ladon": "ladon",
+            "talos": "talos",
+        }
+
+        # Legacy mode: $spawn <hp> [rarity] [raid_hp]
+        if first.lstrip("+-").isdigit():
+            hp = self._parse_positive_int(parts[0], "hp")
+            rarity = parts[1].lower() if len(parts) >= 2 else "magic"
+            raid_hp = self._parse_positive_int(parts[2], "raid_hp") if len(parts) >= 3 else 17776
+            if len(parts) > 3:
+                raise ValueError("Too many arguments for legacy spawn. Use: `$spawn <hp> [rarity] [raid_hp]`.")
+            if rarity not in allowed_rarities:
+                raise ValueError("Invalid rarity specified.")
+            return hp, rarity, raid_hp
+
+        boss = alias_map.get(first)
+        if not boss:
+            raise ValueError(
+                f"Unknown boss `{parts[0]}`. Valid: ragnarok, charybdis, echidna, death, ladon, talos."
+            )
+
+        rest = parts[1:]
+        if boss == "ragnarok":
+            if not rest:
+                raise ValueError("Usage: `$spawn ragnarok <hp> [rarity] [raid_hp]`.")
+            hp = self._parse_positive_int(rest[0], "hp")
+            rarity = rest[1].lower() if len(rest) >= 2 else "magic"
+            raid_hp = self._parse_positive_int(rest[2], "raid_hp") if len(rest) >= 3 else 17776
+            if len(rest) > 3:
+                raise ValueError("Too many arguments. Usage: `$spawn ragnarok <hp> [rarity] [raid_hp]`.")
+            if rarity not in allowed_rarities:
+                raise ValueError("Invalid rarity specified.")
+            return hp, rarity, raid_hp
+
+        if boss in {"charybdis", "echidna", "death"}:
+            if not rest:
+                raise ValueError(f"Usage: `$spawn {boss} <hp> [rarity]`.")
+            hp = self._parse_positive_int(rest[0], "hp")
+            rarity = rest[1].lower() if len(rest) >= 2 else "magic"
+            if len(rest) > 2:
+                raise ValueError(f"Too many arguments. Usage: `$spawn {boss} <hp> [rarity]`.")
+            if rarity not in allowed_rarities:
+                raise ValueError("Invalid rarity specified.")
+
+            helper = self.bot.get_cog("NewRaids")
+            from cogs.newraids import NewRaids, CharybdisBehavior, EchidnaBehavior, DeathBehavior
+            if not helper:
+                helper = NewRaids(self.bot)
+
+            if boss == "charybdis":
+                await helper._spawn_generic(ctx, boss_name="Charybdis", hp=hp, rarity=rarity, behavior=CharybdisBehavior())
+            elif boss == "echidna":
+                await helper._spawn_generic(ctx, boss_name="Echidna", hp=hp, rarity=rarity, behavior=EchidnaBehavior())
+            else:
+                await helper._spawn_generic(
+                    ctx,
+                    boss_name="Death",
+                    hp=hp,
+                    rarity=rarity,
+                    behavior=DeathBehavior(),
+                    enable_autojoin=False,
+                )
+            return None
+
+        helper = self.bot.get_cog("LadonRaid")
+        from cogs.ladonraid import LadonRaid
+        if not helper:
+            helper = LadonRaid(self.bot)
+
+        if boss == "ladon":
+            if len(rest) < 2:
+                raise ValueError("Usage: `$spawn ladon <element> <hp> [crate_rarity]`.")
+            element = rest[0]
+            hp = self._parse_positive_int(rest[1], "hp")
+            crate_rarity = rest[2].lower() if len(rest) >= 3 else "legendary"
+            if len(rest) > 3:
+                raise ValueError("Too many arguments. Usage: `$spawn ladon <element> <hp> [crate_rarity]`.")
+            await helper.spawn_ladon(ctx, element=element, hp=hp, crate_rarity=crate_rarity)
+            return None
+
+        if not rest:
+            raise ValueError("Usage: `$spawn talos <hp>`.")
+        hp = self._parse_positive_int(rest[0], "hp")
+        if len(rest) > 1:
+            raise ValueError("Too many arguments. Usage: `$spawn talos <hp>`.")
+        await helper.spawn_talos(ctx, hp=hp)
+        return None
+
     @is_gm()
     @raid_channel()
     @raid_free()
-    @commands.command(hidden=True, brief=_("Start a Ragnorak raid"))
-    async def spawn(self, ctx, hp: IntGreaterThan(0), rarity: str = "magic", raid_hp: int = 17776):
+    @commands.command(hidden=True, brief=_("Start a raid with unified spawn format"))
+    async def spawn(self, ctx, *spawn_args):
+        try:
+            parsed = await self._dispatch_unified_spawn(ctx, spawn_args)
+            if parsed is None:
+                return
+            hp, rarity, raid_hp = parsed
+        except ValueError as e:
+            return await ctx.send(f"❌ {e}")
+
         try:
             if rarity not in ["magic", "legendary", "rare", "uncommon", "common", "mystery", "fortune", "divine"]:
                 raise ValueError("Invalid rarity specified.")
@@ -1307,6 +1445,7 @@ class Raid(commands.Cog):
                         classes=profile["class"],
                         race=profile["race"],
                         guild=profile["guild"],
+                        xp=profile["xp"],
                         conn=conn,
                     )
                     if raid_hp == 17776:
@@ -1877,10 +2016,11 @@ class Raid(commands.Cog):
             await player.send(f"You took too long to decide. Defaulting to '{default_actions[role]}'.")
             return default_actions[role]
 
-    @is_gm()
-    @commands.command(hidden=True, brief=_("Start an Infernal Ritual raid"))
     async def evilspawn(self, ctx):
         """[Evil God only] Starts a raid."""
+        await self.bot.reset_cooldown(ctx)
+        await ctx.send("This legacy raid spawn is disabled.")
+        return
 
         try:
             # Create single join view with both options
@@ -1984,6 +2124,7 @@ class Raid(commands.Cog):
                             race=profile["race"],
                             guild=profile["guild"],
                             god=profile["god"],
+                            xp=profile["xp"],
                             conn=conn,
                         )
                     except ValueError:
@@ -2898,8 +3039,6 @@ class Raid(commands.Cog):
 
         return display_names
 
-    @is_gm()
-    @commands.command(hidden=True, breif=("See who was in your last raid"))
     async def chaoslistold(self, ctx):
         try:
             if self.chaoslist is None:
@@ -2912,11 +3051,11 @@ class Raid(commands.Cog):
             await ctx.send(e)
 
 
-    @is_god()
-    @raid_free()
-    @commands.command(hidden=True, brief=_("Start a Drakath raid"))
     async def chaosspawnold(self, ctx, boss_hp: IntGreaterThan(0)):
         """[Drakath only] Starts a raid."""
+        await self.bot.reset_cooldown(ctx)
+        await ctx.send("This legacy raid spawn is disabled.")
+        return
         try:
             await self.set_raid_timer()
 
@@ -3627,6 +3766,7 @@ class Raid(commands.Cog):
                         classes=profile["class"],
                         race=profile["race"],
                         guild=profile["guild"],
+                        xp=profile["xp"],
                         conn=conn,
                     )
                     
@@ -4047,13 +4187,13 @@ class Raid(commands.Cog):
             try:
                 # Fetch class, attack multiplier, defense multiplier, health, and health per level
                 query = '''
-                                SELECT p."class", p."atkmultiply", p."defmultiply", p."health", p."hplevel", 
-                                       p."guild", p."xp", p."statdef", p."statatk", p."stathp",
-                                       a."hp" as amulet_hp
-                                FROM profile p
-                                LEFT JOIN amulets a ON p."user" = a."user_id" AND a."equipped" = TRUE
-                                WHERE p."user" = $1;
-                            '''
+                    SELECT p."class", p."atkmultiply", p."defmultiply", p."health", p."hplevel",
+                           p."guild", p."xp", p."statdef", p."statatk", p."stathp",
+                           a."hp" as amulet_hp
+                    FROM profile p
+                    LEFT JOIN amulets a ON p."user" = a."user_id" AND a."equipped" = TRUE
+                    WHERE p."user" = $1;
+                '''
                 result = await self.bot.pool.fetch(query, target_player.id)
 
                 if result:
@@ -4066,7 +4206,7 @@ class Raid(commands.Cog):
 
                     stathp = player_data["stathp"] * 50
                     base = 200 + (level * 15)
-                    amulet_hp = player_data["amulet_hp"] or 0  # Handle null case
+                    amulet_hp = player_data["amulet_hp"] or 0
                     hp = player_data["health"] + stathp + base + amulet_hp
                     hplevel = player_data["hplevel"]
                     guild = player_data["guild"]
@@ -4126,10 +4266,12 @@ class Raid(commands.Cog):
             async def get_player_data(player):
                 try:
                     query = '''
-                        SELECT "class", "atkmultiply", "defmultiply", "health", "hplevel", 
-                               "guild", "xp", "statdef", "statatk", "stathp" 
-                        FROM profile 
-                        WHERE "user" = $1;
+                        SELECT p."class", p."atkmultiply", p."defmultiply", p."health", p."hplevel",
+                               p."guild", p."xp", p."statdef", p."statatk", p."stathp",
+                               a."hp" as amulet_hp
+                        FROM profile p
+                        LEFT JOIN amulets a ON p."user" = a."user_id" AND a."equipped" = TRUE
+                        WHERE p."user" = $1;
                     '''
                     result = await self.bot.pool.fetch(query, player.id)
 
@@ -4145,7 +4287,8 @@ class Raid(commands.Cog):
 
                     stathp = player_data["stathp"] * 50
                     base = 200 + (level * 15)
-                    hp = player_data["health"] + stathp + base
+                    amulet_hp = player_data["amulet_hp"] or 0
+                    hp = player_data["health"] + stathp + base + amulet_hp
                     hplevel = player_data["hplevel"]
                     guild = player_data["guild"]
                     hpprice = self.getpricetohp(hplevel + Decimal("0.1"))
@@ -4403,5 +4546,3 @@ async def setup(bot):
     if designated_shard_id in bot.shard_ids:
         await bot.add_cog(Raid(bot))
         print(f"Raid loaded on shard {designated_shard_id}")
-
-

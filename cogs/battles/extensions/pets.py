@@ -34,6 +34,55 @@ class PetExtension:
             return 0.0   # Cautious: +0%
         else:
             return -0.20  # Distrustful: -20%
+
+    def _apply_owner_damage_buff(
+        self,
+        owner_combatant,
+        *,
+        active_attr,
+        duration_attr,
+        multiplier_attr,
+        multiplier,
+        duration,
+    ):
+        """Apply a temporary owner damage buff without stacking duplicate multipliers."""
+        multiplier = Decimal(str(multiplier))
+        if not getattr(owner_combatant, active_attr, False):
+            owner_combatant.damage *= multiplier
+            setattr(owner_combatant, active_attr, True)
+            setattr(owner_combatant, multiplier_attr, multiplier)
+        setattr(owner_combatant, duration_attr, duration)
+
+    def _tick_owner_damage_buff(
+        self,
+        owner_combatant,
+        *,
+        active_attr,
+        duration_attr,
+        multiplier_attr,
+        fallback_multiplier,
+        fade_message,
+        messages,
+    ):
+        """Tick down a temporary owner damage buff and safely remove it when it expires."""
+        duration = getattr(owner_combatant, duration_attr, 0)
+        if duration <= 0:
+            return
+
+        setattr(owner_combatant, duration_attr, duration - 1)
+        if duration - 1 != 0:
+            return
+
+        multiplier = Decimal(
+            str(getattr(owner_combatant, multiplier_attr, fallback_multiplier))
+        )
+        if multiplier != 0:
+            owner_combatant.damage /= multiplier
+
+        for attr in (active_attr, duration_attr, multiplier_attr):
+            if hasattr(owner_combatant, attr):
+                delattr(owner_combatant, attr)
+        messages.append(fade_message)
     
     def apply_skill_effects(self, pet_combatant, learned_skills):
         """Apply skill effects to pet combatant with actual implementations"""
@@ -1284,6 +1333,7 @@ class PetExtension:
         modified_damage = Decimal(str(damage))  # Convert to Decimal to handle all operations
         effects = pet_combatant.skill_effects
         messages = []
+        owner_combatant = self.find_owner_combatant(pet_combatant)
         
         # Check for special immunities first
         divine_invincibility = getattr(pet_combatant, 'divine_invincibility', 0)
@@ -1332,6 +1382,20 @@ class PetExtension:
                 setattr(pet_combatant, 'flame_shield', flame_shield - absorbed)
                 modified_damage -= absorbed
                 messages.append(f"Flame Barrier absorbs **{absorbed:.2f} damage**!")
+
+        # Eternal Flame - pet survives lethal damage while owner is healthy
+        if (
+            'eternal_flame' in effects
+            and owner_combatant
+            and owner_combatant.is_alive()
+            and modified_damage >= pet_combatant.hp
+        ):
+            owner_hp_ratio = owner_combatant.hp / owner_combatant.max_hp
+            if owner_hp_ratio > effects['eternal_flame']['owner_hp_threshold']:
+                modified_damage = max(Decimal('0'), pet_combatant.hp - Decimal('1'))
+                messages.append(
+                    f"{pet_combatant.name}'s Eternal Flame keeps them alive at **1 HP**!"
+                )
                 
         # Phoenix Rebirth - death prevention with revival
         if ('phoenix_rebirth' in effects and modified_damage >= pet_combatant.hp and
@@ -1546,18 +1610,18 @@ class PetExtension:
             return 0, messages
             
         # Symbiotic Bond - share damage with owner
-        if ('symbiotic_bond' in effects and hasattr(pet_combatant, 'owner')):
+        if ('symbiotic_bond' in effects and owner_combatant and owner_combatant.is_alive()):
             share_percent = Decimal(str(effects['symbiotic_bond']['share_percent']))
             shared_damage = modified_damage * share_percent
             remaining_damage = modified_damage - shared_damage
             
             # Apply shared damage to owner (but not below 1 HP)
-            owner_current_hp = Decimal(str(getattr(pet_combatant.owner, 'hp', 0)))
+            owner_current_hp = Decimal(str(getattr(owner_combatant, 'hp', 0)))
             owner_min_hp = Decimal('1')
             actual_shared = min(shared_damage, owner_current_hp - owner_min_hp)
             
             if actual_shared > 0:
-                setattr(pet_combatant.owner, 'hp', owner_current_hp - actual_shared)
+                setattr(owner_combatant, 'hp', owner_current_hp - actual_shared)
                 modified_damage = remaining_damage + (shared_damage - actual_shared)  # Return unshared portion
                 messages.append(f"{pet_combatant.name}'s Symbiotic Bond shares **{actual_shared:.2f} damage** with their owner!")
             else:
@@ -1615,6 +1679,11 @@ class PetExtension:
             
         effects = pet_combatant.skill_effects
         messages = []
+        owner_combatant = (
+            self.find_owner_combatant(pet_combatant)
+            if hasattr(pet_combatant, 'owner')
+            else None
+        )
         
         # Check for ultimate activation
         if (hasattr(pet_combatant, 'ultimate_threshold') and 
@@ -1634,16 +1703,34 @@ class PetExtension:
                 if hasattr(pet_combatant, 'battlefield_control'):
                     delattr(pet_combatant, 'battlefield_control')
         
-        # Handle Overcharge duration
-        if hasattr(pet_combatant, 'owner'):
-            overcharge_duration = getattr(pet_combatant.owner, 'overcharge_duration', 0)
-            if overcharge_duration > 0:
-                setattr(pet_combatant.owner, 'overcharge_duration', overcharge_duration - 1)
-                if overcharge_duration - 1 == 0:
-                    # Remove overcharge buff
-                    if hasattr(pet_combatant.owner, 'overcharge_active'):
-                        delattr(pet_combatant.owner, 'overcharge_active')
-                    messages.append(f"{pet_combatant.name}'s Overcharge effect fades from their owner...")
+        if owner_combatant:
+            self._tick_owner_damage_buff(
+                owner_combatant,
+                active_attr='power_surge_active',
+                duration_attr='power_surge_duration',
+                multiplier_attr='power_surge_multiplier',
+                fallback_multiplier=Decimal('1.15'),
+                fade_message=f"{pet_combatant.name}'s Power Surge effect fades from their owner...",
+                messages=messages,
+            )
+            self._tick_owner_damage_buff(
+                owner_combatant,
+                active_attr='overcharge_active',
+                duration_attr='overcharge_duration',
+                multiplier_attr='overcharge_multiplier',
+                fallback_multiplier=Decimal('1.5'),
+                fade_message=f"{pet_combatant.name}'s Overcharge effect fades from their owner...",
+                messages=messages,
+            )
+            self._tick_owner_damage_buff(
+                owner_combatant,
+                active_attr='dark_pact_active',
+                duration_attr='dark_pact_duration',
+                multiplier_attr='dark_pact_multiplier',
+                fallback_multiplier=Decimal('2.0'),
+                fade_message=f"{pet_combatant.name}'s Dark Pact effect fades from their owner...",
+                messages=messages,
+            )
         
         # Handle Void Pact duration
         if hasattr(pet_combatant, 'team'):
@@ -1670,22 +1757,18 @@ class PetExtension:
                         messages.append(f"{enemy.name}'s Void Pact defense penalty fades...")
         
         # 🔥 FIRE PER-TURN EFFECTS
-        # Warmth - heal owner on attack (enhanced version)
-        if ('warmth' in effects and hasattr(pet_combatant, 'owner')):
-            # Find the owner combatant from the team
-            owner_combatant = self.find_owner_combatant(pet_combatant)
-            if owner_combatant and hasattr(owner_combatant, 'max_hp') and hasattr(owner_combatant, 'heal'):
-                # Always provide some warmth, more when attacking
-                base_heal = owner_combatant.max_hp * Decimal(str(effects['warmth']['heal_percent']))
-                if getattr(pet_combatant, 'attacked_this_turn', False):
-                    # Double healing when attacking
-                    heal_amount = base_heal * Decimal('2')
-                    owner_combatant.heal(heal_amount)
-                    messages.append(f"{pet_combatant.name}'s Warmth surges after attacking! Owner healed **{heal_amount:.2f} HP**!")
-                else:
-                    # Base healing even when not attacking
-                    owner_combatant.heal(base_heal)
-                    messages.append(f"{pet_combatant.name}'s Warmth comforts their owner! Owner healed **{base_heal:.2f} HP**!")
+        # Warmth - heal living owner after the pet attacks
+        if (
+            'warmth' in effects
+            and owner_combatant
+            and owner_combatant.is_alive()
+            and getattr(pet_combatant, 'attacked_this_turn', False)
+        ):
+            heal_amount = pet_combatant.max_hp * Decimal(str(effects['warmth']['heal_percent']))
+            owner_combatant.heal(heal_amount)
+            messages.append(
+                f"{pet_combatant.name}'s Warmth heals their owner for **{heal_amount:.2f} HP**!"
+            )
                 
         # Phoenix Resistance - temporary fire immunity
         phoenix_resistance = getattr(pet_combatant, 'phoenix_resistance', 0)
@@ -1719,18 +1802,6 @@ class PetExtension:
                         setattr(enemy, 'burning', effects['burning_spirit']['duration'])
                         messages.append(f"{pet_combatant.name}'s Burning Spirit ignites enemies!")
                         break
-        
-        # Eternal Flame - conditional immortality
-        if ('eternal_flame' in effects and hasattr(pet_combatant, 'owner')):
-            # Find the owner combatant from the team
-            owner_combatant = self.find_owner_combatant(pet_combatant)
-            if owner_combatant and hasattr(owner_combatant, 'hp') and hasattr(owner_combatant, 'max_hp'):
-                owner_hp_ratio = owner_combatant.hp / owner_combatant.max_hp
-                if owner_hp_ratio < effects['eternal_flame']['owner_hp_threshold']:
-                    setattr(pet_combatant, 'immortal_while_owner_low', True)
-                    messages.append(f"{pet_combatant.name} burns with Eternal Flame - cannot die while owner is in danger!")
-                elif hasattr(pet_combatant, 'immortal_while_owner_low'):
-                    delattr(pet_combatant, 'immortal_while_owner_low')
         
         # 💧 WATER PER-TURN EFFECTS
         # Healing Rain - team healing
@@ -1812,11 +1883,15 @@ class PetExtension:
         # Power Surge - owner attack bonus
         if ('power_surge' in effects and hasattr(pet_combatant, 'owner') and 
             getattr(pet_combatant, 'attacked_this_turn', False)):
-            # Find the owner combatant from the team
-            owner_combatant = self.find_owner_combatant(pet_combatant)
             if owner_combatant and hasattr(owner_combatant, 'damage'):
-                owner_combatant.damage *= (Decimal('1') + Decimal(str(effects['power_surge']['attack_bonus'])))
-                setattr(owner_combatant, 'power_surge_duration', effects['power_surge']['duration'])
+                self._apply_owner_damage_buff(
+                    owner_combatant,
+                    active_attr='power_surge_active',
+                    duration_attr='power_surge_duration',
+                    multiplier_attr='power_surge_multiplier',
+                    multiplier=Decimal('1') + Decimal(str(effects['power_surge']['attack_bonus'])),
+                    duration=effects['power_surge']['duration'],
+                )
                 messages.append(f"Power Surge electrifies {pet_combatant.name}'s owner!")
             
         # Battery Life - now handled in pets system for skill learning costs
@@ -1842,8 +1917,6 @@ class PetExtension:
             elif 0.25 <= current_hp_ratio <= 0.5 and random.randint(1, 100) <= 40:
                 should_activate = True
                 
-            # Find the owner combatant from the team
-            owner_combatant = self.find_owner_combatant(pet_combatant)
             if (owner_combatant and should_activate and not getattr(owner_combatant, 'overcharge_active', False)):
                 sacrifice_hp = pet_combatant.max_hp * Decimal(str(effects['overcharge']['hp_sacrifice']))
                 current_hp = Decimal(str(getattr(pet_combatant, 'hp', 0)))
@@ -1853,9 +1926,14 @@ class PetExtension:
                     setattr(pet_combatant, 'hp', current_hp - sacrifice_hp)
                     
                     # Boost owner damage
-                    owner_combatant.damage *= (Decimal('1') + Decimal(str(effects['overcharge']['owner_buff'])))
-                    setattr(owner_combatant, 'overcharge_duration', effects['overcharge']['duration'])
-                    setattr(owner_combatant, 'overcharge_active', True)
+                    self._apply_owner_damage_buff(
+                        owner_combatant,
+                        active_attr='overcharge_active',
+                        duration_attr='overcharge_duration',
+                        multiplier_attr='overcharge_multiplier',
+                        multiplier=Decimal('1') + Decimal(str(effects['overcharge']['owner_buff'])),
+                        duration=effects['overcharge']['duration'],
+                    )
                     
                     messages.append(f"{pet_combatant.name} overcharges! Sacrifices **{sacrifice_hp:.2f} HP** to empower their owner!")
         
@@ -2010,15 +2088,19 @@ class PetExtension:
             
         # Dark Pact - sacrifice for owner boost
         if ('dark_pact' in effects and hasattr(pet_combatant, 'owner')):
-            # Find the owner combatant from the team
-            owner_combatant = self.find_owner_combatant(pet_combatant)
-            if owner_combatant and hasattr(owner_combatant, 'damage'):
+            if owner_combatant and hasattr(owner_combatant, 'damage') and not getattr(owner_combatant, 'dark_pact_active', False):
                 sacrifice = pet_combatant.max_hp * Decimal(str(effects['dark_pact']['hp_sacrifice']))
                 current_hp = Decimal(str(getattr(pet_combatant, 'hp', 0)))
                 if current_hp > sacrifice:
                     setattr(pet_combatant, 'hp', current_hp - sacrifice)
-                    owner_combatant.damage *= (Decimal('1') + Decimal(str(effects['dark_pact']['owner_dark_boost'])))
-                    setattr(owner_combatant, 'dark_pact_duration', effects['dark_pact']['duration'])
+                    self._apply_owner_damage_buff(
+                        owner_combatant,
+                        active_attr='dark_pact_active',
+                        duration_attr='dark_pact_duration',
+                        multiplier_attr='dark_pact_multiplier',
+                        multiplier=Decimal('1') + Decimal(str(effects['dark_pact']['owner_dark_boost'])),
+                        duration=effects['dark_pact']['duration'],
+                    )
                     messages.append(f"{pet_combatant.name} makes a Dark Pact, empowering their owner!")
         
         # 🌀 CORRUPTED PER-TURN EFFECTS
@@ -2123,8 +2205,8 @@ class PetExtension:
                     else:  # reality_distort
                         # Create beneficial reality distortion
                         setattr(pet_combatant, 'reality_master', 2)  # 2 turns of reality control
-                        if hasattr(pet_combatant, 'owner'):
-                            pet_combatant.owner.damage *= Decimal('1.3')  # 30% damage boost
+                        if owner_combatant and hasattr(owner_combatant, 'damage'):
+                            owner_combatant.damage *= Decimal('1.3')  # 30% damage boost
                         messages.append(f"Void Mastery bends reality to {pet_combatant.name}'s will!")
                         
         # Void Lord - enhanced battlefield control
@@ -2148,9 +2230,9 @@ class PetExtension:
                     messages.append(f"Void Lord dominates {dominated_enemies} enemies - they serve the void!")
                     
             # Grant battlefield control powers
-            if hasattr(pet_combatant, 'owner'):
-                setattr(pet_combatant.owner, 'void_lord_blessed', True)
-                pet_combatant.owner.damage *= Decimal('1.4')  # +40% damage for owner
+            if owner_combatant and hasattr(owner_combatant, 'damage'):
+                setattr(owner_combatant, 'void_lord_blessed', True)
+                owner_combatant.damage *= Decimal('1.4')  # +40% damage for owner
                 
             messages.append(f"{pet_combatant.name}'s Void Lord power reshapes the battlefield!")
             
@@ -2290,11 +2372,11 @@ class PetExtension:
             # Check for Symbiotic Bond healing sharing
             if (hasattr(pet_combatant, 'skill_effects') and 
                 'symbiotic_bond' in pet_combatant.skill_effects and 
-                hasattr(pet_combatant, 'owner')):
+                owner_combatant and owner_combatant.is_alive()):
                 share_percent = Decimal(str(pet_combatant.skill_effects['symbiotic_bond']['share_percent']))
                 shared_heal = heal_amount * share_percent
-                pet_combatant.owner.heal(shared_heal)
-                messages.append(f"Symbiotic Bond shares **{shared_heal:.2f} regeneration** with {pet_combatant.owner.user.display_name}!")
+                owner_combatant.heal(shared_heal)
+                messages.append(f"Symbiotic Bond shares **{shared_heal:.2f} regeneration** with {owner_combatant.user.display_name}!")
             
             # Countdown duration
             setattr(pet_combatant, 'immortal_growth_duration', immortal_growth_duration - 1)

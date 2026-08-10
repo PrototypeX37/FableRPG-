@@ -3,6 +3,7 @@ from datetime import datetime, timezone, timedelta
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
 Copyright (C) 2023-2024 Lunar (PrototypeX37)
+Copyright (C) 2026 Danaelis
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -39,6 +40,7 @@ import random as pyrandom
 
 from classes.converters import CrateRarity, IntFromTo, IntGreaterThan, UserWithCharacter
 from classes.items import ItemType
+from cogs.battles.extensions.elements import ElementExtension
 from cogs.shard_communication import user_on_cooldown as user_cooldown
 from utils import random
 from utils.i18n import _, locale_doc
@@ -50,17 +52,41 @@ import traceback
 
 from contextlib import redirect_stdout
 
-from utils.checks import has_char, is_gm, is_god
+from utils.checks import has_char, is_gm, is_god, user_is_gm
 from classes.badges import Badge, BadgeConverter
 from classes.bot import Bot
 from classes.context import Context
 from utils import shell
 from utils.misc import random_token
+from utils.divine_familiars import (
+    DIVINE_SHARDS_PER_EGG,
+    DIVINE_FAMILIARS,
+    award_divine_shards,
+    ensure_divine_familiar_tables,
+    get_familiar_display_name,
+    resolve_familiar_key,
+)
 from typing import Union, Optional, Dict, Any
 
 
 CHANNEL_BLACKLIST = ['⟢super-secrets〡🤫', '⟢god-spammit〡💫', '⟢gm-logs〡📝', 'Accepted Suggestions']
 CATEGORY_NAME = '╰• ☣ | ☣ FABLE RPG ☣ | ☣ •╯'
+GM_PREMIUM_CONSUMABLES = {
+    "petage": "pet_age_potion",
+    "pet_age_potion": "pet_age_potion",
+    "petspeed": "pet_speed_growth_potion",
+    "pet_speed_growth_potion": "pet_speed_growth_potion",
+    "petxp": "pet_xp_potion",
+    "pet_xp_potion": "pet_xp_potion",
+    "splicefinal": "splice_final_potion",
+    "splice_final_potion": "splice_final_potion",
+}
+GM_PREMIUM_CONSUMABLE_LABELS = {
+    "pet_age_potion": "Pet Age Potion",
+    "pet_speed_growth_potion": "Pet Speed Growth Potion",
+    "pet_xp_potion": "Pet XP Potion",
+    "splice_final_potion": "Splice Final Potion",
+}
 
 
 class GameMaster(commands.Cog):
@@ -71,6 +97,102 @@ class GameMaster(commands.Cog):
         self.auction_entry = None
         #self.patron_ids = self.load_patron_ids()
         self.isbid = False
+
+    @staticmethod
+    def _truncate_audit_text(value: str | None, limit: int = 900) -> str:
+        if not value:
+            return ""
+        text = str(value).replace("`", "'").replace("\n", " ").strip()
+        if len(text) <= limit:
+            return text
+        return f"{text[: limit - 3]}..."
+
+    @staticmethod
+    def _has_named_check(command_obj: commands.Command | None, check_name: str) -> bool:
+        if command_obj is None:
+            return False
+        for check in getattr(command_obj, "checks", ()):
+            code = getattr(check, "__code__", None)
+            if code and check_name in getattr(code, "co_names", ()):
+                return True
+            qualname = getattr(check, "__qualname__", "")
+            if check_name in qualname:
+                return True
+        return False
+
+    def _is_gm_audit_command(self, command_obj: commands.Command | None) -> bool:
+        if command_obj is None or command_obj.cog is not self:
+            return False
+
+        if self._has_named_check(command_obj, "user_is_gm") or self._has_named_check(
+            command_obj, "is_owner"
+        ):
+            return True
+
+        names = [command_obj.name, *list(getattr(command_obj, "aliases", ()))]
+        return any(str(name).lower().startswith("gm") for name in names if name)
+
+    async def _send_gm_audit_log(self, content: str) -> None:
+        channel_id = getattr(self.bot.config.game, "gm_log_channel", None)
+        if not channel_id:
+            return
+        try:
+            with handle_message_parameters(content=content[:1900]) as params:
+                await self.bot.http.send_message(channel_id, params=params)
+        except Exception:
+            # Never block command execution on audit logging failures.
+            return
+
+    async def _audit_gm_command(
+        self, ctx: Context, *, status: str, error: Exception | None = None
+    ) -> None:
+        command_name = (
+            f"{ctx.clean_prefix}{ctx.command.qualified_name}"
+            if getattr(ctx, "command", None)
+            else "unknown"
+        )
+        guild_info = (
+            f"{ctx.guild.name} ({ctx.guild.id})"
+            if getattr(ctx, "guild", None)
+            else "DM"
+        )
+        channel_name = getattr(ctx.channel, "name", "unknown") if ctx.channel else "unknown"
+        channel_info = (
+            f"{channel_name} ({ctx.channel.id})"
+            if getattr(ctx, "channel", None)
+            else "unknown"
+        )
+        jump_url = getattr(getattr(ctx, "message", None), "jump_url", None)
+        raw_input = getattr(getattr(ctx, "message", None), "content", None)
+
+        lines = [
+            f"**GM AUDIT {status}** `{command_name}`",
+            f"Invoker: {ctx.author} ({ctx.author.id})",
+            f"Guild: {guild_info}",
+            f"Channel: {channel_info}",
+        ]
+        if raw_input:
+            lines.append(f"Input: `{self._truncate_audit_text(raw_input)}`")
+        if jump_url:
+            lines.append(f"Jump: {jump_url}")
+        if error is not None:
+            lines.append(
+                f"Error: `{self._truncate_audit_text(f'{type(error).__name__}: {error}')}`"
+            )
+
+        await self._send_gm_audit_log("\n".join(lines))
+
+    @commands.Cog.listener()
+    async def on_command_completion(self, ctx: Context) -> None:
+        if not self._is_gm_audit_command(getattr(ctx, "command", None)):
+            return
+        await self._audit_gm_command(ctx, status="SUCCESS")
+
+    @commands.Cog.listener()
+    async def on_command_error(self, ctx: Context, error: Exception) -> None:
+        if not self._is_gm_audit_command(getattr(ctx, "command", None)):
+            return
+        await self._audit_gm_command(ctx, status="ERROR", error=error)
 
     @is_gm()
     @commands.command(brief=_("Publish an announcement"))
@@ -449,13 +571,37 @@ class GameMaster(commands.Cog):
             await ctx.send("Invalid tier value. Please choose a tier between 0 and 4.")
             return
 
-        # Update the tier using the PostgreSQL connection with placeholders
+        patreon_core = self.bot.get_cog("PatreonCore")
+
+        if patreon_core is not None:
+            # Persist a manual lock so Patreon/role sync won't overwrite this tier.
+            patreon_core.set_manual_tier_override(userID, tier, setter_id=ctx.author.id)
+            status = await patreon_core.update_patron_tier_in_db(
+                userID,
+                tier,
+                source="manual",
+                force=True,
+            )
+            if status == "missing_profile":
+                return await ctx.send(f"User ID {userID} has no profile row.")
+            if status == "error":
+                return await ctx.send(f"Failed to set tier for user ID {userID}; check logs.")
+            await ctx.send(
+                f"Tier for user ID {userID} has been updated to {tier} and is now manually locked.\n"
+                f"Use `cleartieroverride {userID}` when you want Patreon sync to control it again."
+            )
+            return
+
+        # Fallback when PatreonCore cog is not loaded.
         async with self.bot.pool.acquire() as connection:
             await connection.execute(
                 'UPDATE profile SET "tier" = $1 WHERE "user" = $2',
                 tier, userID
             )
-
+        try:
+            await self.bot.clear_donator_cache(userID)
+        except Exception:
+            pass
         await ctx.send(f"Tier for user ID {userID} has been updated to {tier}.")
 
     @is_gm()
@@ -574,6 +720,58 @@ class GameMaster(commands.Cog):
                         content="**{gm}** gave **${money}** to **{other}**.\n\nReason: *{reason}*".format(
                             gm=ctx.author,
                             money=money,
+                            other=other,
+                            reason=reason or f"<{ctx.message.jump_url}>",
+                        )
+                ) as params:
+                    await self.bot.http.send_message(
+                        self.bot.config.game.gm_log_channel,
+                        params=params,
+                    )
+
+        except Exception as e:
+            await ctx.send(e)
+
+    @is_gm()
+    @commands.command(name="gmdrachma", hidden=True, brief=_("Create drachma"))
+    @locale_doc
+    async def gmdrachma(
+            self,
+            ctx,
+            drachmas: int,
+            other: UserWithCharacter,
+            *,
+            reason: str = None,
+    ):
+        _(
+            """`<drachmas>` - the amount of drachmas to generate for the user
+            `<other>` - A discord User with a character
+            `[reason]` - The reason this action was done, defaults to the command message link
+
+            Gives a user drachmas / dragon coins without subtracting them from the command author's balance.
+
+            Only Game Masters can use this command."""
+        )
+
+        try:
+            permissions = ctx.channel.permissions_for(ctx.guild.me)
+
+            if permissions.read_messages and permissions.send_messages:
+                await self.bot.pool.execute(
+                    'UPDATE profile SET dragoncoins = COALESCE(dragoncoins, 0) + $1 WHERE "user"=$2;',
+                    drachmas,
+                    other.id,
+                )
+                await ctx.send(
+                    _(
+                        "Successfully gave **{drachmas} drachmas** without a loss for you to **{other}**."
+                    ).format(drachmas=drachmas, other=other)
+                )
+
+                with handle_message_parameters(
+                        content="**{gm}** gave **{drachmas} drachmas** to **{other}**.\n\nReason: *{reason}*".format(
+                            gm=ctx.author,
+                            drachmas=drachmas,
                             other=other,
                             reason=reason or f"<{ctx.message.jump_url}>",
                         )
@@ -721,7 +919,7 @@ class GameMaster(commands.Cog):
                     INSERT INTO dragon_progress (id, current_level, weekly_defeats, last_reset)
                     VALUES (1, 1, 0, $1)
                     """,
-                    dt.datetime.now(dt.timezone.utc),
+                    datetime.now(timezone.utc),
                 )
 
                 # Reset weekly_defeats in dragon_contributions
@@ -865,7 +1063,7 @@ class GameMaster(commands.Cog):
         )
 
 
-        if other.id in ctx.bot.config.game.game_masters:  # preserve deletion of admins
+        if await user_is_gm(ctx.bot, other.id):  # preserve deletion of admins
             return await ctx.send(_("Very funny..."))
         async with self.bot.pool.acquire() as conn:
             g = await conn.fetchval(
@@ -916,7 +1114,7 @@ class GameMaster(commands.Cog):
 
             Only Game Masters can use this command."""
         )
-        if target.id in ctx.bot.config.game.game_masters:  # preserve renaming of admins
+        if await user_is_gm(ctx.bot, target.id):  # preserve renaming of admins
             return await ctx.send(_("Very funny..."))
 
         await ctx.send(
@@ -1000,7 +1198,11 @@ class GameMaster(commands.Cog):
                 element=element,
             )
         except Exception as e:
-            await ctx.send(f"Error has occured {e}")
+            await self._send_gm_audit_log(
+                f"**GM AUDIT ERROR** `gmitem` by {ctx.author} ({ctx.author.id}) "
+                f"failed during item creation: `{self._truncate_audit_text(f'{type(e).__name__}: {e}', 600)}`"
+            )
+            return await ctx.send(f"Error has occured {e}")
 
         message = "{gm} created a {item_type} with name {name} and stat {stat}.\n\nReason: *{reason}*".format(
             gm=ctx.author,
@@ -1010,8 +1212,6 @@ class GameMaster(commands.Cog):
             reason=reason or f"<{ctx.message.jump_url}>",
         )
 
-        await ctx.send(_("Done."))
-
         with handle_message_parameters(content=message) as params:
             await self.bot.http.send_message(
                 self.bot.config.game.gm_log_channel, params=params
@@ -1020,6 +1220,12 @@ class GameMaster(commands.Cog):
         for user in self.bot.owner_ids:
             user = await self.bot.get_user_global(user)
             await user.send(message)
+
+        try:
+            await ctx.send(_("Done."))
+        except discord.Forbidden:
+            # Item has already been created and logged; keep command side effects intact.
+            pass
 
     @is_gm()
     @commands.command(hidden=True, brief=_("Create crates"))
@@ -1060,6 +1266,81 @@ class GameMaster(commands.Cog):
                     gm=ctx.author,
                     amount=amount,
                     rarity=rarity,
+                    target=target,
+                    reason=reason or f"<{ctx.message.jump_url}>",
+                )
+        ) as params:
+            await self.bot.http.send_message(
+                self.bot.config.game.gm_log_channel,
+                params=params,
+            )
+
+    @is_gm()
+    @commands.command(hidden=True, brief=_("Give premium consumable potions"))
+    @locale_doc
+    async def gmpotion(
+            self,
+            ctx,
+            target: UserWithCharacter,
+            amount: IntGreaterThan(0),
+            potion_type: str,
+            *,
+            reason: str = None,
+    ):
+        _(
+            """`<target>` - A discord User with a character
+            `<amount>` - The amount of potions to give, must be greater than 0
+            `<potion_type>` - One of petage, petspeed, petxp, splicefinal
+            `[reason]` - The reason this action was done, defaults to the command message link
+
+            Gives premium pet potions directly to a user.
+
+            Only Game Masters can use this command."""
+        )
+
+        normalized_type = GM_PREMIUM_CONSUMABLES.get(
+            potion_type.strip().lower().replace("-", "_").replace(" ", "_")
+        )
+        if not normalized_type:
+            valid = ", ".join(sorted({"petage", "petspeed", "petxp", "splicefinal"}))
+            return await ctx.send(
+                _("Invalid potion type. Valid types: {valid}").format(valid=valid)
+            )
+
+        display_name = GM_PREMIUM_CONSUMABLE_LABELS[normalized_type]
+
+        existing = await self.bot.pool.fetchrow(
+            'SELECT id FROM user_consumables WHERE user_id = $1 AND consumable_type = $2;',
+            target.id,
+            normalized_type,
+        )
+        if existing:
+            await self.bot.pool.execute(
+                'UPDATE user_consumables SET quantity = quantity + $1 WHERE id = $2;',
+                amount,
+                existing["id"],
+            )
+        else:
+            await self.bot.pool.execute(
+                'INSERT INTO user_consumables (user_id, consumable_type, quantity) VALUES ($1, $2, $3);',
+                target.id,
+                normalized_type,
+                amount,
+            )
+
+        await ctx.send(
+            _("Successfully gave **{amount}x {potion}** to **{target}**.").format(
+                amount=amount,
+                potion=display_name,
+                target=target,
+            )
+        )
+
+        with handle_message_parameters(
+                content="**{gm}** gave **{amount}x {potion}** to **{target}**.\n\nReason: *{reason}*".format(
+                    gm=ctx.author,
+                    amount=amount,
+                    potion=display_name,
                     target=target,
                     reason=reason or f"<{ctx.message.jump_url}>",
                 )
@@ -1348,6 +1629,151 @@ class GameMaster(commands.Cog):
                     amount=amount,
                     rarity=rarity,
                     count=success_count,
+                )
+        ) as params:
+            await self.bot.http.send_message(
+                self.bot.config.game.gm_log_channel,
+                params=params,
+            )
+
+    @is_gm()
+    @commands.command(hidden=True, brief=_("Give Summer Olympics medals"))
+    @locale_doc
+    async def gmmedal(
+            self,
+            ctx,
+            target: UserWithCharacter,
+            amount: int,
+            medal_type: str,
+            *,
+            reason: str = None,
+    ):
+        _(
+            """`<target>` - A discord User with character
+            `<amount>` - The amount of medals to give, can be negative
+            `<medal_type>` - gold, silver, or bronze
+            `[reason]` - The reason this action was done, defaults to the command message link
+
+            Adjust Summer Olympics medals for a user.
+
+            Only Game Masters can use this command."""
+        )
+        summer_cog = (
+            self.bot.get_cog("SummerOlympics")
+            or self.bot.get_cog("SummerEvent")
+            or self.bot.get_cog("Summer")
+        )
+        if summer_cog is None:
+            return await ctx.send(_("SummerOlympics cog is not loaded."))
+
+        normalized_medal = summer_cog.normalize_medal_type(medal_type)
+        if normalized_medal is None:
+            return await ctx.send(_("Invalid medal type. Use gold, silver, or bronze."))
+
+        success = await summer_cog.add_medals(target.id, normalized_medal, amount)
+        if not success:
+            return await ctx.send(_("Could not update medals for that user."))
+
+        medal_display = f"{summer_cog.MEDAL_EMOJIS[normalized_medal]} {normalized_medal}"
+        await ctx.send(
+            _("Successfully gave **{amount}** {medal} medal(s) to **{target}**.").format(
+                amount=amount,
+                medal=medal_display,
+                target=target,
+            )
+        )
+
+        with handle_message_parameters(
+                content="**{gm}** gave **{amount}** {medal} Summer Olympics medal(s) to **{target}**.\n\nReason: *{reason}*".format(
+                    gm=ctx.author,
+                    amount=amount,
+                    medal=medal_display,
+                    target=target,
+                    reason=reason or f"<{ctx.message.jump_url}>",
+                )
+        ) as params:
+            await self.bot.http.send_message(
+                self.bot.config.game.gm_log_channel,
+                params=params,
+            )
+
+    @is_gm()
+    @commands.command(hidden=True, brief=_("Give Summer Olympics medals to multiple users"))
+    @locale_doc
+    async def gmmedals(
+            self,
+            ctx,
+            targets: commands.Greedy[UserWithCharacter],
+            amount: int,
+            medal_type: str,
+            *,
+            reason: str = None,
+    ):
+        _(
+            """`<targets>` - One or more Discord users with characters
+            `<amount>` - The amount of medals to give each user, can be negative
+            `<medal_type>` - gold, silver, or bronze
+            `[reason]` - The reason this action was done, defaults to the command message link
+
+            Adjust Summer Olympics medals for multiple users.
+
+            Only Game Masters can use this command."""
+        )
+        if not targets:
+            return await ctx.send(_("No valid users with characters were provided."))
+
+        summer_cog = (
+            self.bot.get_cog("SummerOlympics")
+            or self.bot.get_cog("SummerEvent")
+            or self.bot.get_cog("Summer")
+        )
+        if summer_cog is None:
+            return await ctx.send(_("SummerOlympics cog is not loaded."))
+
+        normalized_medal = summer_cog.normalize_medal_type(medal_type)
+        if normalized_medal is None:
+            return await ctx.send(_("Invalid medal type. Use gold, silver, or bronze."))
+
+        success_count = 0
+        failed_targets = []
+        for target in targets:
+            try:
+                success = await summer_cog.add_medals(target.id, normalized_medal, amount)
+            except Exception:
+                success = False
+            if success:
+                success_count += 1
+            else:
+                failed_targets.append(str(target))
+
+        medal_display = f"{summer_cog.MEDAL_EMOJIS[normalized_medal]} {normalized_medal}"
+        if success_count:
+            await ctx.send(
+                _("Successfully gave **{amount}** {medal} medal(s) to **{count}** users.").format(
+                    amount=amount,
+                    medal=medal_display,
+                    count=success_count,
+                )
+            )
+
+        if failed_targets:
+            failed_list = ", ".join(failed_targets[:10])
+            if len(failed_targets) > 10:
+                failed_list += "..."
+            await ctx.send(
+                _("Failed to update medals for {count} users: {users}").format(
+                    count=len(failed_targets),
+                    users=failed_list,
+                )
+            )
+
+        with handle_message_parameters(
+                content="**{gm}** gave **{amount}** {medal} Summer Olympics medal(s) to **{count}** users.\n\nReason: *{reason}*".format(
+                    gm=ctx.author,
+                    amount=amount,
+                    medal=medal_display,
+                    count=success_count,
+                    reason=reason or f"<{ctx.message.jump_url}>",
                 )
         ) as params:
             await self.bot.http.send_message(
@@ -1965,17 +2391,24 @@ class GameMaster(commands.Cog):
             else:
                 local = False
             reward_text = ""
-            stat_point_received = False
-
+            current_xp = await conn.fetchval(
+                'SELECT "xp" FROM profile WHERE "user" = $1;',
+                target.id,
+            )
+            old_level = int(rpgtools.xptolevel(int(current_xp or 0)))
             new_level = int(rpgtools.xptolevel(int(xp)))
-            await ctx.send(new_level)
-            if new_level % 2 == 0 and new_level > 0:
-                await ctx.send("breaker")
-                # Increment statpoints directly in the database and fetch the updated value
+            gained_points = rpgtools.gained_statpoints(old_level, new_level)
+            if gained_points > 0:
                 update_query = 'UPDATE profile SET "statpoints" = "statpoints" + 1 WHERE "user" = $1 RETURNING "statpoints";'
-                new_statpoints = await conn.fetchval(update_query, target.id)
-                reward_text += f"You also received **1 stat point** (total: {new_statpoints}). "
-                stat_point_received = True
+                if gained_points > 1:
+                    update_query = 'UPDATE profile SET "statpoints" = "statpoints" + $1 WHERE "user" = $2 RETURNING "statpoints";'
+                    new_statpoints = await conn.fetchval(update_query, gained_points, target.id)
+                else:
+                    new_statpoints = await conn.fetchval(update_query, target.id)
+                reward_text += (
+                    f"You also received **{gained_points} stat point{'s' if gained_points != 1 else ''}** "
+                    f"(total: {new_statpoints}). "
+                )
 
             if (reward := random.choice(["crates", "money", "item"])) == "crates":
                 if new_level < 6:
@@ -2049,7 +2482,6 @@ class GameMaster(commands.Cog):
                     conn=conn,
                 )
                 reward_text = f"**${money}**"
-            old_level = new_level - 1
             additional = (
                 _("You can now choose your second class using `{prefix}class`!").format(
                     prefix=ctx.clean_prefix
@@ -2763,6 +3195,248 @@ class GameMaster(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error listing game masters: {str(e)}")
 
+    @is_gm()
+    @commands.command(
+        name="gmservers",
+        aliases=["gmguilds"],
+        hidden=True,
+        brief=_("List all servers the bot is in"),
+    )
+    async def gmservers(self, ctx: Context):
+        guilds = sorted(self.bot.guilds, key=lambda g: (g.name or "").lower())
+        if not guilds:
+            embed = discord.Embed(
+                title=_("Server List"),
+                description=_("I'm currently not in any servers."),
+                color=discord.Color.blurple(),
+            )
+            return await ctx.send(embed=embed)
+
+        total_members = sum((g.member_count or 0) for g in guilds)
+        header = _("Servers: **{guilds}** total • Members: **{members}** total").format(
+            guilds=len(guilds),
+            members=total_members,
+        )
+
+        lines = []
+        for idx, guild in enumerate(guilds, start=1):
+            member_count = guild.member_count if guild.member_count is not None else "?"
+            lines.append(
+                f"`{idx:>3}.` **{guild.name}** (`{guild.id}`) • {member_count} member(s)"
+            )
+
+        chunk_limit = 3800
+        current = ""
+        chunks = []
+        for line in lines:
+            add = line + "\n"
+            if len(current) + len(add) > chunk_limit:
+                chunks.append(current.rstrip())
+                current = add
+            else:
+                current += add
+
+        if current.strip():
+            chunks.append(current.rstrip())
+
+        for idx, chunk in enumerate(chunks, start=1):
+            description = chunk
+            if idx == 1:
+                description = f"{header}\n\n{chunk}"
+            embed = discord.Embed(
+                title=_("Server List"),
+                description=description,
+                color=discord.Color.blurple(),
+            )
+            embed.set_footer(text=f"Page {idx}/{len(chunks)}")
+            await ctx.send(embed=embed)
+
+    @is_gm()
+    @commands.command(
+        name="gmdailyactives",
+        aliases=["gmdailyusers", "gmdailyclaims"],
+        hidden=True,
+        brief=_("List players who claimed $daily today (UTC)"),
+    )
+    async def gmdailyactives(self, ctx: Context):
+        day_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+
+        try:
+            raw_keys = await self.bot.redis.execute_command("KEYS", "cd:*:daily")
+        except Exception as e:
+            embed = discord.Embed(
+                title=_("Daily Actives"),
+                description=_("Could not read daily cooldown keys from Redis: {err}").format(err=e),
+                color=discord.Color.red(),
+            )
+            return await ctx.send(embed=embed)
+
+        user_ids = set()
+        for raw in raw_keys or []:
+            key = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+            parts = key.split(":")
+            if len(parts) != 3 or parts[0] != "cd" or parts[2] != "daily":
+                continue
+            if parts[1].isdigit():
+                user_ids.add(int(parts[1]))
+
+        if not user_ids:
+            embed = discord.Embed(
+                title=_("Daily Actives"),
+                description=_("No `$daily` claims recorded for today (UTC)."),
+                color=discord.Color.blurple(),
+            )
+            return await ctx.send(embed=embed)
+
+        async with self.bot.pool.acquire() as conn:
+            profile_rows = await conn.fetch(
+                """
+                SELECT "user", name
+                FROM profile
+                WHERE "user" = ANY($1::bigint[])
+                """,
+                list(user_ids),
+            )
+
+        name_by_id = {int(row["user"]): (row["name"] or "Unknown") for row in profile_rows}
+        sorted_user_ids = sorted(
+            user_ids,
+            key=lambda uid: ((name_by_id.get(uid) or "Unknown").lower(), uid),
+        )
+
+        header = _(
+            "Daily Actives: **{count}** user(s)\n"
+            "Window: `{start}` to `{end}` (UTC)"
+        ).format(
+            count=len(sorted_user_ids),
+            start=day_start.strftime("%Y-%m-%d %H:%M"),
+            end=day_end.strftime("%Y-%m-%d %H:%M"),
+        )
+
+        lines = []
+        for idx, user_id in enumerate(sorted_user_ids, start=1):
+            character_name = name_by_id.get(user_id, "Unknown")
+            lines.append(
+                f"`{idx:>3}.` **{character_name}** • <@{user_id}> (`{user_id}`)"
+            )
+
+        chunk_limit = 3800
+        current = ""
+        chunks = []
+        for line in lines:
+            add = line + "\n"
+            if len(current) + len(add) > chunk_limit:
+                chunks.append(current.rstrip())
+                current = add
+            else:
+                current += add
+
+        if current.strip():
+            chunks.append(current.rstrip())
+
+        for idx, chunk in enumerate(chunks, start=1):
+            description = chunk
+            if idx == 1:
+                description = f"{header}\n\n{chunk}"
+            embed = discord.Embed(
+                title=_("Daily Actives"),
+                description=description,
+                color=discord.Color.blurple(),
+            )
+            embed.set_footer(text=f"Page {idx}/{len(chunks)}")
+            await ctx.send(embed=embed)
+
+    @is_gm()
+    @commands.command(name="gmhelp", aliases=["gmcommands"])
+    async def gmhelp(self, ctx: Context):
+        """Show a comprehensive Game Master command reference."""
+
+        def has_named_check(command_obj: commands.Command, check_name: str) -> bool:
+            for check in getattr(command_obj, "checks", ()):
+                code = getattr(check, "__code__", None)
+                if code and check_name in getattr(code, "co_names", ()):
+                    return True
+                qualname = getattr(check, "__qualname__", "")
+                if check_name in qualname:
+                    return True
+            return False
+
+        def is_gm_command(command_obj: commands.Command) -> bool:
+            names = [command_obj.name, *list(getattr(command_obj, "aliases", ()))]
+            if any(str(name).lower().startswith("gm") for name in names):
+                return True
+            if has_named_check(command_obj, "user_is_gm"):
+                return True
+            if has_named_check(command_obj, "is_owner"):
+                return True
+            return False
+
+        def short_description(command_obj: commands.Command) -> str:
+            if command_obj.brief:
+                return str(command_obj.brief).strip()
+            if command_obj.help:
+                first_line = str(command_obj.help).strip().splitlines()[0].strip()
+                if first_line:
+                    return first_line
+            return "No description."
+
+        gm_commands: list[commands.Command] = []
+        for command in self.walk_commands():
+            if command.hidden and not is_gm_command(command):
+                continue
+            if is_gm_command(command):
+                gm_commands.append(command)
+
+        gm_commands = sorted(gm_commands, key=lambda c: c.qualified_name.lower())
+
+        lines: list[str] = []
+        for command in gm_commands:
+            invocation = f"{ctx.clean_prefix}{command.qualified_name}"
+            aliases = [f"{ctx.clean_prefix}{alias}" for alias in command.aliases if alias]
+            alias_text = ""
+            if aliases:
+                alias_text = f" (aliases: {', '.join(aliases)})"
+
+            flags = []
+            if has_named_check(command, "is_owner"):
+                flags.append("owner-only")
+            elif has_named_check(command, "user_is_gm"):
+                flags.append("gm-only")
+            if command.hidden:
+                flags.append("hidden")
+            flag_text = f" [{' | '.join(flags)}]" if flags else ""
+
+            lines.append(
+                f"`{invocation}`{alias_text}{flag_text} - {short_description(command)}"
+            )
+
+        if not lines:
+            return await ctx.send("No GM commands were found.")
+
+        chunks = []
+        current = ""
+        for line in lines:
+            candidate = f"{current}\n{line}" if current else line
+            if len(candidate) > 1800:
+                chunks.append(current)
+                current = line
+            else:
+                current = candidate
+        if current:
+            chunks.append(current)
+
+        total = len(chunks)
+        for idx, chunk in enumerate(chunks, start=1):
+            embed = discord.Embed(
+                title=f"Game Master Help ({idx}/{total})",
+                description=chunk,
+                color=discord.Color.blurple(),
+            )
+            if idx == total:
+                embed.set_footer(text="Tip: use $help <command> for full syntax/details.")
+            await ctx.send(embed=embed)
+
 
     @is_gm()
     @commands.command(hidden=True)
@@ -2770,69 +3444,57 @@ class GameMaster(commands.Cog):
 
         async with self.bot.pool.acquire() as conn:
             rows = await conn.fetch(
-                'SELECT name, xp, statpoints, stathp, statatk, statdef FROM profile ORDER BY xp DESC;')
+                'SELECT profile.user, name, xp, statpoints, stathp, statatk, statdef FROM profile ORDER BY xp DESC;')
             messages = []
 
             for row in rows:
                 level = rpgtools.xptolevel(row['xp'])
-                expected_total_statpoints = max(0, level // 2)
+                expected_total_statpoints = rpgtools.statpoints_for_level(level)
 
-                current_unallocated = row['statpoints']
-                current_allocated = row['stathp'] + row['statatk'] + row['statdef']
-                current_total = current_unallocated + current_allocated
+                original_statpoints = row['statpoints']
+                original_stathp = row['stathp']
+                original_statatk = row['statatk']
+                original_statdef = row['statdef']
 
-                if expected_total_statpoints != current_total:
-                    difference = expected_total_statpoints - current_total
+                # Clamp invalid negative allocations before recalculating totals.
+                new_stathp = max(0, original_stathp)
+                new_statatk = max(0, original_statatk)
+                new_statdef = max(0, original_statdef)
 
-                    if difference > 0:
-                        new_statpoints = current_unallocated + difference
-                        await conn.execute(
-                            'UPDATE profile SET statpoints = $1 WHERE name = $2;',
-                            new_statpoints, row['name']
-                        )
-                        messages.append(f"Added {difference} points to {row['name']}'s unallocated stat points. " +
-                                        f"Now has {new_statpoints} unallocated (Level {level}).")
+                allocated_total = new_stathp + new_statatk + new_statdef
+                overflow = max(0, allocated_total - expected_total_statpoints)
 
-                    else:
-                        points_to_deduct = abs(difference)
-                        new_stathp = row['stathp']
-                        new_statatk = row['statatk']
-                        new_statdef = row['statdef']
-                        new_statpoints = row['statpoints']
+                if overflow > 0:
+                    deduct_from_hp = min(new_stathp, overflow)
+                    new_stathp -= deduct_from_hp
+                    overflow -= deduct_from_hp
 
-                        if new_statpoints > 0:
-                            deduct_from_statpoints = min(new_statpoints, points_to_deduct)
-                            new_statpoints -= deduct_from_statpoints
-                            points_to_deduct -= deduct_from_statpoints
+                    deduct_from_atk = min(new_statatk, overflow)
+                    new_statatk -= deduct_from_atk
+                    overflow -= deduct_from_atk
 
-                        stats_modified = []
+                    deduct_from_def = min(new_statdef, overflow)
+                    new_statdef -= deduct_from_def
 
-                        if points_to_deduct > 0 and new_stathp > 0:
-                            deduct_from_hp = min(new_stathp, points_to_deduct)
-                            new_stathp -= deduct_from_hp
-                            points_to_deduct -= deduct_from_hp
-                            stats_modified.append(f"HP -{deduct_from_hp}")
+                new_statpoints = expected_total_statpoints - (new_stathp + new_statatk + new_statdef)
 
-                        if points_to_deduct > 0 and new_statatk > 0:
-                            deduct_from_atk = min(new_statatk, points_to_deduct)
-                            new_statatk -= deduct_from_atk
-                            points_to_deduct -= deduct_from_atk
-                            stats_modified.append(f"ATK -{deduct_from_atk}")
-
-                        if points_to_deduct > 0 and new_statdef > 0:
-                            deduct_from_def = min(new_statdef, points_to_deduct)
-                            new_statdef -= deduct_from_def
-                            points_to_deduct -= deduct_from_def
-                            stats_modified.append(f"DEF -{deduct_from_def}")
-
-                        await conn.execute(
-                            'UPDATE profile SET statpoints = $1, stathp = $2, statatk = $3, statdef = $4 WHERE name = $5;',
-                            new_statpoints, new_stathp, new_statatk, new_statdef, row['name']
-                        )
-
-                        stats_message = ", ".join(stats_modified) if stats_modified else "no allocated stats changed"
-                        messages.append(f"Deducted {abs(difference)} points from {row['name']} " +
-                                        f"({stats_message}). Now has {new_statpoints} unallocated (Level {level}).")
+                if (
+                    new_statpoints != original_statpoints
+                    or new_stathp != original_stathp
+                    or new_statatk != original_statatk
+                    or new_statdef != original_statdef
+                ):
+                    await conn.execute(
+                        'UPDATE profile SET statpoints = $1, stathp = $2, statatk = $3, statdef = $4 WHERE profile.user = $5;',
+                        new_statpoints, new_stathp, new_statatk, new_statdef, row['user']
+                    )
+                    messages.append(
+                        f"Fixed {row['name']} ({row['user']}): "
+                        f"SP {original_statpoints}->{new_statpoints}, "
+                        f"HP {original_stathp}->{new_stathp}, "
+                        f"ATK {original_statatk}->{new_statatk}, "
+                        f"DEF {original_statdef}->{new_statdef} (Level {level})."
+                    )
 
                 if len(messages) >= 5:
                     await ctx.send("\n".join(messages))
@@ -2842,7 +3504,7 @@ class GameMaster(commands.Cog):
             if messages:
                 await ctx.send("\n".join(messages))
             else:
-                await ctx.send("All players have the correct number of stat points.")
+                await ctx.send("All players already have valid stat allocations and stat point totals.")
 
     @is_gm()
     @commands.command(
@@ -3372,6 +4034,42 @@ class GameMaster(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
+    @is_gm()
+    @commands.command(
+        hidden=True,
+        name="gmdaily",
+        aliases=["gmdailyfor", "dailyfor"],
+        brief=_("Run daily for a mentioned user without the confirmation button."),
+    )
+    async def gmdaily(self, ctx, member_arg: str):
+        try:
+            try:
+                member = await commands.MemberConverter().convert(ctx, member_arg)
+            except commands.BadArgument:
+                try:
+                    member_id = int(member_arg)
+                    member = await ctx.bot.fetch_user(member_id)
+                except (ValueError, discord.NotFound):
+                    await ctx.send("Member not found.")
+                    return
+
+            if member.id == 524674960153903126:
+                await ctx.send("You can't do this.")
+                return
+
+            fake_msg = copy.copy(ctx.message)
+            fake_msg._update(dict(channel=ctx.channel, content=ctx.clean_prefix + "daily"))
+            fake_msg.author = member
+
+            new_ctx = await ctx.bot.get_context(fake_msg, cls=commands.Context)
+            new_ctx.skip_daily_confirm = True
+            new_ctx.gm_invoker = ctx.author
+
+            await ctx.send(f"Running `$daily` for **{member}** without confirmation buttons.")
+            await ctx.bot.invoke(new_ctx)
+        except Exception as e:
+            await ctx.send(e)
+
 
     def replace_md(self, s):
         opening = True
@@ -3612,7 +4310,10 @@ class GameMaster(commands.Cog):
     @is_gm()
     @commands.group(hidden=True, invoke_without_command=True)
     async def badges(self, ctx: Context, user: UserWithCharacter) -> None:
-        badges = Badge.from_db(ctx.user_data["badges"])
+        current = await self.bot.pool.fetchval(
+            'SELECT badges FROM profile WHERE "user"=$1;', user.id
+        )
+        badges = Badge.from_db(current)
 
         if badges:
             await ctx.send(badges.to_pretty())
@@ -3624,7 +4325,10 @@ class GameMaster(commands.Cog):
     async def badges_add(
             self, ctx: Context, user: UserWithCharacter, badge: BadgeConverter
     ) -> None:
-        badges = Badge.from_db(ctx.user_data["badges"])
+        current = await self.bot.pool.fetchval(
+            'SELECT badges FROM profile WHERE "user"=$1;', user.id
+        )
+        badges = Badge.from_db(current)
         badges |= badge
 
         await self.bot.pool.execute(
@@ -3638,8 +4342,11 @@ class GameMaster(commands.Cog):
     async def badges_rem(
             self, ctx: Context, user: UserWithCharacter, badge: BadgeConverter
     ) -> None:
-        badges = Badge.from_db(ctx.user_data["badges"])
-        badges ^= badge
+        current = await self.bot.pool.fetchval(
+            'SELECT badges FROM profile WHERE "user"=$1;', user.id
+        )
+        badges = Badge.from_db(current)
+        badges &= ~badge
 
         await self.bot.pool.execute(
             'UPDATE profile SET "badges"=$1 WHERE "user"=$2;', badges.to_db(), user.id
@@ -4389,9 +5096,797 @@ class GameMaster(commands.Cog):
         
         return embed
 
+    def _get_element_choices(self):
+        elements = [e for e in ElementExtension.element_to_emoji.keys() if e != "Unknown"]
+        return sorted(set(elements))
 
+    async def _gm_prompt(self, ctx, prompt, timeout=180, allow_blank=False):
+        await ctx.send(prompt)
 
+        def check(msg):
+            return msg.author == ctx.author and msg.channel == ctx.channel
 
+        try:
+            msg = await self.bot.wait_for("message", timeout=timeout, check=check)
+        except asyncio.TimeoutError:
+            await ctx.send("⏱️ Timed out waiting for a response.")
+            return None
+
+        content = msg.content.strip()
+        if not content and not allow_blank:
+            await ctx.send("❌ Empty response. Cancelled.")
+            return None
+        if content.lower() in ("cancel", "stop", "exit"):
+            await ctx.send("✅ Cancelled.")
+            return None
+        return content
+
+    async def _gm_confirm(self, ctx, prompt):
+        response = await self._gm_prompt(ctx, prompt)
+        if response is None:
+            return False
+        if response.strip().lower() in ("yes", "y"):
+            return True
+        await ctx.send("❌ Cancelled.")
+        return False
+
+    async def _gm_confirm_twice(self, ctx, prompt_one, prompt_two):
+        if not await self._gm_confirm(ctx, prompt_one):
+            return False
+        return await self._gm_confirm(ctx, prompt_two)
+
+    def _format_percent(self, value):
+        if value is None:
+            return "-"
+        try:
+            return f"{float(value) * 100:.2f}%"
+        except (TypeError, ValueError):
+            return str(value)
+
+    def _parse_percent(self, raw):
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        if not text:
+            return None
+        if text.endswith("%"):
+            text = text[:-1].strip()
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+        if value < 0 or value > 100:
+            return None
+        return value / 100.0
+
+    async def _send_menu_embed(self, ctx, title, lines, footer=None):
+        embed = discord.Embed(title=title, description="\n".join(lines), color=discord.Color.blurple())
+        if footer:
+            embed.set_footer(text=footer)
+        await ctx.send(embed=embed)
+
+    async def _fetch_dragon_abilities(self, ability_type: str):
+        async with self.bot.pool.acquire() as conn:
+            return await conn.fetch(
+                "SELECT name, description, dmg, effect, chance FROM ice_dragon_abilities WHERE ability_type = $1 ORDER BY name ASC",
+                ability_type,
+            )
+
+    async def _fetch_dragon_stages(self):
+        async with self.bot.pool.acquire() as conn:
+            return await conn.fetch(
+                "SELECT id, name, min_level, max_level, base_multiplier, enabled, element, move_names, passive_names "
+                "FROM ice_dragon_stages ORDER BY min_level ASC, max_level ASC, id ASC"
+            )
+
+    async def _fetch_dragon_drops(self):
+        async with self.bot.pool.acquire() as conn:
+            return await conn.fetch(
+                "SELECT id, name, item_type, min_stat, max_stat, base_chance, max_chance, is_global, dragon_stage_id, "
+                "element, min_level, max_level "
+                "FROM ice_dragon_drops ORDER BY id ASC"
+            )
+
+    async def _choose_abilities(self, ctx, ability_type: str, max_count: int | None = None):
+        abilities = await self._fetch_dragon_abilities(ability_type)
+        if not abilities:
+            return []
+
+        lines = []
+        for idx, row in enumerate(abilities, start=1):
+            desc = row["description"] or ""
+            if len(desc) > 80:
+                desc = desc[:77] + "..."
+            lines.append(f"{idx}) {row['name']} - {desc}")
+
+        await self._send_menu_embed(
+            ctx,
+            title=f"Select {ability_type.title()}s",
+            lines=lines,
+            footer="Reply with numbers (comma-separated). Example: 1,3"
+        )
+        raw = await self._gm_prompt(ctx, f"Select {ability_type}s by number:", allow_blank=True)
+        if raw is None:
+            return None
+        if raw.strip().lower() in ("", "none", "0"):
+            return []
+
+        selected = []
+        try:
+            for part in raw.split(","):
+                idx = int(part.strip())
+                if 1 <= idx <= len(abilities):
+                    selected.append(abilities[idx - 1]["name"])
+        except ValueError:
+            await ctx.send("❌ Invalid selection. Use numbers only.")
+            return None
+
+        if max_count is not None and len(selected) > max_count:
+            await ctx.send(f"❌ Too many selected (max {max_count}).")
+            return None
+
+        return list(dict.fromkeys(selected))
+
+    @is_gm()
+    @commands.command(name="gmicedragonsettings", aliases=["gmicedragon", "gmids"])
+    async def gm_ice_dragon_settings(self, ctx):
+        """GM UI to manage Ice Dragon stages and drops."""
+        battles_cog = self.bot.get_cog("Battles")
+        if battles_cog:
+            try:
+                await battles_cog.initialize_tables()
+            except Exception:
+                pass
+
+        class IceDragonSettingsView(discord.ui.View):
+            def __init__(self, cog, ctx):
+                super().__init__(timeout=300)
+                self.cog = cog
+                self.ctx = ctx
+
+            async def _guard(self, interaction: discord.Interaction):
+                if interaction.user.id != self.ctx.author.id:
+                    await interaction.response.send_message("❌ This menu is not for you.", ephemeral=True)
+                    return False
+                return True
+
+            @discord.ui.button(label="Create Dragon", style=discord.ButtonStyle.green)
+            async def create_dragon(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if not await self._guard(interaction):
+                    return
+                await interaction.response.send_message("Starting dragon creation...", ephemeral=True)
+                await self.cog._gm_create_dragon(self.ctx)
+
+            @discord.ui.button(label="List Dragons", style=discord.ButtonStyle.blurple)
+            async def list_dragons(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if not await self._guard(interaction):
+                    return
+                await interaction.response.send_message("Listing dragons...", ephemeral=True)
+                await self.cog._gm_list_dragons(self.ctx)
+
+            @discord.ui.button(label="Edit Current List", style=discord.ButtonStyle.gray)
+            async def edit_dragons(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if not await self._guard(interaction):
+                    return
+                await interaction.response.send_message("Editing dragon list...", ephemeral=True)
+                await self.cog._gm_edit_dragons(self.ctx)
+
+            @discord.ui.button(label="Create Drops", style=discord.ButtonStyle.green)
+            async def create_drops(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if not await self._guard(interaction):
+                    return
+                await interaction.response.send_message("Starting drop creation...", ephemeral=True)
+                await self.cog._gm_create_drop(self.ctx)
+
+            @discord.ui.button(label="Edit Drops", style=discord.ButtonStyle.gray)
+            async def edit_drops(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if not await self._guard(interaction):
+                    return
+                await interaction.response.send_message("Editing drops...", ephemeral=True)
+                await self.cog._gm_edit_drops(self.ctx)
+
+            @discord.ui.button(label="Reset Dragons", style=discord.ButtonStyle.red)
+            async def reset_dragons(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if not await self._guard(interaction):
+                    return
+                await interaction.response.send_message("Resetting dragon stages...", ephemeral=True)
+                await self.cog._gm_reset_dragons(self.ctx)
+
+            @discord.ui.button(label="Reset Drops", style=discord.ButtonStyle.red)
+            async def reset_drops(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if not await self._guard(interaction):
+                    return
+                await interaction.response.send_message("Resetting dragon drops...", ephemeral=True)
+                await self.cog._gm_reset_drops(self.ctx)
+
+        embed = discord.Embed(
+            title="GM Ice Dragon Settings",
+            description="Manage Ice Dragon stages, abilities, and weapon drops.",
+            color=discord.Color.blue(),
+        )
+        await ctx.send(embed=embed, view=IceDragonSettingsView(self, ctx))
+
+    async def _gm_list_dragons(self, ctx):
+        rows = await self._fetch_dragon_stages()
+        if not rows:
+            return await ctx.send("No dragon stages found.")
+        embed = discord.Embed(
+            title="Ice Dragon Stages",
+            description="Enabled stages are eligible to spawn for matching levels.",
+            color=discord.Color.blue(),
+        )
+        for row in rows:
+            moves = ", ".join(row["move_names"] or [])
+            passives = ", ".join(row["passive_names"] or [])
+            status = "✅ Enabled" if row["enabled"] else "❌ Disabled"
+            value = (
+                f"{status}\n"
+                f"Level Range: **{row['min_level']}–{row['max_level']}**\n"
+                f"Multiplier: **x{row['base_multiplier']}**\n"
+                f"Element: **{row['element']}**\n"
+                f"Moves: {moves or 'None'}\n"
+                f"Passives: {passives or 'None'}"
+            )
+            embed.add_field(name=row["name"], value=value, inline=False)
+        await ctx.send(embed=embed)
+
+    async def _gm_reset_dragons(self, ctx):
+        confirmed = await self._gm_confirm_twice(
+            ctx,
+            "⚠️ This will delete ALL ice dragon stages and abilities and restore defaults. Type YES to continue.",
+            "⚠️ Final confirmation. Type YES to reset dragon stages and abilities to defaults."
+        )
+        if not confirmed:
+            return
+
+        battles_cog = self.bot.get_cog("Battles")
+        if not battles_cog:
+            return await ctx.send("❌ Battles cog not found.")
+
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute("DELETE FROM ice_dragon_stages")
+            await conn.execute("DELETE FROM ice_dragon_abilities")
+
+        await battles_cog.initialize_tables()
+        await ctx.send("✅ Dragon stages and abilities reset to defaults.")
+
+    async def _gm_reset_drops(self, ctx):
+        confirmed = await self._gm_confirm_twice(
+            ctx,
+            "⚠️ This will delete ALL ice dragon drops and restore defaults. Type YES to continue.",
+            "⚠️ Final confirmation. Type YES to reset dragon drops to defaults."
+        )
+        if not confirmed:
+            return
+
+        battles_cog = self.bot.get_cog("Battles")
+        if not battles_cog:
+            return await ctx.send("❌ Battles cog not found.")
+
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute("DELETE FROM ice_dragon_drops")
+
+        await battles_cog.initialize_tables()
+        await ctx.send("✅ Dragon drops reset to defaults.")
+
+    async def _gm_create_dragon(self, ctx):
+        name = await self._gm_prompt(ctx, "Dragon name?")
+        if not name:
+            return
+        min_level_raw = await self._gm_prompt(ctx, "Min level?")
+        max_level_raw = await self._gm_prompt(ctx, "Max level?")
+        mult_raw = await self._gm_prompt(ctx, "Base multiplier? (e.g. 1.5)")
+        if not min_level_raw or not max_level_raw or not mult_raw:
+            return
+        try:
+            min_level = int(min_level_raw)
+            max_level = int(max_level_raw)
+            base_multiplier = float(mult_raw)
+        except ValueError:
+            return await ctx.send("❌ Invalid number input.")
+
+        elements = self._get_element_choices()
+        elem_raw = await self._gm_prompt(
+            ctx,
+            f"Element? (default Water)\nAvailable: {', '.join(elements)}",
+            allow_blank=True,
+        )
+        element = "Water"
+        if elem_raw:
+            if elem_raw.capitalize() not in elements:
+                return await ctx.send("❌ Invalid element.")
+            element = elem_raw.capitalize()
+
+        moves = await self._choose_abilities(ctx, "move")
+        if moves is None or not moves:
+            return await ctx.send("❌ You must select at least one move.")
+
+        passives = await self._choose_abilities(ctx, "passive", max_count=5)
+        if passives is None:
+            return
+
+        enabled_raw = await self._gm_prompt(ctx, "Enable this stage? (yes/no, default yes)", allow_blank=True)
+        enabled = True
+        if enabled_raw:
+            enabled = enabled_raw.strip().lower() in ("yes", "y", "true", "1")
+
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO ice_dragon_stages (name, min_level, max_level, base_multiplier, enabled, element, move_names, passive_names) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                name,
+                min_level,
+                max_level,
+                base_multiplier,
+                enabled,
+                element,
+                moves,
+                passives,
+            )
+        await ctx.send(f"✅ Dragon stage **{name}** created.")
+
+    async def _gm_edit_dragons(self, ctx):
+        rows = await self._fetch_dragon_stages()
+        if not rows:
+            return await ctx.send("No dragon stages found.")
+        lines = [f"{idx}) {row['name']} (Lv {row['min_level']}-{row['max_level']})" for idx, row in enumerate(rows, start=1)]
+        await self._send_menu_embed(ctx, "Select a Dragon Stage to Edit", lines)
+        sel_raw = await self._gm_prompt(ctx, "Enter the number of the stage to edit:")
+        if not sel_raw:
+            return
+        try:
+            sel_idx = int(sel_raw) - 1
+            if sel_idx < 0 or sel_idx >= len(rows):
+                raise ValueError
+        except ValueError:
+            return await ctx.send("❌ Invalid selection.")
+
+        stage = dict(rows[sel_idx])
+        await self._send_menu_embed(
+            ctx,
+            f"Editing: {stage['name']}",
+            [
+                f"Status: {'Enabled' if stage['enabled'] else 'Disabled'}",
+                f"Level Range: {stage['min_level']}–{stage['max_level']}",
+                f"Multiplier: x{stage['base_multiplier']}",
+                f"Element: {stage['element']}",
+                f"Moves: {', '.join(stage['move_names'] or []) or 'None'}",
+                f"Passives: {', '.join(stage['passive_names'] or []) or 'None'}",
+            ],
+            footer="Type: name, level_range, multiplier, element, moves, passives, toggle, delete, done",
+        )
+        menu = (
+            "What do you want to edit?\n"
+            "Options: name, level_range, multiplier, element, moves, passives, toggle, delete, done"
+        )
+        while True:
+            choice = await self._gm_prompt(ctx, menu)
+            if not choice:
+                return
+            choice = choice.lower()
+            if choice == "done":
+                break
+            if choice == "delete":
+                if not await self._gm_confirm(ctx, f"⚠️ Delete stage **{stage['name']}**? Type YES to confirm."):
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute("DELETE FROM ice_dragon_stages WHERE id = $1", stage["id"])
+                await ctx.send("✅ Stage deleted.")
+                return
+            if choice == "toggle":
+                new_enabled = not stage["enabled"]
+                action = "enable" if new_enabled else "disable"
+                if not await self._gm_confirm(ctx, f"Confirm: {action} **{stage['name']}**? Type YES to confirm."):
+                    await ctx.send("❌ Toggle cancelled.")
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_stages SET enabled = $1 WHERE id = $2",
+                        new_enabled, stage["id"]
+                    )
+                stage["enabled"] = new_enabled
+                await ctx.send(f"✅ Stage {'enabled' if new_enabled else 'disabled'}.")
+                continue
+            if choice == "name":
+                new_name = await self._gm_prompt(ctx, "New name?")
+                if not new_name:
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute("UPDATE ice_dragon_stages SET name = $1 WHERE id = $2", new_name, stage["id"])
+                stage["name"] = new_name
+            elif choice == "level_range":
+                min_raw = await self._gm_prompt(ctx, "New min level?")
+                max_raw = await self._gm_prompt(ctx, "New max level?")
+                if not min_raw or not max_raw:
+                    continue
+                try:
+                    min_level = int(min_raw)
+                    max_level = int(max_raw)
+                except ValueError:
+                    await ctx.send("❌ Invalid number.")
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_stages SET min_level = $1, max_level = $2 WHERE id = $3",
+                        min_level, max_level, stage["id"]
+                    )
+                stage["min_level"] = min_level
+                stage["max_level"] = max_level
+            elif choice == "multiplier":
+                mult_raw = await self._gm_prompt(ctx, "New base multiplier?")
+                if not mult_raw:
+                    continue
+                try:
+                    base_multiplier = float(mult_raw)
+                except ValueError:
+                    await ctx.send("❌ Invalid number.")
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_stages SET base_multiplier = $1 WHERE id = $2",
+                        base_multiplier, stage["id"]
+                    )
+                stage["base_multiplier"] = base_multiplier
+            elif choice == "element":
+                elements = self._get_element_choices()
+                elem_raw = await self._gm_prompt(ctx, f"Element?\nAvailable: {', '.join(elements)}")
+                if not elem_raw:
+                    continue
+                if elem_raw.capitalize() not in elements:
+                    await ctx.send("❌ Invalid element.")
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_stages SET element = $1 WHERE id = $2",
+                        elem_raw.capitalize(), stage["id"]
+                    )
+                stage["element"] = elem_raw.capitalize()
+            elif choice == "moves":
+                moves = await self._choose_abilities(ctx, "move")
+                if moves is None or not moves:
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_stages SET move_names = $1 WHERE id = $2",
+                        moves, stage["id"]
+                    )
+                stage["move_names"] = moves
+            elif choice == "passives":
+                passives = await self._choose_abilities(ctx, "passive", max_count=5)
+                if passives is None:
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_stages SET passive_names = $1 WHERE id = $2",
+                        passives, stage["id"]
+                    )
+                stage["passive_names"] = passives
+            else:
+                await ctx.send("❌ Unknown option.")
+        await ctx.send("✅ Stage updated.")
+
+    async def _gm_create_drop(self, ctx):
+        name = await self._gm_prompt(ctx, "Drop name?")
+        if not name:
+            return
+        item_type_raw = await self._gm_prompt(
+            ctx,
+            f"Item type? Options: {', '.join([i.value for i in ItemType])}"
+        )
+        if not item_type_raw:
+            return
+        item_type_raw = item_type_raw.strip().capitalize()
+        if item_type_raw not in [i.value for i in ItemType]:
+            return await ctx.send("❌ Invalid item type.")
+        min_stat_raw = await self._gm_prompt(ctx, "Min stat?")
+        max_stat_raw = await self._gm_prompt(ctx, "Max stat?")
+        base_chance_raw = await self._gm_prompt(ctx, "Base chance? (percent, e.g. 0.1 or 1.5%)")
+        max_chance_raw = await self._gm_prompt(ctx, "Max chance? (percent, e.g. 0.5 or 2%)")
+        if not min_stat_raw or not max_stat_raw or not base_chance_raw or not max_chance_raw:
+            return
+        try:
+            min_stat = int(min_stat_raw)
+            max_stat = int(max_stat_raw)
+            base_chance = self._parse_percent(base_chance_raw)
+            max_chance = self._parse_percent(max_chance_raw)
+        except ValueError:
+            return await ctx.send("❌ Invalid number input.")
+        if base_chance is None or max_chance is None:
+            return await ctx.send("❌ Invalid chance. Use a percent between 0 and 100.")
+        if base_chance > max_chance:
+            return await ctx.send("❌ Base chance cannot exceed max chance.")
+
+        elements = self._get_element_choices()
+        elem_raw = await self._gm_prompt(
+            ctx,
+            f"Element? (default Water)\nAvailable: {', '.join(elements)}",
+            allow_blank=True,
+        )
+        element = "Water"
+        if elem_raw:
+            if elem_raw.capitalize() not in elements:
+                return await ctx.send("❌ Invalid element.")
+            element = elem_raw.capitalize()
+
+        scope_raw = await self._gm_prompt(ctx, "Drop scope? (global/specific, default global)", allow_blank=True)
+        is_global = True
+        dragon_stage_id = None
+        if scope_raw and scope_raw.strip().lower() in ("specific", "stage", "dragon"):
+            stages = await self._fetch_dragon_stages()
+            if not stages:
+                return await ctx.send("❌ No dragon stages available to bind this drop.")
+            lines = [f"{idx}) {row['name']} (Lv {row['min_level']}-{row['max_level']})" for idx, row in enumerate(stages, start=1)]
+            sel_raw = await self._gm_prompt(ctx, "Select a stage for this drop:\n" + "\n".join(lines))
+            if not sel_raw:
+                return
+            try:
+                sel_idx = int(sel_raw) - 1
+                if sel_idx < 0 or sel_idx >= len(stages):
+                    raise ValueError
+            except ValueError:
+                return await ctx.send("❌ Invalid selection.")
+            is_global = False
+            dragon_stage_id = stages[sel_idx]["id"]
+
+        min_level_raw = await self._gm_prompt(ctx, "Min level filter? (blank for none)", allow_blank=True)
+        max_level_raw = await self._gm_prompt(ctx, "Max level filter? (blank for none)", allow_blank=True)
+        try:
+            min_level = int(min_level_raw) if min_level_raw else None
+            max_level = int(max_level_raw) if max_level_raw else None
+        except ValueError:
+            return await ctx.send("❌ Invalid level filter.")
+
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO ice_dragon_drops (name, item_type, min_stat, max_stat, base_chance, max_chance, is_global, dragon_stage_id, element, min_level, max_level) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                name, item_type_raw, min_stat, max_stat, base_chance, max_chance, is_global, dragon_stage_id, element, min_level, max_level
+            )
+        await ctx.send(f"✅ Drop **{name}** created.")
+
+    async def _gm_edit_drops(self, ctx):
+        rows = await self._fetch_dragon_drops()
+        if not rows:
+            return await ctx.send("No drops found.")
+        lines = [f"{idx}) {row['name']} ({row['item_type']})" for idx, row in enumerate(rows, start=1)]
+        await self._send_menu_embed(ctx, "Select a Drop to Edit", lines)
+        sel_raw = await self._gm_prompt(ctx, "Enter the number of the drop to edit:")
+        if not sel_raw:
+            return
+        try:
+            sel_idx = int(sel_raw) - 1
+            if sel_idx < 0 or sel_idx >= len(rows):
+                raise ValueError
+        except ValueError:
+            return await ctx.send("❌ Invalid selection.")
+
+        drop = dict(rows[sel_idx])
+        scope_text = "Global" if drop["is_global"] else f"Stage ID {drop['dragon_stage_id']}"
+        await self._send_menu_embed(
+            ctx,
+            f"Editing Drop: {drop['name']}",
+            [
+                f"Type: {drop['item_type']}",
+                f"Stats: {drop['min_stat']}–{drop['max_stat']}",
+                f"Chance: {self._format_percent(drop['base_chance'])}–{self._format_percent(drop['max_chance'])}",
+                f"Element: {drop['element']}",
+                f"Scope: {scope_text}",
+                f"Level Filter: {drop['min_level'] or '-'} to {drop['max_level'] or '-'}",
+            ],
+            footer="Type: name, item_type, stats, chance, element, level_range, scope, delete, done",
+        )
+        menu = "Options: name, item_type, stats, chance, element, level_range, scope, delete, done"
+        while True:
+            choice = await self._gm_prompt(ctx, menu)
+            if not choice:
+                return
+            choice = choice.lower()
+            if choice == "done":
+                break
+            if choice == "delete":
+                if not await self._gm_confirm(ctx, f"⚠️ Delete drop **{drop['name']}**? Type YES to confirm."):
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute("DELETE FROM ice_dragon_drops WHERE id = $1", drop["id"])
+                await ctx.send("✅ Drop deleted.")
+                return
+            if choice == "name":
+                new_name = await self._gm_prompt(ctx, "New name?")
+                if not new_name:
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute("UPDATE ice_dragon_drops SET name = $1 WHERE id = $2", new_name, drop["id"])
+                drop["name"] = new_name
+            elif choice == "item_type":
+                item_type_raw = await self._gm_prompt(ctx, f"Item type? Options: {', '.join([i.value for i in ItemType])}")
+                if not item_type_raw:
+                    continue
+                item_type_raw = item_type_raw.strip().capitalize()
+                if item_type_raw not in [i.value for i in ItemType]:
+                    await ctx.send("❌ Invalid item type.")
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute("UPDATE ice_dragon_drops SET item_type = $1 WHERE id = $2", item_type_raw, drop["id"])
+                drop["item_type"] = item_type_raw
+            elif choice == "stats":
+                min_stat_raw = await self._gm_prompt(ctx, "Min stat?")
+                max_stat_raw = await self._gm_prompt(ctx, "Max stat?")
+                if not min_stat_raw or not max_stat_raw:
+                    continue
+                try:
+                    min_stat = int(min_stat_raw)
+                    max_stat = int(max_stat_raw)
+                except ValueError:
+                    await ctx.send("❌ Invalid number.")
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_drops SET min_stat = $1, max_stat = $2 WHERE id = $3",
+                        min_stat, max_stat, drop["id"]
+                    )
+                drop["min_stat"] = min_stat
+                drop["max_stat"] = max_stat
+            elif choice == "chance":
+                base_raw = await self._gm_prompt(ctx, "Base chance? (percent)")
+                max_raw = await self._gm_prompt(ctx, "Max chance? (percent)")
+                if not base_raw or not max_raw:
+                    continue
+                try:
+                    base_chance = self._parse_percent(base_raw)
+                    max_chance = self._parse_percent(max_raw)
+                except ValueError:
+                    await ctx.send("❌ Invalid number.")
+                    continue
+                if base_chance is None or max_chance is None:
+                    await ctx.send("❌ Invalid chance. Use a percent between 0 and 100.")
+                    continue
+                if base_chance > max_chance:
+                    await ctx.send("❌ Base chance cannot exceed max chance.")
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_drops SET base_chance = $1, max_chance = $2 WHERE id = $3",
+                        base_chance, max_chance, drop["id"]
+                    )
+                drop["base_chance"] = base_chance
+                drop["max_chance"] = max_chance
+            elif choice == "element":
+                elements = self._get_element_choices()
+                elem_raw = await self._gm_prompt(ctx, f"Element?\nAvailable: {', '.join(elements)}")
+                if not elem_raw:
+                    continue
+                if elem_raw.capitalize() not in elements:
+                    await ctx.send("❌ Invalid element.")
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_drops SET element = $1 WHERE id = $2",
+                        elem_raw.capitalize(), drop["id"]
+                    )
+                drop["element"] = elem_raw.capitalize()
+            elif choice == "level_range":
+                min_raw = await self._gm_prompt(ctx, "Min level filter? (blank for none)", allow_blank=True)
+                max_raw = await self._gm_prompt(ctx, "Max level filter? (blank for none)", allow_blank=True)
+                try:
+                    min_level = int(min_raw) if min_raw else None
+                    max_level = int(max_raw) if max_raw else None
+                except ValueError:
+                    await ctx.send("❌ Invalid level filter.")
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_drops SET min_level = $1, max_level = $2 WHERE id = $3",
+                        min_level, max_level, drop["id"]
+                    )
+                drop["min_level"] = min_level
+                drop["max_level"] = max_level
+            elif choice == "scope":
+                scope_raw = await self._gm_prompt(ctx, "Drop scope? (global/specific)")
+                if not scope_raw:
+                    continue
+                if scope_raw.strip().lower() in ("global", "all"):
+                    async with self.bot.pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE ice_dragon_drops SET is_global = TRUE, dragon_stage_id = NULL WHERE id = $1",
+                            drop["id"]
+                        )
+                    drop["is_global"] = True
+                    drop["dragon_stage_id"] = None
+                elif scope_raw.strip().lower() in ("specific", "stage", "dragon"):
+                    stages = await self._fetch_dragon_stages()
+                    if not stages:
+                        await ctx.send("❌ No dragon stages available.")
+                        continue
+                    lines = [f"{idx}) {row['name']} (Lv {row['min_level']}-{row['max_level']})" for idx, row in enumerate(stages, start=1)]
+                    sel_raw = await self._gm_prompt(ctx, "Select a stage for this drop:\n" + "\n".join(lines))
+                    if not sel_raw:
+                        continue
+                    try:
+                        sel_idx = int(sel_raw) - 1
+                        if sel_idx < 0 or sel_idx >= len(stages):
+                            raise ValueError
+                    except ValueError:
+                        await ctx.send("❌ Invalid selection.")
+                        continue
+                    stage_id = stages[sel_idx]["id"]
+                    async with self.bot.pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE ice_dragon_drops SET is_global = FALSE, dragon_stage_id = $1 WHERE id = $2",
+                            stage_id, drop["id"]
+                        )
+                    drop["is_global"] = False
+                    drop["dragon_stage_id"] = stage_id
+                else:
+                    await ctx.send("❌ Invalid scope.")
+            else:
+                await ctx.send("❌ Unknown option.")
+        await ctx.send("✅ Drop updated.")
+
+    @is_gm()
+    @commands.command(
+        name="gmdivineshards",
+        aliases=["gmdshards", "gmgrantdivineshards"],
+        hidden=True,
+        brief=_("Grant divine familiar shards to a player"),
+    )
+    @locale_doc
+    async def gmdivineshards(
+        self,
+        ctx: Context,
+        user: UserWithCharacter,
+        amount: IntGreaterThan(0),
+        *,
+        familiar_input: str,
+    ) -> None:
+        _(
+            """`<user>` - target player
+            `<amount>` - shard amount to grant
+            `<familiar>` - divine familiar name/key/cosmetic name
+
+            Grant divine familiar shards to a player.
+
+            Only Game Masters can use this command."""
+        )
+        familiar_key = resolve_familiar_key(familiar_input)
+        if not familiar_key or familiar_key not in DIVINE_FAMILIARS:
+            valid = ", ".join(
+                sorted(cfg["name"] for cfg in DIVINE_FAMILIARS.values())
+            )
+            return await ctx.send(
+                "Unknown divine familiar. "
+                f"Valid options: {valid}.\n"
+                f"Example: `{ctx.clean_prefix}gmdivineshards @User 5 Mayeia`"
+            )
+
+        shard_amount = int(amount)
+        async with self.bot.pool.acquire() as conn:
+            await ensure_divine_familiar_tables(conn)
+            new_total = await award_divine_shards(
+                conn,
+                user.id,
+                familiar_key,
+                shard_amount,
+            )
+
+        familiar_name = get_familiar_display_name(familiar_key)
+        await ctx.send(
+            f"Gave **{shard_amount}** shard(s) of **{familiar_name}** to {user.mention}. "
+            f"New total: **{new_total}/{DIVINE_SHARDS_PER_EGG}**."
+        )
+
+        with handle_message_parameters(
+            content=(
+                f"**{ctx.author}** executed `gmdivineshards`.\n"
+                f"Target: {user.mention} (`{user.id}`)\n"
+                f"Familiar: **{familiar_name}** (`{familiar_key}`)\n"
+                f"Amount: **{shard_amount}**\n"
+                f"New total: **{new_total}/{DIVINE_SHARDS_PER_EGG}**"
+            )
+        ) as params:
+            await self.bot.http.send_message(
+                self.bot.config.game.gm_log_channel,
+                params=params,
+            )
 
 class GMInviteView(discord.ui.View):
     def __init__(self, target_user: discord.Member, timeout: int = 120):

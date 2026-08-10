@@ -11,6 +11,7 @@ from discord.enums import ButtonStyle
 # Adjust these imports if your project paths differ
 from classes.converters import IntGreaterThan
 from utils.checks import is_god
+from utils.divine_familiars import DIVINE_FAMILIARS, award_divine_shards
 from utils.i18n import _
 from utils.joins import JoinView
 
@@ -28,6 +29,8 @@ RARITIES = {
     "divine":    {"column": "crates_divine",    "fallback": "✨", "emote": "<:c_divine:1405959193407651980>"},
 }
 WEIGHTS = {"legendary": 1, "fortune": 1, "divine": 1}  # tweak to weight the roll
+DIVINE_SHARD_RAID_PROC_CHANCE = 0.15
+DIVINE_SHARD_FAMILIAR_KEY = "drakath_familiar"
 
 
 class ShatteredVeil(commands.Cog):
@@ -82,6 +85,7 @@ class ShatteredVeil(commands.Cog):
                 race=profile.get("race"),
                 guild=profile.get("guild"),
                 god=profile.get("god"),
+                xp=profile.get("xp"),
                 conn=conn,
             )
         # Fallback values if get_raidstats is unavailable
@@ -186,6 +190,7 @@ class ShatteredVeil(commands.Cog):
                         continue
                     dmg, deff = await self._get_raidstats(u, dict(profile), conn)
                     raid[u] = {"hp": 100, "armor": deff, "damage": dmg, "kills": 0}
+            participants = list(raid.keys())
 
             await self._send_to_channels(content=f"**Dreamers gathered: {len(raid)}**", ctx=ctx)
 
@@ -355,6 +360,25 @@ class ShatteredVeil(commands.Cog):
                     ),
                     ctx=ctx,
                 )
+
+                if participants and pyrandom.random() < DIVINE_SHARD_RAID_PROC_CHANCE:
+                    shard_target = pyrandom.choice(participants)
+                    familiar_key = DIVINE_SHARD_FAMILIAR_KEY
+                    familiar_name = DIVINE_FAMILIARS[familiar_key]["name"]
+                    async with self.bot.pool.acquire() as conn:
+                        shard_total = await award_divine_shards(
+                            conn,
+                            shard_target.id,
+                            familiar_key,
+                            1,
+                        )
+                    await self._send_to_channels(
+                        content=(
+                            f"✨ A dream-fragment settles on {shard_target.mention}: "
+                            f"**1 {familiar_name} shard**. Now: **{shard_total}/20**"
+                        ),
+                        ctx=ctx,
+                    )
             elif not raid:
                 await self._send_to_channels(content="💀 The Veil implodes. Sleep devours all who entered…", ctx=ctx)
 

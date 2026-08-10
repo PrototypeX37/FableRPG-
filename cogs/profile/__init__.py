@@ -2,6 +2,7 @@
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
 Copyright (C) 2023-2024 Lunar (PrototypeX37)
+Copyright (C) 2026 Danaelis
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -40,121 +41,320 @@ from cogs.help import chunks
 from cogs.shard_communication import user_on_cooldown as user_cooldown
 from cogs.profilecustomization import ProfileCustomization
 from utils import checks, colors, random
+from utils.loot import (
+    LootManagerView,
+    LootRewardView,
+    LootSelectionView,
+    acquire_loot_locks,
+    delete_user_loot,
+    fetch_user_loot,
+    loot_value,
+    release_loot_locks,
+    reserve_loot_action_cooldown,
+    reset_loot_action_cooldown,
+    unique_loot_ids,
+)
 from utils import misc as rpgtools
 from utils.checks import is_gm
 from utils.i18n import _, locale_doc
+from classes.errors import NoChoice
 
 
 
-import discord
-from discord.ext import commands
+class ArmoryTypeSelect(discord.ui.Select):
+    def __init__(self, armory_view: "ArmoryPaginatorView"):
+        self.armory_view = armory_view
+        super().__init__(
+            placeholder=_("Filter by item type"),
+            min_values=1,
+            max_values=1,
+            options=armory_view.build_itemtype_options(),
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_itemtype = self.values[0]
+        if selected_itemtype == self.armory_view.itemtype:
+            await interaction.response.defer()
+            return
+
+        self.armory_view.itemtype = selected_itemtype
+        await self.armory_view.reload_pages(reset_page=True)
+        await interaction.response.edit_message(
+            embed=self.armory_view.embeds[self.armory_view.current_page],
+            view=self.armory_view,
+        )
+
+
+class ArmoryRangeSelect(discord.ui.Select):
+    def __init__(self, armory_view: "ArmoryPaginatorView"):
+        self.armory_view = armory_view
+        super().__init__(
+            placeholder=_("Filter by item power"),
+            min_values=1,
+            max_values=1,
+            options=armory_view.build_range_options(),
+            row=3,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        lowest, highest = (int(value) for value in self.values[0].split(":", maxsplit=1))
+        if lowest == self.armory_view.lowest and highest == self.armory_view.highest:
+            await interaction.response.defer()
+            return
+
+        self.armory_view.lowest = lowest
+        self.armory_view.highest = highest
+        await self.armory_view.reload_pages(reset_page=True)
+        await interaction.response.edit_message(
+            embed=self.armory_view.embeds[self.armory_view.current_page],
+            view=self.armory_view,
+        )
+
 
 class ArmoryPaginatorView(discord.ui.View):
+    RANGE_PRESETS = [
+        ("Any Power (0-201)", 0, 201),
+        ("Starter (0-25)", 0, 25),
+        ("Uncommon (26-60)", 26, 60),
+        ("Strong (61-100)", 61, 100),
+        ("Epic (101-150)", 101, 150),
+        ("Legendary (151-201)", 151, 201),
+    ]
+
     def __init__(
         self,
         ctx: commands.Context,
-        pages: list[list[dict]],
-        embeds: list[discord.Embed],
-        timeout: float = 180.0
+        profile_cog: "Profile",
+        itemtype: str = "All",
+        lowest: int = 0,
+        highest: int = 201,
+        timeout: float = 240.0,
     ):
         super().__init__(timeout=timeout)
         self.ctx = ctx
-        self.pages = pages  # Each element is a list of items for that page
-        self.embeds = embeds
+        self.profile_cog = profile_cog
+        self.itemtype = itemtype
+        self.lowest = lowest
+        self.highest = highest
+        self.pages: list[list[dict]] = []
+        self.embeds: list[discord.Embed] = []
         self.current_page = 0
+        self.message: Optional[discord.Message] = None
+
+        self.type_select = ArmoryTypeSelect(self)
+        self.range_select = ArmoryRangeSelect(self)
+        self.add_item(self.type_select)
+        self.add_item(self.range_select)
+        self._sync_navigation_controls()
+        self._sync_filter_controls()
+
+    def build_itemtype_options(self) -> list[discord.SelectOption]:
+        options = [
+            discord.SelectOption(label="All Types", value="All"),
+            discord.SelectOption(label="One-Handed (1h)", value="1h"),
+            discord.SelectOption(label="Two-Handed (2h)", value="2h"),
+        ]
+        options.extend(
+            discord.SelectOption(label=item_type.name, value=item_type.name)
+            for item_type in ALL_ITEM_TYPES
+        )
+        return options
+
+    def build_range_options(self) -> list[discord.SelectOption]:
+        return [
+            discord.SelectOption(label=label, value=f"{lowest}:{highest}")
+            for label, lowest, highest in self.RANGE_PRESETS
+        ]
 
     async def start(self):
-        """Send the initial embed and attach this view to it."""
-        await self.ctx.send(embed=self.embeds[self.current_page], view=self)
+        await self.reload_pages(reset_page=True)
+        self.message = await self.ctx.send(embed=self.embeds[self.current_page], view=self)
 
-    @discord.ui.button(label="First", style=discord.ButtonStyle.blurple)
-    async def go_first(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Jump to the first page."""
+    async def reload_pages(self, reset_page: bool = False):
+        ret = await self.profile_cog.fetch_armory_items(
+            user_id=self.ctx.author.id,
+            itemtype=self.itemtype,
+            lowest=self.lowest,
+            highest=self.highest,
+        )
+
+        if not ret:
+            self.pages = []
+            self.embeds = [
+                self.profile_cog.armory_empty_embed(
+                    self.ctx, self.itemtype, self.lowest, self.highest
+                )
+            ]
+            self.current_page = 0
+        else:
+            self.pages = list(chunks(ret, 5))
+            if reset_page:
+                self.current_page = 0
+            else:
+                self.current_page = min(self.current_page, len(self.pages) - 1)
+
+            maxpage = len(self.pages) - 1
+            self.embeds = [
+                self.profile_cog.invembed(
+                    self.ctx,
+                    page,
+                    idx,
+                    maxpage,
+                    itemtype=self.itemtype,
+                    lowest=self.lowest,
+                    highest=self.highest,
+                )
+                for idx, page in enumerate(self.pages)
+            ]
+
+        self._sync_filter_controls()
+        self._sync_navigation_controls()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.ctx.author.id:
-            await interaction.response.send_message("Only the command author can use this button.", ephemeral=True)
+            await interaction.response.send_message(
+                _("Only the command author can use this menu."),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    def _sync_filter_controls(self):
+        current_itemtype = self.itemtype
+        for option in self.type_select.options:
+            option.default = option.value == current_itemtype
+        self.type_select.placeholder = _("Type: {itemtype}").format(
+            itemtype=current_itemtype
+        )
+
+        current_range_value = f"{self.lowest}:{self.highest}"
+        has_matching_preset = False
+        for option in self.range_select.options:
+            option.default = option.value == current_range_value
+            has_matching_preset = has_matching_preset or option.default
+        if not has_matching_preset:
+            for option in self.range_select.options:
+                option.default = False
+        self.range_select.placeholder = _("Power: {lowest}-{highest}").format(
+            lowest=self.lowest,
+            highest=self.highest,
+        )
+
+    def _sync_navigation_controls(self):
+        has_multiple_pages = len(self.embeds) > 1
+        has_items = bool(self.pages)
+
+        self.go_first.disabled = not has_multiple_pages or self.current_page == 0
+        self.go_previous.disabled = not has_multiple_pages or self.current_page == 0
+        self.go_next.disabled = (
+            not has_multiple_pages or self.current_page >= len(self.embeds) - 1
+        )
+        self.go_last.disabled = (
+            not has_multiple_pages or self.current_page >= len(self.embeds) - 1
+        )
+        self.copy_ids.disabled = not has_items
+
+    @discord.ui.button(label="First", style=discord.ButtonStyle.blurple, row=0)
+    async def go_first(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page == 0:
+            await interaction.response.defer()
             return
         self.current_page = 0
+        self._sync_navigation_controls()
         await interaction.response.edit_message(
             embed=self.embeds[self.current_page], view=self
         )
 
-    @discord.ui.button(label="Previous", style=discord.ButtonStyle.blurple)
-    async def go_previous(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Go back one page."""
-        if interaction.user.id != self.ctx.author.id:
-            await interaction.response.send_message("Only the command author can use this button.", ephemeral=True)
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.blurple, row=0)
+    async def go_previous(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if self.current_page == 0:
+            await interaction.response.defer()
             return
-        if self.current_page > 0:
-            self.current_page -= 1
-            await interaction.response.edit_message(
-                embed=self.embeds[self.current_page], view=self
-            )
-        else:
-            # Optionally tell the user they're on the first page
-            await interaction.response.send_message(
-                "Already on the first page.", ephemeral=True
-            )
+        self.current_page -= 1
+        self._sync_navigation_controls()
+        await interaction.response.edit_message(
+            embed=self.embeds[self.current_page], view=self
+        )
 
-    @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger, row=0)
     async def stop_pages(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Stop the paginator (removes all buttons)."""
-        if interaction.user.id != self.ctx.author.id:
-            await interaction.response.send_message("Only the command author can use this button.", ephemeral=True)
-            return
-        await interaction.response.defer()  # Acknowledge the button press
-        await interaction.delete_original_response()
-        self.stop()  # Stop listening to button presses
+        await interaction.response.defer()
+        try:
+            await interaction.message.delete()
+        except discord.HTTPException:
+            pass
+        self.stop()
 
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.blurple)
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.blurple, row=0)
     async def go_next(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Advance forward one page."""
-        if interaction.user.id != self.ctx.author.id:
-            await interaction.response.send_message("Only the command author can use this button.", ephemeral=True)
+        if self.current_page >= len(self.embeds) - 1:
+            await interaction.response.defer()
             return
-        if self.current_page < len(self.embeds) - 1:
-            self.current_page += 1
-            await interaction.response.edit_message(
-                embed=self.embeds[self.current_page], view=self
-            )
-        else:
-            await interaction.response.send_message(
-                "Already on the last page.", ephemeral=True
-            )
+        self.current_page += 1
+        self._sync_navigation_controls()
+        await interaction.response.edit_message(
+            embed=self.embeds[self.current_page], view=self
+        )
 
-    @discord.ui.button(label="Last", style=discord.ButtonStyle.blurple)
+    @discord.ui.button(label="Last", style=discord.ButtonStyle.blurple, row=0)
     async def go_last(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Jump to the last page."""
-        if interaction.user.id != self.ctx.author.id:
-            await interaction.response.send_message("Only the command author can use this button.", ephemeral=True)
+        if self.current_page >= len(self.embeds) - 1:
+            await interaction.response.defer()
             return
         self.current_page = len(self.embeds) - 1
+        self._sync_navigation_controls()
         await interaction.response.edit_message(
             embed=self.embeds[self.current_page], view=self
         )
 
-    @discord.ui.button(label="Copy IDs", style=discord.ButtonStyle.green)
+    @discord.ui.button(label="Copy IDs", style=discord.ButtonStyle.green, row=1)
     async def copy_ids(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """
-        Collect the item IDs from the current page and send them to the channel.
-        """
-        if interaction.user.id != self.ctx.author.id:
-            await interaction.response.send_message("Only the command author can use this button.", ephemeral=True)
+        if not self.pages:
+            await interaction.response.send_message(
+                _("No item IDs available for this filter."),
+                ephemeral=True,
+            )
             return
-        current_items = self.pages[self.current_page]  # raw DB rows for this page
-        # Extract IDs and join them with commas
+
+        current_items = self.pages[self.current_page]
         item_ids = [str(item["id"]) for item in current_items]
         joined_ids = ", ".join(item_ids)
-
-        # Send the IDs to the channel (you could also do ephemeral, but user specifically asked for ctx.send)
-        await self.ctx.send(f"{joined_ids}")
-
-        # Acknowledge the button so there's no "interaction failed" message
-        await interaction.response.defer()
+        await interaction.response.send_message(joined_ids, ephemeral=True)
 
 
 class Profile(commands.Cog):
     def __init__(self, bot: Bot) -> None:
         self.bot = bot
+
+    @staticmethod
+    def _encode_preset_amulet_id(amulet_id: int) -> int:
+        return -abs(amulet_id)
+
+    @staticmethod
+    def _split_preset_item_ids(raw_item_ids):
+        gear_item_ids = []
+        amulet_id = None
+
+        for raw_id in raw_item_ids or []:
+            if raw_id < 0 and amulet_id is None:
+                amulet_id = abs(raw_id)
+                continue
+            if raw_id > 0:
+                gear_item_ids.append(raw_id)
+
+        return gear_item_ids, amulet_id
 
     @checks.has_no_char()
     @user_cooldown(3600)
@@ -321,7 +521,7 @@ class Profile(commands.Cog):
     async def migrate_and_create_character(self, ctx, name, xp, money):
         try:
             Level = int(rpgtools.xptolevel(xp))
-            Statpoints = Level // 2
+            Statpoints = rpgtools.statpoints_for_level(Level)
             # Convert user ID to integer if needed
             user_id = int(ctx.author.id)
 
@@ -426,9 +626,9 @@ class Profile(commands.Cog):
 
         await ctx.send(f"Profile preference updated to {new_profilestyleText}")
 
-    @commands.command(aliases=["me", "p"], brief=_("View someone's profile"))
+    @commands.command(name="legacyprofile", hidden=True, brief=_("View someone's profile"))
     @locale_doc
-    async def profile(self, ctx, *, person: str = None):
+    async def legacyprofile(self, ctx, *, person: str = None):
         _(
             """`[person]` - The person whose profile to view; defaults to oneself
 
@@ -1365,11 +1565,21 @@ class Profile(commands.Cog):
                 )
             )
 
-    def invembed(self, ctx, ret, currentpage, maxpage):
+    def invembed(
+            self,
+            ctx,
+            ret,
+            currentpage,
+            maxpage,
+            itemtype: str = "All",
+            lowest: int = 0,
+            highest: int = 201,
+    ):
         result = discord.Embed(
             title=_("{user}'s inventory includes").format(user=ctx.disp),
             colour=discord.Colour.blurple(),
         )
+        result.description = _("Use the dropdowns below to filter by type and power range.")
         for weapon in ret:
             if weapon["equipped"]:
                 eq = _("(**Equipped**)")
@@ -1408,8 +1618,14 @@ class Profile(commands.Cog):
             )
 
         result.set_footer(
-            text=_("Page {page} of {maxpages}").format(
-                page=currentpage + 1, maxpages=maxpage + 1
+            text=_(
+                "Page {page} of {maxpages} | Type: {itemtype} | Power: {lowest}-{highest}"
+            ).format(
+                page=currentpage + 1,
+                maxpages=maxpage + 1,
+                itemtype=itemtype,
+                lowest=lowest,
+                highest=highest,
             )
         )
         return result
@@ -1667,6 +1883,11 @@ class Profile(commands.Cog):
             "hp": "stathp",
         }
 
+        if amount <= 0:
+            await ctx.send(_("Amount must be greater than 0."))
+            await self.bot.reset_cooldown(ctx)
+            return
+
         if type not in valid_types:
             await ctx.send(
                 _("Invalid type specified. Please use 'def', 'defense', 'attack', 'atk', 'health', or 'hp'."))
@@ -1701,6 +1922,158 @@ class Profile(commands.Cog):
         await ctx.send(
             _(f"Successfully redeemed {amount} points to {type}. You now have {new_stat_points} stat points remaining."))
 
+    def normalize_armory_itemtype(self, itemtype: str | None) -> tuple[Optional[str], Optional[str]]:
+        if itemtype is None:
+            return "All", None
+
+        cleaned_itemtype = itemtype.strip()
+        if not cleaned_itemtype:
+            return "All", None
+
+        alias_map = {
+            "all": "All",
+            "any": "All",
+            "everything": "All",
+            "1h": "1h",
+            "onehand": "1h",
+            "one-handed": "1h",
+            "one_handed": "1h",
+            "2h": "2h",
+            "twohand": "2h",
+            "two-handed": "2h",
+            "two_handed": "2h",
+        }
+        lowered_itemtype = cleaned_itemtype.lower()
+        if lowered_itemtype in alias_map:
+            return alias_map[lowered_itemtype], None
+
+        normalized_itemtype = cleaned_itemtype.title()
+        if ItemType.from_string(normalized_itemtype) is not None:
+            return normalized_itemtype, None
+
+        return (
+            None,
+            _(
+                "Please select a valid item type or `all`, `1h`, `2h`. Available types:"
+                " `{all_types}`"
+            ).format(all_types=", ".join([t.name for t in ALL_ITEM_TYPES])),
+        )
+
+    async def fetch_armory_items(
+            self,
+            user_id: int,
+            itemtype: str,
+            lowest: int,
+            highest: int,
+    ):
+        if itemtype == "All":
+            return await self.bot.pool.fetch(
+                "SELECT ai.*, i.equipped, i.locked "
+                "FROM profile p "
+                "JOIN allitems ai ON (p.user=ai.owner) "
+                "JOIN inventory i ON (ai.id=i.item) "
+                'WHERE p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3) OR i."equipped") '
+                'ORDER BY i."equipped" DESC, i.locked DESC, ai."damage"+ai."armor" DESC;',
+                user_id,
+                lowest,
+                highest,
+            )
+
+        if itemtype == "2h":
+            return await self.bot.pool.fetch(
+                "SELECT ai.*, i.equipped, i.locked "
+                "FROM profile p "
+                "JOIN allitems ai ON (p.user=ai.owner) "
+                "JOIN inventory i ON (ai.id=i.item) "
+                'WHERE p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3 AND ai."hand"=$4) '
+                'OR i."equipped") '
+                'ORDER BY i."equipped" DESC, i.locked DESC, ai."damage"+ai."armor" DESC;',
+                user_id,
+                lowest,
+                highest,
+                "both",
+            )
+
+        if itemtype == "1h":
+            return await self.bot.pool.fetch(
+                "SELECT ai.*, i.equipped, i.locked "
+                "FROM profile p "
+                "JOIN allitems ai ON (p.user=ai.owner) "
+                "JOIN inventory i ON (ai.id=i.item) "
+                'WHERE p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3 AND ai."hand"!=$4) '
+                'OR i."equipped") '
+                'ORDER BY i."equipped" DESC, i.locked DESC, ai."damage"+ai."armor" DESC;',
+                user_id,
+                lowest,
+                highest,
+                "both",
+            )
+
+        return await self.bot.pool.fetch(
+            "SELECT ai.*, i.equipped, i.locked "
+            "FROM profile p "
+            "JOIN allitems ai ON (p.user=ai.owner) "
+            "JOIN inventory i ON (ai.id=i.item) "
+            'WHERE p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3 AND ai."type"=$4) '
+            'OR i."equipped") '
+            'ORDER BY i."equipped" DESC, i.locked DESC, ai."damage"+ai."armor" DESC;',
+            user_id,
+            lowest,
+            highest,
+            itemtype,
+        )
+
+    def armory_empty_embed(self, ctx, itemtype: str, lowest: int, highest: int):
+        result = discord.Embed(
+            title=_("{user}'s inventory includes").format(user=ctx.disp),
+            description=_("No items match this filter."),
+            colour=discord.Colour.blurple(),
+        )
+        result.set_footer(
+            text=_("Type: {itemtype} | Power: {lowest}-{highest}").format(
+                itemtype=itemtype,
+                lowest=lowest,
+                highest=highest,
+            )
+        )
+        return result
+
+    def armory_help_embed(self, ctx):
+        prefix = ctx.clean_prefix
+        result = discord.Embed(
+            title=_("Armory Help"),
+            description=_("Browse and filter your equipped and unequipped gear."),
+            colour=discord.Colour.blurple(),
+        )
+        result.add_field(
+            name=_("Quick Start"),
+            value=f"`{prefix}arm`\n`{prefix}arm help`",
+            inline=False,
+        )
+        result.add_field(
+            name=_("Text Filters"),
+            value=(
+                f"`{prefix}arm <type>`\n"
+                f"`{prefix}arm <type> <min_power> <max_power>`\n"
+                f"`{prefix}arm 2h 80 201`"
+            ),
+            inline=False,
+        )
+        result.add_field(
+            name=_("Item Types"),
+            value=(
+                "`all`, `1h`, `2h`, `sword`, `shield`, `axe`, `wand`, `dagger`, "
+                "`knife`, `spear`, `bow`, `hammer`, `scythe`, `mace`"
+            ),
+            inline=False,
+        )
+        result.add_field(
+            name=_("Interactive Controls"),
+            value=_("Use dropdowns for type/power filters and buttons to navigate pages or copy IDs."),
+            inline=False,
+        )
+        return result
+
     @checks.has_char()
     @commands.command(aliases=["arm", "ar"], brief=_("Show your gear items"))
     @locale_doc
@@ -1714,109 +2087,37 @@ class Profile(commands.Cog):
         _(
             """`[itemtype]` - The type of item to show; defaults to all items
             `[lowest]` - The lower boundary of items to show; defaults to 0
-            `[highest]` - The upper boundary of items to show; defaults to 101
+            `[highest]` - The upper boundary of items to show; defaults to 201
 
             Show your gear items. Items that are in the market will not be shown.
 
             Gear items can be equipped, sold and given away, or upgraded and merged to make them stronger.
             You can gain gear items by completing adventures, opening crates, or having your pet hunt for them, if you are a ranger.
 
+            Run `{prefix}armory` or `{prefix}arm` without arguments to use interactive dropdown filters.
+
             To sell unused items for their value, use `{prefix}merch`. To put them up on the global player market, use `{prefix}sell`."""
         )
 
+        if isinstance(itemtype, str) and itemtype.lower() in {"help", "h", "?", "usage"}:
+            return await ctx.send(embed=self.armory_help_embed(ctx))
 
         if highest < lowest:
             return await ctx.send(
                 _("Make sure that the `highest` value is greater than `lowest`.")
             )
 
-        # Validate itemtype
-        if itemtype != "2h":
-            if itemtype != "1h":
-                itemtype = itemtype.title()
-                itemtype_cls = ItemType.from_string(itemtype)
-                if itemtype != "All" and itemtype_cls is None:
-                    return await ctx.send(
-                        _(
-                            "Please select a valid item type or `all`, `1h`, `2h`. Available types:"
-                            " `{all_types}`"
-                        ).format(all_types=", ".join([t.name for t in ALL_ITEM_TYPES]))
-                    )
+        normalized_itemtype, validation_error = self.normalize_armory_itemtype(itemtype)
+        if validation_error:
+            return await ctx.send(validation_error)
 
-        # Perform the database query
-        if itemtype == "All":
-            ret = await self.bot.pool.fetch(
-                "SELECT ai.*, i.equipped, i.locked "
-                "FROM profile p "
-                "JOIN allitems ai ON (p.user=ai.owner) "
-                "JOIN inventory i ON (ai.id=i.item) "
-                'WHERE p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3) OR i."equipped") '
-                'ORDER BY i."equipped" DESC, i.locked DESC, ai."damage"+ai."armor" DESC;',
-                ctx.author.id,
-                lowest,
-                highest,
-            )
-        elif itemtype == "2h":
-            twohand = "both"
-            ret = await self.bot.pool.fetch(
-                "SELECT ai.*, i.equipped, i.locked "
-                "FROM profile p "
-                "JOIN allitems ai ON (p.user=ai.owner) "
-                "JOIN inventory i ON (ai.id=i.item) "
-                'WHERE p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3 AND ai."hand"=$4) '
-                'OR i."equipped") '
-                'ORDER BY i."equipped" DESC, i.locked DESC, ai."damage"+ai."armor" DESC;',
-                ctx.author.id,
-                lowest,
-                highest,
-                twohand,
-            )
-        elif itemtype == "1h":
-            twohand = "both"
-            ret = await self.bot.pool.fetch(
-                "SELECT ai.*, i.equipped, i.locked "
-                "FROM profile p "
-                "JOIN allitems ai ON (p.user=ai.owner) "
-                "JOIN inventory i ON (ai.id=i.item) "
-                'WHERE p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3 AND ai."hand"!=$4) '
-                'OR i."equipped") '
-                'ORDER BY i."equipped" DESC, i.locked DESC, ai."damage"+ai."armor" DESC;',
-                ctx.author.id,
-                lowest,
-                highest,
-                twohand,
-            )
-        else:
-            # itemtype is some valid custom type
-            ret = await self.bot.pool.fetch(
-                "SELECT ai.*, i.equipped, i.locked "
-                "FROM profile p "
-                "JOIN allitems ai ON (p.user=ai.owner) "
-                "JOIN inventory i ON (ai.id=i.item) "
-                'WHERE p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3 AND ai."type"=$4) '
-                'OR i."equipped") '
-                'ORDER BY i."equipped" DESC, i.locked DESC, ai."damage"+ai."armor" DESC;',
-                ctx.author.id,
-                lowest,
-                highest,
-                itemtype,
-            )
-
-        if not ret:
-            return await ctx.send(_("Your inventory is empty."))
-
-        # Split all items into pages of 5
-        allitems = list(chunks(ret, 5))
-        maxpage = len(allitems) - 1
-
-        # Build an embed for each chunk
-        embeds = []
-        for idx, chunk in enumerate(allitems):
-            page_embed = self.invembed(ctx, chunk, idx, maxpage)
-            embeds.append(page_embed)
-
-        # Pass both raw item pages AND the embeds to our custom paginator
-        view = ArmoryPaginatorView(ctx=ctx, pages=allitems, embeds=embeds)
+        view = ArmoryPaginatorView(
+            ctx=ctx,
+            profile_cog=self,
+            itemtype=normalized_itemtype or "All",
+            lowest=lowest,
+            highest=highest,
+        )
         await view.start()
 
     def lootembed(self, ctx, ret, currentpage, maxpage):
@@ -1856,13 +2157,151 @@ class Profile(commands.Cog):
         )
         if not ret:
             return await ctx.send(_("You do not have any loot at this moment."))
-        allitems = list(chunks(ret, 7))
-        maxpage = len(allitems) - 1
-        embeds = [
-            self.lootembed(ctx, chunk, idx, maxpage)
-            for idx, chunk in enumerate(allitems)
-        ]
-        await self.bot.paginator.Paginator(extras=embeds).paginate(ctx)
+        view = LootManagerView(
+            ctx,
+            ret,
+            exchange_callback=self.perform_exchange_loot,
+            sacrifice_callback=self.perform_sacrifice_from_loot_menu,
+        )
+        await view.start()
+
+    async def perform_sacrifice_from_loot_menu(
+        self,
+        ctx,
+        selected_loot_ids: list[int],
+        requested_count: int,
+        reserve_cooldown: bool = False,
+    ) -> None:
+        if not ctx.character_data.get("god"):
+            return await ctx.send(
+                _("You need to follow a God before you can sacrifice loot.")
+            )
+
+        gods_cog = self.bot.get_cog("Gods")
+        if gods_cog is None:
+            return await ctx.send(_("Sacrifice is not available right now."))
+
+        await gods_cog.perform_sacrifice_loot(
+            ctx,
+            selected_loot_ids,
+            requested_count=requested_count,
+            reserve_cooldown=reserve_cooldown,
+        )
+
+    async def perform_exchange_loot(
+        self,
+        ctx,
+        selected_loot_ids: list[int],
+        requested_count: int | None = None,
+        reserve_cooldown: bool = False,
+    ) -> None:
+        if reserve_cooldown:
+            retry_after = await reserve_loot_action_cooldown(self.bot, ctx.author.id)
+            if retry_after:
+                return await ctx.send(
+                    _(
+                        "You are already using loot. Try again in {seconds} seconds."
+                    ).format(seconds=int(retry_after))
+                )
+
+        selected_loot_ids = unique_loot_ids(selected_loot_ids)
+        requested_count = requested_count or len(selected_loot_ids)
+
+        async with self.bot.pool.acquire() as conn:
+            available_loot = await fetch_user_loot(conn, ctx.author.id, selected_loot_ids)
+
+        if not available_loot:
+            await reset_loot_action_cooldown(self.bot, ctx)
+            return await ctx.send(
+                _("Those loot item(s) were already used by another action.")
+            )
+
+        selected_loot_ids = [int(item["id"]) for item in available_loot]
+        locks, blocked = await acquire_loot_locks(
+            self.bot, ctx.author.id, selected_loot_ids, "exchange"
+        )
+        if blocked:
+            await reset_loot_action_cooldown(self.bot, ctx)
+            return await ctx.send(
+                _(
+                    "Loot item(s) `{loot_ids}` are already being used. Finish or"
+                    " cancel the other loot action first."
+                ).format(loot_ids=", ".join([str(loot_id) for loot_id in blocked]))
+            )
+
+        try:
+            value = int(loot_value(available_loot))
+            count = len(available_loot)
+
+            try:
+                reward = await LootRewardView(
+                    ctx, item_count=count, money_value=value
+                ).prompt()
+            except NoChoice:
+                await reset_loot_action_cooldown(self.bot, ctx)
+                return await ctx.send(_("You didn't choose anything."))
+
+            if reward is None:
+                await reset_loot_action_cooldown(self.bot, ctx)
+                return await ctx.send(_("Cancelled."))
+
+            if reward == "xp":
+                old_level = rpgtools.xptolevel(ctx.character_data["xp"])
+
+            async with self.bot.pool.acquire() as conn:
+                async with conn.transaction():
+                    deleted_loot = await delete_user_loot(
+                        conn, ctx.author.id, selected_loot_ids
+                    )
+                    if not deleted_loot:
+                        await reset_loot_action_cooldown(self.bot, ctx)
+                        return await ctx.send(
+                            _("Those loot item(s) were already used by another action.")
+                        )
+
+                    actual_value = int(loot_value(deleted_loot))
+                    reward_amount = actual_value // 4 if reward == "xp" else actual_value
+                    await conn.execute(
+                        f'UPDATE profile SET "{reward}"="{reward}"+$1 WHERE "user"=$2;',
+                        reward_amount,
+                        ctx.author.id,
+                    )
+                    await self.bot.log_transaction(
+                        ctx,
+                        from_=1,
+                        to=ctx.author.id,
+                        subject="exchange",
+                        data={"Reward": reward, "Amount": reward_amount},
+                        conn=conn,
+                    )
+
+            text = _(
+                "You received **{reward}** when exchanging loot item(s)"
+                " `{loot_ids}`. "
+            ).format(
+                reward=(
+                    f"${reward_amount}"
+                    if reward == "money"
+                    else f"{reward_amount} XP"
+                ),
+                loot_ids=", ".join([str(item["id"]) for item in deleted_loot]),
+            )
+            skipped = requested_count - len(deleted_loot)
+            additional = _(
+                "Skipped `{amount}` because they did not belong to you or were"
+                " already used."
+            ).format(amount=skipped)
+
+            await ctx.send(text + (additional if skipped else ""))
+
+            if reward == "xp":
+                new_level = int(
+                    rpgtools.xptolevel(ctx.character_data["xp"] + reward_amount)
+                )
+                if old_level != new_level:
+                    await self.bot.process_levelup(ctx, new_level, old_level)
+        finally:
+            await release_loot_locks(self.bot, locks)
 
     @checks.has_char()
     @user_cooldown(180, identifier="sacrificeexchange")
@@ -1876,91 +2315,48 @@ class Profile(commands.Cog):
 
             If you choose money, you will get the loots' combined value in cash. For XP, you will get 1/4th of the combined value in XP."""
         )
-        if none_given := (len(loot_ids) == 0):
-            value, count = await self.bot.pool.fetchval(
-                'SELECT (SUM("value"), COUNT(*)) FROM loot WHERE "user"=$1',
-                ctx.author.id,
-            )
-            if count == 0:
-                await self.bot.reset_cooldown(ctx)
-                return await ctx.send(_("You don't have any loot."))
-        else:
-            value, count = await self.bot.pool.fetchval(
-                'SELECT (SUM("value"), COUNT("value")) FROM loot WHERE "id"=ANY($1)'
-                ' AND "user"=$2;',
-                loot_ids,
-                ctx.author.id,
-            )
-            if not count:
-                await self.bot.reset_cooldown(ctx)
-                return await ctx.send(
-                    _("You don't own any loot items with the IDs: {itemids}").format(
-                        itemids=", ".join([str(loot_id) for loot_id in loot_ids])
-                    )
-                )
-
-        value = int(value)
-        reward = await self.bot.paginator.Choose(
-            title=_(f"Select a reward for the {count} items"),
-            placeholder=_("Select a reward"),
-            footer=_("Do you want favor? {prefix}sacrifice instead").format(
-                prefix=ctx.clean_prefix
-            ),
-            return_index=True,
-            entries=[f"**${value}**", _("**{value} XP**").format(value=value // 4)],
-            choices=[f"${value}", _("{value} XP").format(value=value // 4)],
-        ).paginate(ctx)
-        reward = ["money", "xp"][reward]
-        if reward == "xp":
-            old_level = rpgtools.xptolevel(ctx.character_data["xp"])
-            value = value // 4
+        none_given = len(loot_ids) == 0
+        requested_loot_ids = unique_loot_ids(loot_ids)
 
         async with self.bot.pool.acquire() as conn:
+            available_loot = await fetch_user_loot(
+                conn, ctx.author.id, None if none_given else requested_loot_ids
+            )
+
+        if not available_loot:
+            await reset_loot_action_cooldown(self.bot, ctx)
             if none_given:
-                await conn.execute('DELETE FROM loot WHERE "user"=$1;', ctx.author.id)
-            else:
-                await conn.execute(
-                    'DELETE FROM loot WHERE "id"=ANY($1) AND "user"=$2;',
-                    loot_ids,
-                    ctx.author.id,
+                return await ctx.send(_("You don't have any loot."))
+            return await ctx.send(
+                _("You don't own any loot items with the IDs: {itemids}").format(
+                    itemids=", ".join([str(loot_id) for loot_id in requested_loot_ids])
                 )
-            await conn.execute(
-                f'UPDATE profile SET "{reward}"="{reward}"+$1 WHERE "user"=$2;',
-                value,
-                ctx.author.id,
             )
-            await self.bot.log_transaction(
-                ctx,
-                from_=1,
-                to=ctx.author.id,
-                subject="exchange",
-                data={"Reward": reward, "Amount": value},
-                conn=conn,
-            )
+
         if none_given:
-            text = _(
-                "You received **{reward}** when exchanging all of your loot."
-            ).format(reward=f"${value}" if reward == "money" else f"{value} XP")
+            try:
+                selected_loot_ids = await LootSelectionView(
+                    ctx,
+                    available_loot,
+                    title=_("Select loot to exchange"),
+                    placeholder=_("Choose loot to exchange"),
+                ).prompt()
+            except NoChoice:
+                await reset_loot_action_cooldown(self.bot, ctx)
+                return await ctx.send(_("You didn't choose anything."))
+
+            if not selected_loot_ids:
+                await reset_loot_action_cooldown(self.bot, ctx)
+                return await ctx.send(_("Cancelled."))
         else:
-            text = _(
-                "You received **{reward}** when exchanging loot item(s) `{loot_ids}`. "
-            ).format(
-                reward=f"${value}" if reward == "money" else f"{value} XP",
-                loot_ids=", ".join([str(lootid) for lootid in loot_ids]),
-            )
-        additional = _("Skipped `{amount}` because they did not belong to you.").format(
-            amount=len(loot_ids) - count
+            selected_loot_ids = [int(item["id"]) for item in available_loot]
+
+        requested_count = (
+            len(selected_loot_ids) if none_given else len(requested_loot_ids)
         )
-        # if len(loot_ids) > count else ""
-
-        await ctx.send(text + (additional if len(loot_ids) > count else ""))
-
-        if reward == "xp":
-            new_level = int(rpgtools.xptolevel(ctx.character_data["xp"] + value))
-            if old_level != new_level:
-                await self.bot.process_levelup(ctx, new_level, old_level)
-
-        await self.bot.reset_cooldown(ctx)
+        await self.perform_exchange_loot(
+            ctx, selected_loot_ids, requested_count=requested_count
+        )
 
     @user_cooldown(180)
     @checks.has_char()
@@ -2091,7 +2487,7 @@ class Profile(commands.Cog):
     @preset_cmd.command(name="create")
     async def preset_create(self, ctx, preset_id: str):
         """
-        Creates or overwrites a preset using your currently equipped items.
+        Creates or overwrites a preset using your currently equipped items and amulet.
         Enforces a maximum of 5 total presets per user.
         Usage:
             $preset create raid_loadout
@@ -2109,10 +2505,26 @@ class Profile(commands.Cog):
                 """,
                 ctx.author.id
             )
-            if not rows:
-                return await ctx.send("You have no currently equipped items to save.")
+
+            # 1b) Grab currently equipped amulet (if any)
+            amulet_row = await conn.fetchrow(
+                """
+                SELECT id
+                  FROM amulets
+                 WHERE user_id = $1
+                   AND equipped IS TRUE
+                 ORDER BY id DESC
+                 LIMIT 1;
+                """,
+                ctx.author.id,
+            )
+
+            if not rows and not amulet_row:
+                return await ctx.send("You have no currently equipped items or amulet to save.")
 
             item_ids = [r["item"] for r in rows]
+            if amulet_row:
+                item_ids.append(self._encode_preset_amulet_id(amulet_row["id"]))
 
             # 2) Check how many presets the user currently has
             preset_count = await conn.fetchval(
@@ -2155,8 +2567,12 @@ class Profile(commands.Cog):
                 item_ids
             )
 
+        gear_item_ids, amulet_id = self._split_preset_item_ids(item_ids)
+        gear_items_text = ", ".join(map(str, gear_item_ids)) if gear_item_ids else "(none)"
+        amulet_text = str(amulet_id) if amulet_id is not None else "none"
+
         await ctx.send(
-            f"Preset **{preset_id}** saved with these equipped item IDs: {', '.join(map(str, item_ids))}"
+            f"Preset **{preset_id}** saved.\nGear IDs: {gear_items_text}\nAmulet ID: {amulet_text}"
         )
 
     @preset_cmd.command(name="use")
@@ -2182,92 +2598,113 @@ class Profile(commands.Cog):
             if not record:
                 return await ctx.send(f"You have no preset **{preset_id}** defined.")
 
-            # 2) Get currently equipped items to unequip them later
-            equipped = await conn.fetch(
-                """
-                SELECT ai.id, ai.type
-                  FROM allitems ai
-                  JOIN inventory i ON (ai.id = i.item)
-                 WHERE i.equipped IS TRUE
-                   AND ai.owner = $1;
-                """,
-                ctx.author.id
-            )
-
-            item_ids = record["item_ids"]
-            if not item_ids:
+            stored_item_ids = record["item_ids"]
+            gear_item_ids, preset_amulet_id = self._split_preset_item_ids(stored_item_ids)
+            if not gear_item_ids and preset_amulet_id is None:
                 return await ctx.send(f"Preset **{preset_id}** has no items stored.")
 
             # 3) Check ownership of new items
-            owned_rows = await conn.fetch(
-                """
-                SELECT i.item, ai.type
-                  FROM inventory i
-                  JOIN allitems ai ON (i.item = ai.id)
-                 WHERE ai.owner = $1
-                   AND i.item = ANY($2::bigint[]);
-                """,
-                ctx.author.id,
-                item_ids
-            )
-            owned_items = {r["item"]: r["type"] for r in owned_rows}
-            missing = set(item_ids) - set(owned_items.keys())
-            if missing:
-                return await ctx.send(
-                    f"You no longer own these item(s): {', '.join(map(str, missing))}"
+            if gear_item_ids:
+                owned_rows = await conn.fetch(
+                    """
+                    SELECT i.item, ai.type
+                      FROM inventory i
+                      JOIN allitems ai ON (i.item = ai.id)
+                     WHERE ai.owner = $1
+                       AND i.item = ANY($2::bigint[]);
+                    """,
+                    ctx.author.id,
+                    gear_item_ids,
                 )
+                owned_item_ids = {r["item"] for r in owned_rows}
+                missing = set(gear_item_ids) - owned_item_ids
+                if missing:
+                    return await ctx.send(
+                        f"You no longer own these item(s): {', '.join(map(str, missing))}"
+                    )
+
+            preset_amulet = None
+            if preset_amulet_id is not None:
+                preset_amulet = await conn.fetchrow(
+                    """
+                    SELECT id, type, tier
+                      FROM amulets
+                     WHERE user_id = $1
+                       AND id = $2;
+                    """,
+                    ctx.author.id,
+                    preset_amulet_id,
+                )
+                if not preset_amulet:
+                    return await ctx.send(
+                        f"You no longer own the amulet saved in this preset (ID: {preset_amulet_id})."
+                    )
 
             # 4) Begin transaction
             async with conn.transaction():
-                # 5) Unequip currently equipped items
-                for item in equipped:
-                    await conn.execute(
-                        """
-                        UPDATE inventory
-                           SET equipped = FALSE
-                         WHERE item = $1;
-                        """,
-                        item["id"]
-                    )
+                # 5) Unequip all currently equipped items for this owner.
+                await conn.execute(
+                    """
+                    UPDATE inventory
+                       SET equipped = FALSE
+                     WHERE item IN (
+                         SELECT i.item
+                           FROM inventory i
+                           JOIN allitems ai ON (i.item = ai.id)
+                          WHERE ai.owner = $1
+                            AND i.equipped IS TRUE
+                     );
+                    """,
+                    ctx.author.id,
+                )
 
-                # 6) Equip new items
-                for item_id in item_ids:
-                    item_type = owned_items[item_id]
-                    # First ensure no other item of same type is equipped
-                    await conn.execute(
-                        """
-                        UPDATE inventory
-                           SET equipped = FALSE
-                         WHERE item IN (
-                             SELECT i.item
-                               FROM inventory i
-                               JOIN allitems ai ON (i.item = ai.id)
-                              WHERE ai.owner = $1
-                                AND ai.type = $2
-                                AND i.equipped = TRUE
-                         );
-                        """,
-                        ctx.author.id,
-                        item_type
-                    )
-                    # Then equip the new item
+                # 6) Equip every item saved in the preset exactly as stored.
+                if gear_item_ids:
                     await conn.execute(
                         """
                         UPDATE inventory
                            SET equipped = TRUE
-                         WHERE item = $1;
+                         WHERE item = ANY($1::bigint[]);
                         """,
-                        item_id
+                        gear_item_ids,
+                    )
+
+                # 6b) Apply amulet state from the preset.
+                await conn.execute(
+                    """
+                    UPDATE amulets
+                       SET equipped = FALSE
+                     WHERE user_id = $1
+                       AND equipped IS TRUE;
+                    """,
+                    ctx.author.id,
+                )
+
+                if preset_amulet_id is not None:
+                    await conn.execute(
+                        """
+                        UPDATE amulets
+                           SET equipped = TRUE
+                         WHERE user_id = $1
+                           AND id = $2;
+                        """,
+                        ctx.author.id,
+                        preset_amulet_id,
                     )
 
         # 7) Send success message with item details
         item_details = []
-        for item_id in item_ids:
+        for item_id in gear_item_ids:
             item = await self.bot.pool.fetchrow(
                 "SELECT name, type FROM allitems WHERE id = $1", item_id
             )
             if item:
                 item_details.append(f"- {item['name']} ({item['type']})")
+
+        if preset_amulet:
+            item_details.append(
+                f"- Amulet ID {preset_amulet['id']} (Tier {preset_amulet['tier']} {preset_amulet['type'].title()})"
+            )
 
         await ctx.send(
             f"✅ **Equipped preset {preset_id}:**\n" + "\n".join(item_details)[:1900]
@@ -2296,9 +2733,10 @@ class Profile(commands.Cog):
         lines = []
         for r in rows:
             pid = r["preset_id"]
-            items = r["item_ids"]
-            items_str = ", ".join(map(str, items)) if items else "(none)"
-            lines.append(f"**Preset {pid}:** {items_str}")
+            gear_item_ids, amulet_id = self._split_preset_item_ids(r["item_ids"])
+            items_str = ", ".join(map(str, gear_item_ids)) if gear_item_ids else "(none)"
+            amulet_str = str(amulet_id) if amulet_id is not None else "none"
+            lines.append(f"**Preset {pid}:** Gear: {items_str} | Amulet: {amulet_str}")
 
         await ctx.send("\n".join(lines))
 

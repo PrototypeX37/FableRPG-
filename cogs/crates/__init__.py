@@ -2,6 +2,7 @@
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
 Copyright (C) 2023-2024 Lunar (PrototypeX37)
+Copyright (C) 2026 Danaelis
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,7 +17,9 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
+import asyncio
 from collections import Counter, namedtuple
+import traceback
 
 import discord
 import random
@@ -52,10 +55,234 @@ from utils.checks import has_char, has_money, is_gm, is_class
 from utils.i18n import _, locale_doc
 
 
+class CrateActionView(discord.ui.View):
+    def __init__(self, cog, ctx, timeout=120):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.ctx = ctx
+        self.message = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "This crate menu isn't for you!", ephemeral=True
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    @discord.ui.button(label="Open", style=discord.ButtonStyle.success)
+    async def open_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.show_crate_rarity_picker(interaction, self.ctx, "open", self.message)
+
+    @discord.ui.button(label="Sell", style=discord.ButtonStyle.primary)
+    async def sell_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.show_crate_rarity_picker(interaction, self.ctx, "sell", self.message)
+
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary)
+    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = await self.cog.build_crates_embed(self.ctx)
+        await interaction.response.edit_message(content=None, embed=embed, view=self)
+
+    @discord.ui.button(label="Help", style=discord.ButtonStyle.secondary)
+    async def help_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=self.cog.build_crates_help_embed(self.ctx),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary)
+    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.message.delete()
+        except discord.HTTPException:
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(view=self)
+        else:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+        self.stop()
+
+
+class CrateRaritySelect(discord.ui.Select):
+    def __init__(self, cog, ctx, mode, source_message):
+        self.cog = cog
+        self.ctx = ctx
+        self.mode = mode
+        self.source_message = source_message
+        rarities = cog.OPEN_RARITIES if mode == "open" else cog.SELL_RARITIES
+        options = [
+            discord.SelectOption(
+                label=rarity.title(),
+                value=rarity,
+                emoji=getattr(cog.emotes, rarity),
+            )
+            for rarity in rarities
+        ]
+        super().__init__(
+            placeholder=f"Choose a crate rarity to {mode}",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.cog.show_crate_amount_picker(
+            interaction, self.ctx, self.mode, self.values[0], self.source_message
+        )
+
+
+class CrateRarityView(discord.ui.View):
+    def __init__(self, cog, ctx, mode, source_message, timeout=120):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.ctx = ctx
+        self.mode = mode
+        self.source_message = source_message
+        self.add_item(CrateRaritySelect(cog, ctx, mode, source_message))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "This crate menu isn't for you!", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = CrateActionView(self.cog, self.ctx)
+        view.message = self.source_message
+        embed = await self.cog.build_crates_embed(self.ctx)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+
+class CrateAmountView(discord.ui.View):
+    def __init__(self, cog, ctx, mode, rarity, available, source_message, timeout=120):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.ctx = ctx
+        self.mode = mode
+        self.rarity = rarity
+        self.source_message = source_message
+
+        max_amount = min(100, max(1, int(available)))
+        amount_options = [(f"All ({max_amount})", max_amount)]
+        for amount in (1, 5, 10, 25, 100):
+            if amount <= max_amount and amount != max_amount:
+                amount_options.append((str(amount), amount))
+
+        for label, amount in amount_options:
+            button = discord.ui.Button(
+                label=label,
+                style=discord.ButtonStyle.success if mode == "open" else discord.ButtonStyle.primary,
+            )
+            button.callback = self._amount_callback(amount)
+            self.add_item(button)
+
+        back_button = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary)
+        back_button.callback = self._back_callback
+        self.add_item(back_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "This crate menu isn't for you!", ephemeral=True
+            )
+            return False
+        return True
+
+    def _amount_callback(self, amount):
+        async def callback(interaction: discord.Interaction):
+            if self.mode == "open":
+                await interaction.response.defer()
+                command = self.cog.bot.get_command("open")
+                if command is None:
+                    return await self.ctx.send("The open command is not loaded.")
+                await self.ctx.invoke(command, self.rarity, amount)
+                await self.cog.refresh_crates_message(self.ctx, self.source_message)
+            else:
+                await self.cog.show_sell_confirmation(
+                    interaction, self.ctx, self.rarity, amount, self.source_message
+                )
+        return callback
+
+    async def _back_callback(self, interaction: discord.Interaction):
+        await self.cog.show_crate_rarity_picker(
+            interaction, self.ctx, self.mode, self.source_message
+        )
+
+
+class CrateSellConfirmView(discord.ui.View):
+    def __init__(self, cog, ctx, rarity, quantity, source_message, timeout=45):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.ctx = ctx
+        self.rarity = rarity
+        self.quantity = quantity
+        self.source_message = source_message
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "This crate menu isn't for you!", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Yes", style=discord.ButtonStyle.success)
+    async def yes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="Selling crates...", view=self)
+        await self.cog.sell_crates_from_button(self.ctx, self.rarity, self.quantity)
+        await self.cog.refresh_crates_message(self.ctx, self.source_message)
+        self.stop()
+
+    @discord.ui.button(label="No", style=discord.ButtonStyle.danger)
+    async def no_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="Sale cancelled.", view=self)
+        self.stop()
+
+
 class Crates(commands.Cog):
+    OPEN_RARITIES = (
+        "common",
+        "uncommon",
+        "rare",
+        "magic",
+        "legendary",
+        "mystery",
+        "fortune",
+        "divine",
+        "materials",
+    )
+    SELL_RARITIES = ("common", "uncommon", "rare", "magic", "mystery", "legendary")
+    SELL_PRICES = {
+        "common": 400,
+        "uncommon": 900,
+        "rare": 3500,
+        "magic": 25000,
+        "mystery": 1500,
+        "legendary": 100000,
+    }
+
     def __init__(self, bot):
         self.bot = bot
         self.crate = 0
+        self._crate_profile_columns_ready = False
+        self._local_open_locks = {}
         self.emotes = namedtuple(
             "CrateEmotes", "common uncommon rare magic legendary item mystery fortune divine materials"
         )(
@@ -71,10 +298,235 @@ class Crates(commands.Cog):
             materials="<:c_mats:1405959241898004480>",
         )
 
+    async def acquire_open_lock(self, user_id):
+        redis = getattr(self.bot, "redis", None)
+        if redis is not None:
+            token = str(uuid.uuid4())
+            key = f"lock:crates_open_user:{user_id}"
+            try:
+                acquired = await asyncio.wait_for(
+                    redis.execute_command("SET", key, token, "EX", 180, "NX"),
+                    timeout=2,
+                )
+                if acquired:
+                    return ("redis", key, token)
+                return None
+            except Exception as exc:
+                print(
+                    f"[crates.open] Redis open lock unavailable for user {user_id}: {exc!r}",
+                    flush=True,
+                )
+
+        lock = self._local_open_locks.setdefault(user_id, asyncio.Lock())
+        if lock.locked():
+            return None
+        await lock.acquire()
+        return ("local", user_id, lock)
+
+    async def release_open_lock(self, lock_ref):
+        if lock_ref is None:
+            return
+        lock_type, key, value = lock_ref
+        if lock_type == "redis":
+            redis = getattr(self.bot, "redis", None)
+            if redis is None:
+                return
+            try:
+                current = await asyncio.wait_for(
+                    redis.execute_command("GET", key),
+                    timeout=2,
+                )
+                if isinstance(current, bytes):
+                    current = current.decode()
+                if current == value:
+                    await asyncio.wait_for(redis.execute_command("DEL", key), timeout=2)
+            except Exception as exc:
+                print(
+                    f"[crates.open] Failed to release Redis open lock {key}: {exc!r}",
+                    flush=True,
+                )
+            return
+
+        lock = value
+        if lock.locked():
+            lock.release()
+        self._local_open_locks.pop(key, None)
+
+    async def fetch_crate_counts(self, user_id):
+        await self._ensure_crate_profile_columns()
+        columns = ", ".join(f'"crates_{rarity}"' for rarity in self.OPEN_RARITIES)
+        query = f'SELECT {columns} FROM profile WHERE "user"=$1;'
+        row = await self.bot.pool.fetchrow(query, user_id)
+        row = dict(row) if row else {}
+        return {
+            rarity: int(row.get(f"crates_{rarity}", 0) or 0)
+            for rarity in self.OPEN_RARITIES
+        }
+
+    async def build_crates_embed(self, ctx):
+        counts = await self.fetch_crate_counts(ctx.author.id)
+        embed = discord.Embed(
+            title=_("Your Crates"), color=discord.Color.blurple()
+        ).set_author(name=ctx.disp, icon_url=ctx.author.display_avatar.url)
+
+        for rarity in self.OPEN_RARITIES:
+            embed.add_field(
+                name=f"{getattr(self.emotes, rarity)} {rarity.title()}",
+                value=_("{amount} crates").format(amount=counts[rarity]),
+                inline=False,
+            )
+
+        embed.set_footer(
+            text=_("Use the buttons below to open, sell, refresh, or view crate info.")
+        )
+        return embed
+
+    def build_crates_help_embed(self, ctx):
+        embed = discord.Embed(
+            title=_("Crate Info"),
+            color=discord.Color.blurple(),
+            description=_("Open crates for items, materials, money, XP, or other crates."),
+        )
+        embed.add_field(name=f"{self.emotes.common} Common", value=_("Items with stats from 1 to 30."), inline=False)
+        embed.add_field(name=f"{self.emotes.uncommon} Uncommon", value=_("Items with stats from 10 to 35."), inline=False)
+        embed.add_field(name=f"{self.emotes.rare} Rare", value=_("Items with stats from 20 to 40."), inline=False)
+        embed.add_field(name=f"{self.emotes.magic} Magic", value=_("Items with stats from 30 to 55."), inline=False)
+        embed.add_field(name=f"{self.emotes.legendary} Legendary", value=_("Items with stats from 41 to 80 and a chance for Drachmas."), inline=False)
+        embed.add_field(name=f"{self.emotes.divine} Divine", value=_("Items with stats from 47 to 100 and a higher chance for Drachmas."), inline=False)
+        embed.add_field(name=f"{self.emotes.mystery} Mystery", value=_("Opens into a random crate type."), inline=False)
+        embed.add_field(name=f"{self.emotes.fortune} Fortune", value=_("Gives either XP or money."), inline=False)
+        embed.add_field(name=f"{self.emotes.materials} Materials", value=_("Gives random crafting materials."), inline=False)
+        embed.set_footer(text=_("Open and sell actions are limited to 100 crates at a time."))
+        return embed
+
+    async def refresh_crates_message(self, ctx, message):
+        if message is None:
+            return
+        view = CrateActionView(self, ctx)
+        view.message = message
+        try:
+            await message.edit(content=None, embed=await self.build_crates_embed(ctx), view=view)
+        except discord.HTTPException:
+            pass
+
+    async def show_crate_rarity_picker(self, interaction, ctx, mode, source_message):
+        embed = await self.build_crates_embed(ctx)
+        view = CrateRarityView(self, ctx, mode, source_message)
+        await interaction.response.edit_message(
+            content=f"Choose which crate rarity to {mode}.",
+            embed=embed,
+            view=view,
+        )
+
+    async def show_crate_amount_picker(self, interaction, ctx, mode, rarity, source_message):
+        counts = await self.fetch_crate_counts(ctx.author.id)
+        available = counts.get(rarity, 0)
+        if available <= 0:
+            return await interaction.response.send_message(
+                f"You do not have any {rarity} crates.",
+                ephemeral=True,
+            )
+
+        view = CrateAmountView(self, ctx, mode, rarity, available, source_message)
+        await interaction.response.edit_message(
+            content=(
+                f"Choose how many {getattr(self.emotes, rarity)} **{rarity}** "
+                f"crates to {mode}. You have **{available}**."
+            ),
+            embed=None,
+            view=view,
+        )
+
+    async def show_sell_confirmation(self, interaction, ctx, rarity, quantity, source_message):
+        total = self.SELL_PRICES[rarity] * quantity
+        view = CrateSellConfirmView(self, ctx, rarity, quantity, source_message)
+        await interaction.response.edit_message(
+            content=(
+                f"{ctx.author.mention}, sell **{quantity} {getattr(self.emotes, rarity)} "
+                f"{rarity}** crate(s) for **${total:,.0f}**?"
+            ),
+            embed=None,
+            view=view,
+        )
+
+    async def sell_crates_from_button(self, ctx, rarity, quantity):
+        total = self.SELL_PRICES[rarity] * quantity
+        name = ctx.character_data["name"]
+        async with self.bot.pool.acquire() as conn:
+            remaining = await conn.fetchval(
+                f'UPDATE profile SET "crates_{rarity}"="crates_{rarity}"-$1,'
+                f' "money"="money"+$2 WHERE "user"=$3 AND "crates_{rarity}" >= $1 '
+                f'RETURNING "crates_{rarity}";',
+                quantity,
+                total,
+                ctx.author.id,
+            )
+            if remaining is None:
+                return await ctx.send(
+                    _("{name}, you no longer have enough {rarity} crates. Sale cancelled.").format(
+                        name=name, rarity=rarity
+                    )
+                )
+            await self.bot.log_transaction(
+                ctx,
+                from_=ctx.author,
+                to=1,
+                subject="sellcrate",
+                data={"Rarity": rarity, "Quantity": quantity, "Amount": total},
+                conn=conn,
+            )
+
+        await ctx.send(
+            _(
+                "{name}, you've successfully sold **{quantity} {emoji} {rarity}** crate(s) to the NPC for **${total_price:,.0f}**."
+            ).format(
+                name=name,
+                quantity=quantity,
+                emoji=getattr(self.emotes, rarity),
+                rarity=rarity,
+                total_price=total,
+            )
+        )
+
+    async def _ensure_crate_profile_columns(self):
+        if self._crate_profile_columns_ready:
+            return
+        pool = getattr(self.bot, "pool", None)
+        if pool is None:
+            return
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                ALTER TABLE profile
+                ADD COLUMN IF NOT EXISTS crates_fortune BIGINT DEFAULT 0
+                """
+            )
+            await conn.execute(
+                """
+                ALTER TABLE profile
+                ADD COLUMN IF NOT EXISTS crates_divine BIGINT DEFAULT 0
+                """
+            )
+            await conn.execute(
+                """
+                ALTER TABLE profile
+                ADD COLUMN IF NOT EXISTS crates_materials BIGINT DEFAULT 0
+                """
+            )
+            await conn.execute(
+                """
+                ALTER TABLE profile
+                ADD COLUMN IF NOT EXISTS dragoncoins BIGINT DEFAULT 0
+                """
+            )
+        self._crate_profile_columns_ready = True
+
     @has_char()
     @commands.command(aliases=["boxes"], brief=_("Show your crates."))
     @locale_doc
     async def crates(self, ctx):
+        await self._ensure_crate_profile_columns()
         _(
             """Shows all the crates you can have.
 
@@ -91,113 +543,177 @@ class Crates(commands.Cog):
             You can receive crates by voting for the bot using `{prefix}vote`, using `{prefix}daily`, and with a small chance from `{prefix}familyevent` if you have children."""
         )
 
-        embed = discord.Embed(
-            title=_("Your Crates"), color=discord.Color.blurple()
-        ).set_author(name=ctx.disp, icon_url=ctx.author.display_avatar.url)
-
-        for rarity in ("common", "uncommon", "rare", "magic", "legendary", "mystery", "fortune", "divine", "materials"):
-            amount = ctx.character_data[f"crates_{rarity}"]
-            emote = getattr(self.emotes, rarity)
-
-
-            embed.add_field(
-                name=f"{emote} {rarity.title()}",
-                value=_("{amount} crates").format(amount=amount),
-                inline=False,
-            )
-
-        embed.set_footer(
-            text=_("Use {prefix}open [rarity] to open one!").format(
-                prefix=ctx.clean_prefix
-            )
-        )
-
-        await ctx.send(embed=embed)
+        view = CrateActionView(self, ctx)
+        view.message = await ctx.send(embed=await self.build_crates_embed(ctx), view=view)
 
 
     @commands.cooldown(1, 10, commands.BucketType.user)
     @has_char()
-    @commands.command(name="open", brief=_("Open a crate"))
+    @commands.command(name="open", aliases=["opencrate", "crateopen"], brief=_("Open a crate"))
     @locale_doc
     async def _open(
-            self, ctx, arg1=None, arg2=None
+            self, ctx, rarity: CrateRarity = "common", amount: IntFromTo(1, 100) = 1
     ):
-        # Define valid rarities and their shortcuts
-        valid_rarities = {
-            'c': 'common', 'common': 'common',
-            'u': 'uncommon', 'uncommon': 'uncommon',
-            'r': 'rare', 'rare': 'rare',
-            'm': 'magic', 'magic': 'magic',
-            'l': 'legendary', 'legendary': 'legendary',
-            'd': 'divine', 'divine': 'divine',
-            'f': 'fortune', 'fortune': 'fortune',
-            'myst': 'mystery', 'mystery': 'mystery',
-            'mat': 'materials', 'mats': 'materials', 'materials': 'materials'
-        }
-        
-        # Handle parameter ordering
-        if arg1 is None and arg2 is None:
-            # No args provided, use defaults
-            rarity = "common"
-            amount = 1
-        elif arg2 is None:
-            # Only one argument provided
-            if str(arg1).isdigit():
-                amount = max(1, min(100, int(arg1)))  # Clamp between 1-100
-                rarity = "common"
-            else:
-                # Check if it's a valid rarity shortcut or name
-                rarity_input = arg1.lower()
-                if rarity_input in valid_rarities:
-                    rarity = valid_rarities[rarity_input]
-                else:
-                    rarity = "common"  # Default to common if invalid rarity provided
-                amount = 1
-        else:
-            # Two arguments provided, check order
-            if str(arg1).isdigit() and str(arg2).lower() in valid_rarities:
-                amount = max(1, min(100, int(arg1)))
-                rarity = valid_rarities[str(arg2).lower()]
-            elif str(arg2).isdigit() and str(arg1).lower() in valid_rarities:
-                amount = max(1, min(100, int(arg2)))
-                rarity = valid_rarities[str(arg1).lower()]
-            else:
-                # Default to first arg as rarity, second as amount if possible
-                rarity = "common"
-                try:
-                    amount = max(1, min(100, int(arg1) if str(arg1).isdigit() else int(arg2) if str(arg2).isdigit() else 1))
-                    # Check if the other argument is a valid rarity
-                    other_arg = arg2 if str(arg1).isdigit() else arg1
-                    if other_arg.lower() in valid_rarities:
-                        rarity = valid_rarities[other_arg.lower()]
-                except (ValueError, TypeError):
-                    amount = 1
+        lock_ref = await self.acquire_open_lock(ctx.author.id)
+        if lock_ref is None:
+            try:
+                ctx.command.reset_cooldown(ctx)
+            except Exception:
+                pass
+            try:
+                await self.bot.reset_cooldown(ctx)
+            except Exception:
+                pass
+            return await ctx.send(
+                _("You already have a crate opening in progress. Please wait for it to finish.")
+            )
 
-        
-        _(
-            """`[rarity]` - the crate's rarity to open, can be common, uncommon, rare, magic or legendary; defaults to common
-            `[amount]` - the amount of crates to open, may be in range from 1 to 100 at once
+        try:
+            return await self._open_unlocked(ctx, rarity, amount)
+        finally:
+            await self.release_open_lock(lock_ref)
 
-            Open one of your crates to receive a weapon. To check which crates contain which items, check `{prefix}help crates`.
-            This command takes up a lot of space, so choose a spammy channel to open crates."""
+    async def _open_unlocked(
+            self, ctx, rarity: CrateRarity = "common", amount: IntFromTo(1, 100) = 1
+    ):
+        await self._ensure_crate_profile_columns()
+        print(
+            f"[crates.open] enter user={ctx.author.id} rarity={rarity} amount={amount} "
+            f"cached={ctx.character_data.get(f'crates_{rarity}', 'MISSING')} "
+            f"msg={ctx.message.id} cluster_count={self.bot.cluster_count}",
+            flush=True,
         )
         try:
-            name = ctx.character_data["name"]
-            if ctx.character_data[f"crates_{rarity}"] < amount:
-                return await ctx.send(
-                    _(
-                        "Seems like you don't have {amount} crate(s) of this rarity yet."
-                        " Vote me up to get a random one or find them!"
-                    ).format(amount=amount)
-                )
+            _(
+                """`[rarity]` - the crate's rarity to open, can be common, uncommon, rare, magic or legendary; defaults to common
+                `[amount]` - the amount of crates to open, may be in range from 1 to 100 at once
 
+                Open one of your crates to receive a weapon. To check which crates contain which items, check `{prefix}help crates`.
+                This command takes up a lot of space, so choose a spammy channel to open crates."""
+            )
+            print(
+                f"[crates.open] after help text user={ctx.author.id} rarity={rarity}",
+                flush=True,
+            )
+        except Exception:
+            print(
+                f"[crates.open] pre-try setup failed for user {ctx.author.id}, "
+                f"rarity={rarity}, amount={amount}:\n{traceback.format_exc()}",
+                flush=True,
+            )
+            raise
+        try:
+            async def _safe_reset_cooldown():
+                command = getattr(ctx, "command", None)
+                if command is not None:
+                    try:
+                        command.reset_cooldown(ctx)
+                    except Exception:
+                        pass
+                try:
+                    await self.bot.reset_cooldown(ctx)
+                except Exception as cd_exc:
+                    print(
+                        f"[crates.open] Failed to reset cooldown for user {ctx.author.id}: {cd_exc!r}",
+                        flush=True,
+                    )
+
+            async def _send_noop(message: str):
+                # If no crate was consumed, don't punish with cooldown.
+                await _safe_reset_cooldown()
+                await ctx.send(message)
+                return
+
+            # Idempotency guard: if the same Discord message is processed twice
+            # (e.g., multi-process overlap), only one execution may consume crates.
+            # Disabled for now: we've seen the Redis SET/NX lock hang and block
+            # crate opens before they ever reach the database.
+            redis = None
+            if redis is not None:
+                try:
+                    open_lock = await redis.execute_command(
+                        "SET",
+                        f"lock:crates_open:{ctx.message.id}",
+                        "1",
+                        "EX",
+                        30,
+                        "NX",
+                    )
+                    if not open_lock:
+                        print(
+                            f"[crates.open] duplicate lock hit for msg {ctx.message.id}",
+                            flush=True,
+                        )
+                        if int(getattr(self.bot, "cluster_count", 1) or 1) > 1:
+                            await _safe_reset_cooldown()
+                            return
+                except Exception as lock_exc:
+                    print(
+                        f"[crates.open] Idempotency lock failed for msg {ctx.message.id}: {lock_exc!r}",
+                        flush=True,
+                    )
+
+            name = ctx.character_data["name"]
+
+            if rarity == "materials":
+                premiumshop_cog = self.bot.get_cog("PremiumShop")
+                if not premiumshop_cog:
+                    await _send_noop("Materials crate system not available.")
+                    return
+
+                opened = 0
+                last_message = ""
+                for _crate_idx in range(amount):
+                    success, message = await premiumshop_cog.open_materials_crate(
+                        ctx, consume_crate=True
+                    )
+                    if not success:
+                        if opened == 0:
+                            await _send_noop(f"Error: {message}")
+                        else:
+                            await ctx.send(
+                                f"Opened **{opened}**/{amount} Materials Crate(s), then stopped: {message}"
+                            )
+                        return
+                    opened += 1
+                    last_message = message
+
+                if amount == 1:
+                    await ctx.send(last_message)
+                else:
+                    await ctx.send(
+                        f"{name}, you opened **{opened}** Materials Crate(s). "
+                        "Crafting materials were added to your inventory."
+                    )
+                return
+
+            print(
+                f"[crates.open] before pool acquire user={ctx.author.id} rarity={rarity}",
+                flush=True,
+            )
             async with self.bot.pool.acquire() as conn:
-                await conn.execute(
+                print(
+                    f"[crates.open] acquired pool connection user={ctx.author.id} rarity={rarity}",
+                    flush=True,
+                )
+                remaining_crates = await conn.fetchval(
                     f'UPDATE profile SET "crates_{rarity}"="crates_{rarity}"-$1 WHERE'
-                    ' "user"=$2;',
+                    f' "user"=$2 AND "crates_{rarity}" >= $1 RETURNING "crates_{rarity}";',
                     amount,
                     ctx.author.id,
                 )
+                print(
+                    f"[crates.open] db result user={ctx.author.id} rarity={rarity} "
+                    f"remaining={remaining_crates}",
+                    flush=True,
+                )
+                if remaining_crates is None:
+                    return await _send_noop(
+                        _(
+                            "Seems like you don't have {amount} crate(s) of this rarity yet."
+                            " Vote me up to get a random one or find them!"
+                        ).format(amount=amount)
+                    )
 
                 if rarity == "mystery":
                     crates = {
@@ -294,6 +810,7 @@ class Crates(commands.Cog):
                 elif rarity == "fortune":
                     for _i in range(amount):
                         level = rpgtools.xptolevel(ctx.character_data["xp"])
+                        new_level = level
                         random_number = random.randint(1, 100)
 
                         if random_number <= 50:  # Lower half, reward with XP
@@ -315,56 +832,67 @@ class Crates(commands.Cog):
                             reward_type = "money"
 
                         value = random.randint(min_value, max_value)
+                        user_id = ctx.author.id
 
-                        async with self.bot.pool.acquire() as conn:
+                        if reward_type == "xp":
 
-                            user_id = ctx.author.id
+                            nurflevel = level
 
-                            if reward_type == "xp":
+                            if level > 50:
+                                nurflevel = 50
 
-                                nurflevel = level
+                            xpvar = 2000 * level + 1500
 
-                                if level > 50:
-                                    nurflevel = 50
+                            random_xp = random.randint(1000 * nurflevel, xpvar)
 
-                                xpvar = 2000 * level + 1500
+                            await conn.execute(
+                                'UPDATE profile SET "xp" = "xp" + $1 WHERE "user" = $2',
+                                random_xp,
+                                user_id,
+                            )
 
-                                random_xp = random.randint(1000 * nurflevel, xpvar)
+                            name = ctx.character_data["name"]
 
-                                await conn.execute('UPDATE profile SET "xp" = "xp" + $1 WHERE "user" = $2', random_xp,
-                                                   user_id)
+                            await ctx.send(
+                                f"{name} opened a Fortune crate and gained **{random_xp}XP!**")
 
-                                name = ctx.character_data["name"]
+                            await self.bot.public_log(
+                                f"**{ctx.author}** opened a fortune crate and gained **{random_xp} XP!**"
+                            )
 
-                                await ctx.send(
-                                    f"{name} opened a Fortune crate and gained **{random_xp}XP!**")
+                            new_level = int(rpgtools.xptolevel(ctx.character_data["xp"] + random_xp))
 
-                                await self.bot.public_log(
-                                    f"**{ctx.author}** opened a fortune crate and gained **{random_xp} XP!**"
-                                )
+                        else:
 
-                                new_level = int(rpgtools.xptolevel(ctx.character_data["xp"] + random_xp))
+                            reward = round(value, -2)
 
+                            await conn.execute(
+                                'UPDATE profile SET "money" = "money" + $1 WHERE "user" = $2',
+                                reward,
+                                user_id,
+                            )
+                            name = ctx.character_data["name"]
 
+                            await ctx.send(f"{name} opened a Fortune crate and found **${reward}!**")
 
-                            else:
-
-                                reward = round(value, -2)
-
-                                await conn.execute('UPDATE profile SET "money" = "money" + $1 WHERE "user" = $2', reward,
-                                                   user_id)
-                                name = ctx.character_data["name"]
-
-                                await ctx.send(f"{name} opened a Fortune crate and found **${reward}!**")
-
-                                await self.bot.public_log(
-                                    f"**{ctx.author}** opened a fortune crate and received **${reward}!**"
-                                )
-                    try:
-                        if level != new_level:
+                            await self.bot.public_log(
+                                f"**{ctx.author}** opened a fortune crate and received **${reward}!**"
+                            )
+                    if level != new_level:
+                        try:
                             await self.bot.process_levelup(ctx, new_level, level)
-                    except Exception as e:
-                        pass
+                        except Exception:
+                            self.bot.logger.exception(
+                                "Failed to process level-up from fortune crate for user %s (%s -> %s).",
+                                ctx.author.id,
+                                level,
+                                new_level,
+                            )
+                            await ctx.send(
+                                _(
+                                    "You leveled up, but I could not deliver the level-up reward message."
+                                )
+                            )
 
 
                 else:
@@ -421,21 +949,6 @@ class Crates(commands.Cog):
                                 minstat, maxstat = (52, 56)
                             else:
                                 minstat, maxstat = (47, 51)
-                        elif rarity == "materials":
-                            # Materials crates are handled by the premiumshop cog
-                            premiumshop_cog = self.bot.get_cog('PremiumShop')
-                            if premiumshop_cog:
-                                success, message = await premiumshop_cog.open_materials_crate(ctx)
-                                if success:
-                                    await ctx.send(message)
-                                else:
-                                    await ctx.send(f"Error: {message}")
-                                return
-                            else:
-                                await ctx.send("Materials crate system not available.")
-                                return
-
-
                         # Check for Dragon Coin chance on legendary crates (20% chance)
                         dragon_coins_gained = 0
                         if rarity == "legendary" and random.randint(1, 100) <= 20:
@@ -492,7 +1005,7 @@ class Crates(commands.Cog):
                         )
                         embed.set_footer(
                             text=_("Remaining {rarity} crates: {crates}").format(
-                                crates=ctx.character_data[f"crates_{rarity}"] - 1,
+                                crates=max(0, remaining_crates),
                                 rarity=rarity,
                             )
                         )
@@ -571,7 +1084,21 @@ class Crates(commands.Cog):
                                 f" stats:\n```\n{most_common}\n```\nAverage: {average_stat}"
                             )
         except Exception as e:
-            await ctx.send(f"{e}")
+            try:
+                await self.bot.reset_cooldown(ctx)
+            except Exception as cd_exc:
+                print(
+                    f"[crates.open] Failed to reset cooldown for user {ctx.author.id}: {cd_exc!r}",
+                    flush=True,
+                )
+            print(
+                f"[crates.open] Unhandled error for user {ctx.author.id}, rarity={locals().get('rarity', None)}, amount={locals().get('amount', None)}:\n{traceback.format_exc()}",
+                flush=True,
+            )
+            try:
+                await ctx.send(f"Crate opening failed: `{type(e).__name__}: {e}`")
+            except Exception:
+                print(f"[crates.open] Failed to report error for user {ctx.author.id}: {e!r}")
 
     @commands.cooldown(1, 10, commands.BucketType.user)
     @has_char()

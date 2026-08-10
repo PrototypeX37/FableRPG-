@@ -7,6 +7,8 @@ initial_extensions = [
     "cogs.game_master",
     "cogs.gambling",
     "cogs.adventure",
+    "cogs.summerevent",
+    "cogs.summerenigma",
     "cogs.ranks",
     "cogs.trading",
     "cogs.miscellaneous",
@@ -41,6 +43,9 @@ initial_extensions = [
     "cogs.story",
     "cogs.cah",
     "cogs.chatgpt",
+    "cogs.antiscript",
+    "cogs.echoesdex",
+    "cogs.agon",
     "cogs.battleships",
     "cogs.warmap",
     "cogs.reload",
@@ -58,6 +63,8 @@ initial_extensions = [
     "cogs.transaction",
     "cogs.shotgunroulette",
     "cogs.pets",
+    "cogs.petscare",
+    "cogs.petsskill",
     "cogs.simplebattle",
     "cogs.shotgunroulette",
     "cogs.buyorders",
@@ -127,7 +134,6 @@ banned_guilds = [961703553829863445]
 support_server_id = 1199287508794626078
 raid_channel = 1199297906755252234
 gm_log_channel = 1199299210059710504
-helpme_channel = 1199299210059710504
 official_tournament_channel_id = 1199300078796537967
 bot_event_channel = 1199299905466925136
 primary_colour = 16759808
@@ -235,4 +241,3 @@ user = 700801066593419335
 description = "**Alignment: Chaos** - Drakath, the chaotic deity, embodies the thrill of unpredictability and upheaval. Followers celebrate the untamed essence of existence, finding liberation in disrupting norms and embracing disorder. In Drakath's realm, change is revered, and the uncharted path is the most revered journey."
 boundary_low = 0.3
 boundary_high = 2.0
-

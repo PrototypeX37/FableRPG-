@@ -23,19 +23,30 @@ class PatreonStuff(commands.Cog):
             635319019083137057
         }
 
-        # Role to Tier mapping
+        # Role to Tier mapping (legacy IDs + current IDs)
         self.ROLE_TIER_MAPPING = {
+            # Legacy IDs
             1199287508811391015: 1,  # tier 1
             1199287508811391014: 2,  # tier 2
             1199287508828172351: 3,  # tier 3
-            1199287508828172353: 4   # tier 4
+            1199287508828172353: 4,  # tier 4
+            # Current IDs
+            1411756981274017912: 1,  # Mortal
+            1411757068364546139: 2,  # Demi-God
+            1411757100136140913: 4,  # Olympian
+            1411757151306645706: 4,  # Titan
+            1411757168356491508: 4,  # Primordial Fate
         }
 
         # Role to Token Increment mapping for monthly updates
         self.ROLE_TOKEN_UPDATES = {
-            1199287508811391015: 5,   # Tier 1 gets 5 tokens
+            # Legacy IDs
+            1199287508811391015: 5,  # Tier 1
             1199287508811391014: 5,  # Tier 2
             1199287508828172351: 5,  # Tier 3
+            # Current IDs
+            1411756981274017912: 5,  # Mortal
+            1411757068364546139: 5,  # Demi-God
         }
 
     def cog_unload(self):
@@ -46,6 +57,11 @@ class PatreonStuff(commands.Cog):
     @tasks.loop(minutes=5)
     async def periodic_tier_assignment(self):
         print('PatreonStuff Cog: Running periodic tier assignment task.')
+        patreon_core = self.bot.get_cog("PatreonCore")
+        if patreon_core is not None:
+            # PatreonCore is the canonical tier sync source; avoid conflicting writes.
+            print('PatreonStuff Cog: Skipping periodic tier assignment because PatreonCore is active.')
+            return
 
         # Replace with your actual guild (server) ID
         GUILD_ID = 1199287508794626078  # e.g., 123456789012345678
@@ -69,23 +85,17 @@ class PatreonStuff(commands.Cog):
                             if tier > user_tier:
                                 user_tier = tier
 
-                    # Fetch current tier from the database
+                    # Fallback behavior when PatreonCore is unavailable.
                     record = await connection.fetchrow(
                         'SELECT "tier" FROM profile WHERE "user" = $1',
                         member.id
                     )
-
                     current_tier = record['tier'] if record else 0
-
-                    if user_tier != current_tier:
-                        # Update tier in the database
-                        if record:
-                            await connection.execute(
-                                'UPDATE profile SET "tier" = $1 WHERE "user" = $2',
-                                user_tier, member.id
-                            )
-
-
+                    if user_tier != current_tier and record:
+                        await connection.execute(
+                            'UPDATE profile SET "tier" = $1 WHERE "user" = $2',
+                            user_tier, member.id
+                        )
                         print(f'PatreonStuff Cog: Updated tier for user {member.id} to {user_tier}')
             except Exception as e:
                 print(f'PatreonStuff Cog: Error in periodic_tier_assignment: {e}')

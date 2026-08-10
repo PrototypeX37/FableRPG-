@@ -334,22 +334,43 @@ class PetsSkills(commands.Cog):
             return max(1, base_cost - 2)
         return max(1, base_cost - 1)
 
+    async def _resolve_target_pet(self, conn, ctx: commands.Context, pet_id: Optional[int]):
+        """Resolve an explicit pet id, or fall back to the equipped pet."""
+        if pet_id is not None:
+            pet = await conn.fetchrow(
+                "SELECT * FROM monster_pets WHERE user_id=$1 AND id=$2",
+                ctx.author.id,
+                pet_id,
+            )
+            if not pet:
+                await ctx.send(f"❌ You don't have a pet with ID {pet_id}.")
+                return None, None
+            return int(pet_id), pet
+
+        pet = await conn.fetchrow(
+            "SELECT * FROM monster_pets WHERE user_id=$1 AND equipped=TRUE",
+            ctx.author.id,
+        )
+        if not pet:
+            await ctx.send(
+                "❌ No pet ID provided and no pet is equipped. "
+                "Use `$pets equip <pet_id>` or pass a pet ID."
+            )
+            return None, None
+        return int(pet["id"]), pet
+
     # ------------------------------------------------------------------------
     #                                COMMANDS
     # ------------------------------------------------------------------------
 
     @user_cooldown(1800)
     @commands.command(name="train", brief=_("Train your pet to gain experience and trust"))
-    async def train(self, ctx: commands.Context, pet_id: int):
+    async def train(self, ctx: commands.Context, pet_id: Optional[int] = None):
         async with self.bot.pool.acquire() as conn:
-            pet = await conn.fetchrow(
-                "SELECT * FROM monster_pets WHERE user_id=$1 AND id=$2",
-                ctx.author.id,
-                pet_id,
-            )
+            resolved_pet_id, pet = await self._resolve_target_pet(conn, ctx, pet_id)
         if not pet:
-            await ctx.send(f"❌ You don't have a pet with ID {pet_id}.")
             return
+        pet_id = resolved_pet_id
 
         xp_gain, trust_gain = 50, 2
         async with self.bot.pool.acquire() as conn:
@@ -428,16 +449,12 @@ class PetsSkills(commands.Cog):
         await ctx.send(embed=embed)
 
     @commands.command(name="skills", brief=_("View your pet's skill tree and progress"))
-    async def skills(self, ctx: commands.Context, pet_id: int):
+    async def skills(self, ctx: commands.Context, pet_id: Optional[int] = None):
         async with self.bot.pool.acquire() as conn:
-            pet = await conn.fetchrow(
-                "SELECT * FROM monster_pets WHERE user_id=$1 AND id=$2",
-                ctx.author.id,
-                pet_id,
-            )
+            resolved_pet_id, pet = await self._resolve_target_pet(conn, ctx, pet_id)
         if not pet:
-            await ctx.send(f"❌ You don't have a pet with ID {pet_id}.")
             return
+        pet_id = resolved_pet_id
 
         element = str(pet["element"])
         if element not in self.SKILL_TREES:
@@ -488,7 +505,7 @@ class PetsSkills(commands.Cog):
             value="**Legend:**\n✅ = Learned | 🔓 = Can Learn | 💰 = Need SP | 🔒 = Need Level",
             inline=True,
         )
-        embed.set_footer(text="Use $pets skillinfo <skill_name> for detailed info, or $pets learn <id> <skill>.")
+        embed.set_footer(text="Use $pets skillinfo <skill_name> for detailed info, or $pets learn [pet_id] <skill>.")
         await ctx.send(embed=embed)
 
     @commands.command(name="skillinfo", brief=_("View detailed information about a specific skill"))
@@ -547,20 +564,16 @@ class PetsSkills(commands.Cog):
                 value=f"**Pet:** {pet['name']}\n**Current SP:** {pet['skill_points']}\n**Can Learn:** {can}",
                 inline=False,
             )
-        embed.set_footer(text=f"Use $pets learn <pet_id> \"{found['name']}\" to learn this skill!")
+        embed.set_footer(text=f"Use $pets learn [pet_id] \"{found['name']}\" to learn this skill!")
         await ctx.send(embed=embed)
 
     @commands.command(name="learn", brief=_("Learn a skill for your pet"))
-    async def learn(self, ctx: commands.Context, pet_id: int, *, skill_name: str):
+    async def learn(self, ctx: commands.Context, pet_id: Optional[int] = None, *, skill_name: str):
         async with self.bot.pool.acquire() as conn:
-            pet = await conn.fetchrow(
-                "SELECT * FROM monster_pets WHERE user_id=$1 AND id=$2",
-                ctx.author.id,
-                pet_id,
-            )
+            resolved_pet_id, pet = await self._resolve_target_pet(conn, ctx, pet_id)
         if not pet:
-            await ctx.send(f"❌ You don't have a pet with ID {pet_id}.")
             return
+        pet_id = resolved_pet_id
 
         element = str(pet["element"])
         if element not in self.SKILL_TREES:
@@ -622,19 +635,15 @@ class PetsSkills(commands.Cog):
         await ctx.send(embed=embed)
 
     @commands.command(name="unlearn", brief=_("Unlearn a skill from your pet and refund SP"))
-    async def unlearn(self, ctx: commands.Context, pet_id: int, *, skill_name: str):
+    async def unlearn(self, ctx: commands.Context, pet_id: Optional[int] = None, *, skill_name: str):
         """
         Refund uses *current* cost rules (including Battery Life if present now).
         """
         async with self.bot.pool.acquire() as conn:
-            pet = await conn.fetchrow(
-                "SELECT * FROM monster_pets WHERE user_id=$1 AND id=$2",
-                ctx.author.id,
-                pet_id,
-            )
+            resolved_pet_id, pet = await self._resolve_target_pet(conn, ctx, pet_id)
         if not pet:
-            await ctx.send(f"❌ You don't have a pet with ID {pet_id}.")
             return
+        pet_id = resolved_pet_id
 
         element = str(pet["element"])
         if element not in self.SKILL_TREES:
@@ -712,16 +721,16 @@ class PetsSkills(commands.Cog):
                 "• **$pets skillshelp** — this help\n"
                 "• **$pets skilllist** — list all elements\n"
                 "• **$pets skilllist Fire** — full Fire tree\n"
-                "• **$pets skillinfo 123 Battery Life** — details for a skill (optionally with pet id)\n"
-                "• **$pets skills 123** — your pet’s tree & progress"
+                "• **$pets skillinfo 123 Battery Life** — details for a skill (optional pet id)\n"
+                "• **$pets skills [pet_id]** — your pet’s tree & progress"
             ),
             inline=False
         )
         embed.add_field(
             name="🎓 Learn / Unlearn",
             value=(
-                "• **$pets learn 123 \"Battery Life\"** — learn skill\n"
-                "• **$pets unlearn 123 \"Battery Life\"** — refund SP (current-cost rules)\n"
+                "• **$pets learn [pet_id] \"Battery Life\"** — learn skill\n"
+                "• **$pets unlearn [pet_id] \"Battery Life\"** — refund SP (current-cost rules)\n"
                 "_Tip:_ Knowing **Battery Life** reduces other skill SP costs (−1, or −2 if cost ≥ 4)."
             ),
             inline=False
@@ -735,7 +744,7 @@ class PetsSkills(commands.Cog):
             ),
             inline=False
         )
-        embed.set_footer(text="Example: $pets learn 123 \"Phoenix Strike\"")
+        embed.set_footer(text="Example: $pets learn \"Phoenix Strike\" (uses equipped pet)")
         await ctx.send(embed=embed)
 
         
@@ -746,16 +755,12 @@ class PetsSkills(commands.Cog):
 
     @commands.is_owner()
     @commands.command(name="testbatterylife", brief=_("Test Battery Life cost reduction"))
-    async def testbatterylife(self, ctx: commands.Context, pet_id: int):
+    async def testbatterylife(self, ctx: commands.Context, pet_id: Optional[int] = None):
         async with self.bot.pool.acquire() as conn:
-            pet = await conn.fetchrow(
-                "SELECT * FROM monster_pets WHERE user_id=$1 AND id=$2",
-                ctx.author.id,
-                pet_id,
-            )
+            resolved_pet_id, pet = await self._resolve_target_pet(conn, ctx, pet_id)
         if not pet:
-            await ctx.send(f"❌ You don't have a pet with ID {pet_id}.")
             return
+        pet_id = resolved_pet_id
 
         learned = self._extract_learned(pet.get("learned_skills"))
         has_battery = any(s.lower() == "battery life" for s in learned)
@@ -824,4 +829,3 @@ async def setup(bot: commands.Bot):
             group.add_command(cmd)
         else:
             bot.logger.warning(f"[PetsSkill] Command '{name}' not found on bot; check the method/decorator.")
-

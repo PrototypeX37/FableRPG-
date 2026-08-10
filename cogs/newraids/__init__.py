@@ -65,6 +65,8 @@ IMG_RAIDERS_ATTACK  = "https://i.imgur.com/7AsK58N.png"
 
 # Summary channel
 RAIDS_SUMMARY_CHANNEL_ID = 1404885965813842021
+DEATH_RAID_BLOOMSHARDS_MIN = 10
+DEATH_RAID_BLOOMSHARDS_MAX = 55
 
 # Decorators (fallbacks for local testing)
 try:
@@ -253,12 +255,57 @@ class DeathBehavior(BossBehavior):
     attack_img = DEATH_ATTACK_IMG
     reap_every_turns = 4
     armor_ignore_pct = 0.35
+    marked_true_damage_pct = 0.10
+    marked_rounds_per_target = 4
+    retarget_delay_rounds = 1
+
+    def __init__(self):
+        self.marked_target_id: Optional[int] = None
+        self.marked_rounds_left: int = 0
+        self.retarget_cooldown_rounds: int = 0
+
+    def _find_marked_alive_target(
+        self, engine: "RaidEngine"
+    ) -> Tuple[Optional[discord.User], Optional[RaiderState]]:
+        if self.marked_target_id is None:
+            return None, None
+        for user, rst in engine.raiders.items():
+            if user.id == self.marked_target_id and rst.alive:
+                return user, rst
+
+        # Marked target no longer alive/in raid.
+        self.marked_target_id = None
+        self.marked_rounds_left = 0
+        return None, None
+
+    def _resolve_attack_target(
+        self, engine: "RaidEngine"
+    ) -> Tuple[Optional[discord.User], Optional[RaiderState], bool, bool]:
+        # returns: (target, state, newly_marked, marked_active_this_round)
+        alive = [(u, r) for u, r in engine.raiders.items() if r.alive]
+        if not alive:
+            return None, None, False, False
+
+        marked_user, marked_rst = self._find_marked_alive_target(engine)
+        if marked_user and marked_rst:
+            return marked_user, marked_rst, False, True
+
+        # Cooldown round between marks after a survivor endured all marked rounds.
+        if self.retarget_cooldown_rounds > 0:
+            self.retarget_cooldown_rounds -= 1
+            user, rst = random.choice(alive)
+            return user, rst, False, False
+
+        # Apply a fresh mark.
+        user, rst = random.choice(alive)
+        self.marked_target_id = user.id
+        self.marked_rounds_left = self.marked_rounds_per_target
+        return user, rst, True, True
 
     async def boss_attack(self, engine: "RaidEngine") -> List[discord.Embed]:
-        alive = [(k, v) for k, v in engine.raiders.items() if v.alive]
-        if not alive:
+        target, rst, newly_marked, marked_active = self._resolve_attack_target(engine)
+        if not target or not rst:
             return []
-        target, rst = random.choice(alive)
 
         base_raw = random.randint(self.min_dmg, self.max_dmg)
         armor_ignored = int(rst.armor * self.armor_ignore_pct)
@@ -273,13 +320,83 @@ class DeathBehavior(BossBehavior):
             source=self.name,
             container_embed=em,
         )
+
+        true_death_em = None
+        true_damage = 0
+        if marked_active and rst.alive:
+            true_damage = max(1, int(round(base_raw * self.marked_true_damage_pct)))
+            _, true_death_em, _ = engine.apply_damage(
+                target,
+                rst,
+                true_damage,
+                source=f"{self.name} (Marked by Death)",
+                container_embed=em,
+                ignore_armor=True,
+            )
+
+        if newly_marked:
+            em.add_field(
+                name="Marked by Death",
+                value=(
+                    f"{target.mention} is marked for **{self.marked_rounds_per_target} rounds**. "
+                    "If they survive, Death releases them and marks a new target after one round."
+                ),
+                inline=False,
+            )
+
+        if marked_active:
+            if not rst.alive:
+                self.marked_target_id = None
+                self.marked_rounds_left = 0
+            else:
+                self.marked_rounds_left = max(0, self.marked_rounds_left - 1)
+                if self.marked_rounds_left <= 0:
+                    self.marked_target_id = None
+                    self.retarget_cooldown_rounds = self.retarget_delay_rounds
+                    em.add_field(
+                        name="Mark Broken",
+                        value=(
+                            f"{target.mention} endured the mark for "
+                            f"**{self.marked_rounds_per_target} rounds**. "
+                            "Death releases them and will mark a new target after 1 round."
+                        ),
+                        inline=False,
+                    )
+                else:
+                    em.add_field(
+                        name="Mark Duration",
+                        value=f"Rounds remaining on {target.mention}: **{self.marked_rounds_left}**",
+                        inline=False,
+                    )
+        else:
+            em.add_field(
+                name="Mark Cooldown",
+                value="Death is choosing a new marked target next round.",
+                inline=False,
+            )
+
         em.add_field(
             name="Reaper's Edge",
             value=f"Ignored **{armor_ignored:,}** armor on {target.mention}.",
             inline=False,
         )
+        em.add_field(
+            name="Marked Bonus",
+            value=(
+                (
+                    f"True damage to {target.mention}: **{true_damage:,}** "
+                    f"({int(self.marked_true_damage_pct * 100)}%)."
+                )
+                if true_damage > 0 else (
+                    f"{target.mention} was downed before true damage could trigger."
+                    if marked_active
+                    else "No marked true damage this round."
+                )
+            ),
+            inline=False,
+        )
         em.add_field(name="Boss HP", value=engine.boss_hp_bar(), inline=False)
-        return [e for e in (em, death_em) if e]
+        return [e for e in (em, death_em, true_death_em) if e]
 
     async def on_tick(self, engine: "RaidEngine"):
         if engine.player_turn_count > 0 and engine.player_turn_count % self.reap_every_turns == 0:
@@ -344,6 +461,7 @@ class RaidEngine:
         self.participants_count: int = 0
         self.payout_per: Optional[int] = None
         self.crate_line: Optional[str] = None
+        self.spring_bloomshards_line: Optional[str] = None
         self.victory: Optional[bool] = None
         self.talos_auction: Optional[Tuple[int, int]] = None  # (winner_id, amount) reserved for similar flows
 
@@ -395,11 +513,21 @@ class RaidEngine:
         self._locked = False
 
     # Centralized damage application (tracks pre- & post-mitigation, sends death embeds)
-    def apply_damage(self, user: discord.User, rst: RaiderState, raw: int, *, source: str, container_embed: Optional[discord.Embed] = None):
-        eff = max(1, raw - rst.armor)
+    def apply_damage(
+        self,
+        user: discord.User,
+        rst: RaiderState,
+        raw: int,
+        *,
+        source: str,
+        container_embed: Optional[discord.Embed] = None,
+        ignore_armor: bool = False,
+    ):
+        incoming = max(1, int(raw))
+        eff = incoming if ignore_armor else max(1, incoming - rst.armor)
         rst.hp -= eff
         rst.total_damage_taken += eff
-        rst.total_damage_pressure += raw
+        rst.total_damage_pressure += incoming
         survived = False
         death_em: Optional[discord.Embed] = None
 
@@ -447,6 +575,7 @@ class RaidEngine:
                     classes=profile.get("class"),
                     race=profile.get("race"),
                     guild=profile.get("guild"),
+                    xp=profile.get("xp"),
                     conn=conn,
                 )
                 level = self._xptolevel(profile.get("xp", 0))
@@ -642,6 +771,26 @@ class RaidEngine:
             await self._give_crate(winner)
             self.crate_line = f"{self.rarity.capitalize()} crate {self.rarity_emote()} awarded to: {winner.mention}"
 
+        if isinstance(self.behavior, DeathBehavior) and survivors:
+            amount_each = random.randint(DEATH_RAID_BLOOMSHARDS_MIN, DEATH_RAID_BLOOMSHARDS_MAX)
+            awarded = await self._mass_add_bloomshards(survivors, amount_each)
+            if awarded > 0:
+                total_paid = awarded * amount_each
+                self.spring_bloomshards_line = (
+                    f"Bloomshards awarded: **+{amount_each}** to **{awarded}** survivors"
+                )
+                await self.ctx.send(
+                    f"🌸 Death's defeat grants **+{amount_each} Bloomshards** to each survivor "
+                    f"(**{total_paid}** total)."
+                )
+            else:
+                self.spring_bloomshards_line = (
+                    "Bloomshards payout skipped (Dreambound Spring not loaded)."
+                )
+                await self.ctx.send(
+                    "⚠️ Could not award Bloomshards because Dreambound Spring is not loaded."
+                )
+
     async def _auction_crate(self, survivors: List[discord.User]) -> Optional[Tuple[int, int]]:
         """Survivors-only auction for the crate.
         - Pings survivors
@@ -820,6 +969,23 @@ class RaidEngine:
         async with self.bot.pool.acquire() as conn:
             await conn.execute('UPDATE profile SET money=money+$1 WHERE "user"=ANY($2);', amount_each, ids)
 
+    async def _mass_add_bloomshards(self, users: List[discord.User], amount_each: int) -> int:
+        if not users or amount_each <= 0:
+            return 0
+        spring = self.bot.cogs.get("DreamboundSpring")
+        if spring is None or not hasattr(spring, "add_bloomshards"):
+            return 0
+
+        awarded = 0
+        async with self.bot.pool.acquire() as conn:
+            for user in users:
+                try:
+                    await spring.add_bloomshards(user.id, amount_each, conn=conn)
+                    awarded += 1
+                except Exception:
+                    continue
+        return awarded
+
     async def _give_crate(self, user: discord.User):
         col = f"crates_{self.rarity}"
         async with self.bot.pool.acquire() as conn:
@@ -937,6 +1103,7 @@ class RaidEngine:
         status = "Defeated in" if self.victory else "Failed after"
         crate_line = self.crate_line or "No crate result."
         payout_line = f"Payout per participant: **${self.payout_per:,}**" if self.payout_per is not None else "Payouts: —"
+        bloomshards_line = self.spring_bloomshards_line
         emote = ":small_blue_diamond:"
         msg = (
             f"**Raid result:**\n"
@@ -944,6 +1111,10 @@ class RaidEngine:
             f"{emote} {status}: **{self._duration_text()}**\n"
             f"{emote} {crate_line}\n"
             f"{emote} {payout_line}\n"
+        )
+        if bloomshards_line:
+            msg += f"{emote} {bloomshards_line}\n"
+        msg += (
             f"{emote} Survivors: **{survivors} and {boss_forces} of {self.boss['name']}'s forces**\n"
             f"{emote} Raiders joined: **{self.participants_count}**"
         )
@@ -1093,24 +1264,19 @@ class NewRaids(commands.Cog):
         await engine.enroll(players)
         await engine.run()
 
-    # ---------- commands ----------
+    # ---------- spawn handlers (invoked via raid $spawn) ----------
 
-    @commands.command(hidden=True, brief="Start a Charybdis raid")
-    @is_gm()
-    @raid_channel()
     async def spawn_charybdis(self, ctx: commands.Context, hp: int, rarity: str = "magic"):
         await self._spawn_generic(ctx, boss_name="Charybdis", hp=hp, rarity=rarity, behavior=CharybdisBehavior())
 
-    @commands.command(hidden=True, brief="Start an Echidna raid")
-    @is_gm()
-    @raid_channel()
     async def spawn_echidna(self, ctx: commands.Context, hp: int, rarity: str = "magic"):
         await self._spawn_generic(ctx, boss_name="Echidna", hp=hp, rarity=rarity, behavior=EchidnaBehavior())
 
-    @commands.command(hidden=True, brief="Start a Death raid (Spring Event)")
     @is_gm()
     @raid_channel()
+    @commands.command(name="springspawn", hidden=True)
     async def springspawn(self, ctx: commands.Context, hp: int, rarity: str = "magic"):
+        """Spawn the Dreambound Spring Death raid."""
         await self._spawn_generic(
             ctx,
             boss_name="Death",

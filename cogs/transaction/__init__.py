@@ -29,6 +29,13 @@ from utils.i18n import _, locale_doc
 # Add this import for deep copy
 import copy
 
+TRADEABLE_CONSUMABLE_TYPES = [
+    "pet_age_potion",
+    "pet_speed_growth_potion",
+    "pet_xp_potion",
+    "splice_final_potion",
+]
+
 
 def has_no_transaction():
     async def predicate(ctx):
@@ -385,7 +392,7 @@ class Transaction(commands.Cog):
                 await self.transfer_crafting_resources(conn, user1, user2, user1_gives.get("resources", {}), user2_gives.get("resources", {}))
 
                 # Transfer premium consumables
-                for ctype in ["pet_age_potion", "pet_speed_growth_potion", "splice_final_potion"]:
+                for ctype in TRADEABLE_CONSUMABLE_TYPES:
                     qty1 = user1_gives.get("consumables", {}).get(ctype, 0)
                     qty2 = user2_gives.get("consumables", {}).get(ctype, 0)
                     if qty1 > 0:
@@ -671,10 +678,10 @@ class Transaction(commands.Cog):
     @locale_doc
     async def add_consumable(self, ctx, ctype: str, amount: IntGreaterThan(0)):
         """
-        `<ctype>` - The type of premium consumable (pet_age_potion, pet_speed_growth_potion, splice_final_potion)
+        `<ctype>` - The type of premium consumable (pet_age_potion, pet_speed_growth_potion, pet_xp_potion, splice_final_potion)
         `<amount>` - The amount to add
         """
-        valid_types = ["pet_age_potion", "pet_speed_growth_potion", "splice_final_potion"]
+        valid_types = TRADEABLE_CONSUMABLE_TYPES
         ctype = ctype.lower()
         if ctype not in valid_types:
             return await ctx.send(f"❌ Invalid consumable type. Valid types: {', '.join(valid_types)}")
@@ -694,9 +701,9 @@ class Transaction(commands.Cog):
     @locale_doc
     async def add_consumables(self, ctx, *args):
         """
-        `<ctype> <amount>` pairs, e.g. `pet_age_potion 2 petspeed 1`
+        `<ctype> <amount>` pairs, e.g. `pet_age_potion 2 pet_xp_potion 1`
         """
-        valid_types = ["pet_age_potion", "pet_speed_growth_potion", "splice_final_potion"]
+        valid_types = TRADEABLE_CONSUMABLE_TYPES
         if len(args) % 2 != 0:
             return await ctx.send("❌ Usage: trade add consumables <type> <amount> ...")
         async with self.bot.pool.acquire() as conn:
@@ -861,7 +868,7 @@ class Transaction(commands.Cog):
     @set_.command(name="consumable", brief=_("Sets premium consumables in a trade."))
     @locale_doc
     async def set_consumable(self, ctx, ctype: str, amount: IntGreaterThan(0)):
-        valid_types = ["pet_age_potion", "pet_speed_growth_potion", "splice_final_potion"]
+        valid_types = TRADEABLE_CONSUMABLE_TYPES
         ctype = ctype.lower()
         if ctype not in valid_types:
             return await ctx.send(f"❌ Invalid consumable type. Valid types: {', '.join(valid_types)}")
@@ -1024,7 +1031,7 @@ class Transaction(commands.Cog):
     @remove.command(name="consumable", brief=_("Removes premium consumables from a trade."))
     @locale_doc
     async def remove_consumable(self, ctx, ctype: str, amount: IntGreaterThan(0)):
-        valid_types = ["pet_age_potion", "pet_speed_growth_potion", "splice_final_potion"]
+        valid_types = TRADEABLE_CONSUMABLE_TYPES
         ctype = ctype.lower()
         if ctype not in valid_types:
             return await ctx.send(f"❌ Invalid consumable type. Valid types: {', '.join(valid_types)}")

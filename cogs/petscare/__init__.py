@@ -26,6 +26,77 @@ from utils.i18n import _
 from utils import random as urandom  # has randint, choice
 
 
+class DirectPetFoodSelect(discord.ui.Select):
+    def __init__(self, cog: "PetsCare", ctx: commands.Context, pet_id: int):
+        self.cog = cog
+        self.ctx = ctx
+        self.pet_id = pet_id
+
+        options = []
+        for key, food in cog.FOOD_TYPES.items():
+            label = key.replace("_", " ").title()
+            tier_note = " | Warrior+" if food.get("tier_required") else ""
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    description=(
+                        f"${int(food['cost']):,} | Hunger +{food['hunger']} | "
+                        f"Happy +{food['happiness']}{tier_note}"
+                    ),
+                    value=key,
+                    emoji="🍖" if key != "treats" else "🍬",
+                )
+            )
+
+        super().__init__(
+            placeholder="Choose food for this pet...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message(
+                "This food menu is not for you.", ephemeral=True
+            )
+
+        await interaction.response.defer()
+        food_key = self.values[0]
+        await self.cog.feed(
+            self.ctx,
+            self.pet_id,
+            food_type=food_key.replace("_", " "),
+        )
+
+        view = self.view
+        if view:
+            for child in view.children:
+                child.disabled = True
+            try:
+                await interaction.message.edit(view=view)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+
+class DirectPetFoodView(discord.ui.View):
+    def __init__(self, cog: "PetsCare", ctx: commands.Context, pet_id: int):
+        super().__init__(timeout=45)
+        self.ctx = ctx
+        self.add_item(DirectPetFoodSelect(cog, ctx, pet_id))
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.gray, emoji="❌", row=1)
+    async def cancel_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message(
+                "This food menu is not for you.", ephemeral=True
+            )
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="Feed cancelled.", view=self)
+
+
 class PetsCare(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -91,12 +162,18 @@ class PetsCare(commands.Cog):
     def get_skill_points_for_level(self, level: int) -> int:
         return 1 if level % 5 == 0 else 0
 
-    async def gain_experience(self, pet_id: int, xp_amount: int, trust_gain: int = 0) -> Optional[Dict[str, Any]]:
-        try:
-            async with self.bot.pool.acquire() as conn:
+    async def gain_experience(
+        self,
+        pet_id: int,
+        xp_amount: int,
+        trust_gain: int = 0,
+        conn: Optional[asyncpg.Connection] = None,
+    ) -> Optional[Dict[str, Any]]:
+        async def _gain(conn):
+            async with conn.transaction():
                 pet = await conn.fetchrow(
                     """SELECT experience, level, trust_level, skill_points, COALESCE(xp_multiplier, 1.0) AS xp_multiplier 
-                       FROM monster_pets WHERE id = $1""",
+                       FROM monster_pets WHERE id = $1 FOR UPDATE""",
                     pet_id
                 )
                 if not pet:
@@ -115,21 +192,30 @@ class PetsCare(commands.Cog):
                     new_level += 1
                     new_sp += self.get_skill_points_for_level(new_level)
 
-                await conn.execute(
+                updated = await conn.fetchrow(
                     """UPDATE monster_pets 
                        SET experience = $1, level = $2, trust_level = $3, skill_points = $4
-                       WHERE id = $5""",
+                       WHERE id = $5
+                       RETURNING experience, level, trust_level, skill_points""",
                     new_exp, new_level, new_trust, new_sp, pet_id
                 )
 
                 return {
-                    "leveled_up": new_level > cur_level,
-                    "new_level": new_level,
-                    "skill_points_gained": new_sp - int(pet["skill_points"]),
+                    "leveled_up": int(updated["level"]) > cur_level,
+                    "new_level": int(updated["level"]),
+                    "new_experience": int(updated["experience"]),
+                    "new_trust": int(updated["trust_level"]),
+                    "skill_points_gained": int(updated["skill_points"]) - int(pet["skill_points"]),
                     "xp_multiplier_applied": xpm > 1.0,
                     "original_xp": xp_amount,
                     "adjusted_xp": adj_xp,
                 }
+
+        try:
+            if conn is not None:
+                return await _gain(conn)
+            async with self.bot.pool.acquire() as conn:
+                return await _gain(conn)
         except Exception as e:
             print(f"[PetsCare] gain_experience error for pet {pet_id}: {e}")
             return None
@@ -212,10 +298,46 @@ class PetsCare(commands.Cog):
             user_id, pet_id
         )
 
+    async def _resolve_target_pet(self, conn, ctx: commands.Context, pet_id: Optional[int]):
+        """Resolve an explicit pet id, or fall back to the equipped pet."""
+        if pet_id is not None:
+            pet = await self._fetch_pet(conn, ctx.author.id, pet_id)
+            if not pet:
+                await ctx.send(f"❌ You don't have a pet with ID {pet_id}.")
+                return None, None
+            return int(pet_id), pet
+
+        pet = await conn.fetchrow(
+            "SELECT * FROM monster_pets WHERE user_id = $1 AND equipped = TRUE",
+            ctx.author.id,
+        )
+        if not pet:
+            await ctx.send(
+                "❌ No pet ID provided and no pet is equipped. "
+                "Use `$pets equip <pet_id>` or pass a pet ID."
+            )
+            return None, None
+        return int(pet["id"]), pet
+
     # ========= Command bodies (attached under `$pets` group in setup) =========
 
-    async def feed(self, ctx: commands.Context, pet_id: int, *, food_type: str = "basic food"):
-        """$pets feed <pet_id> [food_type] — Feed your pet with specific food types."""
+    async def feed(self, ctx: commands.Context, pet_id: Optional[int] = None, *, food_type: Optional[str] = None):
+        """$pets feed [pet_id] [food_type] — Feed your pet with specific food types."""
+        if food_type is None:
+            async with self.bot.pool.acquire() as conn:
+                resolved_pet_id, pet = await self._resolve_target_pet(conn, ctx, pet_id)
+            if not pet:
+                try:
+                    ctx.command.reset_cooldown(ctx)
+                except Exception:
+                    pass
+                return
+
+            return await ctx.send(
+                f"Choose food for **{pet['name']}**.",
+                view=DirectPetFoodView(self, ctx, resolved_pet_id),
+            )
+
         food_key_in = food_type.lower().strip()
         if food_key_in in self.FOOD_ALIASES:
             food_key = self.FOOD_ALIASES[food_key_in]
@@ -255,19 +377,47 @@ class PetsCare(commands.Cog):
                     pass
                 return
 
-            pet = await self._fetch_pet(conn, ctx.author.id, pet_id)
+            resolved_pet_id, pet = await self._resolve_target_pet(conn, ctx, pet_id)
             if not pet:
-                await ctx.send(f"❌ You don't have a pet with ID {pet_id}.")
                 try:
                     ctx.command.reset_cooldown(ctx)
                 except Exception:
                     pass
                 return
+            pet_id = resolved_pet_id
 
             new_hunger = min(100, int(pet["hunger"]) + int(food["hunger"]))
             new_happy  = min(100, int(pet["happiness"]) + int(food["happiness"]))
             trust_gain = int(food["trust_gain"])
             xp_gain    = int(food["cost"]) // 75
+
+            if not getattr(ctx, "_daily_attachment_cooldown_claimed", False):
+                cooldown_key = f"cd:{ctx.author.id}:pets feed"
+                cooldown_claimed = await self.bot.redis.execute_command(
+                    "SET",
+                    cooldown_key,
+                    "pets feed",
+                    "EX",
+                    3600,
+                    "NX",
+                )
+                if not cooldown_claimed:
+                    ttl = await self.bot.redis.execute_command("TTL", cooldown_key)
+                    if ttl == -1:
+                        ttl = 3600
+                        await self.bot.redis.execute_command("EXPIRE", cooldown_key, ttl)
+                    elif ttl == -2:
+                        ttl = 3600
+                    hours, remainder = divmod(max(int(ttl), 0), 3600)
+                    minutes, seconds = divmod(remainder, 60)
+                    await ctx.send(
+                        f"⏳ You must wait **{hours:02}:{minutes:02}:{seconds:02}** before feeding your pet again."
+                    )
+                    try:
+                        ctx.command.reset_cooldown(ctx)
+                    except Exception:
+                        pass
+                    return
 
             await conn.execute(
                 """UPDATE monster_pets
@@ -276,7 +426,7 @@ class PetsCare(commands.Cog):
                 new_hunger, new_happy, dt.datetime.utcnow(), pet_id
             )
 
-            lvl_result = await self.gain_experience(pet_id, xp_gain, trust_gain)
+            lvl_result = await self.gain_experience(pet_id, xp_gain, trust_gain, conn=conn)
 
             await conn.execute(
                 'UPDATE profile SET money = money - $1 WHERE "user" = $2',
@@ -318,17 +468,17 @@ class PetsCare(commands.Cog):
         embed.set_footer(text=f"Cost: ${food['cost']} | Use $pets status {pet_id} to track progress")
         await ctx.send(embed=embed)
 
-    async def pet(self, ctx: commands.Context, pet_id: int):
-        """$pets pet <pet_id> — Pet your companion to increase happiness and trust."""
+    async def pet(self, ctx: commands.Context, pet_id: Optional[int] = None):
+        """$pets pet [pet_id] — Pet your companion to increase happiness and trust."""
         async with self.bot.pool.acquire() as conn:
-            pet = await self._fetch_pet(conn, ctx.author.id, pet_id)
+            resolved_pet_id, pet = await self._resolve_target_pet(conn, ctx, pet_id)
             if not pet:
-                await ctx.send(f"❌ You don't have a pet with ID {pet_id}.")
                 try:
                     ctx.command.reset_cooldown(ctx)
                 except Exception:
                     pass
                 return
+            pet_id = resolved_pet_id
 
             happiness_boost = 10 if int(pet["happiness"]) > 50 else 5
             new_happy = min(100, int(pet["happiness"]) + happiness_boost)
@@ -370,17 +520,17 @@ class PetsCare(commands.Cog):
             embed.color = discord.Color.gold()
         await ctx.send(embed=embed)
 
-    async def play(self, ctx: commands.Context, pet_id: int):
-        """$pets play <pet_id> — Play with your pet for happiness, trust, and XP."""
+    async def play(self, ctx: commands.Context, pet_id: Optional[int] = None):
+        """$pets play [pet_id] — Play with your pet for happiness, trust, and XP."""
         async with self.bot.pool.acquire() as conn:
-            pet = await self._fetch_pet(conn, ctx.author.id, pet_id)
+            resolved_pet_id, pet = await self._resolve_target_pet(conn, ctx, pet_id)
             if not pet:
-                await ctx.send(f"❌ You don't have a pet with ID {pet_id}.")
                 try:
                     ctx.command.reset_cooldown(ctx)
                 except Exception:
                     pass
                 return
+            pet_id = resolved_pet_id
 
             happiness_boost = 25
             new_happy = min(100, int(pet["happiness"]) + happiness_boost)
@@ -423,17 +573,17 @@ class PetsCare(commands.Cog):
             embed.color = discord.Color.gold()
         await ctx.send(embed=embed)
 
-    async def treat(self, ctx: commands.Context, pet_id: int):
-        """$pets treat <pet_id> — Give your pet a special treat for big boosts."""
+    async def treat(self, ctx: commands.Context, pet_id: Optional[int] = None):
+        """$pets treat [pet_id] — Give your pet a special treat for big boosts."""
         async with self.bot.pool.acquire() as conn:
-            pet = await self._fetch_pet(conn, ctx.author.id, pet_id)
+            resolved_pet_id, pet = await self._resolve_target_pet(conn, ctx, pet_id)
             if not pet:
-                await ctx.send(f"❌ You don't have a pet with ID {pet_id}.")
                 try:
                     ctx.command.reset_cooldown(ctx)
                 except Exception:
                     pass
                 return
+            pet_id = resolved_pet_id
 
             happiness_boost = 50
             new_happy = min(100, int(pet["happiness"]) + happiness_boost)
@@ -475,13 +625,13 @@ class PetsCare(commands.Cog):
             )
         await ctx.send(embed=embed)
 
-    async def status(self, ctx: commands.Context, pet_id: int):
-        """$pets status <pet_id> — View your pet's detailed care & progression status."""
+    async def status(self, ctx: commands.Context, pet_id: Optional[int] = None):
+        """$pets status [pet_id] — View your pet's detailed care & progression status."""
         async with self.bot.pool.acquire() as conn:
-            pet = await self._fetch_pet(conn, ctx.author.id, pet_id)
+            resolved_pet_id, pet = await self._resolve_target_pet(conn, ctx, pet_id)
             if not pet:
-                await ctx.send(f"❌ You don't have a pet with ID {pet_id}.")
                 return
+            pet_id = resolved_pet_id
 
         trust_info = self.get_trust_level_info(int(pet["trust_level"]))
         next_level_xp = self.calculate_level_requirements(int(pet["level"]) + 1)
@@ -601,7 +751,7 @@ class PetsCare(commands.Cog):
             ),
             inline=False
         )
-        embed.set_footer(text="Use $pets feed <pet_id> <food_type> • $pets status <id> to track progress")
+        embed.set_footer(text="Use $pets feed [pet_id] <food_type> • $pets status [pet_id] to track progress")
         await ctx.send(embed=embed)
 
 

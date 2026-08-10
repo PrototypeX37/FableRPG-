@@ -30,6 +30,7 @@ class Battle(ABC):
         self.ctx = ctx
         self.bot = ctx.bot
         self.teams = teams or []
+        self.simulation_mode = bool(kwargs.get("simulation_mode", False))
         self.log = deque(maxlen=kwargs.get("log_size", 5))
         self.action_number = 0
         self.started = False
@@ -96,6 +97,10 @@ class Battle(ABC):
     
     async def add_to_log(self, message):
         """Add a message to the battle log"""
+        if self.simulation_mode:
+            self.action_number += 1
+            return
+
         self.log.append((self.action_number, message))
         self.action_number += 1
         
