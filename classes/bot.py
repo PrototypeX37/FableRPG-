@@ -324,8 +324,8 @@ class Bot(commands.AutoShardedBot):
         guild=None,
         statatk=None,
         statdef=None,
-        xp=None,  # compatibility: some call sites still pass xp
         god=None,
+        xp=None,
         conn=None,
     ):
         """Generates the raidstats for a user"""
@@ -343,7 +343,7 @@ class Bot(commands.AutoShardedBot):
             or statdef is None
         ):
             row = await conn.fetchrow('SELECT * FROM profile WHERE "user"=$1;', v)
-            atkmultiply, defmultiply, classes, race, guild, user_god, statatk, statdef = (
+            atkmultiply, defmultiply, classes, race, guild, user_god, statatk, statdef, xp = (
                 row["atkmultiply"],
                 row["defmultiply"],
                 row["class"],
@@ -352,9 +352,12 @@ class Bot(commands.AutoShardedBot):
                 row["god"],
                 row["statatk"],
                 row["statdef"],
+                row["xp"],
             )
             if god is not None and god != user_god:
                 raise ValueError()
+        if xp is None:
+            xp = await conn.fetchval('SELECT "xp" FROM profile WHERE "user"=$1;', v)
         damage, armor = await self.get_damage_armor_for(
             v, classes=classes, race=race, conn=conn
         )
@@ -370,6 +373,12 @@ class Bot(commands.AutoShardedBot):
 
         atkmultiply += statatk * Decimal('0.1')
         defmultiply += statdef * Decimal('0.1')
+
+        # Scale raid attack/defense from character level before multipliers.
+        # This keeps level progression relevant even with fixed weapon loadouts.
+        level = Decimal(rpgtools.xptolevel(int(xp)))
+        damage = Decimal(str(damage)) + (level * Decimal("5"))
+        armor = Decimal(str(armor)) + (level * Decimal("4"))
 
         #for c in classes:
             #if c and c.in_class_line(Raider):
@@ -401,6 +410,7 @@ class Bot(commands.AutoShardedBot):
         race=None,
         guild=None,
         god=None,
+        xp=None,
         conn=None,
     ):
         """Generates the raidstats for a user"""
@@ -417,16 +427,19 @@ class Bot(commands.AutoShardedBot):
             or guild is None
         ):
             row = await conn.fetchrow('SELECT * FROM profile WHERE "user"=$1;', v)
-            atkmultiply, defmultiply, classes, race, guild, user_god = (
+            atkmultiply, defmultiply, classes, race, guild, user_god, xp = (
                 row["atkmultiply"],
                 row["defmultiply"],
                 row["class"],
                 row["race"],
                 row["guild"],
                 row["god"],
+                row["xp"],
             )
             if god is not None and god != user_god:
                 raise ValueError()
+        if xp is None:
+            xp = await conn.fetchval('SELECT "xp" FROM profile WHERE "user"=$1;', v)
         damage, armor = await self.get_damage_armor_for(
             v, classes=classes, race=race, conn=conn
         )
@@ -445,6 +458,11 @@ class Bot(commands.AutoShardedBot):
 
         atkmultiply = atkmultiply + dmgbuff
         defmultiply = defmultiply + deffbuff
+
+        # Keep juggernaut raid calculations aligned with normal raid scaling.
+        level = Decimal(rpgtools.xptolevel(int(xp)))
+        damage = Decimal(str(damage)) + (level * Decimal("5"))
+        armor = Decimal(str(armor)) + (level * Decimal("4"))
 
         dmg = damage * atkmultiply
         deff = armor * defmultiply
