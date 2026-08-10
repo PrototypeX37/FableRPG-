@@ -164,7 +164,7 @@ class Halloween(commands.Cog):
                     ("<:F_rare:1139514880517484666> Rare Crate", 60, ssrare_value),
                     ("<:F_Magic:1139514865174720532> Magic Crate", 250, ssmagic_value),
                     ("<:F_Legendary:1139514868400132116> Legendary Crate", 1300, sslegendary_value),
-                    ("<:f_money:1146593710516224090> Fortune Crate", 1750, ssfortune_value),
+                    ("<:c_fortune:1405959213682917629> Fortune Crate", 1750, ssfortune_value),
                     ("<:f_divine:1169412814612471869> Divine Crate", 2900, ssdivine_value),
                     ("🖼️ Seasonal Background", 650, ssbg_value),
                     ("🧙 Seasonal Class", 1000, ssclass_value),
@@ -364,7 +364,7 @@ class Halloween(commands.Cog):
                 'UPDATE profile SET crates_fortune = crates_fortune + 1 WHERE "user"=$1;',
                 ctx.author.id
             )
-            await ctx.send("You have successfully purchased a <:f_money:1146593710516224090> for 1750 Bones!")
+            await ctx.send("You have successfully purchased a <:c_fortune:1405959213682917629> for 1750 Bones!")
 
 
 
@@ -554,10 +554,8 @@ class Halloween(commands.Cog):
             bones_count = record['bones']
         else:
             bones_count = 0
-        if ctx.author.id == 708435868842459169:
-            await ctx.send(f"You currently have **{bones_count}** Boners, {ctx.author.mention}!")
-        else:
-            await ctx.send(f"You currently have **{bones_count}** Bones, {ctx.author.mention}!")
+
+        await ctx.send(f"You currently have **{bones_count}** Bones, {ctx.author.mention}!")
 
     @checks.has_char()
     @commands.command(brief=_("Open a trick or treat bag"))

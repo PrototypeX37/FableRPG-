@@ -1,0 +1,262 @@
+{
+  "level_names": [
+    "Steps of Hera",
+    "Torch of Hestia",
+    "Mirrors of Nemesis",
+    "Storm of Boreas",
+    "Sanctuary of Demeter",
+    "Bridge of Sacred Oaths",
+    "Garden of Mnemosyne",
+    "Crucible of Ares",
+    "Trial of Endurance",
+    "Milestone of Hymenaios",
+    "Ballroom of Echoes",
+    "Trial of Boreas",
+    "Labyrinth of Apate",
+    "Mountain of Hubris",
+    "Battlefield of Oaths",
+    "Cavern of Catharsis",
+    "Library of Hermes",
+    "Garden of Peitho",
+    "Chamber of Aidos",
+    "Gate of Symphonia",
+    "Forge of Hephaestus",
+    "Vale of Melancholy",
+    "Mirror of Aletheia",
+    "Storm of Eris",
+    "Abyss of Phobos",
+    "Crucible of Algos",
+    "Trial of Chronos",
+    "Garden of Rebirth",
+    "Gate of Eternity",
+    "Crown of Aphrodite"
+  ],
+  "victories": {
+    "1": {
+      "title": "Steps United",
+      "description": "Golden rose petals drift from the sky as you step together onto the sacred path. Aphrodite smiles upon this beginning, weaving your destinies as one."
+    },
+    "2": {
+      "title": "Light of Trust",
+      "description": "The shadows retreat as a divine torch ignites in your joined hands. Trust has lit the way, and no darkness can divide you."
+    },
+    "3": {
+      "title": "Truth Beyond Jealousy",
+      "description": "The mirrors shatter into silver dust. No illusions remain — only two hearts reflecting the truth of their devotion."
+    },
+    "4": {
+      "title": "Calm After Doubt",
+      "description": "The storm yields to a rainbow of divine light. Together, you have silenced doubt and discovered certainty in one another."
+    },
+    "5": {
+      "title": "Love’s Guardian",
+      "description": "By protecting what matters most, you have proven the essence of love itself. Aphrodite leaves a gift in your care — a blessing sealed within a chest.",
+      "has_chest": true,
+      "chest_rewards": {
+        "default": {
+          "left": {
+            "type": "crate",
+            "value": "common",
+            "amount": 2
+          },
+          "right": {
+            "type": "money",
+            "value": 25000,
+            "amount": 1
+          }
+        },
+        "prestige": "random"
+      }
+    },
+    "6": {
+      "title": "A Leap of Faith",
+      "description": "The chasm closes behind you as you reunite in a fierce embrace. You have learned that no distance, no danger, can separate your souls."
+    },
+    "7": {
+      "title": "Garden of Our Story",
+      "description": "Each memory blooms around you like flowers. Your story is not just remembered — it is sanctified by love itself."
+    },
+    "8": {
+      "title": "Hearts Over Fire",
+      "description": "The flames of anger cool to embers of passion. You have learned to fight not against each other, but always for one another."
+    },
+    "9": {
+      "title": "Endurance of Love",
+      "description": "The demons fall silent, yet your bond endures. Love is not always fire and thunder — sometimes it is persistence, steady and unyielding."
+    },
+    "10": {
+      "title": "Vow Renewed",
+      "description": "The guardian bows, acknowledging your commitment. Aphrodite blesses your union — stronger, surer, eternal in its promise.",
+      "has_chest": true,
+      "chest_rewards": {
+        "default": {
+          "left": {
+            "type": "crate",
+            "value": "uncommon",
+            "amount": 2
+          },
+          "right": {
+            "type": "money",
+            "value": 50000,
+            "amount": 1
+          }
+        },
+        "prestige": "random"
+      }
+    },
+    "11": {
+      "title": "Dance Eternal",
+      "description": "The phantoms fade, and you are left dancing in each other’s arms. No music is needed when hearts move in harmony."
+    },
+    "12": {
+      "title": "The Warmth Within",
+      "description": "Ice shatters, replaced by blossoms of spring. Love’s warmth melts even the coldest trials."
+    },
+    "13": {
+      "title": "Words Unspoken",
+      "description": "At the maze’s center, your kiss speaks louder than any words. You have found the language of the soul."
+    },
+    "14": {
+      "title": "Humble Victory",
+      "description": "At the mountain’s peak, you raise a flag not for pride, but for unity. This triumph belongs to both of you."
+    },
+    "15": {
+      "title": "Unbreakable Loyalty",
+      "description": "The illusions vanish, revealing only truth — loyalty unshaken, unwavering, eternal."
+    },
+    "16": {
+      "title": "Embrace of Forgiveness",
+      "description": "The cavern softens, and echoes turn to silence. Forgiveness has healed where pride once wounded."
+    },
+    "17": {
+      "title": "Secrets Shared",
+      "description": "Books close, whispers fade. No secret can divide you when love is stronger than silence."
+    },
+    "18": {
+      "title": "Temptation Denied",
+      "description": "The garden’s allure fades. You walk onward hand in hand, proving that true love resists all false promises."
+    },
+    "19": {
+      "title": "Chamber of Trust",
+      "description": "Walls crumble, revealing only openness. Vulnerability has become your greatest strength."
+    },
+    "20": {
+      "title": "Threshold of Unity",
+      "description": "The guardian steps aside. Hand in hand, you cross the threshold as one soul in two bodies."
+    },
+    "21": {
+      "title": "Forged in Love",
+      "description": "In the fires of sacrifice, your love emerges stronger. What was given up has only made you more whole."
+    },
+    "22": {
+      "title": "Valley of Tears",
+      "description": "Through despair you endured, and together you found hope. Even in sorrow, love lights the path."
+    },
+    "23": {
+      "title": "The Mirror’s Gift",
+      "description": "No illusions remain. The mirror shows only what Aphrodite herself sees: love in its truest form."
+    },
+    "24": {
+      "title": "Harmony After Chaos",
+      "description": "The storm collapses into silence. From chaos, you have drawn harmony — love’s truest order."
+    },
+    "25": {
+      "title": "The Abyss Defied",
+      "description": "Even the abyss cannot consume your bond. Fear falls away, leaving only unshakable faith in one another."
+    },
+    "26": {
+      "title": "Enduring Through Pain",
+      "description": "From agony comes strength. Your bond is tempered like steel — pain has only sharpened its edge."
+    },
+    "27": {
+      "title": "Eternal Patience",
+      "description": "Time stretches, but love holds steady. In patience, you have found eternity."
+    },
+    "28": {
+      "title": "Garden of Renewal",
+      "description": "Where once lay ruin, flowers bloom anew. Love restores, heals, and creates what was lost."
+    },
+    "29": {
+      "title": "Gate of Forever",
+      "description": "At the threshold of eternity, you stand unafraid. Love has carried you this far, and will carry you beyond."
+    },
+    "30": {
+      "title": "Crown of Aphrodite",
+      "description": "The goddess herself appears, placing a crown of roses upon you both. You have passed every trial, and your love shines eternal under her blessing.",
+      "finale": true,
+      "rewards": {
+        "default": {
+          "type": "crate",
+          "value": "legendary",
+          "amount": 1
+        },
+        "prestige": {
+          "type": "random_premium"
+        }
+      }
+    }
+  },
+  "chest_options": {
+    "random": {
+      "types": [
+        "crate",
+        "money"
+      ],
+      "crate_options": [
+        {
+          "value": "legendary",
+          "weight": 2
+        },
+        {
+          "value": "fortune",
+          "weight": 3
+        },
+        {
+          "value": "mystery",
+          "weight": 50
+        },
+        {
+          "value": "common",
+          "weight": 100
+        },
+        {
+          "value": "uncommon",
+          "weight": 80
+        },
+        {
+          "value": "magic",
+          "weight": 15
+        },
+        {
+          "value": "rare",
+          "weight": 40
+        }
+      ],
+      "money_options": [
+        15000,
+        25000,
+        35000,
+        75000,
+        45000,
+        20000,
+        55000,
+        65000,
+        125000,
+        10000,
+        200000
+      ]
+    },
+    "random_premium": {
+      "types": [
+        "legendary",
+        "divine",
+        "fortune"
+      ],
+      "weights": [
+        0.4,
+        0.3,
+        0.3
+      ]
+    }
+  }
+}

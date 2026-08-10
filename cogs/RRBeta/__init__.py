@@ -24,6 +24,9 @@ from discord.ui import View, Select
 from utils.checks import has_char, is_gm
 from utils.i18n import _, locale_doc
 
+RUSSIAN_ROULETTE_GIF_URL = "https://i.ibb.co/kKn0zQs/ezgif-4-51fcaad25e.gif"
+MEDAL_GIF_URL = "https://media0.giphy.com/media/ely3apij36BJhoZ234/giphy.gif"
+
 class Player:
     def __init__(self, user):
         self.user = user
@@ -249,17 +252,18 @@ class RRBeta(commands.Cog):
             ),
             color=discord.Color.dark_red()
         )
-        embed.set_thumbnail(url="https://media.tenor.com/fklGVnlUSFQAAAAd/russian-roulette.gif")
+        embed.set_thumbnail(url=RUSSIAN_ROULETTE_GIF_URL)
         await ctx.send(embed=embed)
 
         await ctx.send("Players have **2 minutes** to join using **$rrjoin**.")
 
         game.gamestarted = True
-        game.joined_players.add(ctx.author)
+        if not getattr(ctx, "auto_minigame", False):
+            game.joined_players.add(ctx.author)
 
-        player = Player(ctx.author)
-        game.participants.append(player)
-        game.all_players.append(player)
+            player = Player(ctx.author)
+            game.participants.append(player)
+            game.all_players.append(player)
 
         # Collect bets from spectators
         await ctx.send("Spectators can place bets on players using `$rrbet <amount> @player`.")
@@ -512,7 +516,7 @@ class RRBeta(commands.Cog):
                 description=f"{shooter.user.mention} eliminates {target.user.mention} instantly!",
                 color=discord.Color.red()
             )
-            embed.set_image(url="https://media.tenor.com/ggBL-mf1-swAAAAC/guns-anime.gif")
+            embed.set_image(url=RUSSIAN_ROULETTE_GIF_URL)
             await ctx.send(embed=embed)
             game.participants.remove(target)
             return
@@ -533,7 +537,7 @@ class RRBeta(commands.Cog):
                     description=f"{target.user.mention} has been shot by {shooter.user.mention}!",
                     color=discord.Color.red()
                 )
-                embed.set_image(url="https://media.tenor.com/ggBL-mf1-swAAAAC/guns-anime.gif")
+                embed.set_image(url=RUSSIAN_ROULETTE_GIF_URL)
                 await ctx.send(embed=embed)
                 game.participants.remove(target)
             else:
@@ -607,7 +611,7 @@ class RRBeta(commands.Cog):
             description=narrative,
             color=discord.Color.gold()
         )
-        embed.set_image(url="https://media.tenor.com/fklGVnlUSFQAAAAd/russian-roulette.gif")
+        embed.set_image(url=RUSSIAN_ROULETTE_GIF_URL)
         await ctx.send(embed=embed)
 
     async def end_game(self, ctx, game):
@@ -626,7 +630,7 @@ class RRBeta(commands.Cog):
                 description=f"**Winner:** {winner.user.mention}\n**Rounds Played:** {game.roundnum}",
                 color=discord.Color.green()
             )
-            embed.set_thumbnail(url="https://media.tenor.com/_jZg0fof4ZYAAAAd/medal-win.gif")
+            embed.set_thumbnail(url=MEDAL_GIF_URL)
             await ctx.send(embed=embed)
             # Show statistics
             stats_msg = ""

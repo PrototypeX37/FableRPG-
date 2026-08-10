@@ -2,6 +2,7 @@
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
 Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2025 Danaelis (discord danaelis.)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -132,7 +133,6 @@ class GameSection:
         "support_server_id",
         "raid_channel",
         "gm_log_channel",
-        "helpme_channel",
         "official_tournament_channel_id",
         "bot_event_channel",
         "primary_colour",
@@ -146,7 +146,6 @@ class GameSection:
         self.support_server_id = data.get("support_server_id", None)
         self.raid_channel = data.get("raid_channel", None)
         self.gm_log_channel = data.get("gm_log_channel", None)
-        self.helpme_channel = data.get("helpme_channel", None)
         self.official_tournament_channel_id = data.get(
             "official_tournament_channel_id", None
         )

@@ -1,9 +1,11 @@
+
+
+from datetime import datetime, timezone
 """Single-player Werewolf engine (remastered)
 ------------------------------------------------
 A strategic deduction game against intelligent AI opponents with
 sophisticated social dynamics, role questioning, and deductive reasoning.
 """
-from __future__ import annotations
 
 import asyncio
 import datetime
@@ -117,12 +119,12 @@ class Evidence:
         self.action = action
         self.target_id = target_id
         self.details = details or {}
-        self.timestamp = datetime.datetime.now()
+        self.timestamp = datetime.datetime.now(timezone.utc)
 
     @property
     def age(self) -> float:
         """How old this evidence is in seconds."""
-        return (datetime.datetime.now() - self.timestamp).total_seconds()
+        return (datetime.datetime.now(timezone.utc) - self.timestamp).total_seconds()
 
 class DummyAvatar:
     """Mimic `discord.Asset` enough for `avatar.url`."""
@@ -1710,7 +1712,7 @@ class SPGame:
 
     async def _debug(self, message: str):
         """Send debug messages if enabled."""
-        debug_id = 295173706496475136
+        debug_id = 0 #we arent using this anymore and cbf removing it all
         if self.ctx.author.id == debug_id:
             await self._try_send(f"[DEBUG] {message}")
         else:
@@ -2302,7 +2304,7 @@ class SPGame:
 
         # Set up discussion timer
         discussion_time = 60 if self.day <= 2 else 90  # More time in later days
-        discussion_end = datetime.datetime.now() + datetime.timedelta(seconds=discussion_time)
+        discussion_end = datetime.datetime.now(timezone.utc) + datetime.timedelta(seconds=discussion_time)
 
         # Explain discussion phase to player
         if human and human.alive:
@@ -2316,10 +2318,10 @@ class SPGame:
 
         # Initialize AI speaker timing
         next_speaker_idx = 0
-        next_speaker_time = datetime.datetime.now() + datetime.timedelta(seconds=self.rnd.uniform(2.0, 4.0))
+        next_speaker_time = datetime.datetime.now(timezone.utc) + datetime.timedelta(seconds=self.rnd.uniform(2.0, 4.0))
 
         # Main discussion loop - non-blocking with concurrent processing
-        while datetime.datetime.now() < discussion_end:
+        while datetime.datetime.now(timezone.utc) < discussion_end:
             # Check for human input with short timeout
             if human and human.alive:
                 try:
@@ -2581,7 +2583,7 @@ class SPGame:
                     pass  # No human message this cycle
 
             # Check if it's time for an AI to speak
-            if datetime.datetime.now() >= next_speaker_time and next_speaker_idx < len(speakers):
+            if datetime.datetime.now(timezone.utc) >= next_speaker_time and next_speaker_idx < len(speakers):
                 speaker = speakers[next_speaker_idx]
 
                 # Get game state for AI
@@ -2853,7 +2855,7 @@ class SPGame:
 
                 # Set up next speaker
                 next_speaker_idx += 1
-                next_speaker_time = datetime.datetime.now() + datetime.timedelta(seconds=self.rnd.uniform(3.0, 6.0))
+                next_speaker_time = datetime.datetime.now(timezone.utc) + datetime.timedelta(seconds=self.rnd.uniform(3.0, 6.0))
 
             # Short sleep to prevent tight loop
             await asyncio.sleep(0.1)
@@ -2910,12 +2912,12 @@ class SPGame:
             await self._try_send("The villagers begin casting their votes...")
 
         # Set up voting period
-        voting_end = datetime.datetime.now() + datetime.timedelta(seconds=60)
+        voting_end = datetime.datetime.now(timezone.utc) + datetime.timedelta(seconds=60)
         has_human_voted = False
         human_vote_target = None
 
         # Wait for human vote while showing AI votes progressively
-        while datetime.datetime.now() < voting_end and (not human or not human.alive or not has_human_voted):
+        while datetime.datetime.now(timezone.utc) < voting_end and (not human or not human.alive or not has_human_voted):
             try:
                 # Check for human vote if applicable
                 if human and human.alive and not has_human_voted:

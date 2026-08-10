@@ -1,0 +1,2157 @@
+{
+    "1": [
+        {
+            "name": "Sneevil",
+            "hp": 100,
+            "attack": 95,
+            "defense": 100,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Sneevil-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Slime",
+            "hp": 120,
+            "attack": 100,
+            "defense": 105,
+            "element": "Water",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_slime.png",
+            "ispublic": true
+        },
+        {
+            "name": "Frogzard",
+            "hp": 120,
+            "attack": 90,
+            "defense": 95,
+            "element": "Nature",
+            "url": "https://static.wikia.nocookie.net/aqwikia/images/d/d6/Frogzard.png",
+            "ispublic": true
+        },
+        {
+            "name": "Rat",
+            "hp": 90,
+            "attack": 100,
+            "defense": 90,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Rat-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Bat",
+            "hp": 150,
+            "attack": 95,
+            "defense": 85,
+            "element": "Wind",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Bat-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Skeleton",
+            "hp": 190,
+            "attack": 105,
+            "defense": 100,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Skelly-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Imp",
+            "hp": 180,
+            "attack": 95,
+            "defense": 85,
+            "element": "Fire",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zZquzlh-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Pixie",
+            "hp": 100,
+            "attack": 90,
+            "defense": 80,
+            "element": "Light",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_pixie-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Zombie",
+            "hp": 170,
+            "attack": 100,
+            "defense": 95,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zombie-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Spiderling",
+            "hp": 220,
+            "attack": 95,
+            "defense": 90,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_spider-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Spiderling",
+            "hp": 220,
+            "attack": 95,
+            "defense": 90,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_spider-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Moglin",
+            "hp": 200,
+            "attack": 90,
+            "defense": 85,
+            "element": "Light",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Moglin.png",
+            "ispublic": true
+        },
+        {
+            "name": "Chickencow",
+            "hp": 300,
+            "attack": 150,
+            "defense": 90,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChickenCow-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Tog",
+            "hp": 380,
+            "attack": 105,
+            "defense": 95,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Tog-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Lemurphant",
+            "hp": 340,
+            "attack": 95,
+            "defense": 80,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Lemurphant-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Fire Imp",
+            "hp": 200,
+            "attack": 100,
+            "defense": 90,
+            "element": "Fire",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zZquzlh-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Zardman",
+            "hp": 300,
+            "attack": 95,
+            "defense": 100,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Zardman-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Wind Elemental",
+            "hp": 165,
+            "attack": 90,
+            "defense": 85,
+            "element": "Wind",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_WindElemental-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Dark Wolf",
+            "hp": 200,
+            "attack": 100,
+            "defense": 90,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DarkWolf-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Treeant",
+            "hp": 205,
+            "attack": 105,
+            "defense": 95,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Treeant-removebg-preview.png",
+            "ispublic": true
+        }
+    ],
+    "2": [
+        {
+            "name": "Cyclops Warlord",
+            "hp": 230,
+            "attack": 160,
+            "defense": 155,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_CR-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Fishman Soldier",
+            "hp": 200,
+            "attack": 165,
+            "defense": 160,
+            "element": "Water",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Fisherman-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Fire Elemental",
+            "hp": 215,
+            "attack": 150,
+            "defense": 145,
+            "element": "Fire",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_fire_elemental-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Vampire Bat",
+            "hp": 200,
+            "attack": 170,
+            "defense": 160,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_viO2oSJ-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Blood Eagle",
+            "hp": 195,
+            "attack": 165,
+            "defense": 150,
+            "element": "Wind",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BloodEagle-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Earth Elemental",
+            "hp": 190,
+            "attack": 175,
+            "defense": 160,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Earth_Elemental-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Fire Mage",
+            "hp": 200,
+            "attack": 160,
+            "defense": 140,
+            "element": "Fire",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireMage-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Dready Bear",
+            "hp": 230,
+            "attack": 155,
+            "defense": 150,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_dreddy-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Undead Soldier",
+            "hp": 280,
+            "attack": 160,
+            "defense": 155,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_UndeadSoldier-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Skeleton Warrior",
+            "hp": 330,
+            "attack": 155,
+            "defense": 150,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SkeelyWarrior-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Giant Spider",
+            "hp": 350,
+            "attack": 160,
+            "defense": 145,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DreadSpider-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Castle spider",
+            "hp": 310,
+            "attack": 170,
+            "defense": 160,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Castle-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "ConRot",
+            "hp": 210,
+            "attack": 165,
+            "defense": 155,
+            "element": "Water",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ConRot-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Horc Warrior",
+            "hp": 270,
+            "attack": 175,
+            "defense": 170,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_HorcWarrior-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Shadow Hound",
+            "hp": 300,
+            "attack": 160,
+            "defense": 150,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Hound-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Fire Sprite",
+            "hp": 290,
+            "attack": 165,
+            "defense": 155,
+            "element": "Fire",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireSprite-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Rock Elemental",
+            "hp": 300,
+            "attack": 160,
+            "defense": 165,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Earth_Elemental-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Shadow Serpent",
+            "hp": 335,
+            "attack": 155,
+            "defense": 150,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadowSerpant-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Dark Elemental",
+            "hp": 340,
+            "attack": 165,
+            "defense": 155,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DarkEle-Photoroom.png",
+            "ispublic": true
+        },
+        {
+            "name": "Forest Guardian",
+            "hp": 500,
+            "attack": 250,
+            "defense": 250,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ForestGuardian-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Aerochthon",
+            "hp": 310,
+            "attack": 274,
+            "defense": 258,
+            "element": "Water",
+            "url": "https://i.imgur.com/ZZCHsYE.png",
+            "ispublic": false
+        },
+        {
+            "name": "Drympses",
+            "hp": 320,
+            "attack": 270,
+            "defense": 256,
+            "element": "Nature",
+            "url": "https://i.imgur.com/zZVHRMl.png",
+            "ispublic": false
+        },
+        {
+            "name": "Petrohydros",
+            "hp": 340,
+            "attack": 204,
+            "defense": 233,
+            "element": "Nature",
+            "url": "https://i.imgur.com/GI3aRNl.png",
+            "ispublic": false
+        },
+        {
+            "name": "Broken Souls",
+            "hp": 140,
+            "attack": 300,
+            "defense": 200,
+            "element": "Corrupted",
+            "url": "https://i.imgur.com/7M0PNL3.png",
+            "ispublic": true
+        }
+    ],
+    "3": [
+        {
+            "name": "Mana Golem",
+            "hp": 200,
+            "attack": 220,
+            "defense": 210,
+            "element": "Corrupted",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_managolum-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Karok the Fallen",
+            "hp": 180,
+            "attack": 215,
+            "defense": 205,
+            "element": "Water",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_VIMs8un-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Water Draconian",
+            "hp": 220,
+            "attack": 225,
+            "defense": 200,
+            "element": "Water",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_waterdrag-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Wind Djinn",
+            "hp": 210,
+            "attack": 225,
+            "defense": 215,
+            "element": "Wind",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_djinn-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Autunm Fox",
+            "hp": 205,
+            "attack": 230,
+            "defense": 220,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Autumn_Fox-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Dark Draconian",
+            "hp": 195,
+            "attack": 220,
+            "defense": 200,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_darkdom-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Light Elemental",
+            "hp": 185,
+            "attack": 215,
+            "defense": 210,
+            "element": "Light",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_LightELemental-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Undead Giant",
+            "hp": 230,
+            "attack": 220,
+            "defense": 210,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_UndGiant-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Chaos Spider",
+            "hp": 215,
+            "attack": 215,
+            "defense": 205,
+            "element": "Corrupted",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosSpider-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Seed Spitter",
+            "hp": 225,
+            "attack": 220,
+            "defense": 200,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SeedSpitter-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Beach Werewolf",
+            "hp": 240,
+            "attack": 230,
+            "defense": 220,
+            "element": "Water",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BeachWerewold-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Boss Dummy",
+            "hp": 220,
+            "attack": 225,
+            "defense": 210,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BossDummy-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Rock",
+            "hp": 235,
+            "attack": 225,
+            "defense": 215,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Rock-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Shadow Serpent",
+            "hp": 200,
+            "attack": 220,
+            "defense": 205,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadoeSerpant-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Flame Elemental",
+            "hp": 210,
+            "attack": 225,
+            "defense": 210,
+            "element": "Fire",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireElemental-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Bear",
+            "hp": 225,
+            "attack": 215,
+            "defense": 220,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732611726453.png",
+            "ispublic": true
+        },
+        {
+            "name": "Chair",
+            "hp": 215,
+            "attack": 210,
+            "defense": 215,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_chair-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Chaos Serpant",
+            "hp": 230,
+            "attack": 220,
+            "defense": 205,
+            "element": "Corrupted",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosSerp-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Gorillaphant",
+            "hp": 240,
+            "attack": 225,
+            "defense": 210,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_gorillaserpant-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Dyskoles",
+            "hp": 400,
+            "attack": 318,
+            "defense": 345,
+            "element": "Corrupted",
+            "url": "https://i.imgur.com/PdkTL00.png",
+            "ispublic": false
+        },
+        {
+            "name": "Aranethis",
+            "hp": 420,
+            "attack": 360,
+            "defense": 363,
+            "element": "Nature",
+            "url": "https://i.imgur.com/VgQZ06V.png",
+            "ispublic": false
+        },
+        {
+            "name": "Thronyxis",
+            "hp": 380,
+            "attack": 390,
+            "defense": 380,
+            "element": "Corrupted",
+            "url": "https://i.imgur.com/DRZR3gp.png",
+            "ispublic": false
+        }
+    ],
+    "4": [
+        {
+            "name": "Hydra Head",
+            "hp": 300,
+            "attack": 280,
+            "defense": 270,
+            "element": "Water",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_hydra.png",
+            "ispublic": true
+        },
+        {
+            "name": "Blessed Deer",
+            "hp": 280,
+            "attack": 275,
+            "defense": 265,
+            "element": "Light",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BlessedDeer-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Chaos Sphinx",
+            "hp": 320,
+            "attack": 290,
+            "defense": 275,
+            "element": "Corrupted",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaopsSpinx.png",
+            "ispublic": true
+        },
+        {
+            "name": "Inferno Dracolion",
+            "hp": 290,
+            "attack": 285,
+            "defense": 270,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614284328.png",
+            "ispublic": true
+        },
+        {
+            "name": "Wind Cyclone",
+            "hp": 310,
+            "attack": 290,
+            "defense": 280,
+            "element": "Wind",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_WindElemental-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Mr Cuddles",
+            "hp": 305,
+            "attack": 295,
+            "defense": 285,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_mrcuddles-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Infernal Fiend",
+            "hp": 295,
+            "attack": 285,
+            "defense": 270,
+            "element": "Fire",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614284328.png",
+            "ispublic": true
+        },
+        {
+            "name": "Dark Mukai",
+            "hp": 285,
+            "attack": 275,
+            "defense": 265,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614826889.png",
+            "ispublic": true
+        },
+        {
+            "name": "Undead Berserker",
+            "hp": 330,
+            "attack": 285,
+            "defense": 275,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614863579.png",
+            "ispublic": true
+        },
+        {
+            "name": "Chaos Warrior",
+            "hp": 315,
+            "attack": 280,
+            "defense": 270,
+            "element": "Corrupted",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosWarrior-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Dire Wolf",
+            "hp": 325,
+            "attack": 285,
+            "defense": 275,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DireWolf-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Skye Warrior",
+            "hp": 340,
+            "attack": 295,
+            "defense": 285,
+            "element": "Corrupted",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SkyeWarrior-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Death On Wings",
+            "hp": 320,
+            "attack": 290,
+            "defense": 275,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DeathonWings-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Chaorruption",
+            "hp": 335,
+            "attack": 295,
+            "defense": 285,
+            "element": "Corrupted",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Chaorruption-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Shadow Beast",
+            "hp": 300,
+            "attack": 285,
+            "defense": 270,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadowBeast-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Hootbear",
+            "hp": 310,
+            "attack": 290,
+            "defense": 275,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_HootBear-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Anxiety",
+            "hp": 325,
+            "attack": 280,
+            "defense": 290,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_anxiety-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Twilly",
+            "hp": 315,
+            "attack": 275,
+            "defense": 285,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Twilly-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Black Cat",
+            "hp": 330,
+            "attack": 285,
+            "defense": 270,
+            "element": "Corrupted",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_QJsLMnk-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Forest Guardian",
+            "hp": 340,
+            "attack": 290,
+            "defense": 275,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ForestGuardian-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Hyphaelock",
+            "hp": 725,
+            "attack": 735,
+            "defense": 407,
+            "element": "Corrupted",
+            "url": "https://i.imgur.com/j0bzhIV.png",
+            "ispublic": false
+        },
+        {
+            "name": "Sylphystron",
+            "hp": 500,
+            "attack": 404,
+            "defense": 439,
+            "element": "Nature",
+            "url": "https://i.imgur.com/k8iEouL.png",
+            "ispublic": false
+        },
+        {
+            "name": "Alectorion",
+            "hp": 431,
+            "attack": 327,
+            "defense": 426,
+            "element": "Nature",
+            "url": "https://i.imgur.com/BrgjybA.png",
+            "ispublic": false
+        }
+    ],
+    "5": [
+        {
+            "name": "Chaos Dragon",
+            "hp": 400,
+            "attack": 380,
+            "defense": 370,
+            "element": "Corrupted",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosDragon-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Wooden Door",
+            "hp": 380,
+            "attack": 375,
+            "defense": 365,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_WoodenDoor-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Garvodeus",
+            "hp": 420,
+            "attack": 390,
+            "defense": 375,
+            "element": "Water",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Garvodeus-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Shadow Lich",
+            "hp": 390,
+            "attack": 385,
+            "defense": 370,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadowLich-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Zorbak",
+            "hp": 410,
+            "attack": 390,
+            "defense": 380,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Zorbak-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Dwakel Rocketman",
+            "hp": 405,
+            "attack": 395,
+            "defense": 385,
+            "element": "Electric",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DwarkalRock-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Kathool",
+            "hp": 395,
+            "attack": 385,
+            "defense": 370,
+            "element": "Water",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Kathool-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Celestial Hound",
+            "hp": 385,
+            "attack": 375,
+            "defense": 365,
+            "element": "Light",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_CelestialHound-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Undead Raxgore",
+            "hp": 430,
+            "attack": 385,
+            "defense": 375,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Raxfore-removebg-preview_1.png",
+            "ispublic": true
+        },
+        {
+            "name": "Droognax",
+            "hp": 415,
+            "attack": 380,
+            "defense": 370,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Droognax-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Corrupted Boar",
+            "hp": 425,
+            "attack": 385,
+            "defense": 375,
+            "element": "Corrupted",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Corrupted_Bear-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Fressa",
+            "hp": 440,
+            "attack": 395,
+            "defense": 385,
+            "element": "Water",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Fressa-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Grimskull",
+            "hp": 420,
+            "attack": 390,
+            "defense": 375,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Grimskull-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Chaotic Chicken",
+            "hp": 435,
+            "attack": 385,
+            "defense": 380,
+            "element": "Corrupted",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaoticChicken-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Baelgar",
+            "hp": 400,
+            "attack": 385,
+            "defense": 370,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Baelgar-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Blood Dragon",
+            "hp": 410,
+            "attack": 390,
+            "defense": 375,
+            "element": "Fire",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BloodDragon-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Avatar of Desolich",
+            "hp": 425,
+            "attack": 380,
+            "defense": 390,
+            "element": "Fire",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732696555786.png",
+            "ispublic": true
+        },
+        {
+            "name": "Piggy Drake",
+            "hp": 415,
+            "attack": 375,
+            "defense": 385,
+            "element": "Wind",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732696596976.png",
+            "ispublic": true
+        },
+        {
+            "name": "Chaos Alteon",
+            "hp": 430,
+            "attack": 385,
+            "defense": 370,
+            "element": "Corrupted",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Chaos_Alteon-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Argo",
+            "hp": 440,
+            "attack": 380,
+            "defense": 375,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Argo-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Aurigma",
+            "hp": 2383,
+            "attack": 722,
+            "defense": 901,
+            "element": "Dark",
+            "url": "https/storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_TormDragon_auto_20250806084046_8ecaa8e3.png",
+            "ispublic": false
+        },
+        {
+            "name": "Daphnelios",
+            "hp": 460,
+            "attack": 280,
+            "defense": 284,
+            "element": "Light",
+            "url": "https://i.imgur.com/kBdhuqS.png",
+            "ispublic": false
+        },
+        {
+            "name": "Ophionyx",
+            "hp": 424,
+            "attack": 460,
+            "defense": 400,
+            "element": "Dark",
+            "url": "https://i.imgur.com/mij7lRe.png",
+            "ispublic": false
+        },
+        {
+            "name": "Chloropyros",
+            "hp": 600,
+            "attack": 500,
+            "defense": 475,
+            "element": "Nature",
+            "url": "https://i.imgur.com/t25u5nt.png",
+            "ispublic": false
+        },
+        {
+            "name": "Thyridion",
+            "hp": 520,
+            "attack": 465,
+            "defense": 466,
+            "element": "Corrupted",
+            "url": "https://i.imgur.com/IdqGFDF.png",
+            "ispublic": false
+        },
+        {
+            "name": "Kakorys",
+            "hp": 520,
+            "attack": 490,
+            "defense": 496,
+            "element": "Corrupted",
+            "url": "https://i.imgur.com/qWqZxoO.png",
+            "ispublic": false
+        },
+        {
+            "name": "Thalassor",
+            "hp": 320,
+            "attack": 320,
+            "defense": 2649,
+            "element": "Dark",
+            "url": "https://i.imgur.com/7SKudIU.png",
+            "ispublic": false
+        },
+        {
+            "name": "Kakokanthos",
+            "hp": 560,
+            "attack": 520,
+            "defense": 499,
+            "element": "Corrupted",
+            "url": "https://i.imgur.com/W9176YJ.png",
+            "ispublic": false
+        },
+        {
+            "name": "Chimera",
+            "hp": 300,
+            "attack": 500,
+            "defense": 440,
+            "element": "Electric",
+            "url": "https://i.imgur.com/pyX4TFa.png",
+            "ispublic": true
+        }
+    ],
+    "6": [
+        {
+            "name": "Ultra Cuddles",
+            "hp": 500,
+            "attack": 470,
+            "defense": 460,
+            "element": "Corrupted",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ultracuddles-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "General Pollution",
+            "hp": 480,
+            "attack": 465,
+            "defense": 455,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_genpol-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Manslayer Fiend",
+            "hp": 520,
+            "attack": 475,
+            "defense": 460,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_manlsayer-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "The Hushed",
+            "hp": 490,
+            "attack": 470,
+            "defense": 455,
+            "element": "Light",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_hushed-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "The Jailer",
+            "hp": 510,
+            "attack": 475,
+            "defense": 465,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_jailer-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Thriller",
+            "hp": 505,
+            "attack": 480,
+            "defense": 470,
+            "element": "Electric",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Thriller-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Dire Razorclaw",
+            "hp": 495,
+            "attack": 470,
+            "defense": 455,
+            "element": "Fire",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file.png",
+            "ispublic": true
+        },
+        {
+            "name": "Dollageddon",
+            "hp": 485,
+            "attack": 465,
+            "defense": 455,
+            "element": "Light",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Dollageddon-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Gold Werewolf",
+            "hp": 530,
+            "attack": 475,
+            "defense": 460,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Gold_Werewolf-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "FlameMane",
+            "hp": 515,
+            "attack": 470,
+            "defense": 455,
+            "element": "Fire",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FlameMane-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Specimen 66",
+            "hp": 525,
+            "attack": 475,
+            "defense": 460,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Specimen_66-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Frank",
+            "hp": 540,
+            "attack": 480,
+            "defense": 470,
+            "element": "Electric",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Frank-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "French Horned ToadDragon",
+            "hp": 520,
+            "attack": 475,
+            "defense": 460,
+            "element": "Water",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file__1_-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Mog Zard",
+            "hp": 535,
+            "attack": 475,
+            "defense": 465,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_MogZard-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Mo-Zard",
+            "hp": 500,
+            "attack": 470,
+            "defense": 455,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file__2_-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Nulgath",
+            "hp": 510,
+            "attack": 475,
+            "defense": 460,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Nulgath-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Proto Champion",
+            "hp": 525,
+            "attack": 465,
+            "defense": 475,
+            "element": "Corrupted",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file_3.png",
+            "ispublic": true
+        },
+        {
+            "name": "Trash Can",
+            "hp": 515,
+            "attack": 460,
+            "defense": 470,
+            "element": "Light",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_TrashCan-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Turdragon",
+            "hp": 530,
+            "attack": 475,
+            "defense": 460,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Turagon-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Unending Avatar",
+            "hp": 540,
+            "attack": 470,
+            "defense": 455,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file_4.png",
+            "ispublic": true
+        },
+        {
+            "name": "Chloravyr",
+            "hp": 2219,
+            "attack": 2290,
+            "defense": 982,
+            "element": "Dark",
+            "url": "https/storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Frogyriad_auto_20250806134427_0c2e3fbf.png",
+            "ispublic": false
+        },
+        {
+            "name": "Oblivyss",
+            "hp": 2850,
+            "attack": 2390,
+            "defense": 1870,
+            "element": "Electric",
+            "url": "https://i.imgur.com/o87Kcbd.png",
+            "ispublic": false
+        },
+        {
+            "name": "Vulcryon",
+            "hp": 2341,
+            "attack": 2288,
+            "defense": 922,
+            "element": "Dark",
+            "url": "https://i.imgur.com/j0bzhIV.png",
+            "ispublic": false
+        },
+        {
+            "name": "Aracheus",
+            "hp": 1104,
+            "attack": 1089,
+            "defense": 956,
+            "element": "Electric",
+            "url": "https://i.imgur.com/6GCZ0Nu.png",
+            "ispublic": false
+        },
+        {
+            "name": "Nyxastraeus",
+            "hp": 749,
+            "attack": 2073,
+            "defense": 792,
+            "element": "Light",
+            "url": "https://i.imgur.com/tv6dGya.png",
+            "ispublic": false
+        },
+        {
+            "name": "Acheronylis",
+            "hp": 686,
+            "attack": 748,
+            "defense": 629,
+            "element": "Nature",
+            "url": "https://i.imgur.com/SDhfcOH.png",
+            "ispublic": false
+        },
+        {
+            "name": "Tartamykon",
+            "hp": 791,
+            "attack": 838,
+            "defense": 839,
+            "element": "Dark",
+            "url": "https://i.imgur.com/XjzcQn7.png",
+            "ispublic": false
+        },
+        {
+            "name": "Melantheia",
+            "hp": 666,
+            "attack": 667,
+            "defense": 666,
+            "element": "Dark",
+            "url": "https://i.imgur.com/PpjwNtx.png",
+            "ispublic": false
+        },
+        {
+            "name": "Thanocryst",
+            "hp": 350,
+            "attack": 2570,
+            "defense": 304,
+            "element": "Dark",
+            "url": "https://i.imgur.com/2DyJxY6.png",
+            "ispublic": false
+        },
+        {
+            "name": "Phyllora",
+            "hp": 640,
+            "attack": 720,
+            "defense": 668,
+            "element": "Nature",
+            "url": "https://i.imgur.com/7hToyt2.png",
+            "ispublic": false
+        },
+        {
+            "name": "Mmensemble",
+            "hp": 666,
+            "attack": 666,
+            "defense": 666,
+            "element": "Light",
+            "url": "https://i.imgur.com/Mul8ov1.png",
+            "ispublic": false
+        }
+    ],
+    "7": [
+        {
+            "name": "Astral Dragon",
+            "hp": 600,
+            "attack": 570,
+            "defense": 560,
+            "element": "Light",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_AstralDragon.png",
+            "ispublic": true
+        },
+        {
+            "name": "Eise Horror",
+            "hp": 580,
+            "attack": 565,
+            "defense": 555,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Elise_Horror-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Asbane",
+            "hp": 620,
+            "attack": 575,
+            "defense": 560,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Adbane.png",
+            "ispublic": true
+        },
+        {
+            "name": "Apephyryx",
+            "hp": 590,
+            "attack": 570,
+            "defense": 555,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Apephryx-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Enchantress",
+            "hp": 610,
+            "attack": 575,
+            "defense": 565,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Enchantress-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Queen of Monsters",
+            "hp": 605,
+            "attack": 580,
+            "defense": 570,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_QueenOfMonsters-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Krykan",
+            "hp": 595,
+            "attack": 570,
+            "defense": 555,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove_background_project.png",
+            "ispublic": true
+        },
+        {
+            "name": "Painadin Overlord",
+            "hp": 585,
+            "attack": 565,
+            "defense": 555,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Painadin_Overlord-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "EL-Blender",
+            "hp": 630,
+            "attack": 575,
+            "defense": 560,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_EbilBlender-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Key of Sholemoh",
+            "hp": 615,
+            "attack": 570,
+            "defense": 555,
+            "element": "Corrupted",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Key_of_Sholemoh-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Specimen 30",
+            "hp": 625,
+            "attack": 575,
+            "defense": 560,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Specimen_30.png",
+            "ispublic": true
+        },
+        {
+            "name": "Pinky",
+            "hp": 640,
+            "attack": 580,
+            "defense": 570,
+            "element": "Electric",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Pinky-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Monster Cake",
+            "hp": 620,
+            "attack": 575,
+            "defense": 560,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Monster_Cake-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Angyler Fish",
+            "hp": 635,
+            "attack": 575,
+            "defense": 565,
+            "element": "Water",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Angyler_Fish-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Big Bad Ancient.. Goose?",
+            "hp": 600,
+            "attack": 570,
+            "defense": 555,
+            "element": "Light",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BigBadAncientGoose-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Barghest",
+            "hp": 625,
+            "attack": 565,
+            "defense": 575,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Barghest-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Yuzil",
+            "hp": 615,
+            "attack": 560,
+            "defense": 570,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Yuzil.png",
+            "ispublic": true
+        },
+        {
+            "name": "Azkorath",
+            "hp": 630,
+            "attack": 575,
+            "defense": 560,
+            "element": "Corrupted",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Azkorath-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Boto",
+            "hp": 640,
+            "attack": 570,
+            "defense": 555,
+            "element": "Water",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Boto.png",
+            "ispublic": true
+        },
+        {
+            "name": "Erebrythos",
+            "hp": 1320,
+            "attack": 770,
+            "defense": 990,
+            "element": "Corrupted",
+            "url": "https://i.imgur.com/tB4NsvT.png",
+            "ispublic": false
+        },
+        {
+            "name": "Lapidarios",
+            "hp": 894,
+            "attack": 872,
+            "defense": 843,
+            "element": "Light",
+            "url": "https://i.imgur.com/bM8BS08.png",
+            "ispublic": false
+        },
+        {
+            "name": "Thermokleos",
+            "hp": 2580,
+            "attack": 660,
+            "defense": 677,
+            "element": "Fire",
+            "url": "https://i.imgur.com/cs3bmb2.png",
+            "ispublic": false
+        },
+        {
+            "name": "Bouskotos",
+            "hp": 2452,
+            "attack": 800,
+            "defense": 326,
+            "element": "Nature",
+            "url": "https://i.imgur.com/avHuNFr.png",
+            "ispublic": false
+        },
+        {
+            "name": "Cuddelythos",
+            "hp": 300,
+            "attack": 220,
+            "defense": 1884,
+            "element": "Corrupted",
+            "url": "https://i.imgur.com/4JZOlbK.png",
+            "ispublic": false
+        },
+        {
+            "name": "Harpy",
+            "hp": 300,
+            "attack": 1400,
+            "defense": 400,
+            "element": "Wind",
+            "url": "https://i.imgur.com/siSi7kV.png",
+            "ispublic": true
+        }
+    ],
+    "8": [
+        {
+            "name": "Meatmongous",
+            "hp": 1200,
+            "attack": 450,
+            "defense": 600,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Meatmongous-removebg-preview.png",
+            "ispublic": true
+        },
+        {
+            "name": "Ebil Meta Dragon",
+            "hp": 810,
+            "attack": 770,
+            "defense": 550,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_MetaDragon_n_Greg-transformed.png",
+            "ispublic": true
+        },
+        {
+            "name": "Shadow Nulgath",
+            "hp": 850,
+            "attack": 700,
+            "defense": 700,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Shadow_Nulgath.png",
+            "ispublic": true
+        },
+        {
+            "name": "The First Speaker",
+            "hp": 800,
+            "attack": 600,
+            "defense": 700,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FirstSpeakerFix-Photoroom.png",
+            "ispublic": true
+        },
+        {
+            "name": "Beru",
+            "hp": 720,
+            "attack": 900,
+            "defense": 630,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_IMG_7340.png",
+            "ispublic": false
+        },
+        {
+            "name": "Aitherion",
+            "hp": 1132,
+            "attack": 2215,
+            "defense": 917,
+            "element": "Dark",
+            "url": "https://i.imgur.com/2lRgWjg.png",
+            "ispublic": false
+        },
+        {
+            "name": "Chromaerbus",
+            "hp": 2681,
+            "attack": 1076,
+            "defense": 826,
+            "element": "Dark",
+            "url": "https://i.imgur.com/2WFpii7.png",
+            "ispublic": false
+        },
+        {
+            "name": "Pyrkletos",
+            "hp": 787,
+            "attack": 802,
+            "defense": 2352,
+            "element": "Fire",
+            "url": "https://i.imgur.com/f5q5RtD.png",
+            "ispublic": false
+        },
+        {
+            "name": "Lykanthros",
+            "hp": 2650,
+            "attack": 680,
+            "defense": 709,
+            "element": "Nature",
+            "url": "https://i.imgur.com/1CPAxi4.png",
+            "ispublic": false
+        },
+        {
+            "name": "Nyxidamos",
+            "hp": 2120,
+            "attack": 1270,
+            "defense": 631,
+            "element": "Dark",
+            "url": "https://i.imgur.com/jqXnMQ6.png",
+            "ispublic": false
+        },
+        {
+            "name": "Astermyia",
+            "hp": 900,
+            "attack": 2300,
+            "defense": 891,
+            "element": "Light",
+            "url": "https://i.imgur.com/SPhmkyN.png",
+            "ispublic": false
+        },
+        {
+            "name": "Achlyskeras",
+            "hp": 800,
+            "attack": 879,
+            "defense": 756,
+            "element": "Dark",
+            "url": "https://i.imgur.com/jwuyH15.png",
+            "ispublic": false
+        },
+        {
+            "name": "Chalybdoros",
+            "hp": 1300,
+            "attack": 840,
+            "defense": 928,
+            "element": "Dark",
+            "url": "https://i.imgur.com/9INim9Y.png",
+            "ispublic": false
+        },
+        {
+            "name": "Hieronyx",
+            "hp": 830,
+            "attack": 800,
+            "defense": 740,
+            "element": "Light",
+            "url": "https://i.imgur.com/HkUY2ut.png",
+            "ispublic": false
+        },
+        {
+            "name": "Aporion",
+            "hp": 2407,
+            "attack": 931,
+            "defense": 690,
+            "element": "Corrupted",
+            "url": "https://i.imgur.com/ryn0taf.png",
+            "ispublic": false
+        }
+    ],
+    "9": [
+        {
+            "name": "Avatar Tynfdarius",
+            "hp": 800,
+            "attack": 780,
+            "defense": 770,
+            "element": "Fire",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Avatar_Tynfdarius-removebg-preview-transformed-Photoroom.png",
+            "ispublic": true
+        },
+        {
+            "name": "Mech-a-Knight",
+            "hp": 780,
+            "attack": 775,
+            "defense": 790,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Mech-a-knight-removebg-preview-transformed.png",
+            "ispublic": true
+        },
+        {
+            "name": "Astraea's Engineer",
+            "hp": 820,
+            "attack": 790,
+            "defense": 775,
+            "element": "Light",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Engineer-removebg-preview-transformed.png",
+            "ispublic": true
+        },
+        {
+            "name": "Carrots butler",
+            "hp": 909,
+            "attack": 1543,
+            "defense": 707,
+            "element": "Light",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_IMG_9031.png",
+            "ispublic": false
+        },
+        {
+            "name": "Brontonyx",
+            "hp": 1987,
+            "attack": 931,
+            "defense": 1171,
+            "element": "Dark",
+            "url": "https://i.imgur.com/24lGrik.png",
+            "ispublic": false
+        },
+        {
+            "name": "Phlogistios",
+            "hp": 1516,
+            "attack": 2416,
+            "defense": 989,
+            "element": "Corrupted",
+            "url": "https://i.imgur.com/3uvULsW.png",
+            "ispublic": false
+        },
+        {
+            "name": "Thanokles",
+            "hp": 1440,
+            "attack": 1427,
+            "defense": 792,
+            "element": "Dark",
+            "url": "https://i.imgur.com/FB95brp.png",
+            "ispublic": false
+        },
+        {
+            "name": "Atroknox",
+            "hp": 2740,
+            "attack": 803,
+            "defense": 996,
+            "element": "Dark",
+            "url": "https://i.imgur.com/vyyl3RD.png",
+            "ispublic": false
+        },
+        {
+            "name": "Melasporos",
+            "hp": 1534,
+            "attack": 2566,
+            "defense": 846,
+            "element": "Dark",
+            "url": "https://i.imgur.com/jmNybm5.png",
+            "ispublic": false
+        },
+        {
+            "name": "Pyrnyx",
+            "hp": 2000,
+            "attack": 2740,
+            "defense": 954,
+            "element": "Fire",
+            "url": "https://i.imgur.com/aSGLZg4.png",
+            "ispublic": false
+        },
+        {
+            "name": "Hephaereth",
+            "hp": 1260,
+            "attack": 845,
+            "defense": 2280,
+            "element": "Corrupted",
+            "url": "https://i.imgur.com/RsYgfW3.png",
+            "ispublic": false
+        },
+        {
+            "name": "Akridamos",
+            "hp": 1900,
+            "attack": 2580,
+            "defense": 866,
+            "element": "Corrupted",
+            "url": "https://i.imgur.com/Z55zWgV.png",
+            "ispublic": false
+        },
+        {
+            "name": "Pyrogonos",
+            "hp": 1230,
+            "attack": 950,
+            "defense": 970,
+            "element": "Dark",
+            "url": "https://i.imgur.com/3xzjzMx.png",
+            "ispublic": false
+        },
+        {
+            "name": "Euphyrosyne",
+            "hp": 940,
+            "attack": 920,
+            "defense": 965,
+            "element": "Light",
+            "url": "https://i.imgur.com/V101ZmE.png",
+            "ispublic": false
+        },
+        {
+            "name": "Chthonyx",
+            "hp": 2200,
+            "attack": 730,
+            "defense": 623,
+            "element": "Dark",
+            "url": "https://i.imgur.com/E7SNUqp.png",
+            "ispublic": false
+        },
+        {
+            "name": "Lykaimon",
+            "hp": 2780,
+            "attack": 775,
+            "defense": 884,
+            "element": "Dark",
+            "url": "https://i.imgur.com/0UKVOCq.png",
+            "ispublic": false
+        },
+        {
+            "name": "Cryptomorphos",
+            "hp": 1420,
+            "attack": 1300,
+            "defense": 776,
+            "element": "Dark",
+            "url": "https://i.imgur.com/aLM6erU.png",
+            "ispublic": false
+        },
+        {
+            "name": "Stygioforge",
+            "hp": 1800,
+            "attack": 1661,
+            "defense": 1400,
+            "element": "Dark",
+            "url": "https://i.imgur.com/Be4sZBc.png",
+            "ispublic": false
+        }
+    ],
+    "10": [
+        {
+            "name": "Deimos",
+            "hp": 1200,
+            "attack": 700,
+            "defense": 900,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Deimos.png",
+            "ispublic": true
+        },
+        {
+            "name": "Void Dragon",
+            "hp": 2500,
+            "attack": 570,
+            "defense": 575,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_6pnyUGr-Photoroom-Photoroom.png",
+            "ispublic": true
+        },
+        {
+            "name": "End of all things",
+            "hp": 300,
+            "attack": 2500,
+            "defense": 300,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Beast-Photoroom-transformed-Photoroom.png",
+            "ispublic": true
+        },
+        {
+            "name": "Perry",
+            "hp": 877,
+            "attack": 1547,
+            "defense": 626,
+            "element": "Corrupted",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_image-231.png",
+            "ispublic": false
+        },
+        {
+            "name": "Greg",
+            "hp": 1450,
+            "attack": 700,
+            "defense": 700,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_greg_profile_pic2023-640w-removebg-preview-removebg-preview_1.png",
+            "ispublic": false
+        },
+        {
+            "name": "Solara, The Radiant Hare [Event]",
+            "hp": 2300,
+            "attack": 1640,
+            "defense": 900,
+            "element": "Light",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_OIG3.jpg",
+            "ispublic": false
+        },
+        {
+            "name": "Umbra, The Shadow Drake [Event]",
+            "hp": 1250,
+            "attack": 1230,
+            "defense": 1520,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_OIG3_2.jpg",
+            "ispublic": false
+        },
+        {
+            "name": "Thorne, The Floral Serpent [Event]",
+            "hp": 1150,
+            "attack": 1000,
+            "defense": 1000,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_OIG2.jpg",
+            "ispublic": false
+        },
+        {
+            "name": "Pepe Peepee",
+            "hp": 705,
+            "attack": 1011,
+            "defense": 898,
+            "element": "Nature",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_8c8bbb43-9f4e-42ba-8db4-a2f977131bed.png",
+            "ispublic": false
+        },
+        {
+            "name": "Zarynth",
+            "hp": 1015,
+            "attack": 1705,
+            "defense": 1001,
+            "element": "Dark",
+            "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zari.png",
+            "ispublic": false
+        },
+        {
+            "name": "Phosphoros",
+            "hp": 2504,
+            "attack": 2388,
+            "defense": 887,
+            "element": "Light",
+            "url": "https://i.imgur.com/MjPrsWF.png",
+            "ispublic": false
+        },
+        {
+            "name": "Chasmoryx",
+            "hp": 2500,
+            "attack": 2544,
+            "defense": 980,
+            "element": "Dark",
+            "url": "https://i.imgur.com/ocbx0AP.png",
+            "ispublic": false
+        },
+        {
+            "name": "Emberon",
+            "hp": 2470,
+            "attack": 2277,
+            "defense": 1077,
+            "element": "Fire",
+            "url": "https://i.imgur.com/onm4uTL.png",
+            "ispublic": false
+        },
+        {
+            "name": "Astrapyros",
+            "hp": 2200,
+            "attack": 1060,
+            "defense": 1221,
+            "element": "Dark",
+            "url": "https://i.imgur.com/yN4XLVM.png",
+            "ispublic": false
+        },
+        {
+            "name": "Noctiruin",
+            "hp": 2000,
+            "attack": 2100,
+            "defense": 500,
+            "element": "Dark",
+            "url": "https://i.imgur.com/arcR52p.png",
+            "ispublic": false
+        },
+        {
+            "name": "Mycolythos",
+            "hp": 980,
+            "attack": 2850,
+            "defense": 1663,
+            "element": "Corrupted",
+            "url": "https://i.imgur.com/yH43nyp.png",
+            "ispublic": false
+        },
+        {
+            "name": "Cerberus",
+            "hp": 350,
+            "attack": 1300,
+            "defense": 2000,
+            "element": "Nature",
+            "url": "https://i.imgur.com/EFj5FDj.png",
+            "ispublic": true
+        },
+        {
+            "name": "Bront\u00eb",
+            "hp": 2800,
+            "attack": 2500,
+            "defense": 1300,
+            "element": "Electric",
+            "url": "https://i.imgur.com/Nb4vjyi.png",
+            "ispublic": false
+        },
+        {
+            "name": "StyxStar",
+            "hp": 2200,
+            "attack": 2000,
+            "defense": 2400,
+            "element": "Dark",
+            "url": "https://i.imgur.com/CK9uScc.png",
+            "ispublic": false
+        },
+        {
+            "name": "BlinkXL",
+            "hp": 1600,
+            "attack": 3300,
+            "defense": 1600,
+            "element": "Corrupted",
+            "url": "https://i.imgur.com/S50yvw3.png",
+            "ispublic": false
+        },
+        {
+            "name": "PolyBeat",
+            "hp": 3300,
+            "attack": 1400,
+            "defense": 1800,
+            "element": "Nature",
+            "url": "https://i.imgur.com/srw2Gu8.png",
+            "ispublic": false
+        },
+        {
+            "name": "Oniroos",
+            "hp": 1800,
+            "attack": 2100,
+            "defense": 2700,
+            "element": "Light",
+            "url": "https://i.imgur.com/c3nW4e3.png",
+            "ispublic": false
+        }
+    ],
+    "11": [
+        {
+            "name": "Typhon",
+            "hp": 15000,
+            "attack": 4000,
+            "defense": 2500,
+            "element": "Wind",
+            "url": "https://i.imgur.com/B3bRxqx.png",
+            "ispublic": true
+        },
+        {
+            "name": "Bessie",
+            "hp": 18000,
+            "attack": 3500,
+            "defense": 2500,
+            "element": "Water",
+            "url": "https://i.imgur.com/ROfiOzu.png",
+            "ispublic": true
+        },
+        {
+            "name": "Arachne",
+            "hp": 16000,
+            "attack": 3000,
+            "defense": 3000,
+            "element": "Electric",
+            "url": "https://i.imgur.com/faY4xBn.png",
+            "ispublic": true
+        },
+        {
+            "name": "Asterius",
+            "hp": 17000,
+            "attack": 3250,
+            "defense": 2750,
+            "element": "Nature",
+            "url": "https://i.imgur.com/XVYnePd.png",
+            "ispublic": true
+        },
+        {
+            "name": "Sorinveil",
+            "hp": 25000,
+            "attack": 3500,
+            "defense": 4500,
+            "element": "Light",
+            "url": "https://i.imgur.com/zemuDC9.png",
+            "ispublic": true
+        },
+        {
+            "name": "Vaion",
+            "hp": 15000,
+            "attack": 7000,
+            "defense": 2500,
+            "element": "Dark",
+            "url": "https://i.imgur.com/nC06jIp.png",
+            "ispublic": true
+        },
+        {
+            "name": "Astrephiel",
+            "hp": 18000,
+            "attack": 4000,
+            "defense": 6000,
+            "element": "Corrupted",
+            "url": "https://i.imgur.com/IbKng92.png",
+            "ispublic": true
+        },
+        {
+            "name": "Mayeia",
+            "hp": 19000,
+            "attack": 5000,
+            "defense": 5000,
+            "element": "Fire",
+            "url": "https://i.imgur.com/y2SclKj.png",
+            "ispublic": true
+        }
+    ]
+}

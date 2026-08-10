@@ -1,0 +1,20 @@
+{
+  "_notes": "This is a Firebase service account credentials file used for Firebase Storage operations in the Fable RPG bot.",
+  "_description": "This file contains credentials that allow the bot to upload images to Firebase Storage for features like pet generation, background removal, and image processing.",
+  "_security_warning": "⚠️ CRITICAL: This file contains sensitive credentials that give full access to your Firebase project. Never commit this file to version control!",
+  "_setup_instructions": "To set up this file: 1) Go to Firebase Console > Project Settings > Service Accounts 2) Generate new private key 3) Download the JSON file 4) Rename to 'acc.json' and place in the Fable directory 5) Add 'acc.json' to .gitignore",
+  "_usage": "Used by cogs: process_splice, soulforge, patreon for Firebase Storage uploads",
+  "_environment_alternative": "Consider using environment variables instead: FIREBASE_CREDENTIALS_JSON",
+  
+  "type": "service_account",
+  "project_id": "fablerpg-f74c2",
+  "private_key_id": "REDACTED_FOR_SECURITY",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nREDACTED_FOR_SECURITY\n-----END PRIVATE KEY-----\n",
+  "client_email": "firebase-adminsdk-fyqhr@fablerpg-f74c2.iam.gserviceaccount.com",
+  "client_id": "REDACTED_FOR_SECURITY",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fyqhr%40fablerpg-f74c2.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}

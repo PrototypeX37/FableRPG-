@@ -1,7 +1,9 @@
+from datetime import datetime, timezone
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
 Copyright (C) 2023-2024 Lunar (PrototypeX37)
+Copyright (C) 2026 Danaelis
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -62,81 +64,51 @@ class Patreon(commands.Cog):
     def __init__(self, bot: Bot) -> None:
         self.bot = bot
         self.ruby_or_above = []
-
-        if self.bot.config.external.patreon_token:
-            asyncio.create_task(self.update_ruby_or_above())
+        self.support_guild_id = 1323388333589528638
+        self.ruby_or_above_role_ids = {
+            1411757100136140913,  # Olympian
+            1411757151306645706,  # Titan
+            1411757168356491508,  # Primordial Fate
+        }
+        asyncio.create_task(self.update_ruby_or_above())
 
     async def update_ruby_or_above(self) -> None:
         await self.bot.wait_until_ready()
 
-        if not self.bot.get_guild(self.bot.config.game.support_server_id):
-            return
-
-        headers = {"Authorization": f"Bearer {self.bot.config.external.patreon_token}"}
-        params = {
-            "include": "user",
-            "fields[member]": "lifetime_support_cents,patron_status,pledge_relationship_start,currently_entitled_amount_cents",
-            "fields[user]": "social_connections",
-            "page[size]": 100000,
-        }
-
-        async with self.bot.session.get(
-                "https://www.patreon.com/api/oauth2/api/current_user/campaigns",
-                headers=headers,
-        ) as resp:
-            json = await resp.json()
-            campaign_id = json["data"][0]["id"]
-
         while not self.bot.is_closed():
-            self.bot.logger.info("Starting patreon update")
-
-            ruby_or_higher = []
-            patreon_ids = []
-
-            while True:
-                async with self.bot.session.get(
-                        f"https://www.patreon.com/api/oauth2/v2/campaigns/{campaign_id}/members",
-                        headers=headers,
-                        params=params,
-                ) as resp:
-                    json = await resp.json()
-
-                for donator in json["data"]:
-                    if donator["attributes"]["currently_entitled_amount_cents"] >= 7500:
-                        user_id = int(donator["relationships"]["user"]["data"]["id"])
-                        patreon_ids.append(user_id)
-
-                for user in json["included"]:
-                    if user.get("type") != "user":
+            patreon_core = self.bot.get_cog("PatreonCore")
+            if patreon_core is not None and not getattr(patreon_core, "role_driven_sync", True):
+                ruby_or_higher: list[int] = []
+                for discord_user_id in patreon_core.patrons_data.keys():
+                    try:
+                        user_id = int(discord_user_id)
+                    except (TypeError, ValueError):
                         continue
+                    if patreon_core.get_cached_tier_for_user(user_id) >= 4:
+                        ruby_or_higher.append(user_id)
+                self.ruby_or_above = ruby_or_higher
+                self.bot.logger.info(
+                    f"Done with Patreon API cache update, found {len(self.ruby_or_above)} top-tier donators"
+                )
+                await asyncio.sleep(60 * 60)
+                continue
 
-                    if not (attributes := user.get("attributes")):
-                        continue
-                    if not (connections := attributes.get("social_connections")):
-                        continue
-                    if not (discord := connections.get("discord")):
-                        continue
-                    discord_user_id = int(discord.get("user_id", "0"))
-                    patreon_user_id = int(user["id"])
+            guild = self.bot.get_guild(self.support_guild_id)
+            if guild is None and self.bot.config.game.support_server_id:
+                guild = self.bot.get_guild(self.bot.config.game.support_server_id)
 
-                    if patreon_user_id in patreon_ids:
-                        ruby_or_higher.append(discord_user_id)
+            if guild is None:
+                await asyncio.sleep(60 * 5)
+                continue
 
-                pagination_data = json["meta"]["pagination"]
-
-                if not (cursors := pagination_data.get("cursors")):
-                    break
-
-                next_cursor_id = cursors["next"]
-                if not next_cursor_id:
-                    break
-
-                params["page[cursor]"] = next_cursor_id
+            ruby_or_higher: list[int] = []
+            async for member in guild.fetch_members(limit=None):
+                if any(role.id in self.ruby_or_above_role_ids for role in member.roles):
+                    ruby_or_higher.append(member.id)
 
             self.ruby_or_above = ruby_or_higher
-
             self.bot.logger.info(
-                f"Done with patreon update, found {len(self.ruby_or_above)} ruby or diamond donators"
+                f"Done with role-driven patron update, found {len(self.ruby_or_above)} top-tier donators"
             )
 
             # Run once per hour
@@ -163,11 +135,18 @@ class Patreon(commands.Cog):
                     )
                     tier = result['tier']
                     inttier = int(tier)
-                    if inttier < 4 or inttier > 0:
+                    if 0 < inttier <= 4:
                         await self.bot.pool.execute(
                             'UPDATE profile SET tier = $1, weapontoken = weapontoken + $2 WHERE "user" = $3;',
                             int(tier), 5, ctx.author.id
                         )
+                        patreon_core = self.bot.get_cog("PatreonCore")
+                        if patreon_core is not None and inttier > 0:
+                            patreon_core.set_manual_tier_override(ctx.author.id, inttier)
+                        try:
+                            await self.bot.clear_donator_cache(ctx.author.id)
+                        except Exception:
+                            pass
 
                     # Format the timestamp to display only the date
                     formatted_date = current_time.strftime('%Y-%m-%d')
@@ -184,7 +163,7 @@ class Patreon(commands.Cog):
     @user_cooldown(600)
     @commands.command()
     async def message(self, ctx, email):
-        user_id = 295173706496475136  # Replace with the specific user ID
+        user_id = 524674960153903126  # Owner/support contact user ID
 
         try:
             # Fetch the user from Discord's servers
@@ -253,18 +232,15 @@ class Patreon(commands.Cog):
 
         await ctx.send(_("Item reset."))
 
-    @is_patron()
     @has_char()
-    @commands.command(brief=_("[basic] Change an item's name"))
+    @commands.command(brief=_("Change an item's name"))
     @locale_doc
     async def weaponname(self, ctx, itemid: int, *, newname: str):
         _(
             """`<itemid>` - The ID of the item to rename
             `<newname>` - The name to give the item, must be shorter than 40 characters
 
-            Change an item's name. Once an item is renamed, it can no longer be sold.
-
-            Only basic (or above) tier patrons can use this command."""
+            Change an item's name. Once an item is renamed, it can no longer be sold."""
         )
         if len(newname) > 40:
             return await ctx.send(_("Name too long."))
@@ -307,9 +283,8 @@ class Patreon(commands.Cog):
         )
         await ctx.send(f"You have {weapontoken_value} tokens left")
 
-    @is_patron("bronze")
     @has_char()
-    @commands.command(brief=_("[bronze] Change an item's type"))
+    @commands.command(aliases=["weaponchange"], brief=_("Change an item's type"))
     @locale_doc
     async def weapontype(self, ctx, itemid: int, new_type: str.title):
         _(
@@ -321,7 +296,7 @@ class Patreon(commands.Cog):
             You may not change a two-handed item into a one-handed one, or vice versa.
             This proves useful for merging items.
 
-            Only bronze (or above) tier patrons can use this command."""
+            Requires weapon tokens for stronger weapons unless your profile tier is 4."""
         )
 
         # First, fetch the current value of weapontoken for the user
@@ -359,9 +334,19 @@ class Patreon(commands.Cog):
                     )
                 )
             stat = item["damage"] or item["armor"]
-            result = await self.bot.pool.fetchval('SELECT tier FROM profile WHERE "user" = $1;', ctx.author.id)
+            raw_tier = await conn.fetchval(
+                'SELECT tier FROM profile WHERE "user" = $1;',
+                ctx.author.id,
+            )
+            try:
+                tier = int(raw_tier or 0)
+            except (TypeError, ValueError):
+                try:
+                    tier = int(float(raw_tier or 0))
+                except (TypeError, ValueError):
+                    tier = 0
 
-            if result != 4:
+            if tier != 4:
 
                 if item["hand"] == "both" and stat > 40:
                     weapontoken_value = await self.bot.pool.fetchval(
@@ -424,10 +409,9 @@ class Patreon(commands.Cog):
             )
         )
 
-    @is_patron("gold")
-    @has_char()
     @next_day_cooldown()
-    @commands.command(brief=_("[gold] Receive a daily booster"))
+    @has_char()
+    @commands.command(aliases=["boosterdaily"], brief=_("Receive a daily booster"))
     @locale_doc
     async def donatordaily(self, ctx):
         _(

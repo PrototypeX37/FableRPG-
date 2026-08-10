@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
@@ -63,7 +64,7 @@ class Valentine(commands.Cog):
             This command may only be used from the 13th to the 15th February.
             (This command has a cooldown until 12am UTC.)"""
         )
-        today = datetime.datetime.now().day
+        today = datetime.datetime.now(timezone.utc).day
         if not 13 <= today <= 15:
             return await ctx.send(_("It's not time for that yet!"))
         if not ctx.character_data["marriage"]:

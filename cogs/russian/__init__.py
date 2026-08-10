@@ -20,8 +20,44 @@ import discord
 import asyncio
 import random
 from discord.ext import commands
-from utils.checks import has_char
+from utils.checks import has_char, user_is_gm
 from utils.i18n import _, locale_doc
+
+JOIN_TIMEOUT = 60 * 5
+RUSSIAN_ROULETTE_GIF_URL = "https://i.ibb.co/kKn0zQs/ezgif-4-51fcaad25e.gif"
+
+
+class RussianLobbyView(discord.ui.View):
+    def __init__(
+        self,
+        cog,
+        channel_id: int,
+        host_id: int,
+        force_begin: asyncio.Event,
+        timeout: int,
+    ):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.channel_id = channel_id
+        self.host_id = host_id
+        self.force_begin = force_begin
+
+    @discord.ui.button(label="Join", style=discord.ButtonStyle.success)
+    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        message = await self.cog.join_game(self.channel_id, interaction.user)
+        await interaction.response.send_message(message, ephemeral=True)
+
+    @discord.ui.button(label="Begin Now", style=discord.ButtonStyle.primary)
+    async def begin(self, interaction: discord.Interaction, button: discord.ui.Button):
+        is_gm_user = await user_is_gm(self.cog.bot, interaction.user)
+        if interaction.user.id != self.host_id and not is_gm_user:
+            return await interaction.response.send_message(
+                "Only the host/GM can begin now.",
+                ephemeral=True,
+            )
+        self.force_begin.set()
+        await interaction.response.send_message("Beginning now...", ephemeral=True)
+
 
 class Game:
     def __init__(self):
@@ -34,59 +70,60 @@ class Game:
         self.joined_players = set()
         self.gamestarted = False
         self.single = False
+        self.sponsor_reward = 0
 
 class Russian(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.games = {}
 
-    @has_char()
-    @commands.command()
-    async def join(self, ctx):
-        game = self.games.get(ctx.channel.id)
+    async def join_game(self, channel_id: int, user) -> str:
+        game = self.games.get(channel_id)
 
         if not game or not game.gamestarted:
-            await ctx.send("There is no game running. You can't join now.")
-            return
+            return "There is no game running. You can't join now."
 
         if game.is_game_running:
-            await ctx.send("A game is already running. You can't join now.")
-            return
+            return "A game is already running. You can't join now."
 
-        if ctx.author in game.joined_players:
-            await ctx.send(f"{ctx.author.mention}, you have already joined this game.")
-            return
+        if user in game.joined_players:
+            return f"{user.mention}, you have already joined this game."
+
+        async with self.bot.pool.acquire() as conn:
+            profile = await conn.fetchrow(
+                'SELECT "money" FROM profile WHERE "user" = $1;',
+                user.id
+            )
+
+        if not profile:
+            return f"{user.mention}, you need a character to join this game."
 
         if game.bettotal > 0:
             if game.counter == 0:
                 game.betamount = game.bettotal
                 game.counter = 1
-            # Check the player's balance
-            async with self.bot.pool.acquire() as conn:
-                user_balance = await conn.fetchval(
-                    'SELECT "money" FROM profile WHERE "user" = $1;',
-                    ctx.author.id
-                )
 
-            if user_balance < game.betamount:
-                await ctx.send(f"{ctx.author.mention}, you are too poor.")
-                return
+            if profile["money"] < game.betamount:
+                return f"{user.mention}, you are too poor."
 
-            # Deduct the bet amount from the player's profile
             async with self.bot.pool.acquire() as conn:
                 await conn.execute(
                     'UPDATE profile SET "money"="money" - $1 WHERE "user"=$2;',
-                    game.betamount, ctx.author.id
+                    game.betamount, user.id
                 )
-            await ctx.send(f"{ctx.author.mention} has joined the game and paid a bet of {game.betamount}.")
             game.bettotal += game.betamount
-            game.participants.append(ctx.author)
-            game.joined_players.add(ctx.author)
+            game.participants.append(user)
+            game.joined_players.add(user)
+            return f"{user.mention} has joined the game and paid a bet of {game.betamount}."
 
-        else:
-            await ctx.send(f"{ctx.author.mention} has joined the game!")
-            game.participants.append(ctx.author)
-            game.joined_players.add(ctx.author)
+        game.participants.append(user)
+        game.joined_players.add(user)
+        return f"{user.mention} has joined the game!"
+
+    @has_char()
+    @commands.command()
+    async def join(self, ctx):
+        await ctx.send(await self.join_game(ctx.channel.id, ctx.author))
 
     @has_char()
     @commands.command(aliases=["rr", "gungame"], brief=_("Play Russian Roulette"))
@@ -106,7 +143,10 @@ class Russian(commands.Cog):
             return
 
         game = Game()
+        game.sponsor_reward = max(0, int(getattr(ctx, "scheduled_reward", 0)))
         self.games[ctx.channel.id] = game
+        force_begin = asyncio.Event()
+        view = RussianLobbyView(self, ctx.channel.id, ctx.author.id, force_begin, JOIN_TIMEOUT)
 
         if bet < 0:
             await ctx.send(f"{ctx.author.mention} your bet must be above 0!")
@@ -133,17 +173,39 @@ class Russian(commands.Cog):
                     )
                 game.bettotal = bet
                 game.winnings = game.bettotal
-                await ctx.send(
-                    f"Russian Roulette game has started with an entry fee of **${bet}!** Wait for 2 minutes for players to join.")
+                lobby_message = await ctx.send(
+                    f"Russian Roulette game has started with an entry fee of **${bet}!** Wait up to 5 minutes for players to join with the button or **$join**.",
+                    view=view,
+                )
                 game.gamestarted = True
-                game.joined_players.add(ctx.author)
+                if not getattr(ctx, "auto_minigame", False):
+                    game.joined_players.add(ctx.author)
         else:
-            await ctx.send("**Russian Roulette game has started!** Players have 2 minutes to join using **$join**.")
+            reward_line = (
+                f"\nSponsored reward: **${game.sponsor_reward}**"
+                if game.sponsor_reward > 0 else ""
+            )
+            lobby_message = await ctx.send(
+                f"**Russian Roulette game has started!** Players have up to 5 minutes to join with the button or **$join**.{reward_line}",
+                view=view,
+            )
             game.gamestarted = True
-            game.joined_players.add(ctx.author)
+            if not getattr(ctx, "auto_minigame", False):
+                game.joined_players.add(ctx.author)
 
-        game.participants.append(ctx.author)
-        await asyncio.sleep(120)  # Wait for 2 minutes
+        if not getattr(ctx, "auto_minigame", False):
+            game.participants.append(ctx.author)
+        try:
+            await asyncio.wait_for(force_begin.wait(), timeout=JOIN_TIMEOUT)
+        except asyncio.TimeoutError:
+            pass
+        view.stop()
+        for child in view.children:
+            child.disabled = True
+        try:
+            await lobby_message.edit(view=view)
+        except discord.HTTPException:
+            pass
 
         if len(game.participants) < 2:
             await ctx.send("Not enough players to start the game.")
@@ -187,7 +249,7 @@ class Russian(commands.Cog):
                                 description=f"{other_player.mention} has been shot by {player.mention}!",
                                 color=discord.Color.red()
                             )
-                            embed.set_image(url="https://media.tenor.com/ggBL-mf1-swAAAAC/guns-anime.gif")
+                            embed.set_image(url=RUSSIAN_ROULETTE_GIF_URL)
                             await asyncio.sleep(3)  # Simulate suspense
                             await ctx.send(embed=embed)
                             players_to_remove.append(other_player)
@@ -200,7 +262,7 @@ class Russian(commands.Cog):
                                 description=f"{player.mention} has shot themselves in the face!",
                                 color=discord.Color.red()
                             )
-                            embed.set_image(url="https://i.ibb.co/kKn0zQs/ezgif-4-51fcaad25e.gif")
+                            embed.set_image(url=RUSSIAN_ROULETTE_GIF_URL)
                             await asyncio.sleep(3)  # Simulate suspense
                             await ctx.send(embed=embed)
                             players_to_remove.append(player)
@@ -240,6 +302,16 @@ class Russian(commands.Cog):
                                 await ctx.send(
                                     f"Congratulations {winner.mention}! You are the last one standing and won **${winnings}**."
                                 )
+                            elif game.sponsor_reward > 0:
+                                async with self.bot.pool.acquire() as conn:
+                                    await conn.execute(
+                                        'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                                        game.sponsor_reward,
+                                        winner.id,
+                                    )
+                                await ctx.send(
+                                    f"Congratulations {winner.mention}! You are the last one standing and won the sponsored reward of **${game.sponsor_reward}**."
+                                )
                             else:
                                 await ctx.send(
                                     f"Congratulations {winner.mention}! You are the last one standing. **Game over!**"
@@ -267,7 +339,7 @@ class Russian(commands.Cog):
             description="Surviving players automatically move to the next round. Round will start in 5 seconds..",
             color=discord.Color.green()
         )
-        embed.set_image(url="https://media.tenor.com/fklGVnlUSFQAAAAd/russian-roulette.gif")
+        embed.set_image(url=RUSSIAN_ROULETTE_GIF_URL)
         await ctx.send(embed=embed)
 
 async def setup(bot):

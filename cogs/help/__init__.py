@@ -2,6 +2,7 @@
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
 Copyright (C) 2023-2024 Lunar (PrototypeX37)
+Copyright (C) 2026 Danaelis
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -19,21 +20,35 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import asyncio
 import math
 
-from datetime import timedelta
-
 import discord
 
-from asyncpg import UniqueViolationError
 from discord.ext import commands
 from discord.ext.commands.core import Command
-from discord.http import handle_message_parameters
 from discord.interactions import Interaction
 from discord.ui import Button, View, button
+from urllib.parse import urlparse
 
 from classes.bot import Bot
 from classes.context import Context
-from utils.checks import has_open_help_request, is_supporter
+from utils.checks import user_is_gm
 from utils.i18n import _, locale_doc
+
+DEFAULT_BASE_URL = "https://echoesofolympus.ovh"
+
+
+def normalize_base_url(base_url: str | None) -> str:
+    if not isinstance(base_url, str):
+        return DEFAULT_BASE_URL
+
+    candidate = base_url.strip().rstrip("/")
+    if not candidate:
+        return DEFAULT_BASE_URL
+
+    parsed = urlparse(candidate)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return candidate
+
+    return DEFAULT_BASE_URL
 
 
 def chunks(iterable, size):
@@ -277,238 +292,69 @@ class Help(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    def docs_url(self) -> str:
+        return normalize_base_url(getattr(self.bot, "BASE_URL", None))
+
+    def tutorial_url(self) -> str:
+        return f"{self.docs_url()}/tutorial"
+
     @commands.command(aliases=["commands", "cmds"], brief=_("View the command list"))
     @locale_doc
     async def documentation(self, ctx):
         _("""Sends a link to the official documentation.""")
         await ctx.send(
             _(
-                "<:blackcheck:441826948919066625> **Check {url} for a list of"
+                "**Check {url} for a list of"
                 " commands**"
-            ).format(url=f"{self.bot.BASE_URL}/commands")
+            ).format(url=self.docs_url())
         )
 
-    @commands.command(aliases=["faq"], brief=_("View the tutorial"))
+    @commands.command(aliases=["faq", "quickstart"], brief=_("View the tutorial"))
     @locale_doc
     async def tutorial(self, ctx):
-        _("""Link to the bot tutorial and FAQ.""")
-        await ctx.send(
-            _(
-                "<:blackcheck:441826948919066625> **Check {url} for a tutorial and"
-                " FAQ**"
-            ).format(url=f"{self.bot.BASE_URL}/tutorial")
+        _("""Shows a quickstart tutorial and links to the full tutorial and FAQ.""")
+        tutorial_url = self.tutorial_url()
+        docs_url = self.docs_url()
+        prefix = ctx.clean_prefix
+
+        e = discord.Embed(
+            title=_("Fable Quickstart"),
+            colour=self.bot.config.game.primary_colour,
+            url=tutorial_url,
+            description=_(
+                "Use these core commands to get started, then open the full tutorial"
+                " for deeper guidance."
+            ),
+        )
+        e.set_author(name=self.bot.user, icon_url=self.bot.user.display_avatar.url)
+        e.add_field(
+            name=_("Start your character"),
+            value=_(
+                "`{prefix}create` to begin your journey."
+            ).format(prefix=prefix),
+            inline=False,
+        )
+        e.add_field(
+            name=_("Learn commands fast"),
+            value=_(
+                "`{prefix}help` for command help and `{prefix}documentation` for the"
+                " full command list."
+            ).format(prefix=prefix),
+            inline=False,
+        )
+        e.add_field(
+            name=_("Configure your experience"),
+            value=_(
+                "`{prefix}settings prefix` to change the prefix, and"
+                " `{prefix}language set` to set your language."
+            ).format(prefix=prefix),
+            inline=False,
         )
 
-    @is_supporter()
-    @commands.command(brief=_("Allow someone/-thing to use help_me again"))
-    @locale_doc
-    async def unbanfromhelp_me(self, ctx, thing_to_unban: discord.User | int):
-        _(
-            """`<thing_to_unban>` - A discord User, their User ID, or a server ID
-
-            Unbans a previously banned user/server from using the `{prefix}help_me` command.
-
-            Only Support Team Members can use this command."""
-        )
-        if isinstance(thing_to_unban, discord.User):
-            id = thing_to_unban.id
-        else:
-            id = thing_to_unban
-            thing_to_unban = self.bot.get_guild(id)
-        await self.bot.pool.execute('DELETE FROM help_me WHERE "id"=$1;', id)
-        await ctx.send(
-            _("{thing} has been unbanned for the help_me command :ok_hand:").format(
-                thing=thing_to_unban.name
-            )
-        )
-
-    @is_supporter()
-    @commands.command(brief=_("Ban someone/-thing from using help_me"))
-    @locale_doc
-    async def banfromhelp_me(self, ctx, thing_to_ban: discord.User | int):
-        _(
-            """`<thing_to_ban>` - A discord User, their User ID, or a server ID
-
-            Bans a user/server from using the `{prefix}help_me` command.
-
-            Only Support Team Members can use this command."""
-        )
-        id = thing_to_ban.id if isinstance(thing_to_ban, discord.User) else thing_to_ban
-        try:
-            await self.bot.pool.execute('INSERT INTO help_me ("id") VALUES ($1);', id)
-        except UniqueViolationError:
-            return await ctx.send(_("Error... Maybe they're already banned?"))
-        await ctx.send(_("They have been banned for the help_me command :ok_hand:"))
-
-    @commands.guild_only()
-    @commands.group(
-        invoke_without_command=True, brief=_("Ask our Support Team for help")
-    )
-    @locale_doc
-    async def help_me(self, ctx, *, text: str):
-        _(
-            """`<text>` - The text to describe the question or the issue you are having
-
-            Ask our support team for help, allowing them to join your server and help you personally.
-            If they do not join within 48 hours, you may use the help_me command again.
-
-            Make sure the bot has permissions to create instant invites.
-            English is preferred."""
-        )
-        if (
-            cd := await self.bot.redis.execute_command("TTL", f"help_me:{ctx.guild.id}")
-        ) != -2:
-            time = timedelta(seconds=cd)
-            return await ctx.send(
-                _(
-                    "You server already has a help_me request open! Please wait until"
-                    " the support team gets to you or wait {time} to try again. "
-                ).format(time=time)
-            )
-        blocked = await self.bot.pool.fetchrow(
-            'SELECT * FROM help_me WHERE "id"=$1 OR "id"=$2;',
-            ctx.guild.id,
-            ctx.author.id,
-        )
-        if blocked:
-            return await ctx.send(
-                _("You or your server has been blacklisted for some reason.")
-            )
-
-        if not await ctx.confirm(
-            _(
-                "Are you sure? This will notify our support team and allow them to join"
-                " the server."
-            )
-        ):
-            return
-
-        try:
-            inv = await ctx.channel.create_invite()
-        except discord.Forbidden:
-            return await ctx.send(_("Error when creating Invite."))
-        em = discord.Embed(title="Help Request", colour=0xFF0000)
-        em.add_field(name="Requested by", value=f"{ctx.author}")
-        em.add_field(name="Requested in server", value=f"{ctx.guild.name}")
-        em.add_field(name="Requested in channel", value=f"#{ctx.channel}")
-        em.add_field(name="Content", value=text)
-        em.add_field(name="Invite", value=inv)
-        em.set_footer(text=f"Server ID: {ctx.guild.id}")
-
-        with handle_message_parameters(embed=em) as params:
-            message = await self.bot.http.send_message(
-                self.bot.config.game.help_me_channel, params=params
-            )
-        await self.bot.redis.execute_command(
-            "SET",
-            f"help_me:{ctx.guild.id}",
-            message["id"],
-            "EX",
-            172800,  # 48 hours
-        )
-        await ctx.send(
-            _("Support team has been notified and will join as soon as possible!")
-        )
-
-    @is_supporter()
-    @help_me.command(hidden=True, brief=_("Finish the help_me request"))
-    @locale_doc
-    async def finish(self, ctx, guild_id: int):
-        _(
-            """`<guild_id>` - The server ID of the requesting server
-
-            Clear a server's help_me cooldown. If this is not done, they will be on cooldown for 48 hours."""
-        )
-        await self.bot.redis.execute_command("DEL", f"help_me:{guild_id}")
-        await ctx.send("Clear!", delete_after=5)
-
-    @has_open_help_request()
-    @help_me.command(aliases=["correct"], brief=_("Change your help_me text"))
-    @locale_doc
-    async def edit(self, ctx, *, new_text: str):
-        _(
-            """`<new_text>` - The new text to use in your help_me request
-
-            Edit the text on your open help_me request. Our Support Team will see the new text right away.
-
-            You can only use this command if your server has an open help_me request."""
-        )
-        message = await self.bot.http.get_message(
-            self.bot.config.game.help_me_channel, ctx.help_me
-        )
-        inv = discord.utils.find(
-            lambda f: f["name"] == "Invite", message["embeds"][0]["fields"]
-        )["value"]
-        old_text = discord.utils.find(
-            lambda f: f["name"] == "Content", message["embeds"][0]["fields"]
-        )["value"]
-
-        em = discord.Embed(title="Help Request", colour=0xFF0000)
-        em.add_field(name="Requested by", value=f"{ctx.author}")
-        em.add_field(name="Requested in server", value=f"{ctx.guild.name}")
-        em.add_field(name="Requested in channel", value=f"#{ctx.channel}")
-        em.add_field(name="Content", value=new_text)
-        em.add_field(name="Invite", value=inv)
-        em.set_footer(text=f"Server ID: {ctx.guild.id}")
-
-        await self.bot.http.edit_message(
-            self.bot.config.game.help_me_channel,
-            ctx.help_me,
-            content=None,
-            embed=em.to_dict(),
-        )
-        await ctx.send(
-            _("Successfully changed your help_me text from `{old}` to `{new}`!").format(
-                old=old_text, new=new_text
-            )
-        )
-
-    @has_open_help_request()
-    @help_me.command(
-        aliases=["revoke", "remove"], brief=_("Cancel your open help_me request")
-    )
-    @locale_doc
-    async def delete(self, ctx):
-        _(
-            """Cancel your ongoing help_me request. Our Support Team will not join your server.
-
-            You can only use this command if your server has an open help_me request."""
-        )
-        if not await ctx.confirm(
-            _("Are you sure you want to cancel your help_me request?")
-        ):
-            return await ctx.send(_("Cancelled cancellation."))
-        await self.bot.http.delete_message(
-            self.bot.config.game.help_me_channel, ctx.help_me
-        )
-        await self.bot.redis.execute_command("DEL", f"help_me:{ctx.guild.id}")
-        with handle_message_parameters(
-            content=f"help_me request for server {ctx.guild} ({ctx.guild.id}) was cancelled by {ctx.author}"
-        ) as params:
-            await self.bot.http.send_message(
-                self.bot.config.game.help_me_channel, params=params
-            )
-        await ctx.send(_("Your help_me request has been cancelled."))
-
-    @has_open_help_request()
-    @help_me.command(brief=_("View your current help_me request"))
-    @locale_doc
-    async def view(self, ctx):
-        _(
-            """View how your server's current help_me request looks like to our Support Team.
-
-            You can only use this command if your server has an open help_me request."""
-        )
-        message = await self.bot.http.get_message(
-            self.bot.config.game.help_me_channel, ctx.help_me
-        )
-        embed = discord.Embed().from_dict(message["embeds"][0])
-
-        await ctx.send(
-            _("Your help request is visible to our support team like this:"),
-            embed=embed,
-        )
-
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label=_("Open Full Tutorial"), url=tutorial_url))
+        view.add_item(discord.ui.Button(label=_("Open Documentation"), url=docs_url))
+        await ctx.send(embed=e, view=view)
 
 class IdleHelp(commands.HelpCommand):
     def __init__(self, *args, **kwargs):
@@ -591,28 +437,33 @@ class IdleHelp(commands.HelpCommand):
             return await self.send_command_help(cmd)
 
     async def send_bot_help(self, mapping):
+        base_url = normalize_base_url(getattr(self.context.bot, "BASE_URL", None))
+        tutorial_url = f"{base_url}/tutorial"
         e = discord.Embed(
             title=_(
                 "Fable Help {version}",
             ).format(version=self.context.bot.version),
             color=self.context.bot.config.game.primary_colour,
-            url="https://idlerpg.xyz/",
+            url="https://wiki.fablerpg.xyz/",
         )
         e.set_author(
             name=self.context.bot.user,
             icon_url=self.context.bot.user.display_avatar.url,
         )
         e.description = _(
-            "**Welcome to the Fable help.**\nCheck out our tutorial!\n-"
-            " coming soon"
-        ).format(prefix=self.context.clean_prefix)
+            "**Welcome to the Fable help.**\n"
+            "Check out our tutorial:\n"
+            "- {tutorial_url}\n"
+            "Need a quick summary? Use `{prefix}tutorial`."
+        ).format(prefix=self.context.clean_prefix, tutorial_url=tutorial_url)
 
+        has_gm_access = await user_is_gm(self.context.bot, self.context.author)
         allowed = []
         for cog in sorted(mapping.keys(), key=lambda x: x.qualified_name if x else ""):
             if cog is None:
                 continue
             if (
-                self.context.author.id not in self.context.bot.config.game.game_masters
+                not has_gm_access
                 and cog.qualified_name in self.gm_exts
             ):
                 continue
@@ -638,8 +489,9 @@ class IdleHelp(commands.HelpCommand):
         await self.context.send(embed=e)
 
     async def send_cog_help(self, cog):
+        has_gm_access = await user_is_gm(self.context.bot, self.context.author)
         if (cog.qualified_name in self.gm_exts) and (
-            self.context.author.id not in self.context.bot.config.game.game_masters
+            not has_gm_access
         ):
             if self.context.author.id in self.context.bot.owner_ids:
                 pass  # owners don't have restrictions
@@ -674,9 +526,10 @@ class IdleHelp(commands.HelpCommand):
         await menu.start(self.context)
 
     async def send_command_help(self, command: Command):
+        has_gm_access = await user_is_gm(self.context.bot, self.context.author)
         if command.cog:
             if (command.cog.qualified_name in self.gm_exts) and (
-                self.context.author.id not in self.context.bot.config.game.game_masters
+                not has_gm_access
             ):
                 if self.context.author.id in self.context.bot.owner_ids:
                     pass  # owners don't have restrictions
@@ -713,9 +566,10 @@ class IdleHelp(commands.HelpCommand):
         await self.context.send(embed=e)
 
     async def send_group_help(self, group):
+        has_gm_access = await user_is_gm(self.context.bot, self.context.author)
         if group.cog:
             if (
-                self.context.author.id not in self.context.bot.config.game.game_masters
+                not has_gm_access
                 and group.cog.qualified_name in self.gm_exts
             ):
                 return await self.context.send(

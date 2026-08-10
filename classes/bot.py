@@ -1,6 +1,8 @@
+from datetime import timezone
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
+Copyright (C) 2026 Danaelis
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -46,6 +48,7 @@ from classes.exceptions import GlobalCooldown
 from classes.http import ProxiedClientSession
 from classes.items import ALL_ITEM_TYPES, Hand, ItemType
 from utils import i18n, paginator, random
+import utils.misc as rpgtools
 from utils.cache import cache
 from utils.checks import user_is_patron
 from utils.config import ConfigLoader
@@ -79,6 +82,7 @@ class Bot(commands.AutoShardedBot):
         self.support_server_id = self.config.game.support_server_id
         self.linecount = 0
         self.make_linecount()
+        self._allitems_element_column_ready = False
 
         self.all_prefixes = {}
         self.activity = discord.Game(
@@ -150,11 +154,16 @@ class Bot(commands.AutoShardedBot):
     async def close(self):
         await super().close()
 
-        await self.session.close()
-        await self.trusted_session.close()
-        await self.pool.close()
-        await self.second_pool.close()
-        await self.redis.close()
+        if hasattr(self, "session") and self.session:
+            await self.session.close()
+        if hasattr(self, "trusted_session") and self.trusted_session:
+            await self.trusted_session.close()
+        if hasattr(self, "pool") and self.pool:
+            await self.pool.close()
+        if hasattr(self, "second_pool") and self.second_pool:
+            await self.second_pool.close()
+        if hasattr(self, "redis") and self.redis:
+            await self.redis.close()
 
     async def setup_hook(self):
         """Connects all databases and initializes sessions"""
@@ -191,11 +200,59 @@ class Bot(commands.AutoShardedBot):
             **second_database_creds, min_size=10, max_size=20, command_timeout=60.0
         )
 
-        for extension in self.config.bot.initial_extensions:
+        startup_extensions = list(self.config.bot.initial_extensions)
+        required_startup_extensions = (
+            "cogs.antiscript",
+            "cogs.echoesdex",
+            "cogs.petscare",
+            "cogs.petsskill",
+            "cogs.agon",
+            "cogs.dreambound_spring",
+            "cogs.olympusdash",
+            "cogs.chariotrace",
+            "cogs.lykaion",
+            "cogs.russian",
+            "cogs.hungergames",
+            "cogs.minigamescheduler",
+        )
+
+        missing_from_config = [
+            ext for ext in required_startup_extensions if ext not in startup_extensions
+        ]
+        if missing_from_config:
+            print(
+                "[startup] Required extensions missing from config; enforcing load: "
+                + ", ".join(missing_from_config),
+                flush=True,
+            )
+
+        # petscare/petsskill register under the $pets group, so pets must be loaded first.
+        if (
+            any(
+                ext in missing_from_config
+                for ext in ("cogs.petscare", "cogs.petsskill")
+            )
+            and "cogs.pets" not in startup_extensions
+        ):
+            startup_extensions.append("cogs.pets")
+            print(
+                "[startup] Added dependency extension cogs.pets for petscare/petsskill.",
+                flush=True,
+            )
+
+        for ext in required_startup_extensions:
+            if ext not in startup_extensions:
+                startup_extensions.append(ext)
+
+        for extension in startup_extensions:
             try:
-                await self.load_extension(extension)
+                print(f"[startup] Loading extension {extension}...", flush=True)
+                await asyncio.wait_for(self.load_extension(extension), timeout=25)
+                print(f"[startup] Loaded extension {extension}", flush=True)
+            except asyncio.TimeoutError:
+                print(f"[startup] Timeout loading extension {extension}; skipping.", file=sys.stderr, flush=True)
             except Exception:
-                print(f"Failed to load extension {extension}.", file=sys.stderr)
+                print(f"Failed to load extension {extension}.", file=sys.stderr, flush=True)
                 traceback.print_exc()
 
         self.redis_version = await self.get_redis_version()
@@ -268,6 +325,7 @@ class Bot(commands.AutoShardedBot):
         statatk=None,
         statdef=None,
         god=None,
+        xp=None,
         conn=None,
     ):
         """Generates the raidstats for a user"""
@@ -285,7 +343,7 @@ class Bot(commands.AutoShardedBot):
             or statdef is None
         ):
             row = await conn.fetchrow('SELECT * FROM profile WHERE "user"=$1;', v)
-            atkmultiply, defmultiply, classes, race, guild, user_god, statatk, statdef = (
+            atkmultiply, defmultiply, classes, race, guild, user_god, statatk, statdef, xp = (
                 row["atkmultiply"],
                 row["defmultiply"],
                 row["class"],
@@ -294,9 +352,12 @@ class Bot(commands.AutoShardedBot):
                 row["god"],
                 row["statatk"],
                 row["statdef"],
+                row["xp"],
             )
             if god is not None and god != user_god:
                 raise ValueError()
+        if xp is None:
+            xp = await conn.fetchval('SELECT "xp" FROM profile WHERE "user"=$1;', v)
         damage, armor = await self.get_damage_armor_for(
             v, classes=classes, race=race, conn=conn
         )
@@ -313,6 +374,12 @@ class Bot(commands.AutoShardedBot):
         atkmultiply += statatk * Decimal('0.1')
         defmultiply += statdef * Decimal('0.1')
 
+        # Scale raid attack/defense from character level before multipliers.
+        # This keeps level progression relevant even with fixed weapon loadouts.
+        level = Decimal(rpgtools.xptolevel(int(xp)))
+        damage = Decimal(str(damage)) + (level * Decimal("5"))
+        armor = Decimal(str(armor)) + (level * Decimal("4"))
+
         #for c in classes:
             #if c and c.in_class_line(Raider):
                 #grade = c.class_grade()
@@ -320,6 +387,16 @@ class Bot(commands.AutoShardedBot):
                 #defmultiply = defmultiply + Decimal("0.1") * grade
         dmg = damage * atkmultiply
         deff = armor * defmultiply
+
+        # FableReborn parity: apply equipped amulet attack/defense as flat raidstat bonuses.
+        amulet = await conn.fetchrow(
+            'SELECT "attack", "defense" FROM amulets WHERE "user_id"=$1 AND "equipped"=true;',
+            v,
+        )
+        if amulet:
+            dmg += amulet["attack"] or 0
+            deff += amulet["defense"] or 0
+
         if local:
             await self.pool.release(conn)
         return dmg, deff
@@ -333,6 +410,7 @@ class Bot(commands.AutoShardedBot):
         race=None,
         guild=None,
         god=None,
+        xp=None,
         conn=None,
     ):
         """Generates the raidstats for a user"""
@@ -349,16 +427,19 @@ class Bot(commands.AutoShardedBot):
             or guild is None
         ):
             row = await conn.fetchrow('SELECT * FROM profile WHERE "user"=$1;', v)
-            atkmultiply, defmultiply, classes, race, guild, user_god = (
+            atkmultiply, defmultiply, classes, race, guild, user_god, xp = (
                 row["atkmultiply"],
                 row["defmultiply"],
                 row["class"],
                 row["race"],
                 row["guild"],
                 row["god"],
+                row["xp"],
             )
             if god is not None and god != user_god:
                 raise ValueError()
+        if xp is None:
+            xp = await conn.fetchval('SELECT "xp" FROM profile WHERE "user"=$1;', v)
         damage, armor = await self.get_damage_armor_for(
             v, classes=classes, race=race, conn=conn
         )
@@ -377,6 +458,12 @@ class Bot(commands.AutoShardedBot):
 
         atkmultiply = atkmultiply + dmgbuff
         defmultiply = defmultiply + deffbuff
+
+        # Keep juggernaut raid calculations aligned with normal raid scaling.
+        level = Decimal(rpgtools.xptolevel(int(xp)))
+        damage = Decimal(str(damage)) + (level * Decimal("5"))
+        armor = Decimal(str(armor)) + (level * Decimal("4"))
+
         dmg = damage * atkmultiply
         deff = armor * defmultiply
         if local:
@@ -458,6 +545,12 @@ class Bot(commands.AutoShardedBot):
 
     async def reset_cooldown(self, ctx):
         """Resets someone's cooldown for a Context"""
+        command = getattr(ctx, "command", None)
+        if command is not None:
+            try:
+                command.reset_cooldown(ctx)
+            except Exception:
+                pass
         await self.redis.execute_command(
             "DEL", f"cd:{ctx.author.id}:{ctx.command.qualified_name}"
         )
@@ -577,11 +670,28 @@ class Bot(commands.AutoShardedBot):
                 'SELECT * FROM allitems WHERE "owner"=$1 AND "id"=$2;', user, item
             )
 
-    async def start_guild_adventure(self, guild, difficulty, time):
+    async def start_guild_adventure(self, guild, difficulty, time, adventure_type=None):
+        try:
+            difficulty_value = int(difficulty)
+        except (TypeError, ValueError):
+            difficulty_value = 0
+
+        value = str(difficulty_value)
+        if adventure_type is not None:
+            payload = {
+                "difficulty": difficulty_value,
+                "end_time": (
+                    datetime.datetime.now(datetime.timezone.utc) + time
+                ).isoformat(),
+                "is_completed": False,
+                "adventure_type": adventure_type,
+            }
+            value = JSONEncoder().encode(payload)
+
         await self.redis.execute_command(
             "SET",
             f"guildadv:{guild}",
-            difficulty,
+            value,
             "EX",
             int(time.total_seconds()) + 259_200,
         )  # +3 days
@@ -590,18 +700,96 @@ class Bot(commands.AutoShardedBot):
         ttl = await self.redis.execute_command("TTL", f"guildadv:{guild}")
         if ttl == -2:
             return
-        num = await self.redis.execute_command("GET", f"guildadv:{guild}")
-        ttl = ttl - 259_200
-        done = ttl <= 0
-        time = datetime.timedelta(seconds=ttl)
-        return int(num.decode("ascii")), time, done
+        raw_value = await self.redis.execute_command("GET", f"guildadv:{guild}")
+        if raw_value is None:
+            return
+
+        if isinstance(raw_value, (bytes, bytearray)):
+            raw_value = raw_value.decode("utf-8", errors="ignore")
+        else:
+            raw_value = str(raw_value)
+
+        default_adventure_type = {
+            "name": "Guild Adventure",
+            "description": "Your guild is currently on an adventure.",
+            "events": ["Your guild presses onward through danger and glory."],
+        }
+
+        remain_seconds = ttl - 259_200
+        done = remain_seconds <= 0
+        difficulty = 0
+        adventure_type = default_adventure_type
+
+        parsed = None
+        if raw_value.startswith("{"):
+            try:
+                parsed = JSONDecoder().decode(raw_value)
+            except Exception:
+                parsed = None
+
+        if isinstance(parsed, dict):
+            try:
+                difficulty = int(parsed.get("difficulty", 0) or 0)
+            except (TypeError, ValueError):
+                difficulty = 0
+
+            parsed_adv_type = parsed.get("adventure_type")
+            if isinstance(parsed_adv_type, dict):
+                name = parsed_adv_type.get("name") or default_adventure_type["name"]
+                description = parsed_adv_type.get("description") or default_adventure_type["description"]
+                events = parsed_adv_type.get("events")
+                if not isinstance(events, list) or not events:
+                    events = default_adventure_type["events"]
+                adventure_type = {
+                    "name": name,
+                    "description": description,
+                    "events": events,
+                }
+
+            # TTL can be -1 for persistent keys; then infer completion from stored end_time.
+            if ttl == -1:
+                end_time_raw = parsed.get("end_time")
+                if isinstance(end_time_raw, str):
+                    try:
+                        end_time = datetime.datetime.fromisoformat(end_time_raw)
+                        if end_time.tzinfo is None:
+                            end_time = end_time.replace(tzinfo=datetime.timezone.utc)
+                        remain_seconds = int(
+                            (end_time - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+                        )
+                        done = remain_seconds <= 0
+                    except Exception:
+                        pass
+        else:
+            try:
+                difficulty = int(raw_value)
+            except (TypeError, ValueError):
+                difficulty = 0
+
+        time = datetime.timedelta(seconds=max(0, remain_seconds))
+        return difficulty, time, done, adventure_type
 
     async def delete_guild_adventure(self, guild):
         await self.redis.execute_command("DEL", f"guildadv:{guild}")
 
+    async def _ensure_allitems_element_column(self):
+        if self._allitems_element_column_ready:
+            return
+
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                ALTER TABLE allitems
+                ADD COLUMN IF NOT EXISTS element character varying(20)
+                """
+            )
+
+        self._allitems_element_column_ready = True
+
     async def create_item(
         self, name, value, type_, damage, armor, owner, hand, element, equipped=False, conn=None
     ):
+        await self._ensure_allitems_element_column()
         owner = owner.id if isinstance(owner, (discord.User, discord.Member)) else owner
         if conn is None:
             conn = await self.pool.acquire()
@@ -675,6 +863,56 @@ class Bot(commands.AutoShardedBot):
             return await self.create_item(**item, conn=conn)
         return item
 
+    async def _send_levelup_notice(self, ctx, message: str, *, user_id: int | None = None) -> bool:
+        target_user_id = int(user_id) if user_id is not None else getattr(getattr(ctx, "author", None), "id", None)
+        channel_id = getattr(getattr(ctx, "channel", None), "id", "unknown")
+
+        try:
+            await ctx.send(message)
+            return True
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+            self.logger.warning(
+                "Level-up notice failed in channel %s for user %s: %s",
+                channel_id,
+                target_user_id,
+                exc,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Unexpected error while sending level-up notice in channel %s for user %s: %s",
+                channel_id,
+                target_user_id,
+                exc,
+            )
+
+        recipient = None
+        if target_user_id is None:
+            recipient = getattr(ctx, "author", None)
+        elif getattr(ctx, "author", None) and int(ctx.author.id) == target_user_id:
+            recipient = ctx.author
+        else:
+            recipient = await self.get_user_global(target_user_id)
+
+        if recipient is None:
+            return False
+
+        try:
+            await recipient.send(message)
+            return True
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+            self.logger.warning(
+                "Level-up DM notice failed for user %s: %s",
+                target_user_id,
+                exc,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Unexpected error while sending level-up DM notice for user %s: %s",
+                target_user_id,
+                exc,
+            )
+        return False
+
     async def process_levelup(self, ctx, new_level, old_level, conn=None):
         if conn is None:
             conn = await self.pool.acquire()
@@ -682,13 +920,16 @@ class Bot(commands.AutoShardedBot):
         else:
             local = False
         reward_text = ""
-        stat_point_received = False
-        if new_level % 2 == 0 and new_level > 0:
-            # Increment statpoints directly in the database and fetch the updated value
-            update_query = 'UPDATE profile SET "statpoints" = "statpoints" + 1 WHERE "user" = $1 RETURNING "statpoints";'
-            new_statpoints = await conn.fetchval(update_query, ctx.author.id)
-            reward_text += f"You also received **1 stat point** (total: {new_statpoints}). "
-            stat_point_received = True
+        stat_points_text = ""
+        new_level = int(new_level)
+        old_level = int(old_level)
+        gained_points = rpgtools.gained_statpoints(old_level, new_level)
+        if gained_points > 0:
+            update_query = 'UPDATE profile SET "statpoints" = "statpoints" + $1 WHERE "user" = $2 RETURNING "statpoints";'
+            new_statpoints = await conn.fetchval(update_query, gained_points, ctx.author.id)
+            stat_points_text = _(
+                "You also received **{gained_points} stat points** (total: {new_statpoints})."
+            ).format(gained_points=gained_points, new_statpoints=new_statpoints)
 
         if (reward := random.choice(["crates", "money", "item"])) == "crates":
             if new_level < 6:
@@ -718,7 +959,7 @@ class Bot(commands.AutoShardedBot):
                 subject="crates",
                 data={"Rarity": column.split("_")[1], "Amount": amount},
             )
-            await self.pool.execute(
+            await conn.execute(
                 f'UPDATE profile SET {column}={column}+$1 WHERE "user"=$2;',
                 amount,
                 ctx.author.id,
@@ -737,7 +978,7 @@ class Bot(commands.AutoShardedBot):
 
             item["name"] = _("Level {new_level} Memorial").format(new_level=new_level)
             reward_text = _("a special weapon")
-            await self.create_item(**item)
+            await self.create_item(**item, conn=conn)
             await self.log_transaction(
                 ctx,
                 from_=1,
@@ -774,12 +1015,113 @@ class Bot(commands.AutoShardedBot):
         if local:
             await self.pool.release(conn)
 
-        await ctx.send(
-            _(
-                "You reached a new level: **{new_level}** :star:! You received {reward} "
-                "as a reward :tada:! {additional}"
-            ).format(new_level=new_level, reward=reward_text, additional=additional)
+        message = _(
+            "You reached a new level: **{new_level}** :star:! You received {reward} "
+            "as a reward :tada:! {stat_points} {additional}"
+        ).format(
+            new_level=new_level,
+            reward=reward_text,
+            stat_points=stat_points_text,
+            additional=additional,
         )
+        await self._send_levelup_notice(
+            ctx,
+            message,
+            user_id=getattr(ctx.author, "id", None),
+        )
+
+    async def process_guildlevelup(self, ctx, user_id, new_level, old_level, conn=None):
+        user_id = int(user_id)
+        new_level = int(new_level)
+        old_level = int(old_level)
+        if conn is None:
+            conn = await self.pool.acquire()
+            local = True
+        else:
+            local = False
+
+        reward_text = ""
+        stat_points_text = ""
+        gained_points = rpgtools.gained_statpoints(old_level, new_level)
+        if gained_points > 0:
+            update_query = 'UPDATE profile SET "statpoints" = "statpoints" + $1 WHERE "user" = $2 RETURNING "statpoints";'
+            new_statpoints = await conn.fetchval(update_query, gained_points, user_id)
+            stat_points_text = _(
+                "You also received **{gained_points} stat points** (total: {new_statpoints})."
+            ).format(gained_points=gained_points, new_statpoints=new_statpoints)
+
+        reward = random.choice(["crates", "money", "item"])
+        if reward == "crates":
+            if new_level < 6:
+                column = "crates_common"
+                amount = new_level
+                reward_text = f"**{amount}** {self.cogs['Crates'].emotes.common}"
+            elif new_level < 10:
+                column = "crates_uncommon"
+                amount = round(new_level / 2)
+                reward_text = f"**{amount}** {self.cogs['Crates'].emotes.uncommon}"
+            elif new_level < 18:
+                column = "crates_rare"
+                amount = 2
+                reward_text = f"**2** {self.cogs['Crates'].emotes.rare}"
+            elif new_level < 27:
+                column = "crates_rare"
+                amount = 3
+                reward_text = f"**3** {self.cogs['Crates'].emotes.rare}"
+            else:
+                column = "crates_magic"
+                amount = 1
+                reward_text = f"**1** {self.cogs['Crates'].emotes.magic}"
+            await conn.execute(
+                f'UPDATE profile SET {column}={column}+$1 WHERE "user"=$2;',
+                amount,
+                user_id,
+            )
+        elif reward == "item":
+            stat = min(round(new_level * 1.5), 75)
+            item = await self.create_random_item(
+                minstat=stat,
+                maxstat=stat,
+                minvalue=1000,
+                maxvalue=1000,
+                owner=user_id,
+                insert=False,
+                conn=conn,
+            )
+            item["name"] = _("Level {new_level} Memorial").format(new_level=new_level)
+            reward_text = _("a special weapon")
+            await self.create_item(**item, conn=conn)
+        else:
+            money = new_level * 1000
+            await conn.execute(
+                'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                money,
+                user_id,
+            )
+            reward_text = f"**${money}**"
+
+        additional = (
+            _("You can now choose your second class using `{prefix}class`!").format(
+                prefix=ctx.clean_prefix
+            )
+            if old_level < 12 and new_level >= 12
+            else ""
+        )
+
+        if local:
+            await self.pool.release(conn)
+
+        message = _(
+            "{user} reached a new level: **{new_level}** :star:! You received {reward} "
+            "as a reward :tada:! {stat_points} {additional}"
+        ).format(
+            user=f"<@{user_id}>",
+            new_level=new_level,
+            reward=reward_text,
+            stat_points=stat_points_text,
+            additional=additional,
+        )
+        await self._send_levelup_notice(ctx, message, user_id=user_id)
 
     async def clear_donator_cache(self, user):
         user = user if isinstance(user, int) else user.id
@@ -800,18 +1142,99 @@ class Bot(commands.AutoShardedBot):
         if self.config.bot.is_beta or self.config.bot.is_custom:
             return DonatorRank.diamond
 
-        if self.support_server_id is None:
-            return False
-        try:
-            member = await self.http.get_member(self.support_server_id, user_id)
-        except discord.NotFound:
-            return False
-        top_donator_role = None
-        member_roles = [int(i) for i in member.get("roles", [])]
+        tier_to_rank = {
+            1: DonatorRank.basic,
+            2: DonatorRank.bronze,
+            3: DonatorRank.silver,
+            4: DonatorRank.gold,
+            5: DonatorRank.emerald,
+            6: DonatorRank.ruby,
+            7: DonatorRank.diamond,
+        }
+        patreon_core = self.get_cog("PatreonCore")
+        if patreon_core is not None:
+            try:
+                raw_cached_tier = patreon_core.get_cached_tier_for_user(user_id)
+                try:
+                    cached_tier = int(raw_cached_tier)
+                except (TypeError, ValueError):
+                    cached_tier = int(float(raw_cached_tier))
+                cached_rank = tier_to_rank.get(cached_tier)
+                if cached_rank is not None:
+                    return cached_rank
+                if (
+                    not getattr(patreon_core, "role_driven_sync", True)
+                    and bool(getattr(patreon_core, "patrons_data", {}))
+                ):
+                    return None
+            except Exception:
+                pass
+
+        default_guild_id = 1323388333589528638
+        default_role_to_tier = {
+            1411756981274017912: "basic",   # Mortal (tier 1)
+            1411757068364546139: "bronze",  # Demi-God (tier 2)
+            1411757100136140913: "gold",    # Olympian (tier 4)
+            1411757151306645706: "gold",    # Titan (tier 4 + gift tier 1)
+            1411757168356491508: "gold",    # Primordial Fate (tier 4 + gift tier 2)
+        }
+
+        role_rank_map: dict[int, DonatorRank] = {}
         for role in self.config.external.donator_roles:
-            if role.id in member_roles:
-                top_donator_role = role.tier
-        return getattr(DonatorRank, top_donator_role) if top_donator_role else None
+            try:
+                role_id = int(role.id)
+                rank = getattr(DonatorRank, str(role.tier).strip().lower())
+            except (TypeError, ValueError, AttributeError):
+                continue
+            existing = role_rank_map.get(role_id)
+            if existing is None or rank > existing:
+                role_rank_map[role_id] = rank
+
+        # If config has no valid mapping, fall back to hardcoded Patreon roles.
+        if not role_rank_map:
+            for role_id, tier_name in default_role_to_tier.items():
+                rank = getattr(DonatorRank, tier_name)
+                role_rank_map[int(role_id)] = rank
+
+        guild_candidates: list[int] = []
+        if self.support_server_id:
+            try:
+                guild_candidates.append(int(self.support_server_id))
+            except (TypeError, ValueError):
+                pass
+        guild_candidates.append(default_guild_id)
+
+        patreon_core = self.get_cog("PatreonCore")
+        if patreon_core is not None and getattr(patreon_core, "guild_id", None):
+            try:
+                guild_candidates.append(int(patreon_core.guild_id))
+            except (TypeError, ValueError):
+                pass
+
+        # Deduplicate while preserving order.
+        guild_candidates = list(dict.fromkeys(guild_candidates))
+        if not guild_candidates:
+            return None
+
+        top_rank = None
+        for guild_id in guild_candidates:
+            try:
+                member = await self.http.get_member(guild_id, user_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                continue
+
+            member_roles = set()
+            for role_id in member.get("roles", []):
+                try:
+                    member_roles.add(int(role_id))
+                except (TypeError, ValueError):
+                    continue
+
+            for role_id, rank in role_rank_map.items():
+                if role_id in member_roles and (top_rank is None or rank > top_rank):
+                    top_rank = rank
+
+        return top_rank
 
     async def get_damage_armor_for(
         self, user, items=None, classes=None, race=None, conn=None
@@ -904,7 +1327,7 @@ class Bot(commands.AutoShardedBot):
         from_ = from_.id if isinstance(from_, (discord.Member, discord.User)) else from_
         to = to.id if isinstance(to, (discord.Member, discord.User)) else to
         timestamp = datetime.datetime.now()
-        assert subject in [
+        known_subjects = {
             "crates",
             "money",
             "shop",
@@ -921,7 +1344,15 @@ class Bot(commands.AutoShardedBot):
             "trade",
             "alliance",
             "raid",
-        ]
+            "Level Up!",
+            "Memorial Item",
+        }
+        if subject not in known_subjects:
+            self.logger.debug(
+                "Unknown transaction subject '%s' for command '%s'; logging anyway.",
+                subject,
+                getattr(getattr(ctx, "command", None), "qualified_name", "unknown"),
+            )
 
         id_map = {
             0: "Guild Bank",

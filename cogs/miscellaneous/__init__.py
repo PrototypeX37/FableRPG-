@@ -2,6 +2,7 @@
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
 Copyright (C) 2023-2024 Lunar (PrototypeX37)
+Copyright (C) 2026 Danaelis
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -17,6 +18,7 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 import asyncio
+import copy
 import datetime
 import json
 
@@ -38,6 +40,7 @@ import time
 
 from collections import defaultdict, deque
 from functools import partial
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import io
@@ -55,7 +58,6 @@ from discord.ext import commands
 
 from classes.converters import ImageFormat, ImageUrl
 from cogs.help import chunks
-from cogs.shard_communication import next_day_cooldown
 from cogs.shard_communication import user_on_cooldown as user_cooldown
 from utils import random
 from utils.checks import ImgurUploadError, has_char, user_is_patron, is_gm
@@ -127,7 +129,260 @@ class PaginatorView(discord.ui.View):
         await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
 
 
+class DailyConfirmView(discord.ui.View):
+    def __init__(self, ctx, timeout=45):
+        super().__init__(timeout=timeout)
+        self.ctx = ctx
+        self.value = None
+        self.message = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "This confirmation isn't for you!", ephemeral=True
+            )
+            return False
+        return True
+
+    async def _finish(self, interaction, value, content):
+        self.value = value
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content=content, view=self)
+        self.stop()
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            await self.message.edit(
+                content="Daily cancelled. You did not confirm in time.",
+                view=self,
+            )
+
+    @discord.ui.button(label="Yes", style=discord.ButtonStyle.success)
+    async def yes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._finish(interaction, True, "Confirmed. Running your dailies...")
+
+    @discord.ui.button(label="No", style=discord.ButtonStyle.danger)
+    async def no_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._finish(interaction, False, "Daily cancelled.")
+
+
+class DailyAttachManageView(discord.ui.View):
+    def __init__(self, cog, ctx, timeout=120):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.ctx = ctx
+        self.message = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "This daily attachment menu isn't for you!", ephemeral=True
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    @discord.ui.button(label="Add", style=discord.ButtonStyle.success)
+    async def add_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.show_dailyattach_add_picker(interaction, self.ctx, self.message)
+
+    @discord.ui.button(label="Remove", style=discord.ButtonStyle.primary)
+    async def remove_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.show_dailyattach_remove_picker(interaction, self.ctx, self.message)
+
+    @discord.ui.button(label="Clear", style=discord.ButtonStyle.danger)
+    async def clear_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.clear_daily_attachments(self.ctx.author.id)
+        await self.cog.refresh_dailyattach_message(self.ctx, self.message)
+        await interaction.response.send_message("Daily attachments cleared.", ephemeral=True)
+
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary)
+    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content=await self.cog.build_dailyattach_message(self.ctx),
+            view=self,
+        )
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary)
+    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.message.delete()
+        except discord.HTTPException:
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(view=self)
+        else:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+        self.stop()
+
+
+class DailyAttachSelect(discord.ui.Select):
+    def __init__(self, cog, ctx, mode, source_message, options, max_values):
+        self.cog = cog
+        self.ctx = ctx
+        self.mode = mode
+        self.source_message = source_message
+        super().__init__(
+            placeholder=f"Choose commands to {mode}",
+            min_values=1,
+            max_values=max_values,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.mode == "add":
+            attached = await self.cog.add_daily_attachments(self.ctx, self.values)
+        else:
+            attached = await self.cog.remove_daily_attachments(self.ctx, self.values)
+
+        await self.cog.refresh_dailyattach_message(self.ctx, self.source_message)
+        if attached:
+            content = "Attached to daily: " + ", ".join(f"`{command}`" for command in attached)
+        else:
+            content = "No commands are attached to your daily now."
+        await interaction.response.send_message(content, ephemeral=True)
+
+
+class DailyAttachPickerView(discord.ui.View):
+    def __init__(self, cog, ctx, mode, source_message, options, max_values, timeout=120):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.ctx = ctx
+        self.mode = mode
+        self.source_message = source_message
+        self.add_item(DailyAttachSelect(cog, ctx, mode, source_message, options, max_values))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "This daily attachment menu isn't for you!", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = DailyAttachManageView(self.cog, self.ctx)
+        view.message = self.source_message
+        await interaction.response.edit_message(
+            content=await self.cog.build_dailyattach_message(self.ctx),
+            view=view,
+        )
+
+
 class Miscellaneous(commands.Cog):
+    DAILY_RESET_TZ = ZoneInfo("Europe/Paris")
+    DAILY_RESET_HOUR = 1
+    DAILY_ATTACHMENT_LIMITS = {
+        0: 2,
+        1: 4,
+        2: 6,
+        3: 10,
+    }
+    DAILY_COMMAND_CONFIG = {
+        "cratesdaily": {
+            "cooldown": 12 * 3600,
+            "aliases": ("vote",),
+            "label": "cratesdaily",
+        },
+        "boosterdaily": {
+            "cooldown": "midnight",
+            "aliases": ("donatordaily",),
+            "label": "boosterdaily",
+        },
+        "steal": {
+            "cooldown": 60 * 60,
+            "class_requirement": "Thief",
+            "label": "steal",
+        },
+        "date": {
+            "cooldown": 12 * 3600,
+            "label": "date",
+        },
+        "pray": {
+            "cooldown": "midnight",
+            "label": "pray",
+        },
+        "familyevent": {
+            "cooldown": 30 * 60,
+            "label": "familyevent",
+        },
+        "pve": {
+            "cooldown": 1800,
+            "label": "pve",
+            "daily_limit_key": "pve",
+            "daily_limit": 36,
+        },
+        "battletower fight": {
+            "cooldown": 600,
+            "aliases": ("bt fight",),
+            "label": "bt fight",
+            "daily_limit_key": "battletower_fight",
+            "daily_limit": 108,
+        },
+        "pets train": {
+            "cooldown": 1800,
+            "label": "pets train",
+        },
+        "pets treat": {
+            "cooldown": 1800,
+            "label": "pets treat",
+        },
+        "pets pet": {
+            "cooldown": 60,
+            "label": "pets pet",
+        },
+        "pets play": {
+            "cooldown": 300,
+            "label": "pets play",
+        },
+        "pets feed": {
+            "cooldown": 3600,
+            "label": "pets feed",
+            "kwargs": {"food_type": "basic food"},
+        },
+        "pets feed basic": {
+            "command": "pets feed",
+            "cooldown": 3600,
+            "aliases": ("pets feed basic food",),
+            "label": "pets feed basic",
+            "kwargs": {"food_type": "basic food"},
+        },
+        "pets feed premium": {
+            "command": "pets feed",
+            "cooldown": 3600,
+            "aliases": ("pets feed premium food",),
+            "label": "pets feed premium",
+            "kwargs": {"food_type": "premium food"},
+        },
+        "pets feed deluxe": {
+            "command": "pets feed",
+            "cooldown": 3600,
+            "aliases": ("pets feed deluxe food",),
+            "label": "pets feed deluxe",
+            "kwargs": {"food_type": "deluxe food"},
+        },
+        "pets feed elemental": {
+            "command": "pets feed",
+            "cooldown": 3600,
+            "aliases": ("pets feed elemental food",),
+            "label": "pets feed elemental",
+            "kwargs": {"food_type": "elemental food"},
+        },
+    }
+
     def __init__(self, bot):
         self.bot = bot
         self.talk_context = defaultdict(partial(deque, maxlen=3))
@@ -138,6 +393,8 @@ class Miscellaneous(commands.Cog):
             1149193023259951154
         }
         self.whitelist = load_whitelist()
+        self._streaks_table_ready = False
+        self._daily_attachments_table_ready = False
 
     async def get_imgur_url(self, url: str):
         async with self.bot.session.post(
@@ -158,121 +415,692 @@ class Miscellaneous(commands.Cog):
     async def wiki(self, ctx):
         await ctx.send("https://wiki.fablerpg.xyz")
 
+    async def ensure_daily_attachments_table(self):
+        if self._daily_attachments_table_ready:
+            return
+
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS daily_command_attachments (
+                    user_id BIGINT NOT NULL,
+                    command_name TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (user_id, command_name)
+                );
+                """
+            )
+            await conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS daily_command_attachments_user_position_idx
+                    ON daily_command_attachments (user_id, position);
+                """
+            )
+        self._daily_attachments_table_ready = True
+
+    def _daily_config_aliases(self):
+        aliases = {}
+        for command_name, config in self.DAILY_COMMAND_CONFIG.items():
+            aliases[command_name] = command_name
+            aliases[f"${command_name}"] = command_name
+            for alias in config.get("aliases", ()):
+                aliases[alias] = command_name
+                aliases[f"${alias}"] = command_name
+        return aliases
+
+    def _normalize_daily_attachment(self, command_name):
+        normalized = command_name.strip().lower()
+        return self._daily_config_aliases().get(normalized)
+
+    def _normalize_daily_attachments(self, command_names):
+        aliases = self._daily_config_aliases()
+        tokens = [command.strip().lower() for command in command_names if command.strip()]
+        normalized_commands = []
+        invalid_commands = []
+        index = 0
+
+        while index < len(tokens):
+            match = None
+            matched_text = None
+            matched_length = 0
+
+            for length in range(min(4, len(tokens) - index), 0, -1):
+                candidate = " ".join(tokens[index:index + length])
+                candidate = candidate.lstrip("$")
+                normalized = aliases.get(candidate) or aliases.get(f"${candidate}")
+                if normalized:
+                    match = normalized
+                    matched_text = candidate
+                    matched_length = length
+                    break
+
+            if match:
+                if match not in normalized_commands:
+                    normalized_commands.append(match)
+                index += matched_length
+            else:
+                invalid_commands.append(matched_text or tokens[index])
+                index += 1
+
+        return normalized_commands, invalid_commands
+
+    async def get_daily_attachment_limit(self, ctx):
+        limit = self.DAILY_ATTACHMENT_LIMITS[0]
+        try:
+            tier = await self.bot.pool.fetchval(
+                'SELECT "tier" FROM profile WHERE "user"=$1;', ctx.author.id
+            )
+            tier = int(tier or 0)
+        except (TypeError, ValueError):
+            tier = 0
+
+        if tier >= 3:
+            limit = self.DAILY_ATTACHMENT_LIMITS[3]
+        elif tier == 2:
+            limit = self.DAILY_ATTACHMENT_LIMITS[2]
+        elif tier == 1:
+            limit = self.DAILY_ATTACHMENT_LIMITS[1]
+
+        try:
+            if await user_is_patron(self.bot, ctx.author, "silver"):
+                return self.DAILY_ATTACHMENT_LIMITS[3]
+            if await user_is_patron(self.bot, ctx.author, "bronze"):
+                return max(limit, self.DAILY_ATTACHMENT_LIMITS[2])
+            if await user_is_patron(self.bot, ctx.author, "basic"):
+                return max(limit, self.DAILY_ATTACHMENT_LIMITS[1])
+        except Exception:
+            pass
+
+        return limit
+
+    async def get_daily_attachments(self, user_id):
+        await self.ensure_daily_attachments_table()
+        rows = await self.bot.pool.fetch(
+            """
+            SELECT command_name
+            FROM daily_command_attachments
+            WHERE user_id=$1
+            ORDER BY position ASC, created_at ASC;
+            """,
+            user_id,
+        )
+        return [row["command_name"] for row in rows]
+
+    async def save_daily_attachments(self, user_id, command_names):
+        await self.ensure_daily_attachments_table()
+        async with self.bot.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "DELETE FROM daily_command_attachments WHERE user_id=$1;",
+                    user_id,
+                )
+                for position, command_name in enumerate(command_names, start=1):
+                    await conn.execute(
+                        """
+                        INSERT INTO daily_command_attachments (user_id, command_name, position)
+                        VALUES ($1, $2, $3);
+                        """,
+                        user_id,
+                        command_name,
+                        position,
+                    )
+
+    async def clear_daily_attachments(self, user_id):
+        await self.ensure_daily_attachments_table()
+        await self.bot.pool.execute(
+            "DELETE FROM daily_command_attachments WHERE user_id=$1;",
+            user_id,
+        )
+
+    async def add_daily_attachments(self, ctx, command_names):
+        limit = await self.get_daily_attachment_limit(ctx)
+        attached_commands = await self.get_daily_attachments(ctx.author.id)
+        merged_commands = attached_commands[:]
+        for command_name in command_names:
+            if command_name not in merged_commands:
+                merged_commands.append(command_name)
+        merged_commands = merged_commands[:limit]
+        await self.save_daily_attachments(ctx.author.id, merged_commands)
+        return merged_commands
+
+    async def remove_daily_attachments(self, ctx, command_names):
+        attached_commands = await self.get_daily_attachments(ctx.author.id)
+        remaining_commands = [
+            command_name
+            for command_name in attached_commands
+            if command_name not in command_names
+        ]
+        await self.save_daily_attachments(ctx.author.id, remaining_commands)
+        return remaining_commands
+
+    async def build_dailyattach_message(self, ctx):
+        limit = await self.get_daily_attachment_limit(ctx)
+        attached_commands = await self.get_daily_attachments(ctx.author.id)
+        available = ", ".join(
+            f"`{config.get('label', command_name)}`"
+            for command_name, config in self.DAILY_COMMAND_CONFIG.items()
+        )
+
+        if attached_commands:
+            active = attached_commands[:limit]
+            inactive = attached_commands[limit:]
+            message = _("Attached to daily: {commands}\nSlots: **{used}/{limit}**").format(
+                commands=", ".join(f"`{command}`" for command in active),
+                used=len(active),
+                limit=limit,
+            )
+            if inactive:
+                message += _("\nInactive because they exceed your current slot limit: {commands}").format(
+                    commands=", ".join(f"`{command}`" for command in inactive)
+                )
+        else:
+            message = _("No commands are attached to your daily yet.\nSlots: **0/{limit}**").format(
+                limit=limit
+            )
+
+        message += _("\nAvailable commands: {commands}").format(commands=available)
+        message += _("\nUse the buttons below, or `{prefix}dailyattach add pray date`.").format(
+            prefix=ctx.clean_prefix
+        )
+        return message
+
+    async def refresh_dailyattach_message(self, ctx, message):
+        if message is None:
+            return
+        view = DailyAttachManageView(self, ctx)
+        view.message = message
+        try:
+            await message.edit(content=await self.build_dailyattach_message(ctx), view=view)
+        except discord.HTTPException:
+            pass
+
+    def dailyattach_options(self, command_names):
+        return [
+            discord.SelectOption(
+                label=self.DAILY_COMMAND_CONFIG[command_name].get("label", command_name),
+                value=command_name,
+            )
+            for command_name in command_names
+        ]
+
+    async def show_dailyattach_add_picker(self, interaction, ctx, source_message):
+        limit = await self.get_daily_attachment_limit(ctx)
+        attached_commands = await self.get_daily_attachments(ctx.author.id)
+        remaining_slots = limit - len(attached_commands)
+        if remaining_slots <= 0:
+            return await interaction.response.send_message(
+                f"You already use all **{limit}** daily attachment slots.",
+                ephemeral=True,
+            )
+
+        choices = [
+            command_name
+            for command_name in self.DAILY_COMMAND_CONFIG
+            if command_name not in attached_commands
+        ]
+        if not choices:
+            return await interaction.response.send_message(
+                "There are no more commands available to attach.",
+                ephemeral=True,
+            )
+
+        options = self.dailyattach_options(choices[:25])
+        view = DailyAttachPickerView(
+            self,
+            ctx,
+            "add",
+            source_message,
+            options,
+            min(remaining_slots, len(options)),
+        )
+        await interaction.response.edit_message(
+            content=f"Choose up to **{remaining_slots}** command(s) to attach.",
+            view=view,
+        )
+
+    async def send_dailyattach_add_picker(self, ctx):
+        limit = await self.get_daily_attachment_limit(ctx)
+        attached_commands = await self.get_daily_attachments(ctx.author.id)
+        remaining_slots = limit - len(attached_commands)
+        if remaining_slots <= 0:
+            return await ctx.send(f"You already use all **{limit}** daily attachment slots.")
+
+        choices = [
+            command_name
+            for command_name in self.DAILY_COMMAND_CONFIG
+            if command_name not in attached_commands
+        ]
+        if not choices:
+            return await ctx.send("There are no more commands available to attach.")
+
+        options = self.dailyattach_options(choices[:25])
+        view = DailyAttachPickerView(
+            self,
+            ctx,
+            "add",
+            None,
+            options,
+            min(remaining_slots, len(options)),
+        )
+        message = await ctx.send(
+            f"Choose up to **{remaining_slots}** command(s) to attach.",
+            view=view,
+        )
+        view.source_message = message
+        for child in view.children:
+            if isinstance(child, DailyAttachSelect):
+                child.source_message = message
+
+    async def show_dailyattach_remove_picker(self, interaction, ctx, source_message):
+        attached_commands = await self.get_daily_attachments(ctx.author.id)
+        if not attached_commands:
+            return await interaction.response.send_message(
+                "You do not have any daily attachments to remove.",
+                ephemeral=True,
+            )
+
+        options = self.dailyattach_options(attached_commands[:25])
+        view = DailyAttachPickerView(
+            self,
+            ctx,
+            "remove",
+            source_message,
+            options,
+            len(options),
+        )
+        await interaction.response.edit_message(
+            content="Choose command(s) to remove from daily.",
+            view=view,
+        )
+
+    async def send_dailyattach_remove_picker(self, ctx):
+        attached_commands = await self.get_daily_attachments(ctx.author.id)
+        if not attached_commands:
+            return await ctx.send("You do not have any daily attachments to remove.")
+
+        options = self.dailyattach_options(attached_commands[:25])
+        view = DailyAttachPickerView(
+            self,
+            ctx,
+            "remove",
+            None,
+            options,
+            len(options),
+        )
+        message = await ctx.send(
+            "Choose command(s) to remove from daily.",
+            view=view,
+        )
+        view.source_message = message
+        for child in view.children:
+            if isinstance(child, DailyAttachSelect):
+                child.source_message = message
+
+    def _daily_command_cooldown(self, config):
+        cooldown = config["cooldown"]
+        if cooldown == "midnight":
+            return self.time_until_midnight()
+        return int(cooldown)
+
+    async def _check_daily_command_limit(self, ctx, config):
+        command_key = config.get("daily_limit_key")
+        limit = config.get("daily_limit")
+        if not command_key or not limit:
+            return True, None
+
+        antiscript = self.bot.get_cog("AntiScript")
+        if antiscript is None:
+            return True, None
+
+        normalized_key = antiscript.normalize_command_key(command_key)
+        ok = await antiscript.check_and_increment_command_use(
+            user_id=ctx.author.id,
+            command_name=normalized_key,
+            limit=int(limit),
+            increment=0,
+        )
+        if ok:
+            return True, (normalized_key, int(limit))
+        return False, f"You've reached the daily threshold for `{normalized_key}`."
+
+    async def _increment_daily_command_limit(self, ctx, track_info):
+        if not track_info:
+            return
+
+        antiscript = self.bot.get_cog("AntiScript")
+        if antiscript is None:
+            return
+
+        command_key, limit = track_info
+        await antiscript.check_and_increment_command_use(
+            user_id=ctx.author.id,
+            command_name=command_key,
+            limit=int(limit),
+            increment=1,
+        )
+
+    async def run_daily_attached_commands(self, ctx, command_names=None):
+        if command_names is None:
+            command_names = await self.get_daily_attachments(ctx.author.id)
+
+        limit = await self.get_daily_attachment_limit(ctx)
+        command_names = command_names[:limit]
+        if not command_names:
+            return []
+
+        character_data = await ctx.bot.pool.fetchrow(
+            'SELECT class FROM profile WHERE "user"=$1;', ctx.author.id
+        )
+        user_classes = {
+            type(c).__name__
+            for c in map(class_from_string, character_data["class"])
+        } if character_data and character_data["class"] else set()
+
+        command_entries = []
+        status_messages = []
+        for command_name in command_names:
+            config = self.DAILY_COMMAND_CONFIG.get(command_name)
+            if not config:
+                status_messages.append(f"`{command_name}`: command is no longer attachable")
+                continue
+            command_lookup = config.get("command", command_name)
+            command = self.bot.get_command(command_lookup)
+            if not command:
+                command = next(
+                    (
+                        self.bot.get_command(alias)
+                        for alias in (command_name, *config.get("aliases", ()))
+                        if self.bot.get_command(alias)
+                    ),
+                    None,
+                )
+            if not command:
+                status_messages.append(
+                    f"`{config.get('label', command_name)}`: command is not loaded"
+                )
+                continue
+            command_entries.append(
+                {
+                    "name": command_name,
+                    "label": config.get("label", command_name),
+                    "config": config,
+                    "command": command,
+                    "cooldown_key": command.qualified_name,
+                }
+            )
+
+        async with ctx.bot.redis.pipeline() as pipe:
+            for entry in command_entries:
+                pipe.ttl(f"cd:{ctx.author.id}:{entry['cooldown_key']}")
+            cooldowns = await pipe.execute()
+
+        tasks = []
+
+        for entry, current_cooldown in zip(command_entries, cooldowns):
+            cmd_name = entry["label"]
+            config = entry["config"]
+            command = entry["command"]
+            cooldown_key = entry["cooldown_key"]
+
+            if current_cooldown != -2:
+                remaining = self.format_time(current_cooldown)
+                status_messages.append(f"`{cmd_name}`: {remaining} cooldown remaining")
+                continue
+
+            if class_req := config.get("class_requirement"):
+                if class_req not in user_classes:
+                    status_messages.append(f"`{cmd_name}`: Requires {class_req} class")
+                    continue
+
+            allowed, daily_track_info = await self._check_daily_command_limit(ctx, config)
+            if not allowed:
+                status_messages.append(f"`{cmd_name}`: {daily_track_info}")
+                continue
+
+            args = config.get("args", ())
+            kwargs = config.get("kwargs", {})
+            cooldown_seconds = self._daily_command_cooldown(config)
+            cooldown_claimed = await ctx.bot.redis.execute_command(
+                "SET",
+                f"cd:{ctx.author.id}:{cooldown_key}",
+                cooldown_key,
+                "EX",
+                cooldown_seconds,
+                "NX",
+            )
+            if not cooldown_claimed:
+                current_cooldown = await ctx.bot.redis.execute_command(
+                    "TTL", f"cd:{ctx.author.id}:{cooldown_key}"
+                )
+                if current_cooldown == -1:
+                    current_cooldown = cooldown_seconds
+                    await ctx.bot.redis.execute_command(
+                        "EXPIRE", f"cd:{ctx.author.id}:{cooldown_key}", current_cooldown
+                    )
+                elif current_cooldown == -2:
+                    current_cooldown = cooldown_seconds
+                remaining = self.format_time(current_cooldown)
+                status_messages.append(f"`{cmd_name}`: {remaining} cooldown remaining")
+                continue
+
+            invoke_ctx = copy.copy(ctx)
+            invoke_ctx.command = command
+            invoke_ctx._daily_attachment_cooldown_claimed = True
+            tasks.append((invoke_ctx.invoke(command, *args, **kwargs), daily_track_info))
+
+        if tasks:
+            results = await asyncio.gather(
+                *(task for task, _daily_track_info in tasks),
+                return_exceptions=True,
+            )
+            for result, (_task, daily_track_info) in zip(results, tasks):
+                if isinstance(result, Exception):
+                    status_messages.append(f"Attached command error: {str(result)}")
+                else:
+                    await self._increment_daily_command_limit(ctx, daily_track_info)
+
+        return status_messages
+
     @has_char()
     @user_cooldown(1)
     @commands.hybrid_command()
     @locale_doc
     async def all(self, ctx):
-        _("""Automatically invokes several daily commands for you.
+        _("""Automatically invokes daily and your attached daily commands.
 
-        This command will attempt to run several of your daily or periodic commands 
-        such as `vote`, `daily`, `donatordaily`, `steal`, `date`, `pray`, and 
-        `familyevent` in one go, if they are not on cooldown.
+        This command will attempt to run `daily`, which will also run the commands
+        you attached with `dailyattach`. If `daily` is on cooldown, this command
+        will still try to run your attached commands directly.
 
         Usage:
           `$all`
 
         Note:
         - Commands that are on cooldown will be skipped
-        - If you are a Thief class, it will attempt to use `steal` as well
+        - Attached command slots are limited by Patreon tier
         - This command itself has a cooldown of 1 second""")
 
-        # Check tier access
-        character_data = await ctx.bot.pool.fetchrow(
-            'SELECT tier, class FROM profile WHERE "user"=$1;', ctx.author.id
-        )
-        if not character_data or character_data["tier"] < 1:
-            return await ctx.send(_("You do not have access to this command."))
-
-        # Define commands and their cooldowns
-        command_config = {
-            'cratesdaily': {'cooldown': 12 * 3600},  # 12 hours
-            'daily': {'cooldown': self.time_until_midnight()},
-            'boosterdaily': {'cooldown': self.time_until_midnight()},
-            'steal': {
-                'cooldown': 60 * 60,  # 1 hour
-                'class_requirement': 'Thief'
-            },
-            'date': {'cooldown': 12 * 3600},  # 12 hours
-            'pray': {'cooldown': self.time_until_midnight()},
-            'familyevent': {'cooldown': 30 * 60}  # 30 minutes
-        }
-
-        # Get all cooldowns in one Redis pipeline
-        async with ctx.bot.redis.pipeline() as pipe:
-            for cmd_name in command_config:
-                pipe.ttl(f"cd:{ctx.author.id}:{cmd_name}")
-            cooldowns = await pipe.execute()
-
-        # Process user classes once
-        user_classes = {
-            type(c).__name__
-            for c in map(class_from_string, character_data["class"])
-        } if character_data["class"] else set()
-
-        tasks = []
-        status_messages = []
-
-        for (cmd_name, config), current_cooldown in zip(command_config.items(), cooldowns):
-            command = self.bot.get_command(cmd_name)
-            if not command:
-                continue
-
-            # Check if command is available
-            if current_cooldown != -2:  # Cooldown exists
-                remaining = self.format_time(current_cooldown)
-                status_messages.append(f"`{cmd_name}`: {remaining} cooldown remaining")
-                continue
-
-            # Check class requirement if any
-            if class_req := config.get('class_requirement'):
-                if class_req not in user_classes:
-                    status_messages.append(
-                        f"`{cmd_name}`: Requires {class_req} class"
-                    )
-                    continue
-
-            # Add command to task list and set cooldown
-            tasks.append(ctx.invoke(command))
-            await ctx.bot.redis.set(
-                f"cd:{ctx.author.id}:{command.qualified_name}",
-                command.qualified_name,
-                ex=config['cooldown']
-            )
-
-        # Execute all commands concurrently
-        if tasks:
-            try:
-                await asyncio.gather(*tasks)
-            except Exception as e:
-                await ctx.send(f"An error occurred: {str(e)}")
-                return
-
-        # Send status report
-        if status_messages:
-            status_report = "\n".join(status_messages)
-            await ctx.send(
-                _("Status Report:\n{status_report}").format(
-                    status_report=status_report
-                )
-            )
+        daily_command = self.bot.get_command("daily")
+        if daily_command:
+            await ctx.invoke(daily_command)
         try:
             await self.bot.reset_cooldown(ctx)
         except Exception:
             pass
 
+    @has_char()
+    @commands.group(
+        name="dailyattach",
+        aliases=["dailycommands", "dailycmd"],
+        invoke_without_command=True,
+        brief=_("Manage commands attached to daily"),
+    )
+    async def dailyattach(self, ctx):
+        view = DailyAttachManageView(self, ctx)
+        view.message = await ctx.send(
+            await self.build_dailyattach_message(ctx),
+            view=view,
+        )
+
+    @dailyattach.command(name="add", brief=_("Attach commands to daily"))
+    async def dailyattach_add(self, ctx, *command_names):
+        if not command_names:
+            return await self.send_dailyattach_add_picker(ctx)
+
+        normalized_commands, invalid_commands = self._normalize_daily_attachments(
+            command_names
+        )
+
+        if invalid_commands:
+            available = ", ".join(
+                f"`{config.get('label', command_name)}`"
+                for command_name, config in self.DAILY_COMMAND_CONFIG.items()
+            )
+            return await ctx.send(
+                _("These commands cannot be attached: {commands}\nAvailable commands: {available}").format(
+                    commands=", ".join(f"`{command}`" for command in invalid_commands),
+                    available=available,
+                )
+            )
+
+        limit = await self.get_daily_attachment_limit(ctx)
+        attached_commands = await self.get_daily_attachments(ctx.author.id)
+        unique_new_commands = [
+            command_name
+            for command_name in normalized_commands
+            if command_name not in attached_commands
+        ]
+        if len(attached_commands) + len(unique_new_commands) > limit:
+            return await ctx.send(
+                _("You can attach up to **{limit}** commands with your current tier. Remove one first or upgrade your Patreon tier.").format(
+                    limit=limit
+                )
+            )
+
+        merged_commands = await self.add_daily_attachments(ctx, normalized_commands)
+
+        await ctx.send(
+            _("Attached to daily: {commands}").format(
+                commands=", ".join(f"`{command}`" for command in merged_commands)
+            )
+        )
+
+    @dailyattach.command(name="remove", aliases=["delete"], brief=_("Detach commands from daily"))
+    async def dailyattach_remove(self, ctx, *command_names):
+        if not command_names:
+            return await self.send_dailyattach_remove_picker(ctx)
+
+        normalized_commands, _invalid_commands = self._normalize_daily_attachments(
+            command_names
+        )
+        if not normalized_commands:
+            return await ctx.send(_("None of those commands are attached to daily."))
+
+        remaining_commands = await self.remove_daily_attachments(ctx, normalized_commands)
+
+        if remaining_commands:
+            return await ctx.send(
+                _("Attached to daily: {commands}").format(
+                    commands=", ".join(f"`{command}`" for command in remaining_commands)
+                )
+            )
+        await ctx.send(_("No commands are attached to your daily now."))
+
+    @dailyattach.command(name="clear", brief=_("Remove all daily attachments"))
+    async def dailyattach_clear(self, ctx):
+        await self.clear_daily_attachments(ctx.author.id)
+        await ctx.send(_("No commands are attached to your daily now."))
+
     def format_time(self, seconds):
         """Convert seconds to HH:MM:SS format."""
+        seconds = max(int(seconds), 0)
         hours, remainder = divmod(seconds, 3600)
         minutes, seconds = divmod(remainder, 60)
         return f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
 
     def time_until_midnight(self):
-        """Calculate the number of seconds until the next midnight UTC."""
-        return int(86400 - (time.time() % 86400))
+        """Calculate seconds until the configured daily reset time."""
+        _current_reset, next_reset = self._daily_reset_window()
+        now = datetime.datetime.now(self.DAILY_RESET_TZ)
+        return max(1, int((next_reset - now).total_seconds()))
+
+    def _daily_reset_window(self):
+        now = datetime.datetime.now(self.DAILY_RESET_TZ)
+        current_reset = now.replace(
+            hour=self.DAILY_RESET_HOUR,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        if now < current_reset:
+            current_reset -= datetime.timedelta(days=1)
+        next_reset = current_reset + datetime.timedelta(days=1)
+        return current_reset, next_reset
+
+    async def _daily_claimed_since_reset(self, user_id):
+        current_reset, _next_reset = self._daily_reset_window()
+        current_reset_utc = current_reset.astimezone(
+            datetime.timezone.utc
+        ).replace(tzinfo=None)
+        try:
+            await self.ensure_streaks_table()
+            last_daily = await self.bot.pool.fetchval(
+                "SELECT last_daily FROM streaks WHERE user_id = $1;",
+                user_id,
+            )
+        except Exception:
+            return True
+        if last_daily and last_daily.tzinfo is not None:
+            last_daily = last_daily.astimezone(
+                datetime.timezone.utc
+            ).replace(tzinfo=None)
+        return bool(last_daily and last_daily >= current_reset_utc)
+
+    def _daily_window_key(self):
+        current_reset, _next_reset = self._daily_reset_window()
+        return current_reset.date().isoformat()
+
+    async def ensure_streaks_table(self):
+        if self._streaks_table_ready:
+            return
+
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS streaks (
+                    user_id BIGINT PRIMARY KEY,
+                    current_streak INTEGER NOT NULL DEFAULT 0,
+                    highest_days INTEGER NOT NULL DEFAULT 0,
+                    restore_points INTEGER NOT NULL DEFAULT 3,
+                    last_daily TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+            await conn.execute(
+                """
+                ALTER TABLE streaks
+                    ADD COLUMN IF NOT EXISTS current_streak INTEGER NOT NULL DEFAULT 0,
+                    ADD COLUMN IF NOT EXISTS highest_days INTEGER NOT NULL DEFAULT 0,
+                    ADD COLUMN IF NOT EXISTS restore_points INTEGER NOT NULL DEFAULT 3,
+                    ADD COLUMN IF NOT EXISTS last_daily TIMESTAMP,
+                    ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW();
+                """
+            )
+            await conn.execute(
+                """
+                UPDATE streaks
+                SET current_streak = COALESCE(current_streak, 0),
+                    highest_days = COALESCE(highest_days, 0),
+                    restore_points = COALESCE(restore_points, 3);
+                """
+            )
+        self._streaks_table_ready = True
 
     @has_char()
-    @next_day_cooldown()
     @commands.hybrid_command(brief=_("Get your daily reward"))
     @locale_doc
     async def daily(self, ctx):
@@ -326,16 +1154,106 @@ class Miscellaneous(commands.Cog):
 
             If you don't use this command up to 48 hours after the first use, you will lose your streak.
 
-            (This command has a cooldown until 12am UTC.)"""
+            (This command has a cooldown until 1am Europe/Paris.)"""
         )
 
         try:
+            if not getattr(ctx, "skip_daily_confirm", False):
+                view = DailyConfirmView(ctx)
+                view.message = await ctx.send(
+                    f"{ctx.author.mention} Would you like to use all dailies?",
+                    view=view,
+                )
+                await view.wait()
+                if not view.value:
+                    return
+
+            daily_cooldown_key = f"cd:{ctx.author.id}:daily"
+            daily_cooldown_seconds = self.time_until_midnight()
+            daily_claimed = await self.bot.redis.execute_command(
+                "SET",
+                daily_cooldown_key,
+                self._daily_window_key(),
+                "EX",
+                daily_cooldown_seconds,
+                "NX",
+            )
+            if not daily_claimed:
+                daily_cooldown = await self.bot.redis.execute_command(
+                    "TTL", daily_cooldown_key
+                )
+                daily_value = await self.bot.redis.execute_command(
+                    "GET", daily_cooldown_key
+                )
+                if isinstance(daily_value, (bytes, bytearray)):
+                    daily_value = daily_value.decode()
+
+                current_window = self._daily_window_key()
+                if daily_value != current_window:
+                    if not await self._daily_claimed_since_reset(ctx.author.id):
+                        await self.bot.redis.execute_command("DEL", daily_cooldown_key)
+                        daily_claimed = await self.bot.redis.execute_command(
+                            "SET",
+                            daily_cooldown_key,
+                            current_window,
+                            "EX",
+                            daily_cooldown_seconds,
+                            "NX",
+                        )
+                        if daily_claimed:
+                            daily_cooldown = None
+                    else:
+                        await self.bot.redis.execute_command(
+                            "SET",
+                            daily_cooldown_key,
+                            current_window,
+                            "EX",
+                            daily_cooldown_seconds,
+                        )
+
+                if daily_claimed:
+                    pass
+                elif daily_cooldown != -2:
+                    daily_cooldown = daily_cooldown_seconds
+                    await self.bot.redis.execute_command(
+                        "EXPIRE", daily_cooldown_key, daily_cooldown
+                    )
+                else:
+                    daily_cooldown = daily_cooldown_seconds
+
+            if not daily_claimed:
+                attached_status = await self.run_daily_attached_commands(ctx)
+                status_messages = [
+                    f"`daily`: {self.format_time(daily_cooldown)} cooldown remaining"
+                ]
+                status_messages.extend(attached_status)
+                return await ctx.send(
+                    _("Status Report:\n{status_report}").format(
+                        status_report="\n".join(status_messages)
+                    )
+                )
+
             streak = await self.bot.redis.execute_command(
                 "INCR", f"idle:daily:{ctx.author.id}"
             )
             await self.bot.redis.execute_command(
                 "EXPIRE", f"idle:daily:{ctx.author.id}", 48 * 60 * 60
             )  # 48h: after 2 days, they missed it
+
+            await self.ensure_streaks_table()
+            async with self.bot.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO streaks (user_id, current_streak, highest_days, last_daily)
+                    VALUES ($1, $2, $2, NOW())
+                    ON CONFLICT (user_id) DO UPDATE
+                    SET current_streak = EXCLUDED.current_streak,
+                        highest_days = GREATEST(streaks.highest_days, EXCLUDED.current_streak),
+                        last_daily = NOW();
+                    """,
+                    ctx.author.id,
+                    int(streak),
+                )
 
             # Handle milestone rewards
             milestone_rewards = {
@@ -396,6 +1314,7 @@ class Miscellaneous(commands.Cog):
                         money = round(money * 1.5)
 
                     result = await self.bot.pool.fetchval('SELECT tier FROM profile WHERE "user" = $1;', ctx.author.id)
+                    result = int(result or 0)
 
                     if result >= 3:
                         money = round(money * 3)
@@ -462,6 +1381,14 @@ class Miscellaneous(commands.Cog):
                     " crate with possibly rare items!*"
                 ).format(txt=txt, streak=streak, prefix=ctx.clean_prefix)
             )
+
+            attached_status = await self.run_daily_attached_commands(ctx)
+            if attached_status:
+                await ctx.send(
+                    _("Status Report:\n{status_report}").format(
+                        status_report="\n".join(attached_status)
+                    )
+                )
         except Exception as e:
             import traceback
             error_message = f"Error occurred: {e}\n"
@@ -664,18 +1591,7 @@ class Miscellaneous(commands.Cog):
                 await ctx.send("Bonking yourself? That must hurt...")
                 return
 
-            # List of predefined bonk GIFs
-            gif_urls = [
-                "https://media0.giphy.com/media/HmgnQQjEMbMz0oLpqn/giphy.gif?cid=49e4d7b557ooon5bnhtiz3j1n2gp2og8b0qronyhl9njvkcg&ep=v1_gifs_search&rid=giphy.gif&ct=g",
-                "https://media1.tenor.com/m/oHjfWJorYB8AAAAd/bonk.gif",
-                "https://media1.tenor.com/m/tfgcD7qcy1cAAAAd/bonk.gif",
-                "https://media1.tenor.com/m/wHRCrBup3JgAAAAd/bonk-piggies.gif",
-                "https://media1.tenor.com/m/kWNnhhNd5WQAAAAd/bonk.gif",
-                "https://media1.tenor.com/m/yGk_Te0sywsAAAAd/spongebob-meme-bonk.gif"
-            ]
-
-            # Randomly select a GIF from the list
-            gif_url = random.choice(gif_urls)
+            gif_url = "https://media0.giphy.com/media/HmgnQQjEMbMz0oLpqn/giphy.gif?cid=49e4d7b557ooon5bnhtiz3j1n2gp2og8b0qronyhl9njvkcg&ep=v1_gifs_search&rid=giphy.gif&ct=g"
 
             # Create and send the embed message
             embed = discord.Embed(description=f"{ctx.author.mention} bonks {user.mention} 🔨")
@@ -1177,6 +2093,143 @@ class Miscellaneous(commands.Cog):
             )
         )
 
+    @has_char()
+    @commands.hybrid_command(brief=_("Restore your lost daily streak"))
+    @locale_doc
+    async def restore(self, ctx):
+        _(
+            """Restore your lost daily streak using restore points.
+
+            You have 3 restore points available. Each use restores your streak
+            to your previous highest streak achieved.
+
+            This can only be used if your current streak is lower than your highest
+            recorded streak and you have restore points remaining."""
+        )
+        try:
+            await self.ensure_streaks_table()
+
+            async with self.bot.pool.acquire() as conn:
+                user_data = await conn.fetchrow(
+                    """
+                    SELECT current_streak, highest_days, restore_points
+                    FROM streaks
+                    WHERE user_id = $1;
+                    """,
+                    ctx.author.id,
+                )
+
+                if user_data is None:
+                    redis_streak = await self.bot.redis.execute_command(
+                        "GET", f"idle:daily:{ctx.author.id}"
+                    )
+                    if not redis_streak:
+                        return await ctx.send(
+                            _(
+                                "You haven't used the daily command yet! Use `{prefix}daily` first."
+                            ).format(prefix=ctx.clean_prefix)
+                        )
+
+                    current = int(
+                        redis_streak.decode()
+                        if isinstance(redis_streak, (bytes, bytearray))
+                        else redis_streak
+                    )
+                    await conn.execute(
+                        """
+                        INSERT INTO streaks (user_id, current_streak, highest_days, last_daily)
+                        VALUES ($1, $2, $2, NOW())
+                        ON CONFLICT (user_id) DO NOTHING;
+                        """,
+                        ctx.author.id,
+                        current,
+                    )
+                    user_data = {
+                        "current_streak": current,
+                        "highest_days": current,
+                        "restore_points": 3,
+                    }
+
+                current_streak = int(user_data["current_streak"] or 0)
+                highest_days = int(user_data["highest_days"] or 0)
+                restore_points = int(user_data["restore_points"] or 0)
+
+                if restore_points <= 0:
+                    embed = discord.Embed(
+                        title=_("Streak Restore Unavailable"),
+                        description=_("You have no restore points remaining."),
+                        color=discord.Color.red(),
+                    )
+                    return await ctx.send(embed=embed)
+
+                if current_streak >= highest_days:
+                    embed = discord.Embed(
+                        title=_("Streak Restore Not Needed"),
+                        description=_(
+                            "Your current streak (**{current}**) is already at or above your highest streak (**{highest}**)."
+                        ).format(current=current_streak, highest=highest_days),
+                        color=discord.Color.orange(),
+                    )
+                    return await ctx.send(embed=embed)
+
+                new_points = restore_points - 1
+                await conn.execute(
+                    """
+                    UPDATE streaks
+                    SET current_streak = $1,
+                        restore_points = $2,
+                        last_daily = NOW()
+                    WHERE user_id = $3;
+                    """,
+                    highest_days,
+                    new_points,
+                    ctx.author.id,
+                )
+
+                await self.bot.redis.execute_command(
+                    "SET", f"idle:daily:{ctx.author.id}", highest_days
+                )
+                await self.bot.redis.execute_command(
+                    "EXPIRE", f"idle:daily:{ctx.author.id}", 48 * 60 * 60
+                )
+
+                await self.bot.log_transaction(
+                    ctx,
+                    from_=ctx.author.id,
+                    to=1,
+                    subject="streak_restore",
+                    data={
+                        "From": current_streak,
+                        "To": highest_days,
+                        "Points_Remaining": new_points,
+                    },
+                    conn=conn,
+                )
+
+            embed = discord.Embed(
+                title=_("Streak Restored"),
+                description=_("Your daily streak has been restored successfully."),
+                color=discord.Color.green(),
+            )
+            embed.add_field(name=_("Before"), value=f"**{current_streak}**", inline=True)
+            embed.add_field(name=_("After"), value=f"**{highest_days}**", inline=True)
+            embed.add_field(name=_("Restore Points"), value=f"**{new_points}**/3", inline=True)
+            embed.set_footer(
+                text=_("Keep claiming `{prefix}daily` to continue your streak.").format(
+                    prefix=ctx.clean_prefix
+                )
+            )
+            await ctx.send(embed=embed)
+        except Exception as e:
+            import traceback
+
+            print(f"Error occurred in restore: {e}\n{traceback.format_exc()}")
+            await ctx.send(
+                _(
+                    "An unexpected error occurred while restoring your streak. Please try again later."
+                )
+            )
+
 
     @commands.hybrid_command(aliases=["donate"], brief=_("Support the bot financially"))
     @locale_doc
@@ -1185,7 +2238,7 @@ class Miscellaneous(commands.Cog):
             """View the Patreon page of the bot. The different tiers will grant different rewards.
             View `{prefix}help module Patreon` to find the different commands.
 
-            Thank you for supporting Fable RPG!"""
+            Thank you for supporting EoO!"""
         )
         guild_count = sum(
             await self.bot.cogs["Sharding"].handler(
@@ -1204,7 +2257,7 @@ If you want to continue using the bot or just help us, please donate a small amo
 Even $1 can help us.
 **Thank you!**
 
-<https://patreon.com/FableRPG>"""
+https://www.patreon.com/c/Danaelis97"""
             ).format(guild_count=guild_count)
         )
 
@@ -1226,16 +2279,12 @@ Even $1 can help us.
     @locale_doc
     async def invite(self, ctx):
         _(
-            """Invite the bot to your server.
-
-            Use this https://discord.com/api/oauth2/authorize?client_id=1136590782183264308&permissions
-            =8945276537921&scope=bot"""
+            """Please join our support server https://discord.gg/BVWtrWvaDA"""
         )
         await ctx.send(
             _(
-                "You are running version **{version}** by The Fable"
-                "Developers.\nInvite me! https://discord.com/api/oauth2/authorize?client_id=1136590782183264308"
-                "&permissions=8945276537921&scope=bot"
+                "You are running version **{version}**"
+                "Developers.\nJoin us https://discord.gg/BVWtrWvaDA"
             ).format(version=self.bot.version)
         )
 
@@ -1400,23 +2449,23 @@ Even $1 can help us.
         compiler = re.search(r".*\[(.*)\]", sys.version)[1]
 
         embed = discord.Embed(
-            title=_("FableRPG Statistics"),
+            title=_("EoO Statistics"),
             colour=0xB8BBFF,
             url=self.bot.BASE_URL,
             description=_(
-                "Official Support Server Invite: https://discord.com/fablerpg"
+                "Official Support Server Invite: https://discord.gg/BVWtrWvaDA"
             ),
         )
         embed.set_thumbnail(url=self.bot.user.display_avatar.url)
         embed.set_footer(
-            text=f"Fable {self.bot.version} | By {owner}",
+            text=f"EoO {self.bot.version} | By {owner}",
             icon_url=self.bot.user.display_avatar.url,
         )
         embed.add_field(
             name=_("Hosting Statistics"),
             value=_(
                 """\
-CPU: **AMD Ryzen Threadripper PRO 7995WX**
+CPU: ****
 Python Version **{python}** 
 discord.py Version **{dpy}**
 Compiler: **{compiler}**
@@ -1516,7 +2565,7 @@ Average hours of work: **{hours}**"""
         freecredits = 0
         # await ctx.send(f"{credits}")
 
-        if ctx.author.id == 295173706496475136:
+        if ctx.author.id == 524674960153903126:
             await self.bot.reset_cooldown(ctx)
 
         if ctx.author.id == 598004694060892183:
@@ -1533,7 +2582,7 @@ Average hours of work: **{hours}**"""
                 return await ctx.send(f"You have used up all free images for today. Additional images cost **$0.04**.")
 
         try:
-            if ctx.author.id != 295173706496475136:
+            if ctx.author.id != 524674960153903126:
                 if ctx.author.id != 598004694060892183:
                     if len(prompt) > 120:
                         return await ctx.send("The prompt cannot exceed 120 characters.")
@@ -1595,7 +2644,7 @@ Average hours of work: **{hours}**"""
         freecredits = ctx.character_data["freeimage"]
         # await ctx.send(f"{credits}")
 
-        if ctx.author.id == 295173706496475136:
+        if ctx.author.id == 524674960153903126:
             await self.bot.reset_cooldown(ctx)
 
         if ctx.author.id != 598004694060892183:
@@ -1605,7 +2654,7 @@ Average hours of work: **{hours}**"""
             return await ctx.send(f"You do not have enough credits for this model. Additional images cost **$0.12**.")
 
         try:
-            if ctx.author.id != 295173706496475136:
+            if ctx.author.id != 524674960153903126:
                 if ctx.author.id != 698612238549778493:
                     if len(prompt) > 120:
                         return await ctx.send("The prompt cannot exceed 120 characters.")
@@ -1655,7 +2704,7 @@ Average hours of work: **{hours}**"""
 
         # Check if the command is invoked in one of the allowed channels
 
-        if ctx.author.id != 295173706496475136:
+        if ctx.author.id != 524674960153903126:
             if ctx.author.id != 698612238549778493:
                 if ctx.guild:
                     if ctx.guild.id not in [969741725931298857, 1285448244859764839]:
@@ -1807,6 +2856,95 @@ Average hours of work: **{hours}**"""
         except Exception as e:
             return f"Unexpected error! Is the pipeline server running? {e}"
 
+    def _minigames_help_embed(self, prefix: str) -> discord.Embed:
+        embed = discord.Embed(
+            title=_("Mini-games Help"),
+            description=_("Quick index for the community mini-games."),
+            color=discord.Color.gold(),
+        )
+        embed.add_field(
+            name=_("Olympus Dash"),
+            value=(
+                f"`{prefix}od start <laps 1-25> [value]` - board race with tiles, coins, shop dice, rewards.\n"
+                f"`{prefix}od help` - full rules and commands.\n"
+                f"`{prefix}od legend` - tile effects."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name=_("Chariot Race"),
+            value=(
+                f"`{prefix}chariot start [laps] [entry_fee]` - team race with actions and mystery divine cards.\n"
+                f"`{prefix}chariot bet <amount> <team>` - spectator betting during betting phase.\n"
+                f"`{prefix}chariot help` - full rules and commands."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name=_("Odyssey's Voyage"),
+            value=(
+                f"`{prefix}odysseyvoyage` or `{prefix}voyage` / `{prefix}ov` - trick-taking voyage lobby.\n"
+                f"`{prefix}ov epic` - Epic Mode.\n"
+                f"`{prefix}ov help` - rules and card reference."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name=_("Lykaion"),
+            value=(
+                f"`{prefix}lykaion start [extended|normal|fast|blitz]` - Greek social deduction lobby.\n"
+                f"`{prefix}lykaion help` - roles, timers, and game flow.\n"
+                f"`{prefix}lkroles` - role reference pages."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name=_("Russian Roulette"),
+            value=(
+                f"`{prefix}rr [bet]` - classic Russian Roulette.\n"
+                f"`{prefix}rrbeta [bet] [bullets]` - beta variant with spectator bets.\n"
+                f"`{prefix}rrbet <amount> @player` - bet during an RR beta lobby."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name=_("Hunger Games"),
+            value=(
+                f"`{prefix}hungergames` or `{prefix}hg` - join an automated elimination game.\n"
+                "Last survivor wins."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name=_("Trivia & Cards"),
+            value=(
+                f"`{prefix}cah` - Cards Against Humanity lobby.\n"
+                f"`{prefix}trivia [easy|medium|hard]` or `{prefix}tr` - trivia question."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name=_("Scheduled Mini-games"),
+            value=(
+                f"`{prefix}minigamescheduler` or `{prefix}mgs` - GM-only scheduler status.\n"
+                f"`{prefix}mgs interval [amount] [minutes|hours]` - check or change spawn timing.\n"
+                f"`{prefix}mgs roster` - check or change which games rotate."
+            ),
+            inline=False,
+        )
+        embed.set_footer(text=_("Use each mini-game's help command for detailed rules."))
+        return embed
+
+    @commands.group(name="minigames", aliases=["mg"], invoke_without_command=True)
+    @commands.guild_only()
+    async def minigames(self, ctx: commands.Context):
+        await ctx.send(embed=self._minigames_help_embed(ctx.clean_prefix))
+
+    @minigames.command(name="help", aliases=["h"])
+    @commands.guild_only()
+    async def minigames_help(self, ctx: commands.Context):
+        await ctx.send(embed=self._minigames_help_embed(ctx.clean_prefix))
+
 
     @commands.hybrid_command(
         aliases=["pages", "about"], brief=_("Info about the bot and related sites")
@@ -1818,7 +2956,7 @@ Average hours of work: **{hours}**"""
             _(
                 # xgettext: no-python-format
                 """\
-**FableRPG** is Discord's most advanced medieval RPG bot.
+**EoO** is Discord's most advanced greek mythology RPG bot.
 We aim to provide the perfect experience at RPG in Discord with minimum effort for the user.
 
 We are not collecting any data apart from your character information and our transaction logs.
@@ -1828,9 +2966,7 @@ This bot is developed by people who love to code for a good cause and improving 
 **Links**
 <https://git.travitia.xyz/Kenvyra/IdleRPG> - Source Code (IdleRPG)
 <https://git.travitia.xyz/prototypeX37/FableRPG-> - Source Code (FableRPG)
-<https://git.travitia.xyz> - GitLab (Public)
-<https://wiki.fablerpg.xyz> - FableRPG wiki
-<https://api.fablerpg.xyz> - Our API
+<https://github.com/Danaelis/Echoes-of-Olympus/> -Source Code (EoO)
 <https://discord.com/terms> - Discord's ToS
 <https://www.ncpgambling.org/help-treatment/national-helpline-1-800-522-4700/> - Gambling Helpline"""
             )
@@ -1852,11 +2988,10 @@ This bot is developed by people who love to code for a good cause and improving 
 4) Trading in-game content for anything outside of the game is prohibited
 5) Giving or selling renamed items is forbidden
 
-FableRPG is a global bot, your characters are valid everywhere"""
+EoO is a global bot, your characters are valid everywhere"""
             )
         )
 
 
 async def setup(bot):
     await bot.add_cog(Miscellaneous(bot))
-    await bot.tree.sync()

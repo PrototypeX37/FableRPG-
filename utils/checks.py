@@ -2,6 +2,7 @@
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
 Copyright (C) 2024 Lunar (discord itslunar.)
+Copyright (C) 2026 Danaelis
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -146,12 +147,6 @@ class PetRanAway(commands.CheckFailure):
 
 class AlreadyRaiding(commands.CheckFailure):
     """Exception raised when a user tries starting a raid while another is ongoing."""
-
-    pass
-
-
-class NoOpenHelpRequest(commands.CheckFailure):
-    """Exception raised when a user tries to edit/remove an open help request but none exists."""
 
     pass
 
@@ -382,7 +377,7 @@ def is_class(class_: type[GameClass]) -> "_CheckDecorator":
 
 
 def is_nothing(ctx: Context) -> bool:
-    """Checks for a user to be human and not taken cv yet."""
+    """Checks whether the player is still on an initial race with no CV chosen."""
     if ctx.character_data["race"] == "Human" and ctx.character_data["cv"] == -1:
         return True
     return False
@@ -520,29 +515,307 @@ async def guild_has_money(bot: "Bot", guildid: int, money: int) -> bool:
     return res >= money
 
 
+async def user_is_gm(bot: "Bot", user: discord.abc.User | int) -> bool:
+    user_id = int(getattr(user, "id", user))
+
+    owner_ids = getattr(bot, "owner_ids", None) or set()
+    try:
+        if user_id in {int(x) for x in owner_ids}:
+            return True
+    except (TypeError, ValueError):
+        pass
+
+    owner_target = user if hasattr(user, "id") else discord.Object(id=user_id)
+    try:
+        if await bot.is_owner(owner_target):
+            return True
+    except Exception:
+        pass
+
+    gm_ids = getattr(bot.config.game, "game_masters", []) or []
+    try:
+        if user_id in {int(x) for x in gm_ids}:
+            return True
+    except (TypeError, ValueError):
+        pass
+
+    gm_cache = getattr(bot, "_gm_cache", None)
+    if gm_cache is not None and user_id in gm_cache:
+        return True
+
+    pool = getattr(bot, "pool", None)
+    if not pool:
+        return False
+
+    try:
+        is_db_gm = await pool.fetchval(
+            "SELECT 1 FROM game_masters WHERE user_id = $1",
+            user_id,
+        )
+    except Exception:
+        return False
+
+    if not is_db_gm:
+        return False
+
+    if gm_cache is None:
+        gm_cache = set()
+        setattr(bot, "_gm_cache", gm_cache)
+    gm_cache.add(user_id)
+    return True
+
+
 def is_gm() -> "_CheckDecorator":
     async def predicate(ctx: Context) -> bool:
-        return (
-                ctx.author.id in ctx.bot.config.game.game_masters
-        )
+        return await user_is_gm(ctx.bot, ctx.author)
 
     return commands.check(predicate)
 
 
 def is_patron(role: str = "basic") -> "_CheckDecorator":
     async def predicate(ctx: Context) -> bool:
+        required_rank = _parse_donator_rank(role)
         if await user_is_patron(ctx.bot, ctx.author, role):
             return True
-        else:
-            return True
+        raise NoPatron(required_rank)
 
     return commands.check(predicate)
 
 
+_PROFILE_TIER_TO_DONATOR_RANK: dict[int, DonatorRank] = {
+    1: DonatorRank.basic,
+    2: DonatorRank.bronze,
+    3: DonatorRank.silver,
+    4: DonatorRank.gold,
+    5: DonatorRank.emerald,
+    6: DonatorRank.ruby,
+    7: DonatorRank.diamond,
+}
+
+_DEFAULT_PATREON_GUILD_ID = 1323388333589528638
+_DEFAULT_ROLE_TO_RANK: dict[int, DonatorRank] = {
+    1411756981274017912: DonatorRank.basic,   # Mortal (tier 1)
+    1411757068364546139: DonatorRank.bronze,  # Demi-God (tier 2)
+    1411757100136140913: DonatorRank.gold,    # Olympian (tier 4)
+    1411757151306645706: DonatorRank.gold,    # Titan (tier 4 + gift tier 1)
+    1411757168356491508: DonatorRank.gold,    # Primordial Fate (tier 4 + gift tier 2)
+}
+
+
+def _parse_donator_rank(role: str) -> DonatorRank:
+    tier_name = str(role).strip().lower()
+    try:
+        return getattr(DonatorRank, tier_name)
+    except AttributeError as exc:
+        raise ValueError(f"Unknown donator tier: {role!r}") from exc
+
+
+def _coerce_tier_int(value: object | None) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+
+def _rank_from_profile_tier(tier: object | None) -> DonatorRank | None:
+    tier_value = _coerce_tier_int(tier)
+    if tier_value is None:
+        return None
+    return _PROFILE_TIER_TO_DONATOR_RANK.get(tier_value)
+
+
+def _normalize_rank(value: object | None) -> DonatorRank | None:
+    if isinstance(value, DonatorRank):
+        return value
+    if isinstance(value, bool):
+        # bool is an int subtype; do not interpret it as a tier.
+        return None
+    if isinstance(value, int):
+        return _rank_from_profile_tier(value)
+    if isinstance(value, str):
+        try:
+            return _parse_donator_rank(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _max_rank(current: object | None, candidate: object | None) -> DonatorRank | None:
+    current_rank = _normalize_rank(current)
+    candidate_rank = _normalize_rank(candidate)
+    if candidate_rank is None:
+        return current_rank
+    if current_rank is None or candidate_rank > current_rank:
+        return candidate_rank
+    return current_rank
+
+
+def _set_rank_if_higher(
+    role_rank_map: dict[int, DonatorRank], role_id: int, rank: DonatorRank
+) -> None:
+    existing = role_rank_map.get(role_id)
+    if existing is None or rank > existing:
+        role_rank_map[role_id] = rank
+
+
+def _add_default_role_rank_mapping(role_rank_map: dict[int, DonatorRank]) -> None:
+    for role_id, rank in _DEFAULT_ROLE_TO_RANK.items():
+        _set_rank_if_higher(role_rank_map, int(role_id), rank)
+
+
+def _build_role_rank_mapping(bot: "Bot") -> dict[int, DonatorRank]:
+    role_rank_map: dict[int, DonatorRank] = {}
+    _add_default_role_rank_mapping(role_rank_map)
+
+    # Primary source: configured donator role mappings.
+    for configured_role in getattr(bot.config.external, "donator_roles", []) or []:
+        try:
+            role_id = int(configured_role.id)
+            rank = _parse_donator_rank(configured_role.tier)
+        except (TypeError, ValueError):
+            continue
+        _set_rank_if_higher(role_rank_map, role_id, rank)
+
+    # Fallback source: runtime mappings from PatreonStuff (role_id -> numeric tier).
+    patreon_stuff = bot.get_cog("PatreonStuff")
+    if patreon_stuff is not None:
+        for role_id, tier in getattr(patreon_stuff, "ROLE_TIER_MAPPING", {}).items():
+            try:
+                rank = _rank_from_profile_tier(int(tier))
+                if rank is None:
+                    continue
+                role_id_int = int(role_id)
+            except (TypeError, ValueError):
+                continue
+            _set_rank_if_higher(role_rank_map, role_id_int, rank)
+
+    return role_rank_map
+
+
+def _support_guild_candidates(bot: "Bot") -> set[int]:
+    guild_ids: set[int] = {_DEFAULT_PATREON_GUILD_ID}
+
+    support_server_id = getattr(bot.config.game, "support_server_id", None)
+    if support_server_id:
+        try:
+            guild_ids.add(int(support_server_id))
+        except (TypeError, ValueError):
+            pass
+
+    patreon_core = bot.get_cog("PatreonCore")
+    if patreon_core is not None:
+        core_guild_id = getattr(patreon_core, "guild_id", None)
+        if core_guild_id:
+            try:
+                guild_ids.add(int(core_guild_id))
+            except (TypeError, ValueError):
+                pass
+
+    return guild_ids
+
+
+def _rank_from_role_ids(role_ids: list[int], role_rank_map: dict[int, DonatorRank]) -> DonatorRank | None:
+    rank: DonatorRank | None = None
+    for role_id in role_ids:
+        rank = _max_rank(rank, role_rank_map.get(role_id))
+    return rank
+
+
+def _rank_from_member_object(member: discord.Member, role_rank_map: dict[int, DonatorRank]) -> DonatorRank | None:
+    member_role_ids = [int(member_role.id) for member_role in member.roles]
+    rank = _rank_from_role_ids(member_role_ids, role_rank_map)
+    return rank
+
+
+async def _rank_from_member_api(bot: "Bot", guild_id: int, user_id: int, role_rank_map: dict[int, DonatorRank]) -> DonatorRank | None:
+    try:
+        member = await bot.http.get_member(int(guild_id), int(user_id))
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return None
+
+    parsed_role_ids: list[int] = []
+    for role_id in member.get("roles", []):
+        try:
+            parsed_role_ids.append(int(role_id))
+        except (TypeError, ValueError):
+            continue
+    return _rank_from_role_ids(parsed_role_ids, role_rank_map)
+
+
 async def user_is_patron(bot: "Bot", user: discord.User, role: str = "basic") -> bool:
-    actual_role = getattr(DonatorRank, role)
-    rank = await bot.get_donator_rank(user.id)
-    return True
+    required_rank = _parse_donator_rank(role)
+    best_rank: DonatorRank | None = None
+    api_mode_active = False
+
+    # Source 1: live PatreonCore cache (API-driven when enabled).
+    patreon_core = bot.get_cog("PatreonCore")
+    if patreon_core is not None:
+        try:
+            cached_tier = _coerce_tier_int(
+                patreon_core.get_cached_tier_for_user(user.id)
+            )
+            best_rank = _max_rank(best_rank, _rank_from_profile_tier(cached_tier))
+            api_mode_active = (
+                not getattr(patreon_core, "role_driven_sync", True)
+                and bool(getattr(patreon_core, "patrons_data", {}))
+            )
+        except Exception:
+            pass
+
+    # Source 2: existing configured donator logic.
+    if not api_mode_active:
+        try:
+            best_rank = _max_rank(best_rank, await bot.get_donator_rank(user.id))
+        except Exception:
+            pass
+
+    # Source 3: Discord role fallback (supports Patreon-bot-managed roles).
+    if not api_mode_active:
+        role_rank_map = _build_role_rank_mapping(bot)
+        if role_rank_map:
+            if isinstance(user, discord.Member):
+                best_rank = _max_rank(best_rank, _rank_from_member_object(user, role_rank_map))
+
+            guild_ids = _support_guild_candidates(bot)
+
+            if isinstance(user, discord.Member):
+                guild_ids.add(int(user.guild.id))
+
+            for guild_id in guild_ids:
+                best_rank = _max_rank(
+                    best_rank,
+                    await _rank_from_member_api(bot, guild_id, user.id, role_rank_map),
+                )
+
+    # Source 4: profile tier written by Patreon sync jobs.
+    try:
+        tier = await bot.pool.fetchval('SELECT "tier" FROM profile WHERE "user"=$1;', user.id)
+    except Exception:
+        tier = None
+    best_rank = _max_rank(best_rank, _rank_from_profile_tier(tier))
+
+    return best_rank is not None and best_rank >= required_rank
+
+
+def is_patreon(min_tier: int = 1) -> "_CheckDecorator":
+    """Compatibility alias for cogs using the old name."""
+    try:
+        tier = int(min_tier)
+    except (TypeError, ValueError):
+        tier = 1
+
+    if tier < 1:
+        tier = 1
+
+    required_rank = _PROFILE_TIER_TO_DONATOR_RANK.get(
+        tier, _PROFILE_TIER_TO_DONATOR_RANK[max(_PROFILE_TIER_TO_DONATOR_RANK)]
+    )
+    return is_patron(required_rank.name)
 
 
 def is_supporter() -> "_CheckDecorator":
@@ -555,16 +828,5 @@ def is_supporter() -> "_CheckDecorator":
             return False
         member_roles = [int(i) for i in member.get("roles", [])]
         return ctx.bot.config.game.support_team_role in member_roles
-
-    return commands.check(predicate)
-
-
-def has_open_help_request() -> "_CheckDecorator":
-    async def predicate(ctx: Context) -> bool:
-        response = await ctx.bot.redis.execute_command("GET", f"helpme:{ctx.guild.id}")
-        if not response:
-            raise NoOpenHelpRequest()
-        ctx.helpme = response.decode()
-        return True
 
     return commands.check(predicate)

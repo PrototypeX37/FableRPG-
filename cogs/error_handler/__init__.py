@@ -73,13 +73,12 @@ class Errorhandler(commands.Cog):
     async def _on_command_error(
         self, ctx: Context, error: Exception, bypass: bool = False
     ) -> None:
-        if (
-            hasattr(ctx.command, "on_error")
-            or (ctx.command and hasattr(ctx.cog, f"_{ctx.command.cog_name}__error"))
-            and not bypass
-        ):
-            # Do nothing if the command/cog has its own error handler
-            return
+        if not bypass:
+            has_cmd_handler = bool(ctx.command and ctx.command.has_error_handler())
+            has_cog_handler = bool(ctx.cog and ctx.cog.has_error_handler())
+            if has_cmd_handler or has_cog_handler:
+                # Do nothing if the command/cog has its own error handler.
+                return
         if isinstance(error, commands.CommandNotFound):
             return
         elif isinstance(error, commands.MissingRequiredArgument):
@@ -128,7 +127,7 @@ class Errorhandler(commands.Cog):
                 await ctx.send(
                     _(
                         "You did not enter a valid crate rarity. Possible ones are:"
-                        " common (c), uncommon (u), rare (r), magic (m), legendary (l), mystery (myst), fortune (f) and divine (d)."
+                        " common (c), uncommon (u), rare (r), magic (m), legendary (l), mystery (myst), fortune (f), divine (d), and materials (mat/mats)."
                     )
                 )
             elif isinstance(error, InvalidCoinSide):
@@ -294,8 +293,6 @@ class Errorhandler(commands.Cog):
                 await ctx.send(_("Your alliance already owns a city."))
             elif isinstance(error, utils.checks.NoAlliancePermissions):
                 await ctx.send(_("Your alliance rank is too low."))
-            elif isinstance(error, utils.checks.NoOpenHelpRequest):
-                await ctx.send(_("Your server does not have an open help request."))
             elif isinstance(error, utils.checks.ImgurUploadError):
                 await ctx.send(
                     _(

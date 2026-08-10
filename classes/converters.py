@@ -1,7 +1,7 @@
+from datetime import datetime, timezone
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,8 +16,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-
 import datetime
 
 from enum import Flag
@@ -31,10 +29,10 @@ from utils.i18n import _
 
 
 class NotInRange(commands.BadArgument):
-    def __init__(self, text: str, from_: int, to_: int) -> None:
+    def __init__(self, text: str, from_: int, to: int) -> None:
         self.text = text
         self.from_ = from_
-        self.to_ = to_
+        self.to = to
 
 
 class InvalidCrateRarity(commands.BadArgument):
@@ -93,22 +91,22 @@ class MemberWithCharacter(commands.MemberConverter):
 
 
 class IntFromTo(commands.Converter):
-    def __init__(self, from_, to_):
+    def __init__(self, from_, to):
         self.from_ = from_
-        self.to_ = to_
+        self.to = to
 
     async def convert(self, ctx, arg):
         try:
             arg = int(arg)
         except ValueError:
             raise commands.BadArgument("Converting to int failed.")
-        if not self.from_ <= arg <= self.to_:
+        if not self.from_ <= arg <= self.to:
             raise NotInRange(
-                _("The supplied number must be in range of {from_} to {to_}.").format(
-                    from_=self.from_, to_=self.to_
+                _("The supplied number must be in range of {from_} to {to}.").format(
+                    from_=self.from_, to=self.to
                 ),
                 self.from_,
-                self.to_,
+                self.to,
             )
         return arg
 
@@ -145,6 +143,8 @@ class CrateRarity(commands.Converter):
             "myst": "mystery",
             "f": "fortune",
             "d": "divine",
+            "mat": "materials",
+            "mats": "materials",
         }
         rarity = rarities.get(stuff, stuff)
         if rarity not in rarities.values():
@@ -204,7 +204,7 @@ class DateTimeScheduler(commands.Converter):
                     break
             if not worked:
                 raise InvalidTime(_("Could not determine a time from this."))
-        if time < datetime.datetime.utcnow():
+        if time < datetime.datetime.now(timezone.utc):
             raise InvalidTime(_("That time is in the past."))
         return time + datetime.timedelta(seconds=1), subject
 

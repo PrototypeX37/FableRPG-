@@ -1,3 +1,6 @@
+import traceback
+import time
+
 import discord
 import random
 import asyncio
@@ -21,6 +24,7 @@ class SimpleBattle(discord.ext.commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        self.battle_contexts = {}
         # Battle commentary templates and data
         self.commentaries = {
             "intros": [
@@ -1078,35 +1082,39 @@ class SimpleBattle(discord.ext.commands.Cog):
             }
         ]
 
-    async def manage_battle_message(self, ctx, new_content, event_counter=0, force_new=False):
+    async def manage_battle_message(self, ctx, battle_id, new_content, event_counter=0, force_new=False):
         """Create a new message or edit existing one based on event count and content length"""
-        # Check if we need to store this as a property
-        if not hasattr(self, 'battle_messages'):
-            self.battle_messages = []
-            self.current_battle_message = None
-            self.current_content = ""
-            self.message_counter = 0
-            
+        # Get battle context
+        if battle_id not in self.battle_contexts:
+            self.battle_contexts[battle_id] = {
+                "battle_messages": [],
+                "current_battle_message": None,
+                "current_content": "",
+                "message_counter": 0
+            }
+
+        battle_ctx = self.battle_contexts[battle_id]
+
         # Check if we need to create a new message
-        if (force_new or 
-            self.message_counter >= 5 or 
-            not self.current_battle_message or 
-            len(self.current_content + "\n\n" + new_content) > 1950):
-            
+        if (force_new or
+                not battle_ctx["current_battle_message"] or
+                battle_ctx["message_counter"] >= 3 or
+                len((battle_ctx["current_content"] + "\n\n" + new_content) if battle_ctx[
+                    "current_content"] else new_content) > 1800):
+
             # Create a new message
-            self.current_content = new_content
-            self.current_battle_message = await ctx.send(f"{new_content}")
-            self.battle_messages.append(self.current_battle_message)
-            self.message_counter = 1
+            battle_ctx["current_content"] = new_content
+            battle_ctx["current_battle_message"] = await ctx.send(f"{new_content}")
+            battle_ctx["battle_messages"].append(battle_ctx["current_battle_message"])
+            battle_ctx["message_counter"] = 1
         else:
             # Update existing message
-            self.current_content += f"\n\n{new_content}"
-            await self.current_battle_message.edit(content=self.current_content)
-            self.message_counter += 1
-            
-        return self.current_battle_message
-        
-    
+            battle_ctx["current_content"] += f"\n\n{new_content}"
+            await battle_ctx["current_battle_message"].edit(content=battle_ctx["current_content"])
+            battle_ctx["message_counter"] += 1
+
+        return battle_ctx["current_battle_message"]
+
     async def get_weapon_info(self, ctx, user_id) -> Dict:
         """Get the weapon information of a user based on their equipped items."""
         try:
@@ -1117,7 +1125,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                     " inventory i ON (ai.id=i.item) WHERE i.equipped IS TRUE AND p.user=$1",
                     user_id
                 )
-                
+
                 result = {
                     "type": "unknown",
                     "name": "bare hands",
@@ -1127,34 +1135,34 @@ class SimpleBattle(discord.ext.commands.Cog):
                     "second_name": None,
                     "style": "unarmed"
                 }
-                
+
                 if not items:
                     # No equipped items
                     return result
-                
+
                 # Check if any of the equipped items is a shield
                 shield_item = None
                 weapon_item = None
-                
+
                 for item in items:
                     item_type = item["type"].lower() if item["type"] else "unknown"
                     if item_type == "shield":
                         shield_item = item
                     else:
                         weapon_item = item
-                
+
                 # Set god from profile
                 if items:
                     result["god"] = items[0].get("god")
-                
+
                 # Prioritize weapon as primary if available
                 if weapon_item:
                     result["type"] = weapon_item["type"].lower() if weapon_item["type"] else "unknown"
                     result["name"] = weapon_item["name"]
-                    
+
                     if result["type"] in self.weapon_types:
                         result["handed"] = self.weapon_types[result["type"]]["handed"]
-                    
+
                     # If there's also a shield
                     if shield_item:
                         result["second_type"] = "shield"
@@ -1162,13 +1170,13 @@ class SimpleBattle(discord.ext.commands.Cog):
                         result["style"] = "shield"
                     else:
                         result["style"] = "two_handed" if result["handed"] == 2 else "single"
-                
+
                 # If only a shield is equipped (unusual but possible)
                 elif shield_item:
                     result["type"] = "shield"
                     result["name"] = shield_item["name"]
                     result["style"] = "shield"
-                
+
                 return result
         except Exception as e:
             await ctx.send(f"Error getting weapon info: {e}")
@@ -1188,7 +1196,7 @@ class SimpleBattle(discord.ext.commands.Cog):
         try:
             if weapon1 == "unknown" or weapon2 == "unknown":
                 return 0
-                
+
             if weapon2 in self.weapon_types.get(weapon1, {}).get("strong_against", []):
                 return 1  # weapon1 has advantage
             elif weapon2 in self.weapon_types.get(weapon1, {}).get("weak_against", []):
@@ -1202,72 +1210,52 @@ class SimpleBattle(discord.ext.commands.Cog):
             # Return default values in case of error
             return 0
 
-    async def manage_battle_message(self, ctx, new_content, event_counter=0, force_new=False):
-        """Create a new message or edit existing one based on event count and content length"""
-        # Check if we need to create a new message
-        if (force_new or 
-            not self.current_battle_message or 
-            self.message_counter >= 3 or  # Reduced from 5 to 3 for more frequent new messages
-            len(self.current_content + "\n\n" + new_content) > 1800):  # Reduced limit for safety
-            
-            # Create a new message
-            self.current_content = new_content
-            self.current_battle_message = await ctx.send(f"{new_content}")
-            self.battle_messages.append(self.current_battle_message)
-            self.message_counter = 1
-        else:
-            # Update existing message
-            self.current_content += f"\n\n{new_content}"
-            await self.current_battle_message.edit(content=self.current_content)
-            self.message_counter += 1
-            
-        return self.current_battle_message
+    async def manage_phase_message(self, ctx, battle_id, phase_name, new_content=None, edit=False, force_new=False):
+        """Manages messages by battle phase."""
+        # Get battle context
+        if battle_id not in self.battle_contexts:
+            self.battle_contexts[battle_id] = {
+                "battle_messages": [],
+                "current_battle_message": None,
+                "current_content": "",
+                "message_counter": 0,
+                "phase_messages": {},
+                "phase_contents": {}
+            }
 
+        battle_ctx = self.battle_contexts[battle_id]
 
-    async def manage_phase_message(self, ctx, phase_name, new_content=None, edit=False, force_new=False):
-        """
-        Manages messages by battle phase.
-        
-        Parameters:
-        - phase_name: The name of the battle phase (e.g., "PREPARATION PHASE")
-        - new_content: Content to add to the phase message
-        - edit: Whether to edit the existing phase message or create a new one
-        - force_new: Force creation of a new message even if the phase exists
-        
-        Returns:
-        - The phase message object
-        """
-        # Initialize phase messages dict if not exists
-        if not hasattr(self, 'phase_messages'):
-            self.phase_messages = {}
-            self.phase_contents = {}
-        
+        # Initialize phase messages dict if not exists in this battle context
+        if "phase_messages" not in battle_ctx:
+            battle_ctx["phase_messages"] = {}
+            battle_ctx["phase_contents"] = {}
+
         # Create phase header
         header = f"⚔️ == {phase_name} == ⚔️"
-        
+
         # If we need to create a new phase message
-        if force_new or phase_name not in self.phase_messages:
+        if force_new or phase_name not in battle_ctx["phase_messages"]:
             if new_content:
                 content = f"{header}\n{new_content}"
             else:
                 content = header
-                
+
             # Create new message for this phase
-            self.phase_messages[phase_name] = await ctx.send(content)
-            self.phase_contents[phase_name] = content
-            
+            battle_ctx["phase_messages"][phase_name] = await ctx.send(content)
+            battle_ctx["phase_contents"][phase_name] = content
+
         # If we're editing an existing phase message
         elif edit and new_content:
             # Update content for this phase
-            if phase_name not in self.phase_contents:
-                self.phase_contents[phase_name] = header
-                
-            self.phase_contents[phase_name] += f"\n{new_content}"
-            
+            if phase_name not in battle_ctx["phase_contents"]:
+                battle_ctx["phase_contents"][phase_name] = header
+
+            battle_ctx["phase_contents"][phase_name] += f"\n{new_content}"
+
             # Edit the existing message
-            await self.phase_messages[phase_name].edit(content=self.phase_contents[phase_name])
-        
-        return self.phase_messages[phase_name]
+            await battle_ctx["phase_messages"][phase_name].edit(content=battle_ctx["phase_contents"][phase_name])
+
+        return battle_ctx["phase_messages"][phase_name]
 
     @has_char()
     @user_cooldown(90)
@@ -1280,39 +1268,51 @@ class SimpleBattle(discord.ext.commands.Cog):
 
             Challenge another player to a gladiatorial battle in the arena.
             Bet money on your victory, and the winner takes all!
-            
+
             Weapons have strengths and weaknesses against other types.
             Two-handed weapons (bow, scythe, mace) have their own advantages.
-            
+
             The gods (Astraea, Sepulchure, or Drakath) may intervene in battle.
-            
+
             The victorious gladiator earns glory, gold, and a PvP win on their profile.
             (This command has a cooldown of 90 seconds.)"""
         )
-        
+
+        # Create a unique battle ID
+        battle_id = f"{ctx.author.id}-{ctx.channel.id}-{int(time.time())}"
+
+        # Initialize battle context for this battle
+        self.battle_contexts[battle_id] = {
+            "battle_messages": [],
+            "current_battle_message": None,
+            "current_content": "",
+            "message_counter": 0,
+            "phase_messages": {},
+            "phase_contents": {}
+        }
+
         # Initialize variables for potential refund in case of error
         challenger_id = ctx.author.id
         enemy_id = None
         money_deducted = False
         enemy_joined = False
-        
-        # Reset phase messages for this session
-        if hasattr(self, 'phase_messages'):
-            self.phase_messages = {}
-            self.phase_contents = {}
-        else:
-            self.phase_messages = {}
-            self.phase_contents = {}
-        
+
         # Initialize battle tracking variables
         victory_points = [0, 0]  # Track actual points that determine winner
         last_event_winner = None  # Track who won the last event
         consecutive_wins = [0, 0]  # Track consecutive wins for momentum
-        
+
         try:
             if enemy == ctx.author:
+                # Clean up battle context
+                if battle_id in self.battle_contexts:
+                    del self.battle_contexts[battle_id]
                 return await ctx.send(_("You can't battle yourself in the arena."))
+
             if ctx.character_data["money"] < money:
+                # Clean up battle context
+                if battle_id in self.battle_contexts:
+                    del self.battle_contexts[battle_id]
                 return await ctx.send(_("You don't have enough gold for this battle."))
 
             # Deduct the bet amount from challenger
@@ -1383,6 +1383,9 @@ class SimpleBattle(discord.ext.commands.Cog):
                         ctx.author.id,
                     )
                     money_deducted = False
+                # Clean up battle context
+                if battle_id in self.battle_contexts:
+                    del self.battle_contexts[battle_id]
                 return await ctx.send(
                     _("The crowd boos as no one accepts {author}'s challenge!").format(
                         author=ctx.author.mention
@@ -1397,33 +1400,33 @@ class SimpleBattle(discord.ext.commands.Cog):
             # Get players' weapon information
             p1_weapon_info = await self.get_weapon_info(ctx, ctx.author.id)
             p2_weapon_info = await self.get_weapon_info(ctx, enemy_.id)
-            
+
             # Choose gods if not already set
             gods = ["Astraea", "Sepulchure", "Drakath", None]
             p1_god = p1_weapon_info.get("god") or random.choice(gods)
             p2_god = p2_weapon_info.get("god") or random.choice(gods)
-            
+
             # Format god names for display
             p1_god_display = p1_god if p1_god else "no patron deity"
             p2_god_display = p2_god if p2_god else "no patron deity"
-            
+
             # Determine weapon advantage
             advantage = await self.get_weapon_advantage(ctx, p1_weapon_info["type"], p2_weapon_info["type"])
-            
+
             # Get base stats and apply weapon advantage - CONVERT TO FLOAT HERE
             p1_stats_tuple = await self.bot.get_damage_armor_for(ctx.author)
             p2_stats_tuple = await self.bot.get_damage_armor_for(enemy_)
-            
+
             # Convert Decimal to float to avoid type errors
             p1_stats = float(p1_stats_tuple[0]) + float(p1_stats_tuple[1])
             p2_stats = float(p2_stats_tuple[0]) + float(p2_stats_tuple[1])
-            
+
             # Apply 2-handed weapon bonus
             if p1_weapon_info["handed"] == 2:
                 p1_stats += 1.0  # 2-handed bonus
             if p2_weapon_info["handed"] == 2:
                 p2_stats += 1.0  # 2-handed bonus
-            
+
             # Apply weapon advantage - Add victory points for advantage (IMPORTANT FOR NARRATIVE)
             if advantage == 1:
                 p1_stats += 2.0
@@ -1431,47 +1434,49 @@ class SimpleBattle(discord.ext.commands.Cog):
             elif advantage == -1:
                 p2_stats += 2.0
                 victory_points[1] += 2  # Player 2 gets initial advantage points
-            
+
             # Battle intro - introduce the gladiators
             intro = random.choice(self.commentaries["intros"]).format(
-                p1=ctx.author.display_name, 
+                p1=ctx.author.display_name,
                 p2=enemy_.display_name,
                 w1=p1_weapon_info["name"],
                 w2=p2_weapon_info["name"]
             )
-            
+
             # Create battle embed
             battle_embed = discord.Embed(
                 title="⚔️ ARENA BATTLE ⚔️",
                 description=intro,
                 color=0xe74c3c
             )
-            
+
             # Add god affiliations if available
             p1_display = f"{ctx.author.display_name}"
             if p1_god:
                 p1_display += f" ({p1_god_display})"
-                
+
             p2_display = f"{enemy_.display_name}"
             if p2_god:
                 p2_display += f" ({p2_god_display})"
-            
+
             battle_embed.add_field(
-                name=p1_display, 
-                value=f"Wielding: {p1_weapon_info['name']}" + (f" & {p1_weapon_info['second_name']}" if p1_weapon_info['second_name'] else ""), 
+                name=p1_display,
+                value=f"Wielding: {p1_weapon_info['name']}" + (
+                    f" & {p1_weapon_info['second_name']}" if p1_weapon_info['second_name'] else ""),
                 inline=True
             )
-            
+
             battle_embed.add_field(
-                name=p2_display, 
-                value=f"Wielding: {p2_weapon_info['name']}" + (f" & {p2_weapon_info['second_name']}" if p2_weapon_info['second_name'] else ""), 
+                name=p2_display,
+                value=f"Wielding: {p2_weapon_info['name']}" + (
+                    f" & {p2_weapon_info['second_name']}" if p2_weapon_info['second_name'] else ""),
                 inline=True
             )
-            
+
             # Send the battle embed
             await ctx.send(embed=battle_embed)
             await asyncio.sleep(3)  # Wait 3 seconds before starting
-            
+
             # Pre-defined options for commentaries
             announcer_lines = [
                 f"The crowds roar as the massive iron gates of the arena begin to open...",
@@ -1533,26 +1538,26 @@ class SimpleBattle(discord.ext.commands.Cog):
             
             # ========== PREPARATION PHASE ==========
             # Create a separate message for the preparation phase
-            await self.manage_phase_message(ctx, "PREPARATION PHASE")
+            await self.manage_phase_message(ctx, battle_id, "PREPARATION PHASE")
             await asyncio.sleep(2)  # Pause after section header
             
             # Create pre-battle atmosphere with arena announcements
             atmosphere = random.choice(announcer_lines)
-            await self.manage_phase_message(ctx, "PREPARATION PHASE", f"🏟️ **Arena Atmosphere:** {atmosphere}", edit=True)
+            await self.manage_phase_message(ctx, battle_id, "PREPARATION PHASE", f"🏟️ **Arena Atmosphere:** {atmosphere}", edit=True)
             await asyncio.sleep(4)
             
             # Send entrance messages
             p1_entrance = random.choice(p1_entrance_options)
-            await self.manage_phase_message(ctx, "PREPARATION PHASE", f"🥇 **Challenger:** {p1_entrance}", edit=True)
+            await self.manage_phase_message(ctx, battle_id, "PREPARATION PHASE", f"🥇 **Challenger:** {p1_entrance}", edit=True)
             await asyncio.sleep(4)
             
             p2_entrance = random.choice(p2_entrance_options)
-            await self.manage_phase_message(ctx, "PREPARATION PHASE", f"🥈 **Opponent:** {p2_entrance}", edit=True)
+            await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"🥈 **Opponent:** {p2_entrance}", edit=True)
             await asyncio.sleep(4)
             
             # Announcer introduces the fighters formally
             formal_intro = random.choice(announcer_intros)
-            await self.manage_phase_message(ctx, "PREPARATION PHASE", f"📣 **Arena Master:** {formal_intro}", edit=True)
+            await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"📣 **Arena Master:** {formal_intro}", edit=True)
             await asyncio.sleep(4)
             
             # Add a Fablelands reference
@@ -1560,7 +1565,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                 p1=ctx.author.display_name,
                 p2=enemy_.display_name
             )
-            await self.manage_phase_message(ctx, "PREPARATION PHASE", f"🌍 **Fablelands Lore:** {fablelands_ref}", edit=True)
+            await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"🌍 **Fablelands Lore:** {fablelands_ref}", edit=True)
             await asyncio.sleep(4)
             
             # Show weapon style commentary for each player
@@ -1569,12 +1574,12 @@ class SimpleBattle(discord.ext.commands.Cog):
                     player=ctx.author.display_name,
                     weapon=p1_weapon_info["type"]
                 )
-                await self.manage_phase_message(ctx, "PREPARATION PHASE", f"🗡️ **Weapon Style:** {style_comment}", edit=True)
+                await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"🗡️ **Weapon Style:** {style_comment}", edit=True)
             elif p1_weapon_info["style"] == "shield":
                 style_comment = random.choice(self.commentaries["shield_comments"]).format(
                     player=ctx.author.display_name
                 )
-                await self.manage_phase_message(ctx, "PREPARATION PHASE", f"🛡️ **Shield Style:** {style_comment}", edit=True)
+                await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"🛡️ **Shield Style:** {style_comment}", edit=True)
             await asyncio.sleep(4)
             
             if p2_weapon_info["handed"] == 2:
@@ -1582,12 +1587,12 @@ class SimpleBattle(discord.ext.commands.Cog):
                     player=enemy_.display_name,
                     weapon=p2_weapon_info["type"]
                 )
-                await self.manage_phase_message(ctx, "PREPARATION PHASE", f"🗡️ **Weapon Style:** {style_comment}", edit=True)
+                await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"🗡️ **Weapon Style:** {style_comment}", edit=True)
             elif p2_weapon_info["style"] == "shield":
                 style_comment = random.choice(self.commentaries["shield_comments"]).format(
                     player=enemy_.display_name
                 )
-                await self.manage_phase_message(ctx, "PREPARATION PHASE", f"🛡️ **Shield Style:** {style_comment}", edit=True)
+                await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"🛡️ **Shield Style:** {style_comment}", edit=True)
             await asyncio.sleep(4)
             
             # Show weapon advantage if there is one
@@ -1600,7 +1605,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                         weapon2=p2_weapon_info["name"],
                         god=p1_god_display
                     )
-                    await self.manage_phase_message(ctx, "PREPARATION PHASE", f"⚡ **Tactical Advantage:** {advantage_text}", edit=True)
+                    await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"⚡ **Tactical Advantage:** {advantage_text}", edit=True)
                 else:
                     advantage_text = random.choice(self.commentaries["advantages"]).format(
                         p1=enemy_.display_name, 
@@ -1609,7 +1614,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                         weapon2=p1_weapon_info["name"],
                         god=p2_god_display
                     )
-                    await self.manage_phase_message(ctx, "PREPARATION PHASE", f"⚡ **Tactical Advantage:** {advantage_text}", edit=True)
+                    await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"⚡ **Tactical Advantage:** {advantage_text}", edit=True)
                 await asyncio.sleep(4)
 
             # Check if there's a significant difference in base stats
@@ -1681,13 +1686,13 @@ class SimpleBattle(discord.ext.commands.Cog):
                 courage_message = random.choice(underdog_courage_messages)
                 
                 # Add to preparation phase
-                await self.manage_phase_message(ctx, "PREPARATION PHASE", f"⚔️ **Battle Odds:** {dominance_message} {courage_message}", edit=True)
+                await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"⚔️ **Battle Odds:** {dominance_message} {courage_message}", edit=True)
                 await asyncio.sleep(4)
 
             
             # Battle commencement signal
             commencement = random.choice(commencement_options)
-            await self.manage_phase_message(ctx, "BATTLE BEGINS", f"⚔️ **Battle Begins:** {commencement}", edit=True)
+            await self.manage_phase_message(ctx, battle_id,  "BATTLE BEGINS", f"⚔️ **Battle Begins:** {commencement}", edit=True)
             await asyncio.sleep(4)
             
             # Battle events
@@ -1714,7 +1719,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                 
                 # Add blank line if needed
                 if need_blank_line:
-                    await self.manage_phase_message(ctx, "BATTLE BEGINS", " ", edit=True)
+                    await self.manage_phase_message(ctx, battle_id,  "BATTLE BEGINS", " ", edit=True)
                     need_blank_line = False
                 
                 # Determine which player is featured in this event
@@ -1788,7 +1793,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                                 weapon=player_info[player_idx]["name"]
                             )
                         
-                        await self.manage_phase_message(ctx, "BATTLE BEGINS", f"⚔️ **Attack:** {attack}", edit=True)
+                        await self.manage_phase_message(ctx, battle_id,  "BATTLE BEGINS", f"⚔️ **Attack:** {attack}", edit=True)
                         event_counter += 1
                         await asyncio.sleep(3)  # Wait before showing the result
                         
@@ -1823,9 +1828,9 @@ class SimpleBattle(discord.ext.commands.Cog):
                                 injury = random.choice(self.commentaries["brutal_injuries"]).format(
                                     victim=opponent.display_name
                                 )
-                                await self.manage_phase_message(ctx, "BATTLE BEGINS", f"🩸 **Brutal Injury:** {injury}", edit=True)
+                                await self.manage_phase_message(ctx, battle_id,  "BATTLE BEGINS", f"🩸 **Brutal Injury:** {injury}", edit=True)
                             else:
-                                await self.manage_phase_message(ctx, "BATTLE BEGINS", f"💥 **Hit:** The strike lands true! {opponent.display_name} staggers back!", edit=True)
+                                await self.manage_phase_message(ctx, battle_id,  "BATTLE BEGINS", f"💥 **Hit:** The strike lands true! {opponent.display_name} staggers back!", edit=True)
                         else:
                             # Attack is defended - use weapon-specific defense
                             defender_weapon = player_info[opponent_idx]["type"]
@@ -1846,7 +1851,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                                     defender=opponent.display_name,
                                     weapon=player_info[opponent_idx]["name"]
                                 )
-                            await self.manage_phase_message(ctx, "BATTLE BEGINS", f"🛡️ **Defense:** {defense}", edit=True)
+                            await self.manage_phase_message(ctx, battle_id,  "BATTLE BEGINS", f"🛡️ **Defense:** {defense}", edit=True)
                         event_counter += 1
                     
                     elif event_type == "special_event":
@@ -1858,7 +1863,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                             player=player.display_name,
                             weapon=player_info[player_idx]["name"]
                         )
-                        await self.manage_phase_message(ctx, "BATTLE BEGINS", f"🌟 **Special Event:** {event_text}", edit=True)
+                        await self.manage_phase_message(ctx, battle_id,  "BATTLE BEGINS", f"🌟 **Special Event:** {event_text}", edit=True)
                         event_counter += 1
                         
                         # Apply event effect to stats and victory points
@@ -1888,7 +1893,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                                 god=player_gods[player_idx] or "the gods"
                             )
                             await asyncio.sleep(3)  # Wait before showing comeback
-                            await self.manage_phase_message(ctx, "BATTLE BEGINS", f"💪 **Comeback:** {comeback}", edit=True)
+                            await self.manage_phase_message(ctx, battle_id,  "BATTLE BEGINS", f"💪 **Comeback:** {comeback}", edit=True)
                             
                             # Big boost for comeback
                             comeback_bonus = random.randint(4, 6)
@@ -1914,7 +1919,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                             god=player_gods[player_idx] or "the gods"
                         )
                         
-                        await self.manage_phase_message(ctx, "BATTLE BEGINS", f"✨ **Special Move:** {special_move}", edit=True)
+                        await self.manage_phase_message(ctx, battle_id,  "BATTLE BEGINS", f"✨ **Special Move:** {special_move}", edit=True)
                         event_counter += 1
                         
                         # Special moves have big impact
@@ -1929,7 +1934,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                         consecutive_wins[opponent_idx] = 0
                         
                         await asyncio.sleep(3)  # Wait before showing effect
-                        await self.manage_phase_message(ctx, "BATTLE BEGINS", f"💥 **Effect:** A devastating technique! {opponent.display_name} suffers greatly!", edit=True)
+                        await self.manage_phase_message(ctx, battle_id,  "BATTLE BEGINS", f"💥 **Effect:** A devastating technique! {opponent.display_name} suffers greatly!", edit=True)
                         event_counter += 1
                     
                     elif event_type == "arena_event":
@@ -1941,7 +1946,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                             new_condition=random.choice(self.arena_conditions)
                         )
                         
-                        await self.manage_phase_message(ctx, "BATTLE BEGINS", f"🏟️ **Arena Event:** {event_text}", edit=True)
+                        await self.manage_phase_message(ctx, battle_id,  "BATTLE BEGINS", f"🏟️ **Arena Event:** {event_text}", edit=True)
                         event_counter += 1
                         
                         # Event affects both fighters but usually benefits one more
@@ -1977,7 +1982,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                             weapon=player_info[player_idx]["name"]
                         )
                         
-                        await self.manage_phase_message(ctx, "BATTLE BEGINS", f"🔮 **Divine Intervention:** {intervention}", edit=True)
+                        await self.manage_phase_message(ctx, battle_id,  "BATTLE BEGINS", f"🔮 **Divine Intervention:** {intervention}", edit=True)
                         event_counter += 1
                         
                         # Powerful bonus from the gods - major impact on victory points
@@ -1995,7 +2000,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                     if random.random() < 0.3:  # 30% chance after each event
                         await asyncio.sleep(2)  # Wait before showing crowd reaction
                         crowd_reaction = random.choice(self.commentaries["crowd_reactions"])
-                        await self.manage_phase_message(ctx, "BATTLE BEGINS", f"👥 **Crowd:** {crowd_reaction}", edit=True)
+                        await self.manage_phase_message(ctx, battle_id,  "BATTLE BEGINS", f"👥 **Crowd:** {crowd_reaction}", edit=True)
                         event_counter += 1
                         
                     # Show momentum updates strategically
@@ -2007,7 +2012,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                         if consecutive_wins[0] >= 3 or consecutive_wins[1] >= 3:
                             streak_player = 0 if consecutive_wins[0] >= 3 else 1
                             streak_msg = f"{players[streak_player].display_name} is on a devastating streak, landing blow after blow!"
-                            await self.manage_phase_message(ctx, "BATTLE BEGINS", f"🔥 **Battle Streak:** {streak_msg}", edit=True)
+                            await self.manage_phase_message(ctx, battle_id,  "BATTLE BEGINS", f"🔥 **Battle Streak:** {streak_msg}", edit=True)
                             consecutive_wins = [0, 0]
                             event_counter += 1
                         
@@ -2025,13 +2030,13 @@ class SimpleBattle(discord.ext.commands.Cog):
                             momentum = f"{enemy_.display_name} has gained a {lead} advantage in the battle!"
                         
                         await asyncio.sleep(2)
-                        await self.manage_phase_message(ctx, "BATTLE BEGINS", f"⚖️ **Battle Momentum:** {momentum}", edit=True)
+                        await self.manage_phase_message(ctx, battle_id,  "BATTLE BEGINS", f"⚖️ **Battle Momentum:** {momentum}", edit=True)
                         event_counter += 1
                         
                 except Exception as event_error:
                     # If an individual event fails, log it but continue with the battle
                     print(f"Error in event {i+1}: {event_error}")
-                    await self.manage_phase_message(ctx, "BATTLE BEGINS", "👥 **Crowd:** The crowd's roar drowns out a moment of the battle...", edit=True)
+                    await self.manage_phase_message(ctx, battle_id,  "BATTLE BEGINS", "👥 **Crowd:** The crowd's roar drowns out a moment of the battle...", edit=True)
                     event_counter += 1
                 
                 # Wait between events - longer pause for better readability
@@ -2060,7 +2065,7 @@ class SimpleBattle(discord.ext.commands.Cog):
             
             # ========== DECISIVE MOMENT ==========
             # Create a separate message for the decisive moment
-            await self.manage_phase_message(ctx, "DECISIVE MOMENT")
+            await self.manage_phase_message(ctx, battle_id,  "DECISIVE MOMENT")
             await asyncio.sleep(3)  # Longer pause before climax
             
             # Final decisive moment - customize based on how the battle went
@@ -2092,7 +2097,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                 ]
             
             decisive_moment = random.choice(decisive_moments)
-            await self.manage_phase_message(ctx, "DECISIVE MOMENT", f"⚡ **Decisive Moment:** {decisive_moment}", edit=True)
+            await self.manage_phase_message(ctx, battle_id,  "DECISIVE MOMENT", f"⚡ **Decisive Moment:** {decisive_moment}", edit=True)
             await asyncio.sleep(4)  # Longer pause after decisive moment
             
             # Final commentary - customize based on battle narrative
@@ -2122,13 +2127,13 @@ class SimpleBattle(discord.ext.commands.Cog):
                 ]
             
             finisher = random.choice(finishers)
-            await self.manage_phase_message(ctx, "DECISIVE MOMENT", f"🏆 **Victory:** {finisher}", edit=True)
+            await self.manage_phase_message(ctx, battle_id,  "DECISIVE MOMENT", f"🏆 **Victory:** {finisher}", edit=True)
             await asyncio.sleep(4)  # Longer pause after victory
             
             # ========== EMPEROR'S JUDGMENT ==========
             # [Emperor's judgment section remains largely unchanged]
             # Create a separate message for the emperor's judgment
-            await self.manage_phase_message(ctx, "EMPEROR'S JUDGMENT")
+            await self.manage_phase_message(ctx, battle_id,  "EMPEROR'S JUDGMENT")
             await asyncio.sleep(3)  # Longer pause before judgment
             
             # Crowd anticipation
@@ -2142,12 +2147,12 @@ class SimpleBattle(discord.ext.commands.Cog):
                 f"Blood-soaked sand darkens beneath {loser.display_name} as they await the Emperor's decision..."
             ]
             anticipation = random.choice(anticipation_messages)
-            await self.manage_phase_message(ctx, "EMPEROR'S JUDGMENT", f"👑 **Emperor's Decision:** {anticipation}", edit=True)
+            await self.manage_phase_message(ctx, battle_id,  "EMPEROR'S JUDGMENT", f"👑 **Emperor's Decision:** {anticipation}", edit=True)
             await asyncio.sleep(4)  # Longer pause before verdict
             
             # Emperor's verdict
             judgment = random.choice(self.commentaries["emperor_signals"])
-            await self.manage_phase_message(ctx, "EMPEROR'S JUDGMENT", f"👑 **Emperor:** {judgment}", edit=True)
+            await self.manage_phase_message(ctx, battle_id,  "EMPEROR'S JUDGMENT", f"👑 **Emperor:** {judgment}", edit=True)
             await asyncio.sleep(5)  # Extended dramatic pause
             
             # Make mercy more likely for close battles, less likely for dominant victories
@@ -2161,7 +2166,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                 mercy = random.choice(self.commentaries["emperor_mercy"]).format(
                     loser=loser.display_name
                 )
-                await self.manage_phase_message(ctx, "EMPEROR'S JUDGMENT", f"👑 **Emperor:** {judgment}\n\n**JUDGMENT:** {mercy}", edit=True)
+                await self.manage_phase_message(ctx, battle_id,  "EMPEROR'S JUDGMENT", f"👑 **Emperor:** {judgment}\n\n**JUDGMENT:** {mercy}", edit=True)
                 
                 # Add mercy reaction
                 mercy_reactions = [
@@ -2173,13 +2178,13 @@ class SimpleBattle(discord.ext.commands.Cog):
                 ]
                 mercy_reaction = random.choice(mercy_reactions)
                 await asyncio.sleep(4)
-                await self.manage_phase_message(ctx, "EMPEROR'S JUDGMENT", f"🤝 **Mercy:** {mercy_reaction}", edit=True)
+                await self.manage_phase_message(ctx, battle_id,  "EMPEROR'S JUDGMENT", f"🤝 **Mercy:** {mercy_reaction}", edit=True)
             else:  # Death
                 death = random.choice(self.commentaries["emperor_death"]).format(
                     winner=winner.display_name,
                     loser=loser.display_name
                 )
-                await self.manage_phase_message(ctx, "EMPEROR'S JUDGMENT", f"👑 **Emperor:** {judgment}\n\n**JUDGMENT:** {death}", edit=True)
+                await self.manage_phase_message(ctx, battle_id,  "EMPEROR'S JUDGMENT", f"👑 **Emperor:** {judgment}\n\n**JUDGMENT:** {death}", edit=True)
                 
                 # Add execution details
                 weapon_type = player_info[winner_idx]["type"]
@@ -2191,7 +2196,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                     loser=loser.display_name
                 )
                 await asyncio.sleep(4)
-                await self.manage_phase_message(ctx, "EMPEROR'S JUDGMENT", f"☠️ **Execution:** {finishing_move}", edit=True)
+                await self.manage_phase_message(ctx, battle_id,  "EMPEROR'S JUDGMENT", f"☠️ **Execution:** {finishing_move}", edit=True)
                 
                 # Add death aftermath
                 death_aftermath = [
@@ -2203,11 +2208,11 @@ class SimpleBattle(discord.ext.commands.Cog):
                 ]
                 aftermath = random.choice(death_aftermath)
                 await asyncio.sleep(4)
-                await self.manage_phase_message(ctx, "EMPEROR'S JUDGMENT", f"⚰️ **Aftermath:** {aftermath}", edit=True)
+                await self.manage_phase_message(ctx, battle_id,  "EMPEROR'S JUDGMENT", f"⚰️ **Aftermath:** {aftermath}", edit=True)
             
             # ========== BATTLE CONCLUSION ==========
             # Create a separate message for battle conclusion
-            await self.manage_phase_message(ctx, "BATTLE CONCLUSION")
+            await self.manage_phase_message(ctx, battle_id,  "BATTLE CONCLUSION")
             await asyncio.sleep(3)  # Pause after section header
             
             # Victor celebration
@@ -2219,7 +2224,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                 f"{winner.display_name} stands tall amid the roaring approval of thousands, bathed in the golden light of victory!"
             ]
             celebration = random.choice(victor_celebrations)
-            await self.manage_phase_message(ctx, "BATTLE CONCLUSION", f"🏆 **Victory Celebration:** {celebration}", edit=True)
+            await self.manage_phase_message(ctx, battle_id,  "BATTLE CONCLUSION", f"🏆 **Victory Celebration:** {celebration}", edit=True)
             await asyncio.sleep(4)  # Final pause before results
             
             # Final result message
@@ -2228,9 +2233,9 @@ class SimpleBattle(discord.ext.commands.Cog):
             else:
                 result = _(f"**Arena Master:** The battle is decided! {winner.mention} defeats {loser.mention} in glorious combat! The victor claims honor and glory this day!")
             
-            await self.manage_phase_message(ctx, "BATTLE CONCLUSION", result, edit=True)
-            
-            # Update database
+            await self.manage_phase_message(ctx, battle_id,  "BATTLE CONCLUSION", result, edit=True)
+
+            # Update database with winner info
             async with self.bot.pool.acquire() as conn:
                 await conn.execute(
                     'UPDATE profile SET "pvpwins"="pvpwins"+1, "money"="money"+$1 WHERE "user"=$2;',
@@ -2245,15 +2250,19 @@ class SimpleBattle(discord.ext.commands.Cog):
                     data={"Gold": money},
                     conn=conn,
                 )
-            
+
+            # Clean up battle context when done
+            if battle_id in self.battle_contexts:
+                del self.battle_contexts[battle_id]
+
         except Exception as e:
             # Handle any exceptions that occur during battle
             import traceback
             error_traceback = traceback.format_exc()
             error_message = f"An error occurred during the battle:\n```{str(e)}```"
-            
+
             await ctx.send(error_message)
-            
+
             # Refund money to both players if battle failed
             try:
                 if money_deducted:
@@ -2262,20 +2271,25 @@ class SimpleBattle(discord.ext.commands.Cog):
                         money,
                         challenger_id,
                     )
-                
+
                 if enemy_joined and enemy_id:
                     await self.bot.pool.execute(
                         'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
                         money,
                         enemy_id,
                     )
-                
+
                 await ctx.send(_("Gold has been refunded to both gladiators due to arena malfunction."))
-                
+
                 # Reset cooldown so player can try again
                 await self.bot.reset_cooldown(ctx)
             except Exception as refund_error:
                 await ctx.send(f"Error during refund process: {str(refund_error)}")
+
+            # Clean up battle context even in case of error
+            if battle_id in self.battle_contexts:
+                del self.battle_contexts[battle_id]
+
 
 async def setup(bot):
     await bot.add_cog(SimpleBattle(bot))
