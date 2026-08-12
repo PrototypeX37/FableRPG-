@@ -4,6 +4,7 @@ import random
 import asyncio
 
 from utils.checks import is_gm
+from .editor import MonsterCatalogEditor
 
 
 class MonsterManager(commands.Cog):
@@ -409,3 +410,4 @@ class MonsterManager(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(MonsterManager(bot))
+    await bot.add_cog(MonsterCatalogEditor(bot))
