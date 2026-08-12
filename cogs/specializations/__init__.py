@@ -570,6 +570,29 @@ class Specializations(commands.Cog):
         ]
         return matches[0] if matches else None
 
+    async def _has_story_spec_unlock(self, user_id: int, spec_data: dict, *, conn) -> bool:
+        """Require a Fable reward only for specs that explicitly opt into it."""
+        unlock_key = "".join(
+            character.lower() if character.isalnum() else "_"
+            for character in str(spec_data.get("story_unlock_key") or "").strip()
+        )
+        while "__" in unlock_key:
+            unlock_key = unlock_key.replace("__", "_")
+        unlock_key = unlock_key.strip("_")
+        if not unlock_key:
+            return True
+        return bool(
+            await conn.fetchval(
+                """
+                SELECT 1
+                FROM player_fable_rewards
+                WHERE user_id=$1 AND reward_type='specialization' AND reward_key=$2
+                """,
+                user_id,
+                unlock_key,
+            )
+        )
+
     def _build_spec_choice_embed(
         self,
         key: str,
@@ -728,6 +751,20 @@ class Specializations(commands.Cog):
             )
 
         async with self.bot.pool.acquire() as conn:
+            if not await self._has_story_spec_unlock(
+                ctx.author.id,
+                spec_data,
+                conn=conn,
+            ):
+                unlock_name = str(
+                    spec_data.get("story_unlock_name")
+                    or spec_data.get("story_unlock_key")
+                    or "its story quest"
+                ).replace("_", " ").title()
+                return await ctx.send(
+                    f"**{spec_data['name']}** is a story path. Complete **{unlock_name}** "
+                    "before declaring it."
+                )
             existing = await conn.fetchval(
                 "SELECT spec_key FROM class_specs WHERE user_id = $1 AND class_line = $2",
                 ctx.author.id,

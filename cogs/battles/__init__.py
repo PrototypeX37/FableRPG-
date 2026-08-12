@@ -1729,6 +1729,12 @@ class Battles(commands.Cog):
                 "ALTER TABLE battletower ADD COLUMN IF NOT EXISTS freedom_meter INTEGER NOT NULL DEFAULT 0;"
             )
             await conn.execute(
+                "ALTER TABLE battletower ADD COLUMN IF NOT EXISTS last_ending_key TEXT NOT NULL DEFAULT '';"
+            )
+            await conn.execute(
+                "ALTER TABLE battletower ADD COLUMN IF NOT EXISTS last_ending_at TIMESTAMPTZ;"
+            )
+            await conn.execute(
                 "ALTER TABLE battletower ADD COLUMN IF NOT EXISTS ironman_level INTEGER NOT NULL DEFAULT 0;"
             )
             await conn.execute(
@@ -5230,6 +5236,50 @@ class Battles(commands.Cog):
                     )
                     await ctx.send(embed=ending_embed)
 
+        if selected_door_key:
+            try:
+                await self.bot.pool.execute(
+                    """
+                    UPDATE battletower
+                    SET last_ending_key=$2, last_ending_at=NOW()
+                    WHERE id=$1
+                    """,
+                    ctx.author.id,
+                    selected_door_key,
+                )
+            except Exception:
+                logger.exception(
+                    "Could not persist Battle Tower ending %s for user %s",
+                    selected_door_key,
+                    ctx.author.id,
+                )
+
+        door_four_unlock_granted = False
+        if selected_door_key == "door_4_freedom":
+            quests = self.bot.get_cog("Quests")
+            if quests is not None and hasattr(quests, "grant_system_unlock"):
+                try:
+                    door_four_unlock_granted = await quests.grant_system_unlock(
+                        ctx.author.id,
+                        "battle_tower_door_4_freedom",
+                        source="battle_tower:door_4",
+                        metadata={
+                            "ending_key": selected_door_key,
+                            "prestige": int(
+                                await self.bot.pool.fetchval(
+                                    "SELECT COALESCE(prestige, 0) FROM battletower WHERE id=$1",
+                                    ctx.author.id,
+                                )
+                                or 0
+                            ),
+                        },
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not persist Door Four campaign unlock for user %s",
+                        ctx.author.id,
+                    )
+
         # Door 4 bonus: always double finale rewards when the hidden door is chosen.
         # This includes both:
         # - full key unlock (all 3 keys this run), and
@@ -5326,6 +5376,10 @@ class Battles(commands.Cog):
             else:
                 await ctx.send(
                     "🔓 The hidden fourth door opens. Finale rewards are **doubled**."
+                )
+            if door_four_unlock_granted:
+                await ctx.send(
+                    "📖 **A path beyond the tower is now permanently recorded in your Chronicle.**"
                 )
         await ctx.send(reward_message)
 
