@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -35,6 +36,8 @@ CONDITION_TYPES = {
     "campaign_completed",
     "campaign_choice",
     "reputation",
+    "faction_standing",
+    "faction_membership",
     "level",
     "class",
     "god",
@@ -52,6 +55,33 @@ CONDITION_TYPES = {
     "ascension_mantle",
     "frontier_boss_regions",
 }
+CONDITION_OPERATORS = {
+    "=",
+    "==",
+    "is",
+    "!=",
+    "is_not",
+    ">",
+    ">=",
+    "<",
+    "<=",
+    "contains",
+}
+FACTION_STANDING_CONDITION_TYPES = {"reputation", "faction_standing"}
+FACTION_STANDING_FIELDS = {"points", "rank", "tier"}
+FACTION_STANDING_OPERATORS = CONDITION_OPERATORS - {"contains"}
+FACTION_EFFECT_TYPES = {
+    "reputation",
+    "faction_standing",
+    "faction_membership",
+}
+FACTION_MEMBERSHIP_OPERATORS = {"=", "==", "is", "!=", "is_not"}
+FACTION_STANDING_EFFECT_NUMERIC_FIELDS = (
+    "points",
+    "delta",
+    "rank_delta",
+    "set_rank",
+)
 ENCOUNTER_KINDS = {
     "none",
     "pve",
@@ -286,6 +316,14 @@ def build_reference_catalog(monsters: list[dict]) -> dict:
         "turnin_types": sorted(TURNIN_TYPES),
         "reward_types": sorted(REWARD_TYPES),
         "condition_types": sorted(CONDITION_TYPES),
+        "condition_operators": sorted(CONDITION_OPERATORS),
+        "faction_standing_fields": sorted(FACTION_STANDING_FIELDS),
+        "faction_standing_operators": sorted(FACTION_STANDING_OPERATORS),
+        "faction_membership_operators": sorted(FACTION_MEMBERSHIP_OPERATORS),
+        "faction_effect_types": sorted(FACTION_EFFECT_TYPES),
+        "faction_standing_effect_numeric_fields": list(
+            FACTION_STANDING_EFFECT_NUMERIC_FIELDS
+        ),
         "encounter_kinds": sorted(ENCOUNTER_KINDS),
         "monster_names": monster_names,
         "notes": {
@@ -347,10 +385,19 @@ def normalize_package(raw: object) -> dict:
             node["cutscenes"] = _as_dict(node.get("cutscenes"))
             node["encounter"] = _as_dict(node.get("encounter"))
             node["unlocks"] = _as_list(node.get("unlocks"))
+            node["effects"] = _normalize_effects(node.get("effects"))
             node["requirements"] = _normalize_conditions(node.get("requirements"))
             node["quest"]["requirements"] = _normalize_conditions(
                 node["quest"].get("requirements")
             )
+
+    for quest in package["standalone_quests"]:
+        if not isinstance(quest, dict):
+            continue
+        quest["access"] = _as_dict(quest.get("access"))
+        quest["access"]["conditions"] = _normalize_conditions(
+            quest["access"].get("conditions")
+        )
 
     for monster in package["monsters"]:
         if not isinstance(monster, dict):
@@ -363,7 +410,11 @@ def normalize_package(raw: object) -> dict:
         monster["defense"] = max(0, int(monster.get("defense") or 0))
         monster["element"] = str(monster.get("element") or "Nature").strip()
         monster["url"] = str(monster.get("url") or "").strip()
-        monster["tags"] = [str(tag).strip() for tag in _as_list(monster.get("tags")) if str(tag).strip()]
+        monster["tags"] = [
+            str(tag).strip()
+            for tag in _as_list(monster.get("tags"))
+            if str(tag).strip()
+        ]
 
     return package
 
@@ -383,7 +434,7 @@ def _normalize_edges(raw: object) -> list[dict]:
                 "label": str(edge.get("label") or "Continue").strip(),
                 "target": target,
                 "description": str(edge.get("description") or "").strip(),
-                "effects": _as_list(edge.get("effects")),
+                "effects": _normalize_effects(edge.get("effects")),
                 "unlocks": _as_list(edge.get("unlocks")),
                 "conditions": _normalize_conditions(edge.get("conditions")),
             }
@@ -396,18 +447,59 @@ def _normalize_conditions(raw: object) -> list[dict]:
     for condition in _as_list(raw):
         if not isinstance(condition, dict):
             continue
+        condition_type = str(condition.get("type") or "").strip().lower()
+        default_operator = "==" if condition_type == "faction_membership" else ">="
+        field = str(condition.get("field") or "").strip().lower()
+        key = str(condition.get("key") or "").strip()
+        value = condition.get("value", 1)
+        if condition_type in FACTION_STANDING_CONDITION_TYPES and not field:
+            # Historical `reputation` conditions defaulted to rank at runtime.
+            field = "rank"
+        elif condition_type == "faction_membership" and not field:
+            field = "status"
+        if condition_type in FACTION_STANDING_CONDITION_TYPES | {"faction_membership"}:
+            key = normalize_key(key)
+        if condition_type == "faction_membership" and isinstance(value, str):
+            value = normalize_key(value)
+        elif (
+            condition_type in FACTION_STANDING_CONDITION_TYPES
+            and field == "tier"
+            and isinstance(value, str)
+            and not _is_numeric(value)
+        ):
+            value = normalize_key(value)
         conditions.append(
             {
-                "type": str(condition.get("type") or "").strip().lower(),
-                "key": str(condition.get("key") or "").strip(),
-                "operator": str(condition.get("operator") or ">=").strip(),
-                "value": condition.get("value", 1),
+                "type": condition_type,
+                "key": key,
+                "operator": str(condition.get("operator") or default_operator).strip().lower(),
+                "value": value,
                 "equipped": bool(condition.get("equipped", False)),
-                "field": str(condition.get("field") or "").strip().lower(),
+                "field": field,
                 "description": str(condition.get("description") or "").strip(),
             }
         )
     return conditions
+
+
+def _normalize_effects(raw: object) -> list[dict]:
+    effects = []
+    for effect in _as_list(raw):
+        if not isinstance(effect, dict):
+            effects.append(effect)
+            continue
+        normalized = copy.deepcopy(effect)
+        effect_type = str(effect.get("type") or "").strip().lower()
+        normalized["type"] = effect_type
+        if effect_type in FACTION_EFFECT_TYPES:
+            normalized["key"] = normalize_key(effect.get("key"))
+        membership_status = normalized.get("status", normalized.get("value"))
+        if effect_type == "faction_membership" and isinstance(
+            membership_status, str
+        ):
+            normalized["status"] = normalize_key(membership_status)
+        effects.append(normalized)
+    return effects
 
 
 def validate_package(raw: object) -> dict:
@@ -483,11 +575,28 @@ def validate_package(raw: object) -> dict:
                     f"Node `{node_id}` transition to `{edge.get('target')}`",
                     errors,
                 )
+                _validate_effects(
+                    edge.get("effects"),
+                    f"Node `{node_id}` transition to `{edge.get('target')}`",
+                    errors,
+                )
 
             _validate_conditions(node.get("requirements"), f"Node `{node_id}`", errors)
+            _validate_effects(node.get("effects"), f"Node `{node_id}`", errors)
 
             if node_type == "quest":
                 _validate_quest_node(campaign_key, node, quest_keys, errors)
+
+    for quest_index, quest in enumerate(package["standalone_quests"], start=1):
+        owner = f"standalone_quests[{quest_index}]"
+        if not isinstance(quest, dict):
+            errors.append(f"{owner} must be an object.")
+            continue
+        _validate_conditions(
+            (_as_dict(quest.get("access"))).get("conditions"),
+            owner,
+            errors,
+        )
 
     monster_keys: set[str] = set()
     monster_names: set[str] = set()
@@ -576,6 +685,11 @@ def _validate_conditions(raw: object, owner: str, errors: list[str]) -> None:
         condition_type = str(condition.get("type") or "").lower()
         if condition_type not in CONDITION_TYPES:
             errors.append(f"{owner} has unsupported condition `{condition_type}`.")
+        operator = str(condition.get("operator") or ">=").strip().lower()
+        if operator not in CONDITION_OPERATORS:
+            errors.append(
+                f"{owner} condition `{condition_type}` has unsupported operator `{operator}`."
+            )
         if condition_type not in {
             "level",
             "money",
@@ -585,6 +699,87 @@ def _validate_conditions(raw: object, owner: str, errors: list[str]) -> None:
             condition.get("key") or ""
         ).strip():
             errors.append(f"{owner} condition `{condition_type}` needs a key.")
+
+        if condition_type in FACTION_STANDING_CONDITION_TYPES:
+            field = str(condition.get("field") or "rank").strip().lower()
+            if field not in FACTION_STANDING_FIELDS:
+                errors.append(
+                    f"{owner} condition `{condition_type}` has unsupported field `{field}`; "
+                    "use points, rank, or tier."
+                )
+            if operator not in FACTION_STANDING_OPERATORS:
+                errors.append(
+                    f"{owner} condition `{condition_type}` cannot use operator `{operator}`."
+                )
+            value = condition.get("value", 1)
+            if field in {"points", "rank"} and not _is_numeric(value):
+                errors.append(
+                    f"{owner} condition `{condition_type}` field `{field}` needs a numeric value."
+                )
+            elif field == "tier" and not (
+                _is_numeric(value)
+                or (isinstance(value, str) and bool(normalize_key(value)))
+            ):
+                errors.append(
+                    f"{owner} condition `{condition_type}` field `tier` needs a tier "
+                    "key or numeric value."
+                )
+
+        if condition_type == "faction_membership":
+            if operator not in FACTION_MEMBERSHIP_OPERATORS:
+                errors.append(
+                    f"{owner} condition `faction_membership` only supports equality operators."
+                )
+            value = condition.get("value")
+            if not isinstance(value, str) or not normalize_key(value):
+                errors.append(
+                    f"{owner} condition `faction_membership` needs a membership status value."
+                )
+
+
+def _is_numeric(value: object) -> bool:
+    if isinstance(value, bool) or value is None:
+        return False
+    try:
+        numeric = float(value)
+        return math.isfinite(numeric) and numeric.is_integer()
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _validate_effects(raw: object, owner: str, errors: list[str]) -> None:
+    for effect in _as_list(raw):
+        if not isinstance(effect, dict):
+            errors.append(f"{owner} contains an effect that is not an object.")
+            continue
+        effect_type = str(effect.get("type") or "").strip().lower()
+        if effect_type not in FACTION_EFFECT_TYPES:
+            continue
+        key = normalize_key(effect.get("key"))
+        if not key:
+            errors.append(f"{owner} effect `{effect_type}` needs a faction key.")
+
+        if effect_type in FACTION_STANDING_CONDITION_TYPES:
+            provided_fields = [
+                field
+                for field in FACTION_STANDING_EFFECT_NUMERIC_FIELDS
+                if effect.get(field) is not None
+            ]
+            if not provided_fields:
+                errors.append(
+                    f"{owner} effect `{effect_type}` needs a numeric standing value."
+                )
+            for field in provided_fields:
+                if not _is_numeric(effect.get(field)):
+                    errors.append(
+                        f"{owner} effect `{effect_type}` field `{field}` must be numeric."
+                    )
+        elif effect_type == "faction_membership":
+            status = effect.get("status", effect.get("value"))
+            if not isinstance(status, str) or not normalize_key(status):
+                errors.append(
+                    f"{owner} effect `faction_membership` needs a membership status."
+                )
 
 
 def quest_record_from_node(campaign: dict, node: dict) -> dict:

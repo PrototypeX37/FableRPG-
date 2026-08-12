@@ -228,6 +228,14 @@ class Bot(commands.AutoShardedBot):
         )
 
         extensions = list(self.config.bot.initial_extensions)
+        # Quest campaigns, faction-aware conversations, and shops share the
+        # Factions service. Load it ahead of Quests even on older configs.
+        if "cogs.factions" not in extensions:
+            try:
+                quest_index = extensions.index("cogs.quests")
+            except ValueError:
+                quest_index = len(extensions)
+            extensions.insert(quest_index, "cogs.factions")
         if "cogs.aiplayer" not in extensions:
             extensions.append("cogs.aiplayer")
         for extension in extensions:

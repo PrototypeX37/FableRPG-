@@ -902,6 +902,118 @@ class SpliceRequestPaginator(View):
         return self.message
 
 
+class SpliceTreeTargetPicker(View):
+    """Owner-only, paginated picker for ambiguous splice-tree names."""
+
+    def __init__(
+        self,
+        ctx,
+        candidates: list[dict],
+        *,
+        selection_action: str = "Building its splice tree...",
+        timeout: float = 180,
+    ):
+        super().__init__(timeout=timeout)
+        if len(candidates) < 2:
+            raise ValueError("SpliceTreeTargetPicker requires at least two candidates")
+        self.ctx = ctx
+        self.candidates = candidates
+        self.page = 0
+        self.per_page = 25
+        self.selected_key: Optional[str] = None
+        self.selection_action = selection_action
+        self.message: Optional[discord.Message] = None
+        self.allowed_user_ids = {int(ctx.author.id)}
+        alt_invoker_id = getattr(ctx, "alt_invoker_id", None)
+        if alt_invoker_id is not None:
+            self.allowed_user_ids.add(int(alt_invoker_id))
+        self._sync_components()
+
+    @property
+    def total_pages(self) -> int:
+        return max(1, (len(self.candidates) + self.per_page - 1) // self.per_page)
+
+    def _sync_components(self) -> None:
+        self.clear_items()
+        start = self.page * self.per_page
+        page_candidates = self.candidates[start:start + self.per_page]
+        options = []
+        for offset, candidate in enumerate(page_candidates):
+            options.append(
+                SelectOption(
+                    label=str(candidate["label"])[:100],
+                    value=str(start + offset),
+                    description=str(candidate.get("description") or "")[:100] or None,
+                )
+            )
+
+        picker = Select(
+            placeholder=f"Choose the exact creature ({self.page + 1}/{self.total_pages})",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+        picker.callback = self._choose
+        self.add_item(picker)
+
+        if self.total_pages > 1:
+            previous = Button(
+                label="Previous",
+                style=ButtonStyle.secondary,
+                disabled=self.page == 0,
+                row=1,
+            )
+            previous.callback = self._previous
+            self.add_item(previous)
+            following = Button(
+                label="Next",
+                style=ButtonStyle.secondary,
+                disabled=self.page >= self.total_pages - 1,
+                row=1,
+            )
+            following.callback = self._next
+            self.add_item(following)
+
+        cancel = Button(label="Cancel", style=ButtonStyle.danger, row=1)
+        cancel.callback = self._cancel
+        self.add_item(cancel)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if int(interaction.user.id) in self.allowed_user_ids:
+            return True
+        await interaction.response.send_message(
+            "This splice picker belongs to another player.", ephemeral=True
+        )
+        return False
+
+    async def _choose(self, interaction: discord.Interaction) -> None:
+        selected_index = int(interaction.data["values"][0])
+        candidate = self.candidates[selected_index]
+        self.selected_key = candidate["key"]
+        await interaction.response.edit_message(
+            content=f"Selected **{candidate['label']}**. {self.selection_action}",
+            view=None,
+        )
+        self.stop()
+
+    async def _previous(self, interaction: discord.Interaction) -> None:
+        self.page = max(0, self.page - 1)
+        self._sync_components()
+        await interaction.response.edit_message(view=self)
+
+    async def _next(self, interaction: discord.Interaction) -> None:
+        self.page = min(self.total_pages - 1, self.page + 1)
+        self._sync_components()
+        await interaction.response.edit_message(view=self)
+
+    async def _cancel(self, interaction: discord.Interaction) -> None:
+        await interaction.response.edit_message(
+            content="Splice selection cancelled.", view=None
+        )
+        self.stop()
+
+
 
 
 class ProcessSplice(commands.Cog):
@@ -992,18 +1104,37 @@ class ProcessSplice(commands.Cog):
             return None
         return cleaned.casefold()
 
+    @staticmethod
+    def _splice_tree_recipe_key(recipe_id) -> Optional[str]:
+        try:
+            parsed = int(recipe_id)
+        except (TypeError, ValueError):
+            return None
+        return f"splice:{parsed}" if parsed > 0 else None
+
+    @staticmethod
+    def _splice_tree_recipe_id(value: Optional[str]) -> Optional[int]:
+        match = re.fullmatch(
+            r"(?:splice\s*:\s*|\[?s\s*)(\d+)\]?",
+            str(value or "").strip(),
+            flags=re.IGNORECASE,
+        )
+        return int(match.group(1)) if match else None
+
     async def _load_splice_tree_catalog(self, conn) -> dict:
         monsters_data = await asyncio.to_thread(self._load_monsters_json_data)
 
         base_url_by_key = {}
         canonical_by_key = {}
+        aliases_by_name = defaultdict(list)
+        base_keys = set()
 
-        def register_name(value):
+        def register_alias(value, node_key):
             key = self._normalize_splice_tree_name(value)
             if key is None:
                 return None
-            if key not in canonical_by_key:
-                canonical_by_key[key] = value.strip()
+            if node_key not in aliases_by_name[key]:
+                aliases_by_name[key].append(node_key)
             return key
 
         base_monster_names = set()
@@ -1016,42 +1147,97 @@ class ProcessSplice(commands.Cog):
                         continue
                     m_name = monster.get("name")
                     m_url = monster.get("url")
-                    key = register_name(m_name)
+                    key = self._normalize_splice_tree_name(m_name)
                     if key is None:
                         continue
+                    canonical_by_key.setdefault(key, m_name.strip())
+                    register_alias(m_name, key)
+                    base_keys.add(key)
                     base_monster_names.add(canonical_by_key[key])
                     if isinstance(m_url, str) and m_url.strip() and key not in base_url_by_key:
                         base_url_by_key[key] = m_url.strip()
 
         completed_rows = await conn.fetch(
             """
-            SELECT id, pet1_default, pet2_default, result_name, url, created_at
+            SELECT id, pet1_default, pet2_default, result_name,
+                   base_result_name, url, created_at,
+                   parent1_splice_combination_id,
+                   parent2_splice_combination_id
             FROM splice_combinations
             ORDER BY created_at ASC, id ASC
             """
         )
 
-        combinations_by_child = defaultdict(list)
         node_url_by_key = dict(base_url_by_key)
+        recipe_rows_by_id = {}
+        recipe_key_by_id = {}
+        current_recipe_keys_by_name = defaultdict(list)
         generation_edges = []
 
         for row in completed_rows:
-            p1_key = register_name(row["pet1_default"])
-            p2_key = register_name(row["pet2_default"])
-            child_key = register_name(row["result_name"])
-            if p1_key and p2_key and child_key:
-                combinations_by_child[child_key].append((p1_key, p2_key, row["id"]))
-                generation_edges.append((p1_key, p2_key, child_key))
-
+            recipe_id = int(row["id"])
+            child_key = self._splice_tree_recipe_key(recipe_id)
+            if child_key is None:
+                continue
+            recipe_rows_by_id[recipe_id] = row
+            recipe_key_by_id[recipe_id] = child_key
+            display_name = (
+                str(row["result_name"] or row["base_result_name"] or f"Splice S{recipe_id}").strip()
+            )
+            canonical_by_key[child_key] = display_name
+            for alias_index, alias in enumerate((row["result_name"], row["base_result_name"])):
+                alias_key = register_alias(alias, child_key)
+                if alias_index == 0 and alias_key:
+                    current_recipe_keys_by_name[alias_key].append(child_key)
+            register_alias(f"S{recipe_id}", child_key)
+            register_alias(f"[S{recipe_id}]", child_key)
             row_url = row["url"]
             if child_key and isinstance(row_url, str) and row_url.strip():
                 node_url_by_key[child_key] = row_url.strip()
 
-        generation_by_key = {
-            self._normalize_splice_tree_name(name): -1
-            for name in base_monster_names
-            if self._normalize_splice_tree_name(name)
-        }
+        unresolved_parent_links = 0
+        parent_pair_by_child = {}
+
+        def resolve_parent(row, slot, link_column):
+            nonlocal unresolved_parent_links
+            linked_key = recipe_key_by_id.get(row[link_column])
+            if linked_key:
+                return linked_key
+
+            parent_name = row[slot]
+            parent_name_key = self._normalize_splice_tree_name(parent_name)
+            if parent_name_key is None:
+                return None
+
+            recipe_matches = current_recipe_keys_by_name.get(parent_name_key, ())
+            is_base = parent_name_key in base_keys
+            if len(recipe_matches) == 1 and not is_base:
+                return recipe_matches[0]
+            if not recipe_matches and is_base:
+                return parent_name_key
+
+            # A missing identifier plus a colliding legacy name cannot be
+            # resolved safely. Keep it visible as an unknown leaf instead of
+            # silently attaching the first recipe with that name.
+            unresolved_parent_links += 1
+            unknown_key = f"unresolved:{int(row['id'])}:{slot}"
+            canonical_by_key[unknown_key] = str(parent_name or "Unknown parent").strip()
+            return unknown_key
+
+        for recipe_id, row in recipe_rows_by_id.items():
+            child_key = recipe_key_by_id[recipe_id]
+            p1_key = resolve_parent(
+                row, "pet1_default", "parent1_splice_combination_id"
+            )
+            p2_key = resolve_parent(
+                row, "pet2_default", "parent2_splice_combination_id"
+            )
+            if p1_key or p2_key:
+                parent_pair_by_child[child_key] = (p1_key, p2_key, recipe_id)
+            if p1_key and p2_key:
+                generation_edges.append((p1_key, p2_key, child_key))
+
+        generation_by_key = {key: -1 for key in base_keys}
         max_passes = max(1, len(generation_edges) + 1)
         for _ in range(max_passes):
             changed = False
@@ -1063,43 +1249,90 @@ class ProcessSplice(commands.Cog):
 
                 child_gen = max(parent1_gen, parent2_gen) + 1
                 existing = generation_by_key.get(child_key)
-                if existing == -1:
-                    continue
                 if existing is None or child_gen < existing:
                     generation_by_key[child_key] = child_gen
                     changed = True
             if not changed:
                 break
 
-        parent_pair_by_child = {}
-        duplicate_combo_children = 0
-        for child_key, pairs in combinations_by_child.items():
-            if not pairs:
-                continue
-            if len(pairs) > 1:
-                duplicate_combo_children += 1
-            parent_pair_by_child[child_key] = pairs[0]
-
         return {
             "base_monster_names": base_monster_names,
             "canonical_by_key": canonical_by_key,
+            "aliases_by_name": dict(aliases_by_name),
+            "base_keys": base_keys,
+            "recipe_rows_by_id": recipe_rows_by_id,
             "node_url_by_key": node_url_by_key,
             "generation_by_key": generation_by_key,
             "parent_pair_by_child": parent_pair_by_child,
-            "duplicate_combo_children": duplicate_combo_children,
+            "unresolved_parent_links": unresolved_parent_links,
             "completed_row_count": len(completed_rows),
         }
 
-    def _resolve_splice_tree_target_key(self, requested_name: str, canonical_by_key: dict) -> Optional[str]:
+    def _find_splice_tree_target_keys(self, requested_name: str, catalog: dict) -> list[str]:
         requested_key = self._normalize_splice_tree_name(requested_name)
         if requested_key is None:
-            return None
-        if requested_key in canonical_by_key:
-            return requested_key
-        for key in canonical_by_key:
-            if requested_key in key:
-                return key
-        return None
+            return []
+
+        canonical_by_key = catalog["canonical_by_key"]
+        direct_recipe_id = self._splice_tree_recipe_id(requested_name)
+        if direct_recipe_id is not None:
+            direct_key = self._splice_tree_recipe_key(direct_recipe_id)
+            return [direct_key] if direct_key in canonical_by_key else []
+
+        exact = list(catalog.get("aliases_by_name", {}).get(requested_key, ()))
+        if requested_key in canonical_by_key and requested_key not in exact:
+            exact.append(requested_key)
+        if exact:
+            return sorted(set(exact), key=lambda key: self._splice_tree_target_sort_key(key, catalog))
+
+        matches = []
+        for alias, candidate_keys in catalog.get("aliases_by_name", {}).items():
+            if requested_key in alias:
+                matches.extend(candidate_keys)
+        return sorted(
+            set(matches), key=lambda key: self._splice_tree_target_sort_key(key, catalog)
+        )
+
+    def _resolve_splice_tree_target_key(self, requested_name: str, catalog: dict) -> Optional[str]:
+        candidates = self._find_splice_tree_target_keys(requested_name, catalog)
+        return candidates[0] if len(candidates) == 1 else None
+
+    def _splice_tree_target_sort_key(self, node_key: str, catalog: dict):
+        recipe_id = self._splice_tree_recipe_id(node_key)
+        return (
+            0 if recipe_id is not None else 1,
+            self._normalize_splice_tree_name(
+                catalog.get("canonical_by_key", {}).get(node_key, node_key)
+            ) or "",
+            recipe_id or 0,
+        )
+
+    def _splice_tree_picker_candidates(self, node_keys: list[str], catalog: dict) -> list[dict]:
+        candidates = []
+        rows_by_id = catalog.get("recipe_rows_by_id", {})
+        generations = catalog.get("generation_by_key", {})
+        canonical = catalog.get("canonical_by_key", {})
+        for node_key in node_keys:
+            recipe_id = self._splice_tree_recipe_id(node_key)
+            name = canonical.get(node_key, node_key)
+            if recipe_id is None:
+                label = f"Base · {name}"
+                description = "Base monster"
+            else:
+                row = rows_by_id.get(recipe_id, {})
+                label = f"S{recipe_id} · {name}"
+                generation = generations.get(node_key)
+                generation_text = f"Gen {generation}" if isinstance(generation, int) else "Gen ?"
+                parents = " + ".join(
+                    str(value).strip()
+                    for value in (row.get("pet1_default"), row.get("pet2_default"))
+                    if value
+                )
+                description = f"{generation_text} · {parents}" if parents else generation_text
+            candidates.append(
+                {"key": node_key, "label": label, "description": description}
+            )
+        return candidates
 
     def _build_splice_genealogy_tree(
         self,
@@ -1222,10 +1455,16 @@ class ProcessSplice(commands.Cog):
         walk(root_node)
         return missing_keys
 
-    async def _get_user_owned_splice_keys(self, conn, user_id: int) -> set[str]:
+    async def _get_user_owned_splice_keys(
+        self,
+        conn,
+        user_id: int,
+        catalog: Optional[dict] = None,
+    ) -> set[str]:
         rows = await conn.fetch(
             """
-            SELECT COALESCE(NULLIF(BTRIM(default_name), ''), NULLIF(BTRIM(name), '')) AS raw_name
+            SELECT COALESCE(NULLIF(BTRIM(default_name), ''), NULLIF(BTRIM(name), '')) AS raw_name,
+                   splice_combination_id
             FROM monster_pets
             WHERE user_id = $1
             """,
@@ -1233,10 +1472,52 @@ class ProcessSplice(commands.Cog):
         )
         owned_keys = set()
         for row in rows:
-            key = self._normalize_splice_tree_name(row["raw_name"])
-            if key:
-                owned_keys.add(key)
+            recipe_key = self._splice_tree_recipe_key(row["splice_combination_id"])
+            if recipe_key:
+                owned_keys.add(recipe_key)
+                continue
+
+            legacy_name_key = self._normalize_splice_tree_name(row["raw_name"])
+            if not legacy_name_key:
+                continue
+            if not catalog:
+                owned_keys.add(legacy_name_key)
+                continue
+
+            # Unlinked base pets remain unambiguous even if a splice later
+            # reused their display name. Unlinked legacy splice pets are only
+            # credited when their name maps to one exact identity.
+            if legacy_name_key in catalog.get("base_keys", set()):
+                owned_keys.add(legacy_name_key)
+                continue
+            matches = catalog.get("aliases_by_name", {}).get(legacy_name_key, ())
+            if len(matches) == 1:
+                owned_keys.add(matches[0])
         return owned_keys
+
+    def _canonicalize_tracked_splice_targets(
+        self,
+        tracked_targets: list[dict],
+        catalog: dict,
+    ) -> list[dict]:
+        """Resolve legacy name keys only when they identify exactly one node."""
+        canonicalized = []
+        canonical_by_key = catalog.get("canonical_by_key", {})
+        aliases_by_name = catalog.get("aliases_by_name", {})
+        for tracked_target in tracked_targets:
+            item = dict(tracked_target)
+            target_key = item.get("target_key")
+            item["_stored_target_key"] = target_key
+            if target_key not in canonical_by_key:
+                legacy_key = self._normalize_splice_tree_name(target_key)
+                matches = aliases_by_name.get(legacy_key, ()) if legacy_key else ()
+                if len(matches) == 1:
+                    item["target_key"] = matches[0]
+                    item["target_name"] = canonical_by_key.get(
+                        matches[0], item.get("target_name")
+                    )
+            canonicalized.append(item)
+        return canonicalized
 
     async def _get_user_tracked_splice_targets(self, conn, user_id: int) -> list[dict]:
         await self._ensure_splice_tree_tracking_table(conn)
@@ -2207,7 +2488,7 @@ class ProcessSplice(commands.Cog):
         max_depth: int,
         target_name: str,
         target_generation,
-        duplicate_combo_children: int,
+        unresolved_parent_links: int,
         tree_nodes: list,
         generation_by_key: dict,
         canonical_by_key: dict,
@@ -2518,7 +2799,7 @@ class ProcessSplice(commands.Cog):
         subtitle_text = (
             f"Nodes: {len(tree_nodes)} | Levels: {max_depth + 1} | "
             f"Target Gen: {target_generation if target_generation is not None else 'Unknown'} | "
-            f"Multi-parent rows collapsed: {duplicate_combo_children}"
+            f"Unlinked ambiguous parents: {unresolved_parent_links}"
         )
         title_y = max(26, int(title_band * 0.12))
         subtitle_y = title_y + title_font.size + max(12, title_font.size // 4)
@@ -2926,7 +3207,9 @@ class ProcessSplice(commands.Cog):
                 await self._ensure_splice_tree_tracking_table(conn)
                 catalog = await self._load_splice_tree_catalog(conn)
                 tracked_targets = await self._get_user_tracked_splice_targets(conn, ctx.author.id)
-                owned_keys = await self._get_user_owned_splice_keys(conn, ctx.author.id)
+                owned_keys = await self._get_user_owned_splice_keys(
+                    conn, ctx.author.id, catalog
+                )
         except FileNotFoundError:
             return await status.edit(content="Could not read `monsters.json`.")
         except Exception as e:
@@ -2937,7 +3220,10 @@ class ProcessSplice(commands.Cog):
         node_url_by_key = catalog["node_url_by_key"]
         generation_by_key = catalog["generation_by_key"]
         parent_pair_by_child = catalog["parent_pair_by_child"]
-        duplicate_combo_children = catalog["duplicate_combo_children"]
+        unresolved_parent_links = catalog["unresolved_parent_links"]
+        tracked_targets = self._canonicalize_tracked_splice_targets(
+            tracked_targets, catalog
+        )
         tracked_root_keys = {
             row["target_key"]
             for row in tracked_targets
@@ -2969,11 +3255,34 @@ class ProcessSplice(commands.Cog):
             target_name = canonical_by_key.get(root_key, root_key)
             target_generation = furthest_gen
         else:
-            root_key = self._resolve_splice_tree_target_key(target_name, canonical_by_key)
-            if root_key is None:
+            candidate_keys = self._find_splice_tree_target_keys(target_name, catalog)
+            if not candidate_keys:
                 return await status.edit(
                     content=f"Target `{target_name}` not found in monsters or splice combinations."
                 )
+            if len(candidate_keys) > 1:
+                picker = SpliceTreeTargetPicker(
+                    ctx,
+                    self._splice_tree_picker_candidates(candidate_keys, catalog),
+                )
+                picker.message = status
+                await status.edit(
+                    content=(
+                        f"More than one creature matches **{target_name}**. "
+                        "Select the exact recipe identifier to build."
+                    ),
+                    view=picker,
+                )
+                timed_out = await picker.wait()
+                if timed_out:
+                    return await status.edit(
+                        content="Splice tree selection timed out.", view=None
+                    )
+                if picker.selected_key is None:
+                    return
+                root_key = picker.selected_key
+            else:
+                root_key = candidate_keys[0]
             target_generation = generation_by_key.get(root_key)
             target_name = canonical_by_key.get(root_key, target_name)
 
@@ -3159,7 +3468,7 @@ class ProcessSplice(commands.Cog):
                 max_depth=max_depth,
                 target_name=target_name,
                 target_generation=target_generation,
-                duplicate_combo_children=duplicate_combo_children,
+                unresolved_parent_links=unresolved_parent_links,
                 tree_nodes=tree_nodes,
                 generation_by_key=generation_by_key,
                 canonical_by_key=canonical_by_key,
@@ -3214,12 +3523,17 @@ class ProcessSplice(commands.Cog):
                         "You are not tracking any splice targets yet. Use `$splicetrack add <monster name>`."
                     )
 
-                owned_keys = await self._get_user_owned_splice_keys(conn, ctx.author.id)
                 try:
                     catalog = await self._load_splice_tree_catalog(conn)
                 except FileNotFoundError:
                     return await ctx.send("Could not read `monsters.json`.")
+                owned_keys = await self._get_user_owned_splice_keys(
+                    conn, ctx.author.id, catalog
+                )
 
+            tracked_targets = self._canonicalize_tracked_splice_targets(
+                tracked_targets, catalog
+            )
             tracked_root_keys = {
                 row["target_key"]
                 for row in tracked_targets
@@ -3285,32 +3599,56 @@ class ProcessSplice(commands.Cog):
             async with self.bot.pool.acquire() as conn:
                 await self._ensure_splice_tree_tracking_table(conn)
                 catalog = await self._load_splice_tree_catalog(conn)
-                canonical_by_key = catalog["canonical_by_key"]
-                target_key = self._resolve_splice_tree_target_key(requested_target, canonical_by_key)
-                if target_key is None:
-                    return await ctx.send(
-                        f"Could not find a splice target matching `{requested_target}`."
-                    )
+        except FileNotFoundError:
+            return await ctx.send("Could not read `monsters.json`.")
+        except Exception as e:
+            return await ctx.send(f"Failed to load splice targets: {e}")
 
-                existing = await conn.fetchval(
-                    """
-                    SELECT 1
-                    FROM splice_tree_tracks
-                    WHERE user_id = $1 AND target_key = $2
-                    """,
-                    ctx.author.id,
-                    target_key,
+        canonical_by_key = catalog["canonical_by_key"]
+        candidate_keys = self._find_splice_tree_target_keys(requested_target, catalog)
+        if not candidate_keys:
+            return await ctx.send(
+                f"Could not find a splice target matching `{requested_target}`."
+            )
+        if len(candidate_keys) > 1:
+            picker = SpliceTreeTargetPicker(
+                ctx,
+                self._splice_tree_picker_candidates(candidate_keys, catalog),
+                selection_action="Adding it to your tracked targets...",
+            )
+            picker.message = await ctx.send(
+                f"More than one creature matches **{requested_target}**. "
+                "Select the exact recipe identifier to track.",
+                view=picker,
+            )
+            timed_out = await picker.wait()
+            if timed_out:
+                return await picker.message.edit(
+                    content="Splice target selection timed out.", view=None
                 )
-                if existing:
+            if picker.selected_key is None:
+                return
+            target_key = picker.selected_key
+        else:
+            target_key = candidate_keys[0]
+
+        try:
+            async with self.bot.pool.acquire() as conn:
+                tracked_targets = await self._get_user_tracked_splice_targets(
+                    conn, ctx.author.id
+                )
+                tracked_targets = self._canonicalize_tracked_splice_targets(
+                    tracked_targets, catalog
+                )
+                if any(
+                    item.get("target_key") == target_key
+                    for item in tracked_targets
+                ):
                     return await ctx.send(
                         f"Already tracking **{canonical_by_key.get(target_key, requested_target)}**."
                     )
 
-                current_count = await conn.fetchval(
-                    "SELECT COUNT(*) FROM splice_tree_tracks WHERE user_id = $1;",
-                    ctx.author.id,
-                )
-                if int(current_count or 0) >= 10:
+                if len(tracked_targets) >= 10:
                     return await ctx.send("You can only track up to 10 splice targets at once.")
 
                 resolved_name = canonical_by_key.get(target_key, requested_target.strip())
@@ -3323,8 +3661,6 @@ class ProcessSplice(commands.Cog):
                     target_key,
                     resolved_name,
                 )
-        except FileNotFoundError:
-            return await ctx.send("Could not read `monsters.json`.")
         except Exception as e:
             return await ctx.send(f"Failed to add tracked splice target: {e}")
 
@@ -3342,23 +3678,70 @@ class ProcessSplice(commands.Cog):
         try:
             async with self.bot.pool.acquire() as conn:
                 tracked_targets = await self._get_user_tracked_splice_targets(conn, ctx.author.id)
-                match = None
-                for tracked_target in tracked_targets:
-                    target_key = tracked_target.get("target_key")
-                    if target_key == requested_target or requested_target in str(target_key):
-                        match = tracked_target
-                        break
+                catalog = await self._load_splice_tree_catalog(conn)
+        except FileNotFoundError:
+            return await ctx.send("Could not read `monsters.json`.")
+        except Exception as e:
+            return await ctx.send(f"Failed to load tracked splice targets: {e}")
 
-                if match is None:
-                    return await ctx.send(f"`{target.strip()}` is not in your tracked splice targets.")
+        tracked_targets = self._canonicalize_tracked_splice_targets(
+            tracked_targets, catalog
+        )
+        direct_recipe_key = self._splice_tree_recipe_key(
+            self._splice_tree_recipe_id(target)
+        )
+        matches = []
+        for tracked_target in tracked_targets:
+            target_key = tracked_target.get("target_key")
+            target_name_key = self._normalize_splice_tree_name(
+                tracked_target.get("target_name")
+            )
+            if (
+                (direct_recipe_key and target_key == direct_recipe_key)
+                or target_key == requested_target
+                or target_name_key == requested_target
+                or (target_name_key and requested_target in target_name_key)
+            ):
+                matches.append(tracked_target)
 
+        if not matches:
+            return await ctx.send(f"`{target.strip()}` is not in your tracked splice targets.")
+
+        if len(matches) > 1:
+            picker = SpliceTreeTargetPicker(
+                ctx,
+                self._splice_tree_picker_candidates(
+                    [item["target_key"] for item in matches], catalog
+                ),
+                selection_action="Removing it from your tracked targets...",
+            )
+            picker.message = await ctx.send(
+                f"More than one tracked creature matches **{target.strip()}**. "
+                "Select the exact recipe identifier to remove.",
+                view=picker,
+            )
+            timed_out = await picker.wait()
+            if timed_out:
+                return await picker.message.edit(
+                    content="Splice target selection timed out.", view=None
+                )
+            if picker.selected_key is None:
+                return
+            match = next(
+                item for item in matches if item["target_key"] == picker.selected_key
+            )
+        else:
+            match = matches[0]
+
+        try:
+            async with self.bot.pool.acquire() as conn:
                 await conn.execute(
                     """
                     DELETE FROM splice_tree_tracks
                     WHERE user_id = $1 AND target_key = $2
                     """,
                     ctx.author.id,
-                    match["target_key"],
+                    match.get("_stored_target_key", match["target_key"]),
                 )
         except Exception as e:
             return await ctx.send(f"Failed to remove tracked splice target: {e}")

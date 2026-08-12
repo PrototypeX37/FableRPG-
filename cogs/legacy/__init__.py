@@ -189,6 +189,65 @@ class Legacy(commands.Cog):
             "relic_total": len(relic_set_keys),
         }
 
+    async def _check_shop_access(
+        self,
+        user_id: int,
+        *,
+        item_key: str | None = None,
+        conn=None,
+    ) -> tuple[bool, str | None]:
+        """Check the shared content rules for the Legacy Shop.
+
+        Older deployments without the Factions cog retain the original shop
+        behavior. Once that cog is present, an unavailable or malformed access
+        service fails closed so a rules outage cannot bypass configured locks.
+        """
+
+        factions = self.bot.get_cog("Factions")
+        if factions is None:
+            return True, None
+
+        checker = getattr(factions, "check_content_access", None)
+        if not callable(checker):
+            logger.error("Factions cog does not expose check_content_access")
+            return False, "Faction access rules are temporarily unavailable."
+
+        try:
+            result = await checker(
+                int(user_id),
+                scope="shop",
+                target_key="legacy",
+                subtarget_key=item_key,
+                conn=conn,
+            )
+            allowed, reason = result
+        except Exception:
+            logger.exception(
+                "Could not check Legacy Shop access for user %s and item %s",
+                user_id,
+                item_key,
+            )
+            return False, "Faction access rules could not be verified. Please try again."
+
+        if not isinstance(allowed, bool):
+            logger.error(
+                "Factions access check returned a non-boolean result for user %s and item %s",
+                user_id,
+                item_key,
+            )
+            return False, "Faction access rules returned an invalid result."
+
+        normalized_reason = str(reason).strip() if reason else None
+        if not allowed and normalized_reason is None:
+            normalized_reason = "Your faction standing does not grant access."
+        return allowed, normalized_reason
+
+    @staticmethod
+    def _shop_locked_message(reason: str | None, *, item_name: str | None = None) -> str:
+        subject = f"**{item_name}**" if item_name else "The **Legacy Shop**"
+        detail = reason or "Your faction standing does not grant access."
+        return f"🔒 {subject} is locked.\n{detail}"
+
     async def _purchase_shop_item(self, conn, user_id: int, item) -> tuple[bool, str]:
         """Validate and apply one shop purchase in a single transaction."""
 
@@ -210,6 +269,24 @@ class Legacy(commands.Cog):
             )
             points = int(legacy_row["points"] or 0) if legacy_row else 0
             lifetime = int(legacy_row["lifetime"] or 0) if legacy_row else 0
+
+            shop_allowed, shop_reason = await self._check_shop_access(
+                user_id,
+                conn=conn,
+            )
+            if not shop_allowed:
+                return False, self._shop_locked_message(shop_reason)
+
+            item_allowed, item_reason = await self._check_shop_access(
+                user_id,
+                item_key=item.key,
+                conn=conn,
+            )
+            if not item_allowed:
+                return False, self._shop_locked_message(
+                    item_reason,
+                    item_name=item.name,
+                )
 
             if item.weekly_limit is not None:
                 weekly_purchases = await conn.fetchval(
@@ -440,6 +517,13 @@ class Legacy(commands.Cog):
         await self.ensure_tables()
         week_start = legacy_week_start()
         async with self.bot.pool.acquire() as conn:
+            shop_allowed, shop_reason = await self._check_shop_access(
+                ctx.author.id,
+                conn=conn,
+            )
+            if not shop_allowed:
+                return await ctx.send(self._shop_locked_message(shop_reason))
+
             row = await conn.fetchrow(
                 "SELECT points, lifetime FROM legacy WHERE user_id = $1", ctx.author.id
             )
@@ -459,6 +543,13 @@ class Legacy(commands.Cog):
             living_legend_progress = await self._living_legend_progress(
                 conn, ctx.author.id, lifetime=lifetime
             )
+            item_access = {}
+            for item in LEGACY_SHOP.values():
+                item_access[item.key] = await self._check_shop_access(
+                    ctx.author.id,
+                    item_key=item.key,
+                    conn=conn,
+                )
         weekly_purchases = {
             purchase["item_key"]: int(purchase["purchases"])
             for purchase in purchase_rows
@@ -470,6 +561,7 @@ class Legacy(commands.Cog):
             weekly_purchases,
             living_legend_progress,
             prefix=ctx.clean_prefix,
+            item_access=item_access,
         )
         await ctx.send(embed=embed)
 

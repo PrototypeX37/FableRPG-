@@ -75,7 +75,13 @@
 <script>
 const SCHEMA='fablereborn.campaign-package';
 const sources=['none','pve','adventure','battletower','dragonparty','cbt','raidbattle','jurytower','scripted'];
-const conditionTypes=['quest_completed','campaign_completed','campaign_choice','reputation','level','class','god','race','money','guild_member','item_owned','item_equipped','pet_owned','pet_equipped','badge','unlock'];
+const conditionTypes=['quest_completed','campaign_completed','campaign_choice','reputation','faction_standing','faction_membership','level','class','god','race','money','guild_member','item_owned','item_equipped','pet_owned','pet_equipped','badge','unlock'];
+const conditionOperators=['>=','>','==','!=','<=','<','contains'];
+const supportedConditionOperators=['=','==','is','!=','is_not','>','>=','<','<=','contains'];
+const standingOperators=['>=','>','==','!=','<=','<'];
+const membershipOperators=['==','!='];
+const factionStandingFields=['points','rank','tier'];
+const factionEffectTypes=['reputation','faction_standing','faction_membership'];
 const encounterKinds=['none','pve','battle_tower','dragon_party','raid_battle','jury_tower','external_command'];
 const rewardTypes=['none','money','crate','item','egg','bundle'];
 let data=blankPackage(), tab='campaign', selectedCampaign=0, selectedNode=0, selectedQuest=0, selectedMonster=0;
@@ -137,11 +143,52 @@ function addCutscene(slot){currentNode().cutscenes[slot]={title:currentNode().ti
 
 function renderEncounter(n){let e=n.encounter||(n.encounter={kind:'none',party:{min:1,max:1},settings:{}});e.party=e.party||{min:1,max:1};return `<div class="section"><h3>Encounter / Battle Bridge</h3><div class="grid3">${selectField('Encounter kind',encounterKinds,e.kind||'none',"currentNode().encounter.kind=this.value")}${field('Encounter name',e.name||'',"currentNode().encounter.name=this.value")}${field('Monster / boss',e.monster||'',"currentNode().encounter.monster=this.value").replace('<input','<input list="monsterNames"')}</div><div class="grid3">${field('Minimum party',e.party.min||1,"currentNode().encounter.party.min=Number(this.value)",'number')}${field('Maximum party',e.party.max||1,"currentNode().encounter.party.max=Number(this.value)",'number')}${field('Discord launch command',e.launch_command||'',"currentNode().encounter.launch_command=this.value")}</div>${area('Encounter description',e.description||'',"currentNode().encounter.description=this.value")}${area('Future battle settings JSON',JSON.stringify(e.settings||{},null,2),"currentNode().encounter.settings=parseJSON(this.value,{})")}</div>`}
 
-function renderEdges(n,property){let edges=n[property]||(n[property]=[]);let targetIds=(currentCampaign().nodes||[]).map(x=>x.id);return `<div class="section"><h3>${property==='options'?'Branch Choices':'Next Nodes'}</h3>${edges.map((e,i)=>`<div class="row"><div class="row-head"><strong>${property==='options'?'Choice':'Transition'} ${i+1}</strong><button class="mini danger" onclick="currentNode()['${property}'].splice(${i},1);render()">Delete</button></div><div class="grid2">${field('Button label',e.label||'Continue',`currentNode()['${property}'][${i}].label=this.value`)}${selectField('Target node',targetIds,e.target||'',`currentNode()['${property}'][${i}].target=this.value`)}</div>${area('Choice description',e.description||'',`currentNode()['${property}'][${i}].description=this.value`)}${renderConditions(e.conditions||(e.conditions=[]),`currentNode()['${property}'][${i}].conditions`)}${area('Effects JSON (reputation/unlocks)',JSON.stringify(e.effects||[],null,2),`currentNode()['${property}'][${i}].effects=parseJSON(this.value,[])`)}</div>`).join('')}<button onclick="currentNode()['${property}'].push({label:'Continue',target:(currentCampaign().nodes[0]||{}).id||'',description:'',conditions:[],effects:[],unlocks:[]});render()">+ Add ${property==='options'?'Choice':'Transition'}</button></div>`}
-function renderEnding(n){return `<div class="section"><h3>Ending</h3><p>This node completes the campaign and records its unlocks and reputation effects.</p></div>`}
-function renderConsequences(n){return `<div class="section"><h3>Permanent Consequences</h3>${field('Unlock keys (comma separated)',(n.unlocks||[]).map(x=>typeof x==='string'?x:x.key).join(', '),"currentNode().unlocks=this.value.split(',').map(x=>x.trim()).filter(Boolean)")}${area('Effects JSON',JSON.stringify(n.effects||[],null,2),"currentNode().effects=parseJSON(this.value,[])")}<small>Example reputation effect: [{"type":"reputation","key":"evil","points":25,"rank_delta":1}]</small></div>`}
+function renderEdges(n,property){let edges=n[property]||(n[property]=[]);let targetIds=(currentCampaign().nodes||[]).map(x=>x.id);return `<div class="section"><h3>${property==='options'?'Branch Choices':'Next Nodes'}</h3>${edges.map((e,i)=>`<div class="row"><div class="row-head"><strong>${property==='options'?'Choice':'Transition'} ${i+1}</strong><button class="mini danger" onclick="currentNode()['${property}'].splice(${i},1);render()">Delete</button></div><div class="grid2">${field('Button label',e.label||'Continue',`currentNode()['${property}'][${i}].label=this.value`)}${selectField('Target node',targetIds,e.target||'',`currentNode()['${property}'][${i}].target=this.value`)}</div>${area('Choice description',e.description||'',`currentNode()['${property}'][${i}].description=this.value`)}${renderConditions(e.conditions||(e.conditions=[]),`currentNode()['${property}'][${i}].conditions`)}${renderFactionEffects(e.effects||(e.effects=[]),`currentNode()['${property}'][${i}].effects`,'Choice Consequences')}</div>`).join('')}<button onclick="currentNode()['${property}'].push({label:'Continue',target:(currentCampaign().nodes[0]||{}).id||'',description:'',conditions:[],effects:[],unlocks:[]});render()">+ Add ${property==='options'?'Choice':'Transition'}</button></div>`}
+function renderEnding(n){return `<div class="section"><h3>Ending</h3><p>This node completes the campaign and records its unlocks, faction standing, and membership effects.</p></div>`}
+function renderConsequences(n){return `<div class="section"><h3>Permanent Consequences</h3>${field('Unlock keys (comma separated)',(n.unlocks||[]).map(x=>typeof x==='string'?x:x.key).join(', '),"currentNode().unlocks=this.value.split(',').map(x=>x.trim()).filter(Boolean)")}${renderFactionEffects(n.effects||(n.effects=[]),'currentNode().effects','Faction Effects')}</div>`}
 
-function renderConditions(list,path){return `<div class="section"><div class="row-head"><h3>Requirements</h3><button class="mini" onclick="${path}.push({type:'quest_completed',key:'',operator:'>=',value:1,description:''});render()">+ Requirement</button></div>${list.length?list.map((c,i)=>`<div class="row"><div class="row-head"><strong>Requirement ${i+1}</strong><button class="mini danger" onclick="${path}.splice(${i},1);render()">Delete</button></div><div class="grid3">${selectField('Type',conditionTypes,c.type||'quest_completed',`${path}[${i}].type=this.value`)}${field('Key / name',c.key||'',`${path}[${i}].key=this.value`)}${selectField('Compare',['>=','>','==','!=','<=','<','contains'],c.operator||'>=',`${path}[${i}].operator=this.value`)}</div><div class="grid2">${field('Value / required rank',c.value??1,`${path}[${i}].value=this.value`)}${field('Failure message (optional)',c.description||'',`${path}[${i}].description=this.value`)}</div></div>`).join(''):'<div class="empty">No requirements. This content is open when reached.</div>'}</div>`}
+function renderFactionEffects(list,path,title){
+  let rows=list.map((effect,i)=>{
+    let type=effect.type||'faction_standing';
+    if(!factionEffectTypes.includes(type))return `<div class="row"><div class="row-head"><strong>Advanced effect ${i+1}: ${esc(type||'unknown')}</strong><button class="mini danger" onclick="${path}.splice(${i},1);render()">Delete</button></div>${area('Effect JSON',JSON.stringify(effect,null,2),`${path}[${i}]=parseJSON(this.value,{})`)}</div>`;
+    let details='';
+    if(type==='faction_membership'){
+      details=field('Membership status',effect.status||'',`${path}[${i}].status=keyify(this.value);this.value=${path}[${i}].status`);
+    }else{
+      details=`<div class="grid3">${field('Standing points change',effect.points??effect.delta??'',`${path}[${i}].points=this.value===''?null:Number(this.value);delete ${path}[${i}].delta`,'number')}${field('Rank delta (legacy)',effect.rank_delta??'',`${path}[${i}].rank_delta=this.value===''?null:Number(this.value)`,'number')}${field('Set rank (legacy)',effect.set_rank??'',`${path}[${i}].set_rank=this.value===''?null:Number(this.value)`,'number')}</div>`;
+    }
+    return `<div class="row"><div class="row-head"><strong>Faction effect ${i+1}</strong><button class="mini danger" onclick="${path}.splice(${i},1);render()">Delete</button></div><div class="grid2">${selectField('Effect type',factionEffectTypes,type,`${path}[${i}].type=this.value;if(this.value==='faction_membership'){delete ${path}[${i}].points;delete ${path}[${i}].delta;delete ${path}[${i}].rank_delta;delete ${path}[${i}].set_rank;${path}[${i}].status='member'}else{delete ${path}[${i}].status;delete ${path}[${i}].value;${path}[${i}].points=0}render()`)}${field('Faction key',effect.key||'',`${path}[${i}].key=keyify(this.value);this.value=${path}[${i}].key`)}</div>${details}</div>`;
+  }).join('');
+  return `<div class="section"><div class="row-head"><h3>${esc(title||'Faction Effects')}</h3><button class="mini" onclick="${path}.push({type:'faction_standing',key:'',points:0});render()">+ Standing</button><button class="mini" onclick="${path}.push({type:'faction_membership',key:'',status:'member'});render()">+ Membership</button></div>${rows||'<div class="empty">No faction consequences.</div>'}${area('All effects JSON (advanced)',JSON.stringify(list,null,2),`${path}=parseJSON(this.value,[])`)}</div>`;
+}
+
+function updateConditionType(condition,type){
+  condition.type=type;
+  if(type==='reputation'||type==='faction_standing'){
+    condition.field=factionStandingFields.includes(condition.field)?condition.field:'rank';
+    condition.operator=standingOperators.includes(condition.operator)?condition.operator:'>=';
+    if(condition.field!=='tier'&&!Number.isFinite(Number(condition.value)))condition.value=0;
+  }else if(type==='faction_membership'){
+    condition.field='status';condition.operator='==';
+    if(typeof condition.value!=='string'||!condition.value.trim())condition.value='member';
+  }
+}
+
+function renderConditions(list,path){
+  let rows=list.map((c,i)=>{
+    let type=c.type||'quest_completed';
+    let standing=type==='reputation'||type==='faction_standing';
+    let membership=type==='faction_membership';
+    let operators=membership?membershipOperators:(standing?standingOperators:conditionOperators);
+    let selectedOperator=c.operator||(membership?'==':'>=');
+    let fieldControl=standing?selectField('Standing field',factionStandingFields,c.field||'rank',`${path}[${i}].field=this.value;render()`):(membership?field('Membership field','status','', 'text').replace('<input','<input disabled'):field('Field','Not used','', 'text').replace('<input','<input disabled'));
+    let numeric=standing&&(c.field||'rank')!=='tier';
+    let valueLabel=membership?'Membership status':(standing?'Required standing / tier':'Value');
+    let valueChange=membership?`${path}[${i}].value=keyify(this.value);this.value=${path}[${i}].value`:(numeric?`${path}[${i}].value=Number(this.value)`: `${path}[${i}].value=this.value`);
+    return `<div class="row"><div class="row-head"><strong>Requirement ${i+1}</strong><button class="mini danger" onclick="${path}.splice(${i},1);render()">Delete</button></div><div class="grid3">${selectField('Type',conditionTypes,type,`updateConditionType(${path}[${i}],this.value);render()`)}${field('Faction / content key',c.key||'',`${path}[${i}].key=${standing||membership?'keyify(this.value)':'this.value'};this.value=${path}[${i}].key`)}${selectField('Compare',operators,selectedOperator,`${path}[${i}].operator=this.value`)}</div><div class="grid2">${fieldControl}${field(valueLabel,c.value??(membership?'member':1),valueChange,numeric?'number':'text')}</div>${field('Failure message (optional)',c.description||'',`${path}[${i}].description=this.value`)}</div>`;
+  }).join('');
+  return `<div class="section"><div class="row-head"><h3>Requirements</h3><button class="mini" onclick="${path}.push({type:'quest_completed',key:'',operator:'>=',value:1,field:'',description:''});render()">+ Requirement</button></div>${rows||'<div class="empty">No requirements. This content is open when reached.</div>'}</div>`;
+}
 
 function addMonster(){data.monsters.push({key:'new_monster',name:'New Monster',tier:1,hp:100,attack:20,defense:10,element:'Nature',url:'',tags:[]});selectedMonster=data.monsters.length-1;render()}
 function addStandaloneQuest(){data.standalone_quests.push({quest_key:'new_quest',name:'New Quest',category:'General',short_description:'',offer_text:'',turnin_text:'',objective:{source:'none',mode:'progress',required_count:0,target_name:''},turnin:{type:'progress'},reward:{type:'none'},access:{conditions:[]},prerequisites:[],accept_cutscene_key:'',turnin_cutscene_key:'',repeatable:false,is_active:false});selectedQuest=data.standalone_quests.length-1;render()}
@@ -151,9 +198,71 @@ function renderMonster(){let m=data.monsters[selectedMonster];if(!m){main.innerH
 function renderJson(){main.innerHTML=`<div class="section"><h2>Raw Package JSON</h2><p>Useful for advanced fields. Changes apply when the textarea loses focus.</p><textarea style="min-height:70vh;font-family:ui-monospace,monospace" onchange="let parsed=parseJSON(this.value,null);if(parsed){data=parsed;selectedCampaign=selectedNode=selectedMonster=0;render()}else alert('Invalid JSON')">${esc(JSON.stringify(data,null,2))}</textarea></div>`}
 function renderInspector(){let c=currentCampaign(),n=currentNode();if(tab==='quests'){let s=(data.standalone_quests||[])[selectedQuest];inspector.innerHTML=s?`<h3>${esc(s.name)}</h3><p>${esc(s.short_description||'Standalone quest')}</p><span class="pill">${s.is_active?'active':'draft'}</span><span class="pill">${esc(s.objective?.source||'none')}</span><div id="validationStatus"></div>`:'<p>No quest selected.</p>';return}if(tab==='monsters'){let m=data.monsters[selectedMonster];inspector.innerHTML=m?`<h3>${esc(m.name)}</h3><p>Tier ${esc(m.tier)} ${esc(m.element)}</p><p>HP ${esc(m.hp)}<br>ATK ${esc(m.attack)}<br>DEF ${esc(m.defense)}</p>`:'<p>No monster selected.</p>';return}if(!c){inspector.innerHTML='<p>No campaign selected.</p>';return}let links=n?((n.type==='choice'?n.options:n.next)||[]):[];inspector.innerHTML=`<h3>${esc(c.title)}</h3><p>${esc(c.description)}</p><span class="pill">${c.is_active?'active':'draft'}</span><span class="pill">${c.nodes.length} nodes</span>${n?`<hr style="border-color:var(--line)"><h3>${esc(n.title)}</h3><span class="pill">${esc(n.type)}</span><p>${esc(n.description)}</p><strong>Flows to</strong><p>${links.length?links.map(x=>`<span class="pill">${esc(x.target)}</span>`).join(''):'Ending / unlinked'}</p>`:''}<div id="validationStatus"></div>`}
 
-function validatePackage(){let errors=[];if(data.schema!==SCHEMA)errors.push('Wrong schema.');if(data.schema_version!==1)errors.push('schema_version must be 1.');let campaignKeys=new Set(),questKeys=new Set(),monsterNames=new Set();for(let c of data.campaigns||[]){ensureCampaign(c);if(!c.key)errors.push('A campaign has no key.');if(campaignKeys.has(c.key))errors.push(`Duplicate campaign key: ${c.key}`);campaignKeys.add(c.key);let ids=new Set();for(let n of c.nodes){if(!n.id)errors.push(`${c.key}: node without ID`);if(ids.has(n.id))errors.push(`${c.key}: duplicate node ${n.id}`);ids.add(n.id)}if(!ids.has(c.start_node))errors.push(`${c.key}: start node ${c.start_node} does not exist`);for(let n of c.nodes){let edges=n.type==='choice'?n.options:n.next;for(let e of edges||[])if(!ids.has(e.target))errors.push(`${c.key}/${n.id}: missing target ${e.target}`);if(n.type==='choice'&&(n.options||[]).length<2)errors.push(`${c.key}/${n.id}: choice needs at least 2 options`);if(n.type==='quest'){let qk=keyify(n.quest.quest_key||`${c.key}_${n.id}`);if(questKeys.has(qk))errors.push(`Duplicate quest key: ${qk}`);questKeys.add(qk);let p=n.encounter?.party||{};if(Number(p.min||1)>Number(p.max||1))errors.push(`${qk}: party minimum exceeds maximum`)}}}for(let m of data.monsters||[]){m.key=keyify(m.key||m.name);if(!m.name)errors.push('A monster has no name.');if(monsterNames.has(String(m.name).toLowerCase()))errors.push(`Duplicate monster: ${m.name}`);monsterNames.add(String(m.name).toLowerCase())}return errors}
+function isNumericValue(value){return value!==null&&value!==''&&typeof value!=='boolean'&&Number.isInteger(Number(value))}
+function validateConditions(list,owner,errors){
+  for(let condition of list||[]){
+    if(!condition||typeof condition!=='object'){errors.push(`${owner}: requirement is not an object`);continue}
+    let type=String(condition.type||'').toLowerCase(),operator=String(condition.operator||(type==='faction_membership'?'==':'>=')).toLowerCase();
+    if(!supportedConditionOperators.includes(operator))errors.push(`${owner}: unsupported condition operator ${operator}`);
+    if(type==='reputation'||type==='faction_standing'){
+      let fieldName=String(condition.field||'rank').toLowerCase();
+      if(!condition.key)errors.push(`${owner}: ${type} requires a faction key`);
+      if(!factionStandingFields.includes(fieldName))errors.push(`${owner}: ${type} field must be points, rank, or tier`);
+      if(!standingOperators.includes(operator)&&!['=','is','is_not'].includes(operator))errors.push(`${owner}: ${type} cannot use ${operator}`);
+      if((fieldName==='points'||fieldName==='rank')&&!isNumericValue(condition.value))errors.push(`${owner}: ${fieldName} requires a numeric value`);
+      if(fieldName==='tier'&&!isNumericValue(condition.value)&&!keyify(condition.value))errors.push(`${owner}: tier requires a tier key or number`);
+    }else if(type==='faction_membership'){
+      if(!condition.key)errors.push(`${owner}: faction_membership requires a faction key`);
+      if(!['=','==','is','!=','is_not'].includes(operator))errors.push(`${owner}: faction_membership only supports equality`);
+      if(typeof condition.value!=='string'||!keyify(condition.value))errors.push(`${owner}: faction_membership requires a status`);
+    }
+  }
+}
+function validateEffects(list,owner,errors){
+  for(let effect of list||[]){
+    if(!effect||typeof effect!=='object'){errors.push(`${owner}: effect is not an object`);continue}
+    let type=String(effect.type||'').toLowerCase();
+    if(!factionEffectTypes.includes(type))continue;
+    if(!keyify(effect.key))errors.push(`${owner}: ${type} requires a faction key`);
+    if(type==='faction_membership'){
+      let status=effect.status??effect.value;if(typeof status!=='string'||!keyify(status))errors.push(`${owner}: faction_membership requires a status`);
+    }else{
+      let numericFields=['points','delta','rank_delta','set_rank'].filter(name=>effect[name]!==undefined&&effect[name]!==null&&effect[name]!=='');
+      if(!numericFields.length)errors.push(`${owner}: ${type} requires a numeric standing value`);
+      for(let name of numericFields)if(!isNumericValue(effect[name]))errors.push(`${owner}: ${type}.${name} must be numeric`);
+    }
+  }
+}
+function validatePackage(){
+  let errors=[];
+  if(data.schema!==SCHEMA)errors.push('Wrong schema.');
+  if(data.schema_version!==1)errors.push('schema_version must be 1.');
+  let campaignKeys=new Set(),questKeys=new Set(),monsterNames=new Set();
+  for(let c of data.campaigns||[]){
+    ensureCampaign(c);validateConditions(c.requirements,`${c.key||'campaign'} requirements`,errors);
+    if(!c.key)errors.push('A campaign has no key.');
+    if(campaignKeys.has(c.key))errors.push(`Duplicate campaign key: ${c.key}`);campaignKeys.add(c.key);
+    let ids=new Set();
+    for(let n of c.nodes){if(!n.id)errors.push(`${c.key}: node without ID`);if(ids.has(n.id))errors.push(`${c.key}: duplicate node ${n.id}`);ids.add(n.id)}
+    if(!ids.has(c.start_node))errors.push(`${c.key}: start node ${c.start_node} does not exist`);
+    for(let n of c.nodes){
+      let owner=`${c.key}/${n.id}`,edges=n.type==='choice'?n.options:n.next;
+      validateConditions(n.requirements,`${owner} requirements`,errors);validateEffects(n.effects,`${owner} effects`,errors);
+      for(let e of edges||[]){if(!ids.has(e.target))errors.push(`${owner}: missing target ${e.target}`);validateConditions(e.conditions,`${owner} -> ${e.target}`,errors);validateEffects(e.effects,`${owner} -> ${e.target}`,errors)}
+      if(n.type==='choice'&&(n.options||[]).length<2)errors.push(`${owner}: choice needs at least 2 options`);
+      if(n.type==='quest'){
+        validateConditions(n.quest.requirements,`${owner} quest requirements`,errors);
+        let qk=keyify(n.quest.quest_key||`${c.key}_${n.id}`);if(questKeys.has(qk))errors.push(`Duplicate quest key: ${qk}`);questKeys.add(qk);
+        let p=n.encounter?.party||{};if(Number(p.min||1)>Number(p.max||1))errors.push(`${qk}: party minimum exceeds maximum`);
+      }
+    }
+  }
+  for(let [index,quest] of (data.standalone_quests||[]).entries())validateConditions(quest?.access?.conditions,`standalone quest ${index+1}`,errors);
+  for(let m of data.monsters||[]){m.key=keyify(m.key||m.name);if(!m.name)errors.push('A monster has no name.');if(monsterNames.has(String(m.name).toLowerCase()))errors.push(`Duplicate monster: ${m.name}`);monsterNames.add(String(m.name).toLowerCase())}
+  return errors;
+}
 function validateAndShow(){let errors=validatePackage();let status=document.getElementById('validationStatus');if(status)status.innerHTML=`<div class="status ${errors.length?'bad':'good'}">${errors.length?esc(errors.join('\n')):'Valid. Ready to download and import into the bot.'}</div>`;else alert(errors.length?errors.join('\n'):'Valid. Ready to download.')}
-function downloadPackage(){let errors=validatePackage();if(errors.length&&!confirm(`There are ${errors.length} validation errors. Download anyway?`))return;data.exported_at=new Date().toISOString();data.reference={objective_sources:sources,condition_types:conditionTypes,encounter_kinds:encounterKinds,reward_types:rewardTypes,monster_names:data.monsters.map(x=>x.name).sort()};let blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`fablereborn-content-${new Date().toISOString().slice(0,10)}.json`;a.click();URL.revokeObjectURL(a.href)}
+function downloadPackage(){let errors=validatePackage();if(errors.length&&!confirm(`There are ${errors.length} validation errors. Download anyway?`))return;data.exported_at=new Date().toISOString();data.reference={objective_sources:sources,condition_types:conditionTypes,condition_operators:supportedConditionOperators,faction_standing_fields:factionStandingFields,faction_effect_types:factionEffectTypes,faction_standing_effect_numeric_fields:['points','delta','rank_delta','set_rank'],encounter_kinds:encounterKinds,reward_types:rewardTypes,monster_names:data.monsters.map(x=>x.name).sort()};let blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`fablereborn-content-${new Date().toISOString().slice(0,10)}.json`;a.click();URL.revokeObjectURL(a.href)}
 fileInput.addEventListener('change',async e=>{let f=e.target.files[0];if(!f)return;try{let parsed=JSON.parse(await f.text());data=parsed;data.campaigns=data.campaigns||[];data.standalone_quests=data.standalone_quests||[];data.cutscenes=data.cutscenes||[];data.monsters=data.monsters||[];selectedCampaign=selectedNode=selectedMonster=0;render()}catch(err){alert('Could not import JSON: '+err.message)}e.target.value=''})
 render();
 </script>

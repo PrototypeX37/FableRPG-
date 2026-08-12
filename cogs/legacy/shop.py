@@ -1,6 +1,7 @@
 """Catalog and presentation helpers for the Legacy Shop."""
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -139,20 +140,45 @@ def living_legend_progress_lines(progress: dict) -> list[str]:
     ]
 
 
+def _item_access_status(
+    item_access: Mapping[str, tuple[bool, str | None]] | None,
+    item_key: str,
+) -> tuple[bool, str | None]:
+    """Return a normalized access result for one shop item."""
+
+    if not item_access or item_key not in item_access:
+        return True, None
+    allowed, reason = item_access[item_key]
+    normalized_reason = str(reason).strip() if reason else None
+    return bool(allowed), normalized_reason
+
+
+def _locked_reason_text(reason: str | None) -> str:
+    return reason or "Your faction standing does not unlock this reward."
+
+
 def _weekly_offer_line(
-    item: LegacyShopItem, points: int, weekly_purchases: dict[str, int]
+    item: LegacyShopItem,
+    points: int,
+    weekly_purchases: dict[str, int],
+    item_access: Mapping[str, tuple[bool, str | None]] | None = None,
 ) -> str:
     remaining = item.remaining_stock(weekly_purchases.get(item.key, 0))
-    if remaining == 0:
+    allowed, lock_reason = _item_access_status(item_access, item.key)
+    if not allowed:
+        marker = "🔒"
+    elif remaining == 0:
         marker = "—"
-        stock = "sold out"
     else:
         marker = "✓" if points >= item.cost else "○"
-        stock = f"{remaining}/{item.weekly_limit} left"
-    return (
+    stock = "sold out" if remaining == 0 else f"{remaining}/{item.weekly_limit} left"
+    line = (
         f"{marker} `{item.key}` **{item.name}** — **{item.cost:,} LP**\n"
         f"{item.description} · {stock}"
     )
+    if not allowed:
+        line += f"\n🔒 Locked: {_locked_reason_text(lock_reason)}"
+    return line
 
 
 def build_legacy_shop_embed(
@@ -162,6 +188,7 @@ def build_legacy_shop_embed(
     living_legend_progress: dict,
     *,
     prefix: str = "$",
+    item_access: Mapping[str, tuple[bool, str | None]] | None = None,
 ) -> discord.Embed:
     """Build a concise shop card without database or Discord I/O."""
 
@@ -178,7 +205,7 @@ def build_legacy_shop_embed(
     )
 
     weekly_items = [
-        _weekly_offer_line(item, points, weekly_purchases)
+        _weekly_offer_line(item, points, weekly_purchases, item_access)
         for item in LEGACY_SHOP_ITEMS
         if item.weekly_limit is not None
     ]
@@ -191,8 +218,13 @@ def build_legacy_shop_embed(
     badge = LEGACY_SHOP["badge"]
     requirements = "\n".join(living_legend_progress_lines(living_legend_progress))
     gate_open = not living_legend_gate_failures(living_legend_progress)
-    marker = "✓" if gate_open and points >= badge.cost else "○"
-    status = "Requirements met" if gate_open else "Requirements incomplete"
+    badge_allowed, badge_lock_reason = _item_access_status(item_access, badge.key)
+    if not badge_allowed:
+        marker = "🔒"
+        status = f"🔒 Locked: {_locked_reason_text(badge_lock_reason)}"
+    else:
+        marker = "✓" if gate_open and points >= badge.cost else "○"
+        status = "Requirements met" if gate_open else "Requirements incomplete"
     embed.add_field(
         name="Permanent reward",
         value=(

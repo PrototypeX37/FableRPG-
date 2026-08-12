@@ -2366,6 +2366,7 @@ class Quests(commands.Cog):
                     reputation_key TEXT NOT NULL,
                     points INTEGER NOT NULL DEFAULT 0,
                     rank INTEGER NOT NULL DEFAULT 0,
+                    tier_key TEXT NOT NULL DEFAULT 'neutral',
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     PRIMARY KEY (user_id, reputation_key)
                 )
@@ -2412,6 +2413,7 @@ class Quests(commands.Cog):
             "ALTER TABLE player_campaigns ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ",
             "ALTER TABLE player_reputation ADD COLUMN IF NOT EXISTS points INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE player_reputation ADD COLUMN IF NOT EXISTS rank INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE player_reputation ADD COLUMN IF NOT EXISTS tier_key TEXT NOT NULL DEFAULT 'neutral'",
             "ALTER TABLE player_reputation ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
             "ALTER TABLE content_monsters ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE content_monsters ADD COLUMN IF NOT EXISTS tier INTEGER NOT NULL DEFAULT 1",
@@ -3026,9 +3028,12 @@ class Quests(commands.Cog):
         *,
         effects: list | None = None,
         unlocks: list | None = None,
+        event_key: str = "",
+        source: str | None = None,
         conn,
     ) -> list[str]:
         messages = []
+        effect_source = str(source or f"campaign:{campaign_key}").strip()
         row = await conn.fetchrow(
             "SELECT unlocks_json FROM player_campaigns WHERE user_id=$1 AND campaign_key=$2 FOR UPDATE",
             user_id,
@@ -3036,46 +3041,111 @@ class Quests(commands.Cog):
         )
         current_unlocks = list(self._load_progress(row["unlocks_json"]) if row else [])
         for unlock in unlocks or []:
+            unlock_scope = (
+                str(unlock.get("scope") or "campaign").strip().lower()
+                if isinstance(unlock, dict)
+                else "campaign"
+            )
             unlock_key = str(unlock.get("key") if isinstance(unlock, dict) else unlock).strip()
+            if unlock_scope in {"system", "global"}:
+                system_key = normalize_system_unlock_key(unlock_key)
+                if not system_key:
+                    continue
+                result = await conn.execute(
+                    """
+                    INSERT INTO player_system_unlocks (
+                        user_id, unlock_key, source, metadata_json, unlocked_at
+                    ) VALUES ($1,$2,$3,$4,NOW())
+                    ON CONFLICT (user_id, unlock_key) DO NOTHING
+                    """,
+                    user_id,
+                    system_key,
+                    effect_source,
+                    json.dumps({"campaign_key": campaign_key}, sort_keys=True),
+                )
+                if str(result).endswith(" 1"):
+                    messages.append(f"Permanently unlocked **{system_key}**")
+                continue
             if unlock_key and unlock_key not in current_unlocks:
                 current_unlocks.append(unlock_key)
                 messages.append(f"Unlocked **{unlock_key}**")
 
-        for effect in effects or []:
+        for effect_index, effect in enumerate(effects or []):
             if not isinstance(effect, dict):
                 continue
             effect_type = str(effect.get("type") or "").strip().lower()
             key = normalize_campaign_key(effect.get("key"))
+            effect_metadata = (
+                effect.get("metadata") if isinstance(effect.get("metadata"), dict) else {}
+            )
             if effect_type == "unlock" and key:
                 if key not in current_unlocks:
                     current_unlocks.append(key)
                     messages.append(f"Unlocked **{key}**")
-            elif effect_type == "reputation" and key:
-                points = int(effect.get("points") or 0)
-                rank_delta = int(effect.get("rank_delta") or 0)
-                set_rank = effect.get("set_rank")
-                await conn.execute(
+            elif effect_type in {"system_unlock", "global_unlock"} and key:
+                result = await conn.execute(
                     """
-                    INSERT INTO player_reputation (user_id, reputation_key, points, rank, updated_at)
-                    VALUES ($1,$2,$3,$4,NOW())
-                    ON CONFLICT (user_id, reputation_key) DO UPDATE SET
-                        points=player_reputation.points + EXCLUDED.points,
-                        rank=CASE WHEN $5::INTEGER IS NULL
-                            THEN GREATEST(0, player_reputation.rank + EXCLUDED.rank)
-                            ELSE GREATEST(0, $5::INTEGER)
-                        END,
-                        updated_at=NOW()
+                    INSERT INTO player_system_unlocks (
+                        user_id, unlock_key, source, metadata_json, unlocked_at
+                    ) VALUES ($1,$2,$3,$4,NOW())
+                    ON CONFLICT (user_id, unlock_key) DO NOTHING
                     """,
                     user_id,
+                    normalize_system_unlock_key(key),
+                    effect_source,
+                    json.dumps(
+                        {"campaign_key": campaign_key, **effect_metadata},
+                        sort_keys=True,
+                    ),
+                )
+                if str(result).endswith(" 1"):
+                    messages.append(f"Permanently unlocked **{key}**")
+            elif effect_type in {"reputation", "faction_standing"} and key:
+                factions = self.bot.get_cog("Factions")
+                if factions is None:
+                    raise RuntimeError("The Factions cog is required for faction-standing effects.")
+                change = await factions.change_standing(
+                    user_id,
                     key,
-                    points,
-                    rank_delta,
-                    int(set_rank) if set_rank is not None else None,
+                    int(
+                        effect.get("points")
+                        if effect.get("points") is not None
+                        else effect.get("delta") or 0
+                    ),
+                    source=effect_source,
+                    event_key=(
+                        f"{event_key}:effect:{effect_index}" if event_key else ""
+                    ),
+                    metadata={
+                        "campaign_key": campaign_key,
+                        **effect_metadata,
+                    },
+                    rank_delta=int(effect.get("rank_delta") or 0),
+                    set_rank=effect.get("set_rank"),
+                    conn=conn,
                 )
-                messages.append(
-                    f"Reputation **{key}**: {points:+d} points"
-                    + (f", rank {int(set_rank)}" if set_rank is not None else (f", {rank_delta:+d} rank" if rank_delta else ""))
+                if change.applied and change.message():
+                    messages.append(change.message())
+            elif effect_type == "faction_membership" and key:
+                factions = self.bot.get_cog("Factions")
+                if factions is None:
+                    raise RuntimeError("The Factions cog is required for faction-membership effects.")
+                change = await factions.set_membership(
+                    user_id,
+                    key,
+                    effect.get("status") or effect.get("value") or "member",
+                    source=effect_source,
+                    event_key=(
+                        f"{event_key}:effect:{effect_index}" if event_key else ""
+                    ),
+                    metadata={
+                        "campaign_key": campaign_key,
+                        **effect_metadata,
+                    },
+                    conn=conn,
                 )
+                if change.applied and change.message():
+                    messages.append(change.message())
 
         await conn.execute(
             "UPDATE player_campaigns SET unlocks_json=$3, updated_at=NOW() WHERE user_id=$1 AND campaign_key=$2",
@@ -3144,21 +3214,22 @@ class Quests(commands.Cog):
                 node.get("requirements") or [],
                 conn=conn,
             )
-            status = "active" if node.get("type") == "quest" else "awaiting_choice"
-            await conn.execute(
-                """
-                UPDATE player_campaigns
-                SET current_node_key=$3, status=$4, updated_at=NOW()
-                WHERE user_id=$1 AND campaign_key=$2
-                """,
-                ctx.author.id,
-                campaign["key"],
-                node["id"],
-                status,
-            )
+            if allowed:
+                status = "active" if node.get("type") == "quest" else "awaiting_choice"
+                await conn.execute(
+                    """
+                    UPDATE player_campaigns
+                    SET current_node_key=$3, status=$4, updated_at=NOW()
+                    WHERE user_id=$1 AND campaign_key=$2
+                    """,
+                    ctx.author.id,
+                    campaign["key"],
+                    node["id"],
+                    status,
+                )
         if not allowed:
             await ctx.send(
-                f"**{node.get('title', 'Next Chapter')}** is now your next chapter, but it is locked:\n{reason}"
+                f"**{node.get('title', 'Next Chapter')}** is locked:\n{reason}"
             )
             return
 
@@ -3170,6 +3241,7 @@ class Quests(commands.Cog):
                         campaign["key"],
                         effects=node.get("effects") or [],
                         unlocks=node.get("unlocks") or [],
+                        event_key=f"campaign:{campaign['key']}:ending:{node['id']}",
                         conn=conn,
                     )
                     await conn.execute(
@@ -3193,11 +3265,28 @@ class Quests(commands.Cog):
 
         if node.get("type") == "choice":
             async with self.bot.pool.acquire() as conn:
-                edges = await self._available_campaign_edges(
-                    ctx.author.id,
-                    node.get("options") or [],
-                    conn=conn,
+                async with conn.transaction():
+                    messages = await self._apply_campaign_effects(
+                        ctx.author.id,
+                        campaign["key"],
+                        effects=node.get("effects") or [],
+                        unlocks=node.get("unlocks") or [],
+                        event_key=f"campaign:{campaign['key']}:choice_node:{node['id']}",
+                        conn=conn,
+                    )
+                    edges = await self._available_campaign_edges(
+                        ctx.author.id,
+                        node.get("options") or [],
+                        conn=conn,
+                    )
+            if messages:
+                await ctx.send("\n".join(messages))
+            if not edges:
+                await ctx.send(
+                    "No conversation responses are currently unlocked. "
+                    "Your faction standing or another requirement may need to change first."
                 )
+                return
             await ctx.send(embed=self._campaign_choice_embed(campaign, node, edges))
             return
 
@@ -3243,6 +3332,7 @@ class Quests(commands.Cog):
                     campaign_key,
                     effects=node.get("effects") or [],
                     unlocks=node.get("unlocks") or [],
+                    event_key=f"campaign:{campaign_key}:quest:{node_key}",
                     conn=conn,
                 )
                 edges = await self._available_campaign_edges(
@@ -3250,6 +3340,21 @@ class Quests(commands.Cog):
                     node.get("next") or [],
                     conn=conn,
                 )
+                if len(edges) == 1:
+                    edge = edges[0]
+                    consequence_messages.extend(
+                        await self._apply_campaign_effects(
+                            ctx.author.id,
+                            campaign_key,
+                            effects=edge.get("effects") or [],
+                            unlocks=edge.get("unlocks") or [],
+                            event_key=(
+                                f"campaign:{campaign_key}:auto:"
+                                f"{node_key}:{edge['target']}"
+                            ),
+                            conn=conn,
+                        )
+                    )
                 await conn.execute(
                     "UPDATE player_campaigns SET history_json=$3, updated_at=NOW() WHERE user_id=$1 AND campaign_key=$2",
                     ctx.author.id,
@@ -3500,15 +3605,16 @@ class Quests(commands.Cog):
             choices = self._load_progress(choices_raw)
             passed = self._condition_compare(choices.get(choice_key), operator, expected)
             default_text = f"Your earlier choice in **{campaign_key}** does not open this path."
-        elif condition_type == "reputation":
-            reputation = await conn.fetchrow(
-                "SELECT points, rank FROM player_reputation WHERE user_id=$1 AND reputation_key=$2",
-                user_id,
-                normalize_campaign_key(key),
-            )
-            actual = (reputation or {}).get("rank", 0) if str(condition.get("field") or "rank") == "rank" else (reputation or {}).get("points", 0)
-            passed = self._condition_compare(actual, operator, expected)
-            default_text = f"Reach reputation rank **{expected}** with **{key}**."
+        elif condition_type in {
+            "reputation",
+            "faction_standing",
+            "faction_membership",
+            "system_unlock",
+        }:
+            factions = self.bot.get_cog("Factions")
+            if factions is None:
+                return False, "Faction requirements are temporarily unavailable."
+            return await factions.evaluate_condition(user_id, condition, conn=conn)
         elif condition_type == "level":
             actual = int(rpgtools.xptolevel(profile["xp"]))
             passed = self._condition_compare(actual, operator, expected)
@@ -3604,6 +3710,16 @@ class Quests(commands.Cog):
 
     async def _user_meets_custom_access(self, user_id: int, custom_def: dict, *, conn=None) -> tuple[bool, str | None]:
         access = custom_def.get("access") or {}
+        factions = self.bot.get_cog("Factions")
+        if factions is not None:
+            allowed, reason = await factions.check_content_access(
+                user_id,
+                scope="quest",
+                target_key=custom_def.get("quest_key"),
+                conn=conn,
+            )
+            if not allowed:
+                return False, reason
         event_flag = self._normalize_event_flag(access.get("event_flag"))
         if event_flag and not self._event_flag_enabled(event_flag):
             return False, f"This quest is disabled until event flag **{self._event_flag_label(event_flag)}** is enabled."
@@ -5302,10 +5418,16 @@ class Quests(commands.Cog):
         embed.add_field(name="Current Chapter", value=node.get("title") or node["id"], inline=False)
         embed.add_field(name="Progress", value=f"{len(self._load_progress(state['history_json']) or [])} chapter(s) completed")
         if state["status"] == "awaiting_choice":
-            edges = node.get("options") if node.get("type") == "choice" else node.get("next")
+            raw_edges = node.get("options") if node.get("type") == "choice" else node.get("next")
+            async with self.bot.pool.acquire() as conn:
+                edges = await self._available_campaign_edges(
+                    ctx.author.id,
+                    raw_edges or [],
+                    conn=conn,
+                )
             embed.add_field(
                 name="Decision",
-                value="\n".join(f"{index}. {edge.get('label', 'Continue')}" for index, edge in enumerate(edges or [], 1)),
+                value="\n".join(f"{index}. {edge.get('label', 'Continue')}" for index, edge in enumerate(edges, 1)) or "No paths are currently unlocked.",
                 inline=False,
             )
             embed.set_footer(text="Choose with $campaign choose <number>")
@@ -5336,6 +5458,18 @@ class Quests(commands.Cog):
             )
             if not row or not row["is_active"]:
                 return await ctx.send("That campaign is not currently available.")
+            factions = self.bot.get_cog("Factions")
+            if factions is not None:
+                gate_allowed, gate_reason = await factions.check_content_access(
+                    ctx.author.id,
+                    scope="campaign",
+                    target_key=campaign_key,
+                    conn=conn,
+                )
+                if not gate_allowed:
+                    return await ctx.send(
+                        gate_reason or "Your faction standing does not unlock this campaign."
+                    )
             existing = await conn.fetchrow(
                 "SELECT status FROM player_campaigns WHERE user_id=$1 AND campaign_key=$2",
                 ctx.author.id,
@@ -5393,12 +5527,16 @@ class Quests(commands.Cog):
                 node = node_by_id(campaign, state["current_node_key"])
                 if not node:
                     return await ctx.send("This campaign choice points to a missing node.")
+                choices = self._load_progress(state["choices_json"])
+                if node["id"] in choices:
+                    return await ctx.send("You have already made this campaign decision.")
                 raw_edges = node.get("options") if node.get("type") == "choice" else node.get("next")
                 edges = await self._available_campaign_edges(ctx.author.id, raw_edges or [], conn=conn)
+                if not edges:
+                    return await ctx.send("No campaign paths are currently unlocked.")
                 if option < 1 or option > len(edges):
                     return await ctx.send(f"Choose a number from 1 to {len(edges)}.")
                 edge = edges[option - 1]
-                choices = self._load_progress(state["choices_json"])
                 choices[node["id"]] = edge["target"]
                 await conn.execute(
                     "UPDATE player_campaigns SET choices_json=$3, updated_at=NOW() WHERE user_id=$1 AND campaign_key=$2",
@@ -5411,6 +5549,10 @@ class Quests(commands.Cog):
                     state["campaign_key"],
                     effects=edge.get("effects") or [],
                     unlocks=edge.get("unlocks") or [],
+                    event_key=(
+                        f"campaign:{state['campaign_key']}:choice:"
+                        f"{node['id']}:{edge['target']}"
+                    ),
                     conn=conn,
                 )
         await ctx.send(f"You chose **{edge.get('label') or 'Continue'}**.")
@@ -5421,20 +5563,10 @@ class Quests(commands.Cog):
     @campaign.command(name="reputation", aliases=["rep"])
     @has_char()
     async def campaign_reputation(self, ctx):
-        rows = await self.bot.pool.fetch(
-            "SELECT reputation_key, points, rank FROM player_reputation WHERE user_id=$1 ORDER BY rank DESC, points DESC, reputation_key",
-            ctx.author.id,
-        )
-        if not rows:
-            return await ctx.send("You have not earned reputation with any faction yet.")
-        embed = discord.Embed(title="Reputation", color=0x5D2E12)
-        for row in rows[:20]:
-            embed.add_field(
-                name=str(row["reputation_key"]).replace("_", " ").title(),
-                value=f"Rank **{row['rank']}** | **{row['points']}** points",
-                inline=True,
-            )
-        await ctx.send(embed=embed)
+        factions = self.bot.get_cog("Factions")
+        if factions is None:
+            return await ctx.send("Faction standing is temporarily unavailable.")
+        await factions.send_overview(ctx)
 
     @quests.command(name="abandon", aliases=["cancel", "drop"])
     @has_char()

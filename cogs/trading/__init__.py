@@ -19,6 +19,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import datetime
 import time
 import datetime as dt
+import logging
 import random
 import uuid
 from contextlib import suppress
@@ -39,6 +40,9 @@ from classes.items import ALL_ITEM_TYPES, ItemType
 from cogs.shard_communication import user_on_cooldown as user_cooldown
 from utils.checks import has_char, has_money, is_gm
 from utils.i18n import _, locale_doc
+
+
+logger = logging.getLogger(__name__)
 
 
 class MarketFilterModal(discord.ui.Modal, title="Filter Player Market"):
@@ -316,7 +320,36 @@ class Trading(commands.Cog):
 
         self.player_item_cache = {}
 
-
+    async def _check_trader_access(
+        self,
+        user_id: int,
+        *,
+        offer_type: str | None = None,
+        conn=None,
+    ) -> tuple[bool, str | None]:
+        """Evaluate shared shop gates for the NPC Trader."""
+        factions = self.bot.get_cog("Factions")
+        if factions is None:
+            return True, None
+        checker = getattr(factions, "check_content_access", None)
+        if not callable(checker):
+            logger.error("Factions cog does not expose check_content_access")
+            return False, "Faction access rules are temporarily unavailable."
+        try:
+            return await checker(
+                int(user_id),
+                scope="shop",
+                target_key="trader",
+                subtarget_key=offer_type,
+                conn=conn,
+            )
+        except Exception:
+            logger.exception(
+                "Could not check Trader access for user %s and offer type %s",
+                user_id,
+                offer_type,
+            )
+            return False, "The Trader could not verify your faction standing. Please try again."
 
     def get_current_time(self):
         return datetime.datetime.utcnow()
@@ -1877,6 +1910,12 @@ class Trading(commands.Cog):
 
         try:
             player_id = ctx.author.id
+            shop_allowed, shop_reason = await self._check_trader_access(player_id)
+            if not shop_allowed:
+                return await ctx.send(
+                    f"🔒 The **Trader** is unavailable.\n"
+                    f"{shop_reason or 'Your faction standing does not grant access.'}"
+                )
 
             cached_offers = self.player_item_cache.get(player_id, [])
             if isinstance(cached_offers, dict):
@@ -1895,8 +1934,23 @@ class Trading(commands.Cog):
                 self.player_item_cache[player_id],
                 key=self._get_trader_offer_priority,
             )
+            visible_offers = []
+            first_lock_reason = None
+            for offer in offers:
+                allowed, reason = await self._check_trader_access(
+                    player_id,
+                    offer_type=offer.get("offer_type"),
+                )
+                if allowed:
+                    visible_offers.append(offer)
+                elif first_lock_reason is None:
+                    first_lock_reason = reason
+            offers = visible_offers
             if not offers:
-                return await ctx.send("There are no trader offers available at the moment.")
+                message = "There are no trader offers available at the moment."
+                if first_lock_reason:
+                    message += f"\n🔒 {first_lock_reason}"
+                return await ctx.send(message)
 
             first_item_timestamp = offers[0]["timestamp"]
             time_left = self.get_time_until_expiry(first_item_timestamp, 12)
@@ -2000,10 +2054,23 @@ class Trading(commands.Cog):
                 embed.add_field(name="Price", value=self._format_price(price))
 
             async with self.bot.pool.acquire() as conn:
-                if not await has_money(self.bot, ctx.author.id, price, conn=conn):
-                    return await ctx.send("You are too poor to buy this offer.")
-
                 async with conn.transaction():
+                    purchase_allowed, purchase_reason = await self._check_trader_access(
+                        ctx.author.id,
+                        offer_type=offer_type,
+                        conn=conn,
+                    )
+                    if not purchase_allowed:
+                        return await ctx.send(
+                            f"🔒 This Trader offer is locked.\n"
+                            f"{purchase_reason or 'Your faction standing no longer grants access.'}"
+                        )
+                    money = await conn.fetchval(
+                        'SELECT money FROM profile WHERE "user"=$1 FOR UPDATE;',
+                        ctx.author.id,
+                    )
+                    if money is None or int(money) < int(price):
+                        return await ctx.send("You are too poor to buy this offer.")
                     await conn.execute(
                         'UPDATE profile SET "money" = "money" - $1 WHERE "user" = $2;',
                         price,
