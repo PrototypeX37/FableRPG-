@@ -1525,17 +1525,43 @@ class Trading(commands.Cog):
                     )
                 )
 
-            if equipped:
-                if not await ctx.confirm(
-                        _(
-                            "You are about to sell {amount} equipped items. Are you sure?"
-                        ).format(amount=equipped),
-                        timeout=6,
-                ):
-                    return await ctx.send(_("Cancelled."))
             buildings = await self.bot.get_city_buildings(
                 ctx.character_data["guild"]
             )
+            estimated_value = value
+            if buildings:
+                estimated_value = int(
+                    estimated_value * (1 + buildings["trade_building"] / 2)
+                )
+            visible_ids = ", ".join(str(item["id"]) for item in allitems[:10])
+            hidden_count = max(0, amount - 10)
+            equipped_warning = (
+                _("\n⚔️ **Warning:** {amount} of these items are currently equipped.").format(
+                    amount=equipped
+                )
+                if equipped
+                else ""
+            )
+            more_items = (
+                _(" and {amount} more").format(amount=hidden_count)
+                if hidden_count
+                else ""
+            )
+            if not await ctx.confirm(
+                _(
+                    "💰 Sell **{amount} item(s)** to the merchant for **${value:,}**?\n"
+                    "Item IDs: `{itemids}`{more_items}{equipped_warning}\n\n"
+                    "⚠️ **This permanently destroys the items and cannot be undone.**"
+                ).format(
+                    amount=amount,
+                    value=estimated_value,
+                    itemids=visible_ids,
+                    more_items=more_items,
+                    equipped_warning=equipped_warning,
+                ),
+                timeout=30,
+            ):
+                return await ctx.send(_("Cancelled. No items were sold."))
             async with conn.transaction():
                 # Re-select the items WITH A LOCK inside the transaction and
                 # compute the payout from the rows we actually delete. This stops

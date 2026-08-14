@@ -26,3 +26,10 @@ assets/html/campaign_editor.html
 cogs/quests/data/builtin_campaigns/README.md
 tests/test_campaign_content.py
 tests/test_fable_engine.py
+assets/html/campaign_editor_mobile.html
+assets/html/campaign_editor.html
+CAMPAIGN_AUTHORING_GUIDE.md
+tests/test_campaign_runtime_hardening.py
+tests/test_campaign_hardening.py
+tests/test_campaign_editor_contract.py
+tests/test_armory_merchant_confirmation.py

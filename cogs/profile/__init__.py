@@ -182,7 +182,12 @@ class ArmoryActionSelect(discord.ui.Select):
             discord.SelectOption(label="Unequip" if equipped else "Equip", value="unequip" if equipped else "equip", emoji="⚔️"),
             discord.SelectOption(label="Unlock" if locked else "Lock", value="unlock" if locked else "lock", emoji="🔒"),
             discord.SelectOption(label="Compare with Equipped", value="compare", emoji="📊"),
-            discord.SelectOption(label="Sell to Merchant", value="merchant", emoji="💰"),
+            discord.SelectOption(
+                label="Sell to Merchant",
+                value="merchant",
+                emoji="💰",
+                description="Requires confirmation before the item is destroyed",
+            ),
             discord.SelectOption(label="List on Player Market", value="market", emoji="🏷️"),
         ]
         super().__init__(

@@ -14,8 +14,12 @@ SCHEMA_NAME = "fablereborn.campaign-package"
 SCHEMA_VERSION = 2
 SUPPORTED_SCHEMA_VERSIONS = {1, 2}
 
-NODE_TYPES = {"quest", "choice", "dialogue", "scene", "travel", "scenario", "ending"}
+NODE_TYPES = {
+    "quest", "choice", "dialogue", "scene", "travel", "scenario",
+    "warfront", "ending",
+}
 CHOICE_NODE_TYPES = {"choice", "dialogue"}
+MAX_PROMPT_OPTIONS = 20
 OBJECTIVE_SOURCES = {
     "none",
     "pve",
@@ -71,6 +75,7 @@ CONDITION_TYPES = {
     "relationship",
     "location_state",
     "war_state",
+    "fable_reward",
 }
 CONDITION_OPERATORS = {
     "=",
@@ -116,6 +121,14 @@ MODEL_EFFECT_TYPES = {
     "war_increment",
 }
 COLLECTION_EFFECT_TYPES = {"fable_reward", "collection_reward"}
+DIRECT_UNLOCK_EFFECT_TYPES = {"unlock", "system_unlock", "global_unlock"}
+EFFECT_TYPES = (
+    FACTION_EFFECT_TYPES
+    | STORY_STATE_EFFECT_TYPES
+    | MODEL_EFFECT_TYPES
+    | COLLECTION_EFFECT_TYPES
+    | DIRECT_UNLOCK_EFFECT_TYPES
+)
 CONDITION_GROUP_KEYS = {"all", "any", "not"}
 FACTION_MEMBERSHIP_OPERATORS = {"=", "==", "is", "!=", "is_not"}
 FACTION_STANDING_EFFECT_NUMERIC_FIELDS = (
@@ -338,6 +351,34 @@ def _positive_int(value: object, default: int = 1) -> int:
         return default
 
 
+def _bounded_int_or_original(
+    value: object,
+    default: int,
+    *,
+    minimum: int = 0,
+    maximum: int | None = None,
+) -> object:
+    """Normalize valid integers without hiding authoring mistakes from validation."""
+    raw = default if value in (None, "") else value
+    if isinstance(raw, bool):
+        return raw
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return raw
+    if isinstance(raw, float) and not raw.is_integer():
+        return raw
+    if isinstance(raw, str) and str(parsed) != raw.strip():
+        return raw
+    # Preserve out-of-range integers so the validator can give the author a
+    # precise error instead of silently changing campaign balance.
+    return parsed
+
+
+def _is_integer(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def new_package() -> dict:
     return {
         "schema": SCHEMA_NAME,
@@ -405,6 +446,17 @@ def build_reference_catalog(monsters: list[dict]) -> dict:
                 "Use state/story_state conditions with dotted keys and state_set, "
                 "state_increment, state_add, state_remove, or state_delete effects."
             ),
+            "chronicle_replay": (
+                "Completed canonical snapshots can be replayed as isolated chronicle runs."
+            ),
+            "campaign_systems": (
+                "Campaigns may define companions, camp scenes, autonomous events, "
+                "locations, services, homes, and a configurable active party."
+            ),
+            "warfront": (
+                "Warfront nodes resolve assigned force power across simultaneous fronts "
+                "and require unconditional fail-forward outcome coverage."
+            ),
         },
     }
 
@@ -433,6 +485,15 @@ def normalize_package(raw: object) -> dict:
         campaign["is_active"] = bool(campaign.get("is_active", False))
         campaign["nodes"] = _as_list(campaign.get("nodes"))
         campaign["requirements"] = _normalize_conditions(campaign.get("requirements"))
+        campaign["epilogue"] = _normalize_epilogue(campaign.get("epilogue"), "campaign")
+        campaign["party_size"] = _bounded_int_or_original(
+            campaign.get("party_size"), 2, minimum=1, maximum=4
+        )
+        campaign["companions"] = _normalize_companions(campaign.get("companions"))
+        campaign["locations"] = _normalize_locations(campaign.get("locations"))
+        campaign["autonomous_events"] = _normalize_autonomous_events(
+            campaign.get("autonomous_events")
+        )
 
         for node in campaign["nodes"]:
             if not isinstance(node, dict):
@@ -447,10 +508,12 @@ def normalize_package(raw: object) -> dict:
             node["cutscenes"] = _as_dict(node.get("cutscenes"))
             node["encounter"] = _as_dict(node.get("encounter"))
             node["scenario"] = _normalize_scenario(node.get("scenario"), node["id"])
+            node["warfront"] = _normalize_warfront(node.get("warfront"), node["id"])
             node["location_key"] = normalize_key(node.get("location_key"))
             node["unlocks"] = _as_list(node.get("unlocks"))
             node["effects"] = _normalize_effects(node.get("effects"))
             node["requirements"] = _normalize_conditions(node.get("requirements"))
+            node["epilogue"] = _normalize_epilogue(node.get("epilogue"), node["id"])
             node["quest"]["requirements"] = _normalize_conditions(
                 node["quest"].get("requirements")
             )
@@ -458,6 +521,31 @@ def normalize_package(raw: object) -> dict:
     for quest in package["standalone_quests"]:
         if not isinstance(quest, dict):
             continue
+        quest["quest_key"] = normalize_key(quest.get("quest_key"))
+        quest["name"] = str(
+            quest.get("name") or quest["quest_key"].replace("_", " ").title()
+        )
+        quest["category"] = str(quest.get("category") or "General")
+        quest["objective"] = _as_dict(quest.get("objective"))
+        quest["objective"]["source"] = str(
+            quest["objective"].get("source") or "none"
+        ).strip().lower()
+        quest["objective"]["mode"] = str(
+            quest["objective"].get("mode") or "progress"
+        ).strip().lower()
+        quest["turnin"] = _as_dict(quest.get("turnin"))
+        quest["turnin"]["type"] = str(
+            quest["turnin"].get("type") or "progress"
+        ).strip().lower()
+        quest["reward"] = _as_dict(quest.get("reward")) or {"type": "none"}
+        quest["reward"]["type"] = str(
+            quest["reward"].get("type") or "none"
+        ).strip().lower()
+        quest["prerequisites"] = [
+            normalize_key(prerequisite)
+            for prerequisite in _as_list(quest.get("prerequisites"))
+            if normalize_key(prerequisite)
+        ]
         quest["access"] = _as_dict(quest.get("access"))
         quest["access"]["conditions"] = _normalize_conditions(
             quest["access"].get("conditions")
@@ -549,11 +637,264 @@ def _normalize_scenario(raw: object, node_id: str) -> dict:
     return scenario
 
 
+def _normalize_companions(raw: object) -> list[dict]:
+    companions = []
+    for companion in _as_list(raw):
+        if not isinstance(companion, dict):
+            companions.append(companion)
+            continue
+        normalized = copy.deepcopy(companion)
+        normalized["key"] = normalize_key(companion.get("key") or companion.get("name"))
+        normalized["name"] = str(
+            companion.get("name") or normalized["key"].replace("_", " ").title()
+        ).strip()
+        normalized["role"] = str(companion.get("role") or "Companion").strip()
+        normalized["description"] = str(companion.get("description") or "").strip()
+        normalized["conditions"] = _normalize_conditions(companion.get("conditions"))
+        normalized["scenes"] = []
+        for index, scene in enumerate(_as_list(companion.get("scenes")), start=1):
+            if not isinstance(scene, dict):
+                normalized["scenes"].append(scene)
+                continue
+            scene_data = copy.deepcopy(scene)
+            scene_data["id"] = normalize_key(
+                scene.get("id") or f"{normalized['key']}_scene_{index}"
+            )
+            scene_data["title"] = str(
+                scene.get("title") or scene_data["id"].replace("_", " ").title()
+            ).strip()
+            scene_data["text"] = str(scene.get("text") or "").strip()
+            scene_data["order"] = _bounded_int_or_original(
+                scene.get("order"), index * 10, minimum=0
+            )
+            scene_data["once"] = bool(scene.get("once", True))
+            scene_data["requires_party"] = bool(scene.get("requires_party", False))
+            scene_data["participants"] = [
+                normalize_key(value)
+                for value in _as_list(scene.get("participants") or [normalized["key"]])
+                if normalize_key(value)
+            ]
+            scene_data["conditions"] = _normalize_conditions(scene.get("conditions"))
+            scene_data["effects"] = _normalize_effects(scene.get("effects"))
+            scene_data["unlocks"] = _as_list(scene.get("unlocks"))
+            normalized["scenes"].append(scene_data)
+        companions.append(normalized)
+    return companions
+
+
+def _normalize_locations(raw: object) -> list[dict]:
+    locations = []
+    for location in _as_list(raw):
+        if not isinstance(location, dict):
+            locations.append(location)
+            continue
+        normalized = copy.deepcopy(location)
+        normalized["key"] = normalize_key(location.get("key") or location.get("name"))
+        normalized["name"] = str(
+            location.get("name") or normalized["key"].replace("_", " ").title()
+        ).strip()
+        normalized["description"] = str(location.get("description") or "").strip()
+        normalized["travel_node"] = normalize_key(location.get("travel_node"))
+        normalized["home"] = bool(location.get("home", False))
+        normalized["conditions"] = _normalize_conditions(location.get("conditions"))
+        normalized["services"] = []
+        for service in _as_list(location.get("services")):
+            if not isinstance(service, dict):
+                normalized["services"].append(service)
+                continue
+            service_data = copy.deepcopy(service)
+            service_data["key"] = normalize_key(service.get("key") or service.get("name"))
+            service_data["name"] = str(
+                service.get("name") or service_data["key"].replace("_", " ").title()
+            ).strip()
+            service_data["description"] = str(service.get("description") or "").strip()
+            service_data["command"] = str(service.get("command") or "").strip()
+            service_data["conditions"] = _normalize_conditions(service.get("conditions"))
+            normalized["services"].append(service_data)
+        locations.append(normalized)
+    return locations
+
+
+def _normalize_autonomous_events(raw: object) -> list[dict]:
+    events = []
+    for index, event in enumerate(_as_list(raw), start=1):
+        if not isinstance(event, dict):
+            events.append(event)
+            continue
+        normalized = copy.deepcopy(event)
+        normalized["id"] = normalize_key(event.get("id") or f"autonomous_event_{index}")
+        normalized["trigger_node"] = normalize_key(event.get("trigger_node"))
+        normalized["title"] = str(event.get("title") or "Companion Decision").strip()
+        normalized["text"] = str(event.get("text") or "").strip()
+        normalized["redirect_target"] = normalize_key(event.get("redirect_target"))
+        normalized["conditions"] = _normalize_conditions(event.get("conditions"))
+        normalized["effects"] = _normalize_effects(event.get("effects"))
+        normalized["unlocks"] = _as_list(event.get("unlocks"))
+        events.append(normalized)
+    return events
+
+
+def _normalize_warfront(raw: object, node_id: str) -> dict:
+    warfront = _as_dict(raw)
+    if not warfront:
+        return {}
+    warfront["key"] = normalize_key(warfront.get("key") or node_id)
+    warfront["title"] = str(
+        warfront.get("title") or warfront["key"].replace("_", " ").title()
+    ).strip()
+    warfront["description"] = str(warfront.get("description") or "").strip()
+    warfront["player_power"] = _bounded_int_or_original(
+        warfront.get("player_power"), 100, minimum=0
+    )
+    warfront["fronts"] = _as_list(warfront.get("fronts"))
+    warfront["assets"] = _as_list(warfront.get("assets"))
+    warfront["outcomes"] = _as_list(warfront.get("outcomes"))
+    for front in warfront["fronts"]:
+        if not isinstance(front, dict):
+            continue
+        front["id"] = normalize_key(front.get("id"))
+        front["title"] = str(front.get("title") or front["id"].replace("_", " ").title())
+        front["description"] = str(front.get("description") or "").strip()
+        front["difficulty"] = _bounded_int_or_original(
+            front.get("difficulty"), 100, minimum=0
+        )
+        front["base_power"] = _bounded_int_or_original(
+            front.get("base_power"), 0, minimum=0
+        )
+        front["max_assets"] = _bounded_int_or_original(
+            front.get("max_assets"), 1, minimum=0, maximum=5
+        )
+        front["conditions"] = _normalize_conditions(front.get("conditions"))
+        front["success_effects"] = _normalize_effects(front.get("success_effects"))
+        front["failure_effects"] = _normalize_effects(front.get("failure_effects"))
+        front["success_unlocks"] = _as_list(front.get("success_unlocks"))
+        front["failure_unlocks"] = _as_list(front.get("failure_unlocks"))
+    for asset in warfront["assets"]:
+        if not isinstance(asset, dict):
+            continue
+        asset["key"] = normalize_key(asset.get("key") or asset.get("name"))
+        asset["name"] = str(asset.get("name") or asset["key"].replace("_", " ").title())
+        asset["description"] = str(asset.get("description") or "").strip()
+        asset["power"] = _bounded_int_or_original(
+            asset.get("power"), 0, minimum=0
+        )
+        asset["conditions"] = _normalize_conditions(asset.get("conditions"))
+    for outcome in warfront["outcomes"]:
+        if not isinstance(outcome, dict):
+            continue
+        outcome["id"] = normalize_key(outcome.get("id"))
+        outcome["title"] = str(outcome.get("title") or outcome["id"].replace("_", " ").title())
+        outcome["description"] = str(outcome.get("description") or "").strip()
+        outcome["minimum_successes"] = _bounded_int_or_original(
+            outcome.get("minimum_successes"), 0, minimum=0
+        )
+        maximum = outcome.get("maximum_successes")
+        outcome["maximum_successes"] = (
+            None
+            if maximum in (None, "")
+            else _bounded_int_or_original(maximum, 0, minimum=0)
+        )
+        outcome["target"] = normalize_key(outcome.get("target"))
+        outcome["conditions"] = _normalize_conditions(outcome.get("conditions"))
+        outcome["effects"] = _normalize_effects(outcome.get("effects"))
+        outcome["unlocks"] = _as_list(outcome.get("unlocks"))
+    return warfront
+
+
+def resolve_warfront(
+    warfront: dict,
+    assignments: Mapping[str, object] | None,
+    player_front: object,
+    available_assets: list[dict],
+    *,
+    eligible_outcome_ids: set[str] | None = None,
+) -> dict:
+    """Resolve one authored warfront plan without Discord or database state.
+
+    The caller determines which conditional assets and outcomes are currently
+    eligible. This function owns allocation integrity, power calculation, and
+    fail-forward result selection, making the core operation deterministic and
+    independently testable.
+    """
+    fronts = [front for front in warfront.get("fronts") or [] if isinstance(front, dict)]
+    fronts_by_id = {str(front.get("id") or ""): front for front in fronts}
+    player_front_key = normalize_key(player_front)
+    if not player_front_key or player_front_key not in fronts_by_id:
+        raise ValueError("Choose a valid front for the player to lead.")
+
+    assets_by_key = {
+        normalize_key(asset.get("key")): asset
+        for asset in available_assets or []
+        if isinstance(asset, dict) and normalize_key(asset.get("key"))
+    }
+    normalized_assignments: dict[str, list[str]] = {front_id: [] for front_id in fronts_by_id}
+    seen_assets: set[str] = set()
+    for raw_front, raw_assets in dict(assignments or {}).items():
+        front_id = normalize_key(raw_front)
+        if front_id not in fronts_by_id:
+            raise ValueError(f"Assignment references unknown front `{front_id}`.")
+        keys = [normalize_key(key) for key in _as_list(raw_assets)]
+        keys = [key for key in keys if key]
+        if len(keys) > int(fronts_by_id[front_id].get("max_assets") or 0):
+            raise ValueError(f"Front `{front_id}` has too many assigned assets.")
+        for key in keys:
+            if key not in assets_by_key:
+                raise ValueError(f"Asset `{key}` is not currently available.")
+            if key in seen_assets:
+                raise ValueError(f"Asset `{key}` is assigned to more than one front.")
+            seen_assets.add(key)
+        normalized_assignments[front_id] = keys
+
+    results = []
+    for front in fronts:
+        front_id = front["id"]
+        assigned_keys = normalized_assignments[front_id]
+        power = int(front.get("base_power") or 0)
+        power += sum(int(assets_by_key[key].get("power") or 0) for key in assigned_keys)
+        personally_led = player_front_key == front_id
+        if personally_led:
+            power += int(warfront.get("player_power") or 0)
+        difficulty = int(front.get("difficulty") or 0)
+        results.append(
+            {
+                "front": front_id,
+                "title": front.get("title") or front_id,
+                "power": power,
+                "difficulty": difficulty,
+                "success": power >= difficulty,
+                "assigned": assigned_keys,
+                "player": personally_led,
+            }
+        )
+
+    success_count = sum(1 for result in results if result["success"])
+    outcome = None
+    for candidate in warfront.get("outcomes") or []:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_id = normalize_key(candidate.get("id"))
+        if eligible_outcome_ids is not None and candidate_id not in eligible_outcome_ids:
+            continue
+        minimum = int(candidate.get("minimum_successes") or 0)
+        maximum = candidate.get("maximum_successes")
+        maximum = len(results) if maximum is None else int(maximum)
+        if minimum <= success_count <= maximum:
+            outcome = candidate
+            break
+    if outcome is None:
+        raise ValueError("No eligible fail-forward outcome covers this result.")
+    return {
+        "outcome": outcome,
+        "successes": success_count,
+        "fronts": results,
+    }
+
+
 def _normalize_condition_leaf(condition: dict) -> dict:
     condition_type = str(condition.get("type") or "").strip().lower()
     default_operator = (
         "=="
-        if condition_type in {"faction_membership", "system_unlock"}
+        if condition_type in {"faction_membership", "system_unlock", "fable_reward"}
         else ">="
     )
     if condition_type in STORY_STATE_CONDITION_TYPES:
@@ -571,6 +912,9 @@ def _normalize_condition_leaf(condition: dict) -> dict:
     elif condition_type in STORY_STATE_CONDITION_TYPES:
         key = normalize_state_key(key)
     elif condition_type in MODEL_CONDITION_TYPES:
+        key = normalize_key(key)
+        field = normalize_key(field)
+    elif condition_type == "fable_reward":
         key = normalize_key(key)
         field = normalize_key(field)
     if condition_type == "faction_membership" and isinstance(value, str):
@@ -655,6 +999,31 @@ def _normalize_effects(raw: object) -> list[dict]:
     return effects
 
 
+def _normalize_epilogue(raw: object, owner_key: str) -> list[dict]:
+    fragments = []
+    for index, fragment in enumerate(_as_list(raw), start=1):
+        if not isinstance(fragment, dict):
+            fragments.append(fragment)
+            continue
+        normalized = copy.deepcopy(fragment)
+        normalized["id"] = normalize_key(
+            fragment.get("id") or f"{owner_key}_epilogue_{index}"
+        )
+        normalized["title"] = str(fragment.get("title") or "Aftermath").strip()
+        normalized["text"] = str(fragment.get("text") or "").strip()
+        raw_order = fragment.get("order", index * 10)
+        if isinstance(raw_order, bool):
+            normalized["order"] = raw_order
+        else:
+            try:
+                normalized["order"] = int(raw_order)
+            except (TypeError, ValueError):
+                normalized["order"] = raw_order
+        normalized["conditions"] = _normalize_conditions(fragment.get("conditions"))
+        fragments.append(normalized)
+    return fragments
+
+
 def validate_package(raw: object) -> dict:
     package = normalize_package(raw)
     errors: list[str] = []
@@ -690,12 +1059,18 @@ def validate_package(raw: object) -> dict:
             f"Campaign `{campaign_key}`",
             errors,
         )
+        _validate_epilogue(
+            campaign.get("epilogue"),
+            f"Campaign `{campaign_key}`",
+            errors,
+        )
         if not campaign.get("start_node"):
             errors.append(f"Campaign `{campaign_key}` needs a start_node.")
         elif campaign["start_node"] not in known_nodes:
             errors.append(
                 f"Campaign `{campaign_key}` start_node `{campaign['start_node']}` does not exist."
             )
+        _validate_campaign_systems(campaign, known_nodes, errors)
 
         seen_nodes: set[str] = set()
         for node_index, node in enumerate(nodes, start=1):
@@ -719,6 +1094,11 @@ def validate_package(raw: object) -> dict:
                 errors.append(f"Choice node `{node_id}` needs at least two options.")
             if node_type == "dialogue" and not edges:
                 errors.append(f"Dialogue node `{node_id}` needs at least one response.")
+            if len(edges or []) > MAX_PROMPT_OPTIONS:
+                errors.append(
+                    f"Node `{node_id}` has more than {MAX_PROMPT_OPTIONS} transitions; "
+                    "split it into smaller player prompts."
+                )
             if node_type in {"scene", "travel"} and not edges:
                 errors.append(f"{node_type.title()} node `{node_id}` needs a next transition.")
             if node_type == "travel" and not node.get("location_key"):
@@ -740,14 +1120,23 @@ def validate_package(raw: object) -> dict:
                     f"Node `{node_id}` transition to `{edge.get('target')}`",
                     errors,
                 )
+                _validate_unlocks(
+                    edge.get("unlocks"),
+                    f"Node `{node_id}` transition to `{edge.get('target')}`",
+                    errors,
+                )
 
             _validate_conditions(node.get("requirements"), f"Node `{node_id}`", errors)
             _validate_effects(node.get("effects"), f"Node `{node_id}`", errors)
+            _validate_unlocks(node.get("unlocks"), f"Node `{node_id}`", errors)
+            _validate_epilogue(node.get("epilogue"), f"Node `{node_id}`", errors)
 
             if node_type == "quest":
                 _validate_quest_node(campaign_key, node, quest_keys, errors)
             elif node_type == "scenario":
                 _validate_scenario_node(campaign_key, node, known_nodes, errors)
+            elif node_type == "warfront":
+                _validate_warfront_node(campaign_key, node, known_nodes, errors)
 
         if package.get("schema_version") == 2:
             _validate_campaign_graph(campaign, errors)
@@ -757,6 +1146,13 @@ def validate_package(raw: object) -> dict:
         if not isinstance(quest, dict):
             errors.append(f"{owner} must be an object.")
             continue
+        quest_key = normalize_key(quest.get("quest_key"))
+        if not quest_key:
+            errors.append(f"{owner}.quest_key is required.")
+        elif quest_key in quest_keys:
+            errors.append(f"Duplicate quest key `{quest_key}`.")
+        quest_keys.add(quest_key)
+        _validate_quest_payload(quest_key or owner, quest, errors)
         _validate_conditions(
             (_as_dict(quest.get("access"))).get("conditions"),
             owner,
@@ -786,6 +1182,128 @@ def validate_package(raw: object) -> dict:
     return package
 
 
+def _validate_campaign_systems(
+    campaign: dict,
+    known_nodes: set[str],
+    errors: list[str],
+) -> None:
+    owner = f"Campaign `{campaign.get('key') or 'campaign'}`"
+    party_size = campaign.get("party_size")
+    if not _is_integer(party_size) or not 1 <= party_size <= 4:
+        errors.append(f"{owner} party_size must be an integer from 1 to 4.")
+    companion_keys: set[str] = set()
+    scene_ids: set[str] = set()
+    for companion in campaign.get("companions") or []:
+        if not isinstance(companion, dict):
+            errors.append(f"{owner} contains a companion that is not an object.")
+            continue
+        key = companion.get("key")
+        if not key:
+            errors.append(f"{owner} has a companion without a key.")
+        elif key in companion_keys:
+            errors.append(f"{owner} has duplicate companion `{key}`.")
+        companion_keys.add(key)
+        _validate_conditions(companion.get("conditions"), f"{owner} companion `{key}`", errors)
+        for scene in companion.get("scenes") or []:
+            if not isinstance(scene, dict):
+                errors.append(f"{owner} companion `{key}` has a scene that is not an object.")
+                continue
+            scene_id = scene.get("id")
+            if not scene_id:
+                errors.append(f"{owner} companion `{key}` has a scene without an id.")
+            elif scene_id in scene_ids:
+                errors.append(f"{owner} has duplicate camp scene `{scene_id}`.")
+            scene_ids.add(scene_id)
+            if not str(scene.get("text") or "").strip():
+                errors.append(f"{owner} camp scene `{scene_id}` needs player-facing text.")
+            if not _is_integer(scene.get("order")) or scene.get("order", 0) < 0:
+                errors.append(
+                    f"{owner} camp scene `{scene_id}` order must be a non-negative integer."
+                )
+            for participant in scene.get("participants") or []:
+                if participant not in companion_keys and participant != key:
+                    # A later companion may still be valid; checked after collection below.
+                    pass
+            _validate_conditions(scene.get("conditions"), f"{owner} camp scene `{scene_id}`", errors)
+            _validate_effects(scene.get("effects"), f"{owner} camp scene `{scene_id}`", errors)
+            _validate_unlocks(scene.get("unlocks"), f"{owner} camp scene `{scene_id}`", errors)
+    for companion in campaign.get("companions") or []:
+        if not isinstance(companion, dict):
+            continue
+        for scene in companion.get("scenes") or []:
+            if not isinstance(scene, dict):
+                continue
+            for participant in scene.get("participants") or []:
+                if participant not in companion_keys:
+                    errors.append(
+                        f"{owner} camp scene `{scene.get('id')}` references missing companion `{participant}`."
+                    )
+
+    location_keys: set[str] = set()
+    service_keys: set[str] = set()
+    for location in campaign.get("locations") or []:
+        if not isinstance(location, dict):
+            errors.append(f"{owner} contains a location that is not an object.")
+            continue
+        key = location.get("key")
+        if not key:
+            errors.append(f"{owner} has a location without a key.")
+        elif key in location_keys:
+            errors.append(f"{owner} has duplicate location `{key}`.")
+        location_keys.add(key)
+        if location.get("travel_node") and location["travel_node"] not in known_nodes:
+            errors.append(
+                f"{owner} location `{key}` points to missing travel node `{location['travel_node']}`."
+            )
+        _validate_conditions(location.get("conditions"), f"{owner} location `{key}`", errors)
+        local_services: set[str] = set()
+        for service in location.get("services") or []:
+            if not isinstance(service, dict):
+                errors.append(f"{owner} location `{key}` has a service that is not an object.")
+                continue
+            service_key = service.get("key")
+            if not service_key:
+                errors.append(f"{owner} location `{key}` has a service without a key.")
+            elif service_key in local_services:
+                errors.append(f"{owner} location `{key}` repeats service `{service_key}`.")
+            elif service_key in service_keys:
+                errors.append(
+                    f"{owner} repeats service key `{service_key}` across locations."
+                )
+            local_services.add(service_key)
+            service_keys.add(service_key)
+            if not service.get("command"):
+                errors.append(f"{owner} service `{service_key}` needs a launch command.")
+            _validate_conditions(service.get("conditions"), f"{owner} service `{service_key}`", errors)
+
+    event_ids: set[str] = set()
+    for event in campaign.get("autonomous_events") or []:
+        if not isinstance(event, dict):
+            errors.append(f"{owner} contains an autonomous event that is not an object.")
+            continue
+        event_id = event.get("id")
+        if not event_id:
+            errors.append(f"{owner} has an autonomous event without an id.")
+        elif event_id in event_ids:
+            errors.append(f"{owner} has duplicate autonomous event `{event_id}`.")
+        event_ids.add(event_id)
+        if event.get("trigger_node") not in known_nodes:
+            errors.append(
+                f"{owner} autonomous event `{event_id}` has a missing trigger node."
+            )
+        if event.get("redirect_target") and event["redirect_target"] not in known_nodes:
+            errors.append(
+                f"{owner} autonomous event `{event_id}` points to missing redirect `{event['redirect_target']}`."
+            )
+        if event.get("redirect_target") == event.get("trigger_node"):
+            errors.append(f"{owner} autonomous event `{event_id}` redirects to its own trigger.")
+        if not str(event.get("text") or "").strip():
+            errors.append(f"{owner} autonomous event `{event_id}` needs player-facing text.")
+        _validate_conditions(event.get("conditions"), f"{owner} event `{event_id}`", errors)
+        _validate_effects(event.get("effects"), f"{owner} event `{event_id}`", errors)
+        _validate_unlocks(event.get("unlocks"), f"{owner} event `{event_id}`", errors)
+
+
 def _validate_campaign_graph(campaign: dict, errors: list[str]) -> None:
     """Reject V2 story graphs with unreachable chapters or no route to an ending."""
     campaign_key = campaign.get("key") or "campaign"
@@ -807,6 +1325,12 @@ def _validate_campaign_graph(campaign: dict, errors: list[str]) -> None:
             edges = [
                 {"target": outcome.get("target")}
                 for outcome in (node.get("scenario") or {}).get("outcomes") or []
+                if isinstance(outcome, dict)
+            ]
+        elif node_type == "warfront":
+            edges = [
+                {"target": outcome.get("target")}
+                for outcome in (node.get("warfront") or {}).get("outcomes") or []
                 if isinstance(outcome, dict)
             ]
         else:
@@ -877,11 +1401,21 @@ def _validate_scenario_node(
     if scenario.get("start_stage") not in set(stage_ids):
         errors.append(f"{owner} start_stage does not exist.")
 
+    stage_adjacency: dict[str, set[str]] = {
+        stage_id: set() for stage_id in stage_ids if stage_id
+    }
+    stages_with_outcomes: set[str] = set()
+    referenced_outcomes: set[str] = set()
     for stage in stages:
         stage_owner = f"{owner} stage `{stage.get('id')}`"
         actions = stage.get("actions") or []
         if not actions:
             errors.append(f"{stage_owner} needs at least one action.")
+        if len(actions) > MAX_PROMPT_OPTIONS:
+            errors.append(
+                f"{stage_owner} has more than {MAX_PROMPT_OPTIONS} actions; "
+                "split it into smaller stages."
+            )
         for action_index, action in enumerate(actions, start=1):
             action_owner = f"{stage_owner} action {action_index}"
             if not isinstance(action, dict):
@@ -897,8 +1431,14 @@ def _validate_scenario_node(
                 errors.append(f"{action_owner} points to missing stage `{next_stage}`.")
             elif outcome and outcome not in set(outcome_ids):
                 errors.append(f"{action_owner} points to missing outcome `{outcome}`.")
+            elif next_stage:
+                stage_adjacency.setdefault(stage.get("id"), set()).add(next_stage)
+            elif outcome:
+                stages_with_outcomes.add(stage.get("id"))
+                referenced_outcomes.add(outcome)
             _validate_conditions(action.get("conditions"), action_owner, errors)
             _validate_effects(action.get("effects"), action_owner, errors)
+            _validate_unlocks(action.get("unlocks"), action_owner, errors)
 
     for outcome in outcomes:
         outcome_owner = f"{owner} outcome `{outcome.get('id')}`"
@@ -908,6 +1448,186 @@ def _validate_scenario_node(
             )
         _validate_conditions(outcome.get("conditions"), outcome_owner, errors)
         _validate_effects(outcome.get("effects"), outcome_owner, errors)
+        _validate_unlocks(outcome.get("unlocks"), outcome_owner, errors)
+
+    start_stage = scenario.get("start_stage")
+    reachable_stages: set[str] = set()
+    frontier = [start_stage] if start_stage in stage_adjacency else []
+    while frontier:
+        stage_id = frontier.pop()
+        if stage_id in reachable_stages:
+            continue
+        reachable_stages.add(stage_id)
+        frontier.extend(stage_adjacency.get(stage_id, ()))
+    for stage_id in sorted(set(stage_adjacency) - reachable_stages):
+        errors.append(f"{owner} stage `{stage_id}` is unreachable from its start stage.")
+
+    reverse_stages: dict[str, set[str]] = {
+        stage_id: set() for stage_id in stage_adjacency
+    }
+    for source, targets in stage_adjacency.items():
+        for target in targets:
+            reverse_stages[target].add(source)
+    can_finish = set(stages_with_outcomes)
+    frontier = list(stages_with_outcomes)
+    while frontier:
+        stage_id = frontier.pop()
+        for predecessor in reverse_stages.get(stage_id, ()):
+            if predecessor not in can_finish:
+                can_finish.add(predecessor)
+                frontier.append(predecessor)
+    for stage_id in sorted(reachable_stages - can_finish):
+        errors.append(f"{owner} stage `{stage_id}` cannot reach a fail-forward outcome.")
+    for outcome_id in sorted(set(outcome_ids) - referenced_outcomes):
+        if outcome_id:
+            errors.append(f"{owner} outcome `{outcome_id}` is never used by a stage action.")
+
+
+def _validate_warfront_node(
+    campaign_key: str,
+    node: dict,
+    known_nodes: set[str],
+    errors: list[str],
+) -> None:
+    owner = f"Campaign `{campaign_key}` warfront `{node.get('id')}`"
+    warfront = node.get("warfront") or {}
+    if not warfront.get("key"):
+        errors.append(f"{owner} needs a warfront key.")
+    if not _is_integer(warfront.get("player_power")) or warfront.get("player_power", 0) < 0:
+        errors.append(f"{owner} player_power must be a non-negative integer.")
+    fronts = [front for front in warfront.get("fronts") or [] if isinstance(front, dict)]
+    assets = [asset for asset in warfront.get("assets") or [] if isinstance(asset, dict)]
+    outcomes = [outcome for outcome in warfront.get("outcomes") or [] if isinstance(outcome, dict)]
+    if len(fronts) < 2:
+        errors.append(f"{owner} needs at least two simultaneous fronts.")
+    if not outcomes:
+        errors.append(f"{owner} needs at least one result outcome.")
+    front_ids = [front.get("id") for front in fronts]
+    asset_keys = [asset.get("key") for asset in assets]
+    outcome_ids = [outcome.get("id") for outcome in outcomes]
+    if any(not value for value in front_ids) or len(set(front_ids)) != len(front_ids):
+        errors.append(f"{owner} has missing or duplicate front IDs.")
+    if any(not value for value in asset_keys) or len(set(asset_keys)) != len(asset_keys):
+        errors.append(f"{owner} has missing or duplicate asset keys.")
+    if any(not value for value in outcome_ids) or len(set(outcome_ids)) != len(outcome_ids):
+        errors.append(f"{owner} has missing or duplicate outcome IDs.")
+    for front in fronts:
+        front_owner = f"{owner} front `{front.get('id')}`"
+        for field in ("difficulty", "base_power", "max_assets"):
+            if not _is_integer(front.get(field)) or front.get(field, 0) < 0:
+                errors.append(f"{front_owner} {field} must be a non-negative integer.")
+        if _is_integer(front.get("max_assets")) and front["max_assets"] > 5:
+            errors.append(f"{front_owner} max_assets cannot exceed 5.")
+        _validate_conditions(front.get("conditions"), front_owner, errors)
+        _validate_effects(front.get("success_effects"), f"{front_owner} success", errors)
+        _validate_effects(front.get("failure_effects"), f"{front_owner} failure", errors)
+        _validate_unlocks(front.get("success_unlocks"), f"{front_owner} success", errors)
+        _validate_unlocks(front.get("failure_unlocks"), f"{front_owner} failure", errors)
+    for asset in assets:
+        if not _is_integer(asset.get("power")) or asset.get("power", 0) < 0:
+            errors.append(
+                f"{owner} asset `{asset.get('key')}` power must be a non-negative integer."
+            )
+        _validate_conditions(
+            asset.get("conditions"),
+            f"{owner} asset `{asset.get('key')}`",
+            errors,
+        )
+    covered_success_counts: set[int] = set()
+    unconditional_success_counts: set[int] = set()
+    for outcome in outcomes:
+        outcome_owner = f"{owner} outcome `{outcome.get('id')}`"
+        if (
+            not _is_integer(outcome.get("minimum_successes"))
+            or outcome.get("minimum_successes", 0) < 0
+        ):
+            errors.append(
+                f"{outcome_owner} minimum_successes must be a non-negative integer."
+            )
+            continue
+        minimum = outcome["minimum_successes"]
+        maximum = outcome.get("maximum_successes")
+        if maximum is not None and (not _is_integer(maximum) or maximum < 0):
+            errors.append(
+                f"{outcome_owner} maximum_successes must be a non-negative integer or blank."
+            )
+            continue
+        maximum = len(fronts) if maximum is None else maximum
+        if minimum > maximum:
+            errors.append(f"{outcome_owner} minimum successes exceed its maximum.")
+        if maximum > len(fronts):
+            errors.append(f"{outcome_owner} maximum successes exceed the number of fronts.")
+        covered_range = set(range(max(0, minimum), min(len(fronts), maximum) + 1))
+        covered_success_counts.update(covered_range)
+        if not outcome.get("conditions"):
+            unconditional_success_counts.update(covered_range)
+        if outcome.get("target") not in known_nodes:
+            errors.append(
+                f"{outcome_owner} points to missing node `{outcome.get('target')}`."
+            )
+        _validate_conditions(outcome.get("conditions"), outcome_owner, errors)
+        _validate_effects(outcome.get("effects"), outcome_owner, errors)
+        _validate_unlocks(outcome.get("unlocks"), outcome_owner, errors)
+    missing_counts = sorted(set(range(len(fronts) + 1)) - covered_success_counts)
+    if missing_counts:
+        errors.append(
+            f"{owner} has no fail-forward outcome for success counts: "
+            + ", ".join(str(value) for value in missing_counts)
+            + "."
+        )
+    missing_fallbacks = sorted(
+        set(range(len(fronts) + 1)) - unconditional_success_counts
+    )
+    if not missing_counts and missing_fallbacks:
+        errors.append(
+            f"{owner} needs an unconditional fallback outcome for success counts: "
+            + ", ".join(str(value) for value in missing_fallbacks)
+            + "."
+        )
+
+
+def _validate_quest_payload(quest_key: str, quest: dict, errors: list[str]) -> None:
+    objective = _as_dict(quest.get("objective"))
+    source = str(objective.get("source") or "none").strip().lower()
+    mode = str(objective.get("mode") or "progress").strip().lower()
+    if source not in OBJECTIVE_SOURCES:
+        errors.append(f"Quest `{quest_key}` has unsupported source `{source}`.")
+    if mode not in OBJECTIVE_MODES:
+        errors.append(f"Quest `{quest_key}` has unsupported objective mode `{mode}`.")
+
+    turnin_type = str((_as_dict(quest.get("turnin"))).get("type") or "progress").lower()
+    reward = _as_dict(quest.get("reward"))
+    reward_type = str(reward.get("type") or "none").lower()
+    if turnin_type not in TURNIN_TYPES:
+        errors.append(f"Quest `{quest_key}` has unsupported turn-in type `{turnin_type}`.")
+    if reward_type not in REWARD_TYPES:
+        errors.append(f"Quest `{quest_key}` has unsupported reward type `{reward_type}`.")
+    elif reward_type in COLLECTION_REWARD_TYPES and not normalize_key(reward.get("key")):
+        errors.append(f"Quest `{quest_key}` reward `{reward_type}` needs a key.")
+    elif reward_type == "bundle":
+        rewards = _as_list(reward.get("rewards"))
+        if not rewards:
+            errors.append(f"Quest `{quest_key}` reward bundle is empty.")
+        for bundled_reward in rewards:
+            bundled = _as_dict(bundled_reward)
+            bundled_type = str(bundled.get("type") or "none").lower()
+            if bundled_type not in REWARD_TYPES - {"bundle"}:
+                errors.append(
+                    f"Quest `{quest_key}` has unsupported bundled reward `{bundled_type}`."
+                )
+            elif bundled_type in COLLECTION_REWARD_TYPES and not normalize_key(
+                bundled.get("key")
+            ):
+                errors.append(
+                    f"Quest `{quest_key}` bundled reward `{bundled_type}` needs a key."
+                )
+
+    prerequisites = _as_list(quest.get("prerequisites"))
+    normalized_prerequisites = [normalize_key(value) for value in prerequisites]
+    if len(set(normalized_prerequisites)) != len(normalized_prerequisites):
+        errors.append(f"Quest `{quest_key}` has duplicate prerequisites.")
+    if quest_key in normalized_prerequisites:
+        errors.append(f"Quest `{quest_key}` cannot require itself.")
 
 
 def _validate_quest_node(
@@ -1040,6 +1760,18 @@ def _validate_conditions(raw: object, owner: str, errors: list[str]) -> None:
             errors.append(f"{owner} condition `{condition_type}` needs an entity key.")
         if not normalize_key(condition.get("field")):
             errors.append(f"{owner} condition `{condition_type}` needs a field.")
+    if condition_type == "fable_reward":
+        if not normalize_key(condition.get("key")):
+            errors.append(f"{owner} condition `fable_reward` needs a reward key.")
+        reward_type = normalize_key(condition.get("field"))
+        if reward_type not in COLLECTION_REWARD_TYPES:
+            errors.append(
+                f"{owner} condition `fable_reward` needs a supported reward type in field."
+            )
+        if operator not in FACTION_MEMBERSHIP_OPERATORS:
+            errors.append(
+                f"{owner} condition `fable_reward` only supports equality operators."
+            )
 
     if condition_type in FACTION_STANDING_CONDITION_TYPES:
         field = str(condition.get("field") or "rank").strip().lower()
@@ -1098,6 +1830,9 @@ def _validate_effects(raw: object, owner: str, errors: list[str]) -> None:
             errors.append(f"{owner} contains an effect that is not an object.")
             continue
         effect_type = str(effect.get("type") or "").strip().lower()
+        if effect_type not in EFFECT_TYPES:
+            errors.append(f"{owner} has unsupported effect `{effect_type or 'missing type'}`.")
+            continue
         if effect_type in STORY_STATE_EFFECT_TYPES:
             key = normalize_state_key(effect.get("key"))
             if not key:
@@ -1108,6 +1843,7 @@ def _validate_effects(raw: object, owner: str, errors: list[str]) -> None:
                     errors.append(
                         f"{owner} effect `state_increment` needs a numeric delta."
                     )
+                _validate_increment_bounds(effect, owner, effect_type, errors)
             elif effect_type in {"state_set", "state_add", "state_remove"}:
                 if "value" not in effect:
                     errors.append(f"{owner} effect `{effect_type}` needs a value.")
@@ -1126,6 +1862,7 @@ def _validate_effects(raw: object, owner: str, errors: list[str]) -> None:
                 delta = effect.get("delta", effect.get("value", 0))
                 if isinstance(delta, bool) or not isinstance(delta, (int, float)):
                     errors.append(f"{owner} effect `{effect_type}` needs a numeric delta.")
+                _validate_increment_bounds(effect, owner, effect_type, errors)
             elif "value" not in effect:
                 errors.append(f"{owner} effect `{effect_type}` needs a value.")
             continue
@@ -1138,7 +1875,9 @@ def _validate_effects(raw: object, owner: str, errors: list[str]) -> None:
             if not normalize_key(effect.get("key")):
                 errors.append(f"{owner} effect `{effect_type}` needs a reward key.")
             continue
-        if effect_type not in FACTION_EFFECT_TYPES:
+        if effect_type in DIRECT_UNLOCK_EFFECT_TYPES:
+            if not normalize_key(effect.get("key")):
+                errors.append(f"{owner} effect `{effect_type}` needs an unlock key.")
             continue
         key = normalize_key(effect.get("key"))
         if not key:
@@ -1165,6 +1904,77 @@ def _validate_effects(raw: object, owner: str, errors: list[str]) -> None:
                 errors.append(
                     f"{owner} effect `faction_membership` needs a membership status."
                 )
+
+
+def _validate_increment_bounds(
+    effect: dict,
+    owner: str,
+    effect_type: str,
+    errors: list[str],
+) -> None:
+    for name in ("minimum", "maximum"):
+        value = effect.get(name)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+        ):
+            errors.append(f"{owner} effect `{effect_type}` {name} must be numeric.")
+    minimum = effect.get("minimum")
+    maximum = effect.get("maximum")
+    if (
+        isinstance(minimum, (int, float))
+        and not isinstance(minimum, bool)
+        and isinstance(maximum, (int, float))
+        and not isinstance(maximum, bool)
+        and minimum > maximum
+    ):
+        errors.append(
+            f"{owner} effect `{effect_type}` minimum cannot exceed its maximum."
+        )
+
+
+def _validate_unlocks(raw: object, owner: str, errors: list[str]) -> None:
+    for index, unlock in enumerate(_as_list(raw), start=1):
+        unlock_owner = f"{owner} unlock {index}"
+        if isinstance(unlock, str):
+            if not normalize_key(unlock):
+                errors.append(f"{unlock_owner} needs a key.")
+            continue
+        if not isinstance(unlock, dict):
+            errors.append(f"{unlock_owner} must be a string or object.")
+            continue
+        if not normalize_key(unlock.get("key")):
+            errors.append(f"{unlock_owner} needs a key.")
+        scope = str(unlock.get("scope") or "campaign").strip().lower()
+        if scope not in {"campaign", "system", "global"}:
+            errors.append(
+                f"{unlock_owner} has unsupported scope `{scope}`; "
+                "use campaign, system, or global."
+            )
+
+
+def _validate_epilogue(raw: object, owner: str, errors: list[str]) -> None:
+    seen_ids: set[str] = set()
+    for index, fragment in enumerate(_as_list(raw), start=1):
+        fragment_owner = f"{owner} epilogue fragment {index}"
+        if not isinstance(fragment, dict):
+            errors.append(f"{fragment_owner} must be an object.")
+            continue
+        fragment_id = normalize_key(fragment.get("id"))
+        if not fragment_id:
+            errors.append(f"{fragment_owner} needs an id.")
+        elif fragment_id in seen_ids:
+            errors.append(f"{owner} has duplicate epilogue fragment `{fragment_id}`.")
+        seen_ids.add(fragment_id)
+        if not str(fragment.get("text") or "").strip():
+            errors.append(f"{fragment_owner} needs player-facing text.")
+        order = fragment.get("order", index * 10)
+        if isinstance(order, bool) or not isinstance(order, int):
+            errors.append(f"{fragment_owner} order must be an integer.")
+        _validate_conditions(
+            fragment.get("conditions"),
+            f"{fragment_owner} conditions",
+            errors,
+        )
 
 
 def quest_record_from_node(campaign: dict, node: dict) -> dict:

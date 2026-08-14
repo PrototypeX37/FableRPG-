@@ -121,6 +121,10 @@ def expand_model_effect(effect: dict) -> dict:
                 "delta": effect.get("delta", effect.get("value", 0)),
             }
         )
+        if effect.get("minimum") is not None:
+            compiled["minimum"] = effect.get("minimum")
+        if effect.get("maximum") is not None:
+            compiled["maximum"] = effect.get("maximum")
     elif effect_type == "relationship_flag_add":
         compiled.update({"type": "state_add", "value": effect.get("value")})
     elif effect_type == "relationship_flag_remove":
@@ -338,6 +342,26 @@ class FableStateService:
         )
         await conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS fable_warfront_attempts (
+                attempt_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES fable_campaign_runs(run_id) ON DELETE CASCADE,
+                user_id BIGINT NOT NULL,
+                campaign_key TEXT NOT NULL,
+                node_key TEXT NOT NULL,
+                warfront_key TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'planning',
+                player_front_key TEXT NOT NULL DEFAULT '',
+                assignments_json TEXT NOT NULL DEFAULT '{}',
+                result_json TEXT NOT NULL DEFAULT '{}',
+                started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                completed_at TIMESTAMPTZ,
+                UNIQUE (run_id, node_key)
+            )
+            """
+        )
+        await conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS fable_processed_events (
                 run_id TEXT NOT NULL REFERENCES fable_campaign_runs(run_id) ON DELETE CASCADE,
                 event_key TEXT NOT NULL,
@@ -498,6 +522,51 @@ class FableStateService:
         )
         return bool(inserted)
 
+    async def has_reward(
+        self,
+        conn,
+        *,
+        user_id: int,
+        reward_type: object,
+        reward_key: object,
+    ) -> bool:
+        normalized_type = normalize_state_key(reward_type).replace(".", "_")
+        normalized_key = normalize_state_key(reward_key).replace(".", "_")
+        if not normalized_type or not normalized_key:
+            return False
+        return bool(
+            await conn.fetchval(
+                """
+                SELECT 1 FROM player_fable_rewards
+                WHERE user_id=$1 AND reward_type=$2 AND reward_key=$3
+                """,
+                user_id,
+                normalized_type,
+                normalized_key,
+            )
+        )
+
+    async def list_rewards(
+        self,
+        conn,
+        *,
+        user_id: int,
+        reward_type: object = "",
+    ) -> list[dict]:
+        normalized_type = normalize_state_key(reward_type).replace(".", "_")
+        rows = await conn.fetch(
+            """
+            SELECT reward_type, reward_key, display_name, source,
+                   metadata_json, unlocked_at
+            FROM player_fable_rewards
+            WHERE user_id=$1 AND ($2='' OR reward_type=$2)
+            ORDER BY reward_type, unlocked_at, reward_key
+            """,
+            user_id,
+            normalized_type,
+        )
+        return [dict(row) for row in rows]
+
     async def apply_effects(
         self,
         conn,
@@ -571,6 +640,16 @@ class FableStateService:
                 ):
                     raise FableStateError(f"State `{key}` is not numeric and cannot be incremented.")
                 after = (before or 0) + delta
+                minimum = effect.get("minimum")
+                maximum = effect.get("maximum")
+                if minimum is not None:
+                    if isinstance(minimum, bool) or not isinstance(minimum, (int, float)):
+                        raise FableStateError(f"State increment `{key}` has an invalid minimum.")
+                    after = max(minimum, after)
+                if maximum is not None:
+                    if isinstance(maximum, bool) or not isinstance(maximum, (int, float)):
+                        raise FableStateError(f"State increment `{key}` has an invalid maximum.")
+                    after = min(maximum, after)
                 value_type, after = coerce_state_value(after)
             elif effect_type == "state_add":
                 if before is not None and not isinstance(before, list):

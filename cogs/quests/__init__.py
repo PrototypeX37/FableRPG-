@@ -20,6 +20,7 @@ from cogs.quests.campaign_content import (
     CHOICE_NODE_TYPES,
     COLLECTION_EFFECT_TYPES,
     COLLECTION_REWARD_TYPES,
+    MAX_PROMPT_OPTIONS,
     SCHEMA_VERSION as CAMPAIGN_SCHEMA_VERSION,
     builtin_install_decision,
     build_reference_catalog,
@@ -28,6 +29,7 @@ from cogs.quests.campaign_content import (
     normalize_key as normalize_campaign_key,
     normalize_system_unlock_key,
     quest_record_from_node,
+    resolve_warfront,
     validate_builtin_package,
     validate_package,
 )
@@ -2211,6 +2213,114 @@ class GMQuestBuilderView(View):
         await interaction.followup.send("Quest builder refreshed.", ephemeral=True)
 
 
+class CampaignActionView(View):
+    """Clickable campaign decisions that remain bound to their original prompt."""
+
+    def __init__(
+        self,
+        *,
+        cog,
+        ctx,
+        run_id: str,
+        campaign_key: str,
+        node_key: str,
+        options: list[dict],
+        action_kind: str,
+        stage_key: str = "",
+    ):
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.ctx = ctx
+        self.owner_id = ctx.author.id
+        self.run_id = run_id
+        self.campaign_key = campaign_key
+        self.node_key = node_key
+        self.stage_key = stage_key
+        self.action_kind = action_kind
+        self.message = None
+
+        for index, option in enumerate(options[:MAX_PROMPT_OPTIONS], start=1):
+            fallback = "Act" if action_kind == "act" else "Continue"
+            label = f"{index}. {option.get('label') or fallback}"[:80]
+            button = Button(
+                label=label,
+                style=(
+                    discord.ButtonStyle.secondary
+                    if action_kind == "act"
+                    else discord.ButtonStyle.primary
+                ),
+                row=(index - 1) // 5,
+            )
+
+            async def callback(interaction, selected=index):
+                await self._select(interaction, selected)
+
+            button.callback = callback
+            self.add_item(button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "This story prompt belongs to another player.",
+            ephemeral=True,
+        )
+        return False
+
+    async def _select(self, interaction: discord.Interaction, option: int) -> None:
+        is_current = await self.cog._campaign_prompt_matches(
+            self.owner_id,
+            run_id=self.run_id,
+            campaign_key=self.campaign_key,
+            node_key=self.node_key,
+            action_kind=self.action_kind,
+            stage_key=self.stage_key,
+        )
+        if not is_current:
+            await interaction.response.send_message(
+                "That story prompt has expired. Use `$campaign` to open the current one.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer()
+        for child in self.children:
+            child.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+        self.stop()
+
+        if self.action_kind == "act":
+            await self.cog._resolve_campaign_act(
+                self.ctx,
+                option,
+                expected_prompt=(
+                    self.run_id,
+                    self.campaign_key,
+                    self.node_key,
+                    self.stage_key,
+                ),
+            )
+        else:
+            await self.cog._resolve_campaign_choice(
+                self.ctx,
+                option,
+                expected_prompt=(self.run_id, self.campaign_key, self.node_key),
+            )
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
 class Quests(commands.Cog):
     GREG_INTRO_CUTSCENE_KEY = "greg_intro_lore"
 
@@ -3177,15 +3287,12 @@ class Quests(commands.Cog):
         try:
             normalized_key = normalize_campaign_key(campaign_key)
             if user_id is not None:
-                raw = await conn.fetchval(
-                    """
-                    SELECT campaign_json_snapshot
-                    FROM fable_campaign_runs
-                    WHERE user_id=$1 AND campaign_key=$2 AND is_canonical=TRUE
-                    """,
+                run = await self._selected_campaign_run(
+                    conn,
                     user_id,
-                    normalized_key,
+                    campaign_key=normalized_key,
                 )
+                raw = run["campaign_json_snapshot"] if run else None
             else:
                 raw = None
             if not raw or str(raw).strip() == "{}":
@@ -3198,6 +3305,39 @@ class Quests(commands.Cog):
         finally:
             if local:
                 await self.bot.pool.release(conn)
+
+    async def _selected_campaign_run(
+        self,
+        conn,
+        user_id: int,
+        *,
+        campaign_key: str = "",
+        statuses: list[str] | tuple[str, ...] | None = None,
+        for_update: bool = False,
+    ):
+        """Return the focused run, falling back to the canonical run."""
+        normalized_key = normalize_campaign_key(campaign_key)
+        clauses = ["fcr.user_id=$1"]
+        arguments: list[object] = [user_id]
+        if normalized_key:
+            arguments.append(normalized_key)
+            clauses.append(f"fcr.campaign_key=${len(arguments)}")
+        if statuses:
+            arguments.append(list(statuses))
+            clauses.append(f"fcr.status=ANY(${len(arguments)}::text[])")
+        lock = " FOR UPDATE OF fcr" if for_update else ""
+        return await conn.fetchrow(
+            f"""
+            SELECT fcr.*
+            FROM fable_campaign_runs fcr
+            LEFT JOIN fable_player_preferences fp ON fp.user_id=fcr.user_id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY (fcr.run_id=fp.selected_run_id) DESC,
+                     fcr.is_canonical DESC, fcr.updated_at DESC
+            LIMIT 1{lock}
+            """,
+            *arguments,
+        )
 
     def _campaign_quest_key(self, campaign: dict, node: dict) -> str:
         return quest_record_from_node(campaign, node)["quest_key"]
@@ -3233,6 +3373,49 @@ class Quests(commands.Cog):
             )
         return bool(inserted)
 
+    async def has_fable_reward(
+        self,
+        user_id: int,
+        reward_type: object,
+        reward_key: object,
+        *,
+        conn=None,
+    ) -> bool:
+        """Public entitlement API for profiles, travel, shops, and battle systems."""
+        owns_connection = conn is None
+        if owns_connection:
+            conn = await self.bot.pool.acquire()
+        try:
+            return await self.fable_state.has_reward(
+                conn,
+                user_id=user_id,
+                reward_type=reward_type,
+                reward_key=reward_key,
+            )
+        finally:
+            if owns_connection:
+                await self.bot.pool.release(conn)
+
+    async def list_fable_rewards(
+        self,
+        user_id: int,
+        reward_type: object = "",
+        *,
+        conn=None,
+    ) -> list[dict]:
+        owns_connection = conn is None
+        if owns_connection:
+            conn = await self.bot.pool.acquire()
+        try:
+            return await self.fable_state.list_rewards(
+                conn,
+                user_id=user_id,
+                reward_type=reward_type,
+            )
+        finally:
+            if owns_connection:
+                await self.bot.pool.release(conn)
+
     async def _apply_campaign_effects(
         self,
         user_id: int,
@@ -3242,20 +3425,40 @@ class Quests(commands.Cog):
         unlocks: list | None = None,
         event_key: str = "",
         source: str | None = None,
+        run_id: str | None = None,
         conn,
     ) -> list[str]:
         messages = []
         effect_source = str(source or f"campaign:{campaign_key}").strip()
-        row = await conn.fetchrow(
-            """
-            SELECT unlocks_json FROM fable_campaign_runs
-            WHERE user_id=$1 AND campaign_key=$2 AND is_canonical=TRUE
-            FOR UPDATE
-            """,
-            user_id,
-            campaign_key,
-        )
+        if run_id:
+            row = await conn.fetchrow(
+                """
+                SELECT run_id, unlocks_json, is_canonical
+                FROM fable_campaign_runs
+                WHERE run_id=$1 AND user_id=$2 AND campaign_key=$3
+                FOR UPDATE
+                """,
+                run_id,
+                user_id,
+                campaign_key,
+            )
+        else:
+            row = await conn.fetchrow(
+                """
+                SELECT run_id, unlocks_json, is_canonical
+                FROM fable_campaign_runs
+                WHERE user_id=$1 AND campaign_key=$2 AND is_canonical=TRUE
+                FOR UPDATE
+                """,
+                user_id,
+                campaign_key,
+            )
+        if not row:
+            raise RuntimeError("Campaign effects require an active campaign run.")
+        resolved_run_id = str(row["run_id"])
+        is_canonical_run = bool(row["is_canonical"])
         current_unlocks = list(self._load_progress(row["unlocks_json"]) if row else [])
+        replay_state_effects = []
         for unlock in unlocks or []:
             unlock_scope = (
                 str(unlock.get("scope") or "campaign").strip().lower()
@@ -3343,6 +3546,40 @@ class Quests(commands.Cog):
                 if inserted:
                     messages.append(f"Unlocked **{display_name}**")
             elif effect_type in {"reputation", "faction_standing"} and key:
+                if not is_canonical_run:
+                    points = int(
+                        effect.get("points")
+                        if effect.get("points") is not None
+                        else effect.get("delta") or 0
+                    )
+                    if points:
+                        replay_state_effects.append(
+                            {
+                                "type": "state_increment",
+                                "key": f"faction.{key}.points",
+                                "delta": points,
+                            }
+                        )
+                    if effect.get("rank_delta"):
+                        replay_state_effects.append(
+                            {
+                                "type": "state_increment",
+                                "key": f"faction.{key}.rank",
+                                "delta": int(effect["rank_delta"]),
+                            }
+                        )
+                    if effect.get("set_rank") is not None:
+                        replay_state_effects.append(
+                            {
+                                "type": "state_set",
+                                "key": f"faction.{key}.rank",
+                                "value": int(effect["set_rank"]),
+                            }
+                        )
+                    messages.append(
+                        f"Alternate-history standing changed for **{key.replace('_', ' ').title()}**."
+                    )
+                    continue
                 factions = self.bot.get_cog("Factions")
                 if factions is None:
                     raise RuntimeError("The Factions cog is required for faction-standing effects.")
@@ -3369,6 +3606,21 @@ class Quests(commands.Cog):
                 if change.applied and change.message():
                     messages.append(change.message())
             elif effect_type == "faction_membership" and key:
+                if not is_canonical_run:
+                    membership = normalize_campaign_key(
+                        effect.get("status") or effect.get("value") or "member"
+                    )
+                    replay_state_effects.append(
+                        {
+                            "type": "state_set",
+                            "key": f"faction.{key}.membership",
+                            "value": membership,
+                        }
+                    )
+                    messages.append(
+                        f"Alternate-history allegiance with **{key.replace('_', ' ').title()}** is now **{membership.replace('_', ' ').title()}**."
+                    )
+                    continue
                 factions = self.bot.get_cog("Factions")
                 if factions is None:
                     raise RuntimeError("The Factions cog is required for faction-membership effects.")
@@ -3396,7 +3648,9 @@ class Quests(commands.Cog):
             and str(effect.get("type") or "").strip().lower()
             in STATE_EFFECT_TYPES | MODEL_EFFECT_TYPES
         ]
-        state_effects = [expand_model_effect(effect) for effect in authored_state_effects]
+        state_effects = [
+            expand_model_effect(effect) for effect in authored_state_effects
+        ] + replay_state_effects
         if state_effects:
             mutations = await self.fable_state.apply_effects(
                 conn,
@@ -3405,6 +3659,7 @@ class Quests(commands.Cog):
                 effects=state_effects,
                 event_key=event_key,
                 source=effect_source,
+                run_id=resolved_run_id,
                 metadata={"campaign_key": campaign_key},
             )
             for effect, mutation in zip(authored_state_effects, mutations):
@@ -3414,11 +3669,10 @@ class Quests(commands.Cog):
 
         await conn.execute(
             """
-            UPDATE fable_campaign_runs SET unlocks_json=$3, updated_at=NOW()
-            WHERE user_id=$1 AND campaign_key=$2 AND is_canonical=TRUE
+            UPDATE fable_campaign_runs SET unlocks_json=$2, updated_at=NOW()
+            WHERE run_id=$1
             """,
-            user_id,
-            campaign_key,
+            resolved_run_id,
             json.dumps(current_unlocks),
         )
         return messages
@@ -3431,6 +3685,7 @@ class Quests(commands.Cog):
         conn,
         campaign_key: str = "",
         run_id: str | None = None,
+        campaign: dict | None = None,
     ) -> list[dict]:
         available = []
         for edge in edges or []:
@@ -3441,9 +3696,147 @@ class Quests(commands.Cog):
                 campaign_key=campaign_key,
                 run_id=run_id,
             )
-            if allowed:
-                available.append(edge)
+            if not allowed:
+                continue
+            if campaign is not None:
+                target = node_by_id(campaign, edge.get("target"))
+                if target is None:
+                    continue
+                allowed, _reason = await self._evaluate_campaign_conditions(
+                    user_id,
+                    target.get("requirements") or [],
+                    conn=conn,
+                    campaign_key=campaign_key,
+                    run_id=run_id,
+                )
+                if not allowed:
+                    continue
+            available.append(edge)
         return available
+
+    async def _campaign_epilogue_fragments(
+        self,
+        user_id: int,
+        campaign: dict,
+        ending_node: dict,
+        *,
+        conn,
+        run_id: str | None,
+    ) -> list[dict]:
+        """Resolve ordered, conditional epilogue fragments for an ending."""
+        authored = list(campaign.get("epilogue") or []) + list(
+            ending_node.get("epilogue") or []
+        )
+        rendered = []
+        for index, fragment in enumerate(authored):
+            if not isinstance(fragment, dict):
+                continue
+            allowed, _reason = await self._evaluate_campaign_conditions(
+                user_id,
+                fragment.get("conditions") or [],
+                conn=conn,
+                campaign_key=campaign["key"],
+                run_id=run_id,
+            )
+            if not allowed:
+                continue
+            rendered.append(
+                {
+                    "id": normalize_campaign_key(
+                        fragment.get("id") or f"epilogue_{index + 1}"
+                    ),
+                    "title": str(fragment.get("title") or "Aftermath").strip(),
+                    "text": str(fragment.get("text") or "").strip(),
+                    "order": int(fragment.get("order", (index + 1) * 10)),
+                }
+            )
+        return sorted(
+            rendered,
+            key=lambda fragment: (fragment["order"], fragment["id"]),
+        )
+
+    async def _process_campaign_autonomous_events(
+        self,
+        ctx,
+        campaign: dict,
+        node_id: str,
+        *,
+        run_id: str,
+    ) -> str:
+        """Resolve one-shot companion/world decisions triggered on node entry."""
+        matching = [
+            event
+            for event in campaign.get("autonomous_events") or []
+            if isinstance(event, dict) and event.get("trigger_node") == node_id
+        ]
+        if not matching:
+            return ""
+        rendered = []
+        redirect_target = ""
+        async with self.bot.pool.acquire() as conn:
+            async with conn.transaction():
+                for event in matching:
+                    marker_key = f"event.autonomous.{event['id']}"
+                    exists, resolved = await self.fable_state.get_state(
+                        conn,
+                        user_id=ctx.author.id,
+                        campaign_key=campaign["key"],
+                        state_key=marker_key,
+                        run_id=run_id,
+                    )
+                    if exists and resolved:
+                        continue
+                    allowed, _reason = await self._evaluate_campaign_conditions(
+                        ctx.author.id,
+                        event.get("conditions") or [],
+                        conn=conn,
+                        campaign_key=campaign["key"],
+                        run_id=run_id,
+                    )
+                    if not allowed:
+                        continue
+                    effects = list(event.get("effects") or []) + [
+                        {"type": "state_set", "key": marker_key, "value": True}
+                    ]
+                    messages = await self._apply_campaign_effects(
+                        ctx.author.id,
+                        campaign["key"],
+                        effects=effects,
+                        unlocks=event.get("unlocks") or [],
+                        event_key=f"campaign:{campaign['key']}:autonomous:{event['id']}",
+                        source=f"autonomous:{event['id']}",
+                        run_id=run_id,
+                        conn=conn,
+                    )
+                    rendered.append(
+                        (
+                            str(event.get("title") or "Companion Decision"),
+                            str(event.get("text") or ""),
+                            messages,
+                        )
+                    )
+                    if event.get("redirect_target"):
+                        redirect_target = event["redirect_target"]
+                        await conn.execute(
+                            """
+                            UPDATE fable_campaign_runs
+                            SET current_node_key=$2, status='entering', updated_at=NOW()
+                            WHERE run_id=$1
+                            """,
+                            run_id,
+                            redirect_target,
+                        )
+                        break
+        for title, text, messages in rendered:
+            embed = discord.Embed(title=title, description=text, color=0x6B4C8A)
+            if messages:
+                embed.add_field(
+                    name="Consequences",
+                    value="\n".join(messages)[:1024],
+                    inline=False,
+                )
+            await ctx.send(embed=embed)
+        return redirect_target
 
     def _campaign_choice_embed(self, campaign: dict, node: dict, edges: list[dict]) -> discord.Embed:
         embed = discord.Embed(
@@ -3459,6 +3852,82 @@ class Quests(commands.Cog):
             )
         embed.set_footer(text="Choose with $campaign choose <number>")
         return embed
+
+    async def _campaign_prompt_matches(
+        self,
+        user_id: int,
+        *,
+        run_id: str,
+        campaign_key: str,
+        node_key: str,
+        action_kind: str,
+        stage_key: str = "",
+    ) -> bool:
+        """Reject stale buttons before they can act on a later story prompt."""
+        if action_kind == "act":
+            row = await self.bot.pool.fetchrow(
+                """
+                SELECT fcr.run_id, fcr.campaign_key, fcr.current_node_key,
+                       fsa.current_stage_key
+                FROM fable_campaign_runs fcr
+                JOIN fable_scenario_attempts fsa ON fsa.run_id=fcr.run_id
+                LEFT JOIN fable_player_preferences fp ON fp.user_id=fcr.user_id
+                WHERE fcr.user_id=$1 AND fcr.run_id=$2
+                  AND fcr.status='awaiting_scenario' AND fsa.status='active'
+                LIMIT 1
+                """,
+                user_id,
+                run_id,
+            )
+            return bool(
+                row
+                and str(row["run_id"]) == run_id
+                and row["campaign_key"] == campaign_key
+                and row["current_node_key"] == node_key
+                and row["current_stage_key"] == stage_key
+            )
+        row = await self.bot.pool.fetchrow(
+            """
+            SELECT fcr.run_id, fcr.campaign_key, fcr.current_node_key
+            FROM fable_campaign_runs fcr
+            LEFT JOIN fable_player_preferences fp ON fp.user_id=fcr.user_id
+            WHERE fcr.user_id=$1 AND fcr.run_id=$2
+              AND fcr.status='awaiting_choice'
+            LIMIT 1
+            """,
+            user_id,
+            run_id,
+        )
+        return bool(
+            row
+            and str(row["run_id"]) == run_id
+            and row["campaign_key"] == campaign_key
+            and row["current_node_key"] == node_key
+        )
+
+    async def _send_campaign_choice_prompt(
+        self,
+        ctx,
+        campaign: dict,
+        node: dict,
+        edges: list[dict],
+        *,
+        run_id: str,
+    ) -> None:
+        view = CampaignActionView(
+            cog=self,
+            ctx=ctx,
+            run_id=run_id,
+            campaign_key=campaign["key"],
+            node_key=node["id"],
+            options=edges,
+            action_kind="choose",
+        )
+        message = await ctx.send(
+            embed=self._campaign_choice_embed(campaign, node, edges),
+            view=view,
+        )
+        view.message = message
 
     async def _send_campaign_encounter(self, ctx, node: dict) -> None:
         encounter = node.get("encounter") or {}
@@ -3526,6 +3995,7 @@ class Quests(commands.Cog):
         *,
         conn,
         run_id: str,
+        campaign: dict | None = None,
     ) -> list[dict]:
         available = []
         for action in stage.get("actions") or []:
@@ -3553,6 +4023,19 @@ class Quests(commands.Cog):
                 )
                 if not allowed:
                     continue
+                if campaign is not None:
+                    target = node_by_id(campaign, outcome.get("target"))
+                    if target is None:
+                        continue
+                    allowed, _reason = await self._evaluate_campaign_conditions(
+                        user_id,
+                        target.get("requirements") or [],
+                        conn=conn,
+                        campaign_key=campaign_key,
+                        run_id=run_id,
+                    )
+                    if not allowed:
+                        continue
             available.append(action)
         return available
 
@@ -3561,6 +4044,8 @@ class Quests(commands.Cog):
         ctx,
         campaign: dict,
         node: dict,
+        *,
+        run_id: str,
     ) -> bool:
         scenario = node.get("scenario") or {}
         async with self.bot.pool.acquire() as conn:
@@ -3570,15 +4055,21 @@ class Quests(commands.Cog):
                 FROM fable_scenario_attempts fsa
                 JOIN fable_campaign_runs fcr ON fcr.run_id=fsa.run_id
                 WHERE fcr.user_id=$1 AND fcr.campaign_key=$2
-                  AND fcr.is_canonical=TRUE AND fsa.node_key=$3
+                  AND fcr.run_id=$4 AND fsa.node_key=$3
                   AND fsa.status='active'
                 """,
                 ctx.author.id,
                 campaign["key"],
                 node["id"],
+                run_id,
             )
             if not attempt:
-                await self._enter_campaign_scenario(ctx, campaign, node)
+                await self._enter_campaign_scenario(
+                    ctx,
+                    campaign,
+                    node,
+                    run_id=run_id,
+                )
                 return False
             stage = self._scenario_stage(scenario, attempt["current_stage_key"])
             if not stage:
@@ -3591,6 +4082,7 @@ class Quests(commands.Cog):
                 stage,
                 conn=conn,
                 run_id=str(attempt["run_id"]),
+                campaign=campaign,
             )
         embed = discord.Embed(
             title=stage.get("title") or node.get("title") or "Campaign Scenario",
@@ -3610,10 +4102,262 @@ class Quests(commands.Cog):
                 inline=False,
             )
         embed.set_footer(text="Act with $campaign act <number>")
+        view = CampaignActionView(
+            cog=self,
+            ctx=ctx,
+            run_id=str(attempt["run_id"]),
+            campaign_key=campaign["key"],
+            node_key=node["id"],
+            stage_key=stage["id"],
+            options=actions,
+            action_kind="act",
+        )
+        message = await ctx.send(embed=embed, view=view)
+        view.message = message
+        return True
+
+    @staticmethod
+    def _warfront_front(warfront: dict, front_key: str) -> dict | None:
+        normalized = normalize_campaign_key(front_key)
+        return next(
+            (
+                front for front in warfront.get("fronts") or []
+                if isinstance(front, dict) and front.get("id") == normalized
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _warfront_asset(warfront: dict, asset_key: str) -> dict | None:
+        normalized = normalize_campaign_key(asset_key)
+        return next(
+            (
+                asset for asset in warfront.get("assets") or []
+                if isinstance(asset, dict) and asset.get("key") == normalized
+            ),
+            None,
+        )
+
+    async def _available_warfront_assets(
+        self,
+        user_id: int,
+        campaign: dict,
+        warfront: dict,
+        *,
+        conn,
+        run_id: str,
+    ) -> list[dict]:
+        available = []
+        for asset in warfront.get("assets") or []:
+            if not isinstance(asset, dict):
+                continue
+            allowed, _reason = await self._evaluate_campaign_conditions(
+                user_id,
+                asset.get("conditions") or [],
+                conn=conn,
+                campaign_key=campaign["key"],
+                run_id=run_id,
+            )
+            if allowed:
+                available.append(asset)
+        return available
+
+    async def _available_warfront_fronts(
+        self,
+        user_id: int,
+        campaign: dict,
+        warfront: dict,
+        *,
+        conn,
+        run_id: str,
+    ) -> list[dict]:
+        available = []
+        for front in warfront.get("fronts") or []:
+            if not isinstance(front, dict):
+                continue
+            allowed, _reason = await self._evaluate_campaign_conditions(
+                user_id,
+                front.get("conditions") or [],
+                conn=conn,
+                campaign_key=campaign["key"],
+                run_id=run_id,
+            )
+            if allowed:
+                available.append(front)
+        return available
+
+    async def _send_campaign_warfront_plan(
+        self,
+        ctx,
+        campaign: dict,
+        node: dict,
+        *,
+        run_id: str,
+    ) -> bool:
+        warfront = node.get("warfront") or {}
+        async with self.bot.pool.acquire() as conn:
+            attempt = await conn.fetchrow(
+                """
+                SELECT player_front_key, assignments_json
+                FROM fable_warfront_attempts
+                WHERE run_id=$1 AND node_key=$2 AND status='planning'
+                """,
+                run_id,
+                node["id"],
+            )
+            if not attempt:
+                await self._enter_campaign_warfront(
+                    ctx,
+                    campaign,
+                    node,
+                    run_id=run_id,
+                )
+                return False
+            assets = await self._available_warfront_assets(
+                ctx.author.id,
+                campaign,
+                warfront,
+                conn=conn,
+                run_id=run_id,
+            )
+            fronts = await self._available_warfront_fronts(
+                ctx.author.id,
+                campaign,
+                warfront,
+                conn=conn,
+                run_id=run_id,
+            )
+        assignments = self._load_progress(attempt["assignments_json"])
+        player_front = str(attempt["player_front_key"] or "")
+        asset_names = {asset["key"]: asset.get("name") or asset["key"] for asset in assets}
+        embed = discord.Embed(
+            title=warfront.get("title") or node.get("title") or "Warfront Plan",
+            description=warfront.get("description") or node.get("description") or "Allocate your available forces.",
+            color=0x8B1E1E,
+        )
+        for front in fronts:
+            assigned = list(assignments.get(front["id"]) or [])
+            forces = [asset_names.get(key, key.replace("_", " ").title()) for key in assigned]
+            if player_front == front["id"]:
+                forces.insert(0, "You")
+            embed.add_field(
+                name=f"{front['title']} · Difficulty {front['difficulty']}",
+                value=(
+                    f"{front.get('description') or 'A contested front.'}\n"
+                    f"Assigned: {', '.join(forces) if forces else 'Nobody'}"
+                )[:1024],
+                inline=False,
+            )
+        if assets:
+            embed.add_field(
+                name="Available Forces",
+                value="\n".join(
+                    f"`{asset['key']}` · {asset.get('name') or asset['key']} · Power {asset.get('power', 0)}"
+                    for asset in assets[:20]
+                )[:1024],
+                inline=False,
+            )
+        if not fronts:
+            embed.add_field(
+                name="No active fronts",
+                value="This operation's front requirements currently hide every route. Contact a GM or revise the campaign package.",
+                inline=False,
+            )
+        embed.set_footer(
+            text="$campaign assign player <front> · $campaign assign <force> <front> · $campaign deploy"
+        )
         await ctx.send(embed=embed)
         return True
 
-    async def _enter_campaign_scenario(self, ctx, campaign: dict, node: dict) -> None:
+    async def _enter_campaign_warfront(
+        self,
+        ctx,
+        campaign: dict,
+        node: dict,
+        *,
+        run_id: str,
+    ) -> None:
+        warfront = node.get("warfront") or {}
+        resolved_target = ""
+        messages = []
+        async with self.bot.pool.acquire() as conn:
+            async with conn.transaction():
+                run = await conn.fetchrow(
+                    """
+                    SELECT run_id FROM fable_campaign_runs
+                    WHERE run_id=$1 AND user_id=$2 AND campaign_key=$3
+                    FOR UPDATE
+                    """,
+                    run_id,
+                    ctx.author.id,
+                    campaign["key"],
+                )
+                if not run:
+                    return await ctx.send("No campaign run exists for this warfront.")
+                messages = await self._apply_campaign_effects(
+                    ctx.author.id,
+                    campaign["key"],
+                    effects=node.get("effects") or [],
+                    unlocks=node.get("unlocks") or [],
+                    event_key=f"campaign:{campaign['key']}:warfront_node:{node['id']}",
+                    run_id=run_id,
+                    conn=conn,
+                )
+                attempt = await conn.fetchrow(
+                    """
+                    INSERT INTO fable_warfront_attempts (
+                        attempt_id, run_id, user_id, campaign_key, node_key,
+                        warfront_key, status, player_front_key,
+                        assignments_json, result_json, started_at, updated_at
+                    ) VALUES ($1,$2,$3,$4,$5,$6,'planning','','{}','{}',NOW(),NOW())
+                    ON CONFLICT (run_id, node_key) DO UPDATE SET updated_at=NOW()
+                    RETURNING status, result_json
+                    """,
+                    self.fable_state.new_run_id(),
+                    run_id,
+                    ctx.author.id,
+                    campaign["key"],
+                    node["id"],
+                    warfront.get("key") or node["id"],
+                )
+                if attempt and str(attempt["status"]) == "completed":
+                    result = self._load_progress(attempt["result_json"])
+                    resolved_target = str(result.get("target") or "")
+                await conn.execute(
+                    """
+                    UPDATE fable_campaign_runs
+                    SET current_node_key=$2, status=$3, updated_at=NOW()
+                    WHERE run_id=$1
+                    """,
+                    run_id,
+                    resolved_target or node["id"],
+                    "entering" if resolved_target else "awaiting_warfront",
+                )
+        if messages:
+            await ctx.send("\n".join(messages))
+        if resolved_target:
+            await self._enter_campaign_node(
+                ctx,
+                campaign,
+                resolved_target,
+                run_id=run_id,
+            )
+            return
+        await self._send_campaign_warfront_plan(
+            ctx,
+            campaign,
+            node,
+            run_id=run_id,
+        )
+
+    async def _enter_campaign_scenario(
+        self,
+        ctx,
+        campaign: dict,
+        node: dict,
+        *,
+        run_id: str,
+    ) -> None:
         scenario = node.get("scenario") or {}
         messages = []
         resolved_target = ""
@@ -3624,14 +4368,15 @@ class Quests(commands.Cog):
                     """
                     SELECT run_id
                     FROM fable_campaign_runs
-                    WHERE user_id=$1 AND campaign_key=$2 AND is_canonical=TRUE
+                    WHERE run_id=$1 AND user_id=$2 AND campaign_key=$3
                     FOR UPDATE
                     """,
+                    run_id,
                     ctx.author.id,
                     campaign["key"],
                 )
                 if not run:
-                    await ctx.send("No canonical campaign run exists for this scenario.")
+                    await ctx.send("No matching campaign run exists for this scenario.")
                     return
                 messages = await self._apply_campaign_effects(
                     ctx.author.id,
@@ -3639,6 +4384,7 @@ class Quests(commands.Cog):
                     effects=node.get("effects") or [],
                     unlocks=node.get("unlocks") or [],
                     event_key=f"campaign:{campaign['key']}:scenario_node:{node['id']}",
+                    run_id=run_id,
                     conn=conn,
                 )
                 attempt = await conn.fetchrow(
@@ -3667,18 +4413,45 @@ class Quests(commands.Cog):
                         prior_result.get("outcome") if isinstance(prior_result, dict) else "",
                     )
                     resolved_target = str((prior_outcome or {}).get("target") or "")
+                await conn.execute(
+                    """
+                    UPDATE fable_campaign_runs
+                    SET current_node_key=$2, status=$3, updated_at=NOW()
+                    WHERE run_id=$1
+                    """,
+                    run_id,
+                    resolved_target or node["id"],
+                    "entering" if resolved_target else "awaiting_scenario",
+                )
         if messages:
             await ctx.send("\n".join(messages))
         if resolved_target:
-            await self._enter_campaign_node(ctx, campaign, resolved_target)
+            await self._enter_campaign_node(
+                ctx,
+                campaign,
+                resolved_target,
+                run_id=run_id,
+            )
             return
         if attempt_was_completed:
             await ctx.send("This completed scenario has an invalid saved outcome. Ask a GM to inspect it.")
             return
         await self._play_campaign_node_cutscene(ctx, campaign, node, "enter")
-        await self._send_campaign_scenario_stage(ctx, campaign, node)
+        await self._send_campaign_scenario_stage(
+            ctx,
+            campaign,
+            node,
+            run_id=run_id,
+        )
 
-    async def _enter_campaign_node(self, ctx, campaign: dict, node_id: str) -> None:
+    async def _enter_campaign_node(
+        self,
+        ctx,
+        campaign: dict,
+        node_id: str,
+        *,
+        run_id: str,
+    ) -> None:
         node = node_by_id(campaign, node_id)
         if not node:
             await ctx.send("This campaign points to a missing chapter. Ask a GM to validate its JSON.")
@@ -3690,29 +4463,26 @@ class Quests(commands.Cog):
                 node.get("requirements") or [],
                 conn=conn,
                 campaign_key=campaign["key"],
+                run_id=run_id,
             )
-            if allowed:
-                status = (
-                    "active"
-                    if node.get("type") == "quest"
-                    else "awaiting_scenario"
-                    if node.get("type") == "scenario"
-                    else "awaiting_choice"
-                )
-                await conn.execute(
-                    """
-                    UPDATE fable_campaign_runs
-                    SET current_node_key=$3, status=$4, updated_at=NOW()
-                    WHERE user_id=$1 AND campaign_key=$2 AND is_canonical=TRUE
-                    """,
-                    ctx.author.id,
-                    campaign["key"],
-                    node["id"],
-                    status,
-                )
         if not allowed:
             await ctx.send(
                 f"**{node.get('title', 'Next Chapter')}** is locked:\n{reason}"
+            )
+            return
+
+        redirect_target = await self._process_campaign_autonomous_events(
+            ctx,
+            campaign,
+            node["id"],
+            run_id=run_id,
+        )
+        if redirect_target:
+            await self._enter_campaign_node(
+                ctx,
+                campaign,
+                redirect_target,
+                run_id=run_id,
             )
             return
 
@@ -3725,6 +4495,7 @@ class Quests(commands.Cog):
                         effects=node.get("effects") or [],
                         unlocks=node.get("unlocks") or [],
                         event_key=f"campaign:{campaign['key']}:ending:{node['id']}",
+                        run_id=run_id,
                         conn=conn,
                     )
                     run = await conn.fetchrow(
@@ -3732,9 +4503,10 @@ class Quests(commands.Cog):
                         SELECT run_id, content_version, history_json,
                                choices_json, unlocks_json
                         FROM fable_campaign_runs
-                        WHERE user_id=$1 AND campaign_key=$2 AND is_canonical=TRUE
+                        WHERE run_id=$1 AND user_id=$2 AND campaign_key=$3
                         FOR UPDATE
                         """,
+                        run_id,
                         ctx.author.id,
                         campaign["key"],
                     )
@@ -3742,6 +4514,13 @@ class Quests(commands.Cog):
                         await self.fable_state.snapshot(conn, str(run["run_id"]))
                         if run
                         else {}
+                    )
+                    epilogue_fragments = await self._campaign_epilogue_fragments(
+                        ctx.author.id,
+                        campaign,
+                        node,
+                        conn=conn,
+                        run_id=str(run["run_id"]) if run else None,
                     )
                     ending_history = list(
                         self._load_progress(run["history_json"]) if run else []
@@ -3758,16 +4537,16 @@ class Quests(commands.Cog):
                         "choices": self._load_progress(run["choices_json"]) if run else {},
                         "unlocks": self._load_progress(run["unlocks_json"]) if run else [],
                         "state": story_state,
+                        "epilogue": epilogue_fragments,
                     }
                     await conn.execute(
                         """
                         UPDATE fable_campaign_runs
                         SET status='completed', completed_at=NOW(), updated_at=NOW(),
-                            ending_snapshot_json=$3, history_json=$4
-                        WHERE user_id=$1 AND campaign_key=$2 AND is_canonical=TRUE
+                            ending_snapshot_json=$2, history_json=$3
+                        WHERE run_id=$1
                         """,
-                        ctx.author.id,
-                        campaign["key"],
+                        run_id,
                         json.dumps(ending_snapshot, allow_nan=False, sort_keys=True),
                         json.dumps(ending_history),
                     )
@@ -3778,11 +4557,31 @@ class Quests(commands.Cog):
             )
             if messages:
                 embed.add_field(name="Consequences", value="\n".join(messages), inline=False)
+            for fragment in epilogue_fragments[:12]:
+                embed.add_field(
+                    name=fragment["title"][:256],
+                    value=fragment["text"][:1024],
+                    inline=False,
+                )
             await ctx.send(embed=embed)
             return
 
+        if node.get("type") == "warfront":
+            await self._enter_campaign_warfront(
+                ctx,
+                campaign,
+                node,
+                run_id=run_id,
+            )
+            return
+
         if node.get("type") == "scenario":
-            await self._enter_campaign_scenario(ctx, campaign, node)
+            await self._enter_campaign_scenario(
+                ctx,
+                campaign,
+                node,
+                run_id=run_id,
+            )
             return
 
         if node.get("type") != "quest":
@@ -3811,6 +4610,7 @@ class Quests(commands.Cog):
                         effects=node_effects,
                         unlocks=node.get("unlocks") or [],
                         event_key=f"campaign:{campaign['key']}:{node_type}_node:{node['id']}",
+                        run_id=run_id,
                         conn=conn,
                     )
                     raw_edges = (
@@ -3823,6 +4623,17 @@ class Quests(commands.Cog):
                         raw_edges or [],
                         conn=conn,
                         campaign_key=campaign["key"],
+                        run_id=run_id,
+                        campaign=campaign,
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE fable_campaign_runs
+                        SET current_node_key=$2, status='awaiting_choice', updated_at=NOW()
+                        WHERE run_id=$1
+                        """,
+                        run_id,
+                        node["id"],
                     )
             if messages:
                 await ctx.send("\n".join(messages))
@@ -3833,15 +4644,86 @@ class Quests(commands.Cog):
                     "Your faction standing or another requirement may need to change first."
                 )
                 return
-            await ctx.send(embed=self._campaign_choice_embed(campaign, node, edges))
+            await self._send_campaign_choice_prompt(
+                ctx,
+                campaign,
+                node,
+                edges,
+                run_id=run_id,
+            )
             return
 
         quest_key = self._campaign_quest_key(campaign, node)
         try:
             accept_data = await self._accept_quest_for_user(ctx.author.id, quest_key)
         except ValueError as exc:
+            quest_row = await self.bot.pool.fetchrow(
+                """
+                SELECT status, completion_count
+                FROM player_quests
+                WHERE user_id=$1 AND quest_key=$2
+                """,
+                ctx.author.id,
+                quest_key,
+            )
+            replay_run = await self.bot.pool.fetchrow(
+                "SELECT is_canonical FROM fable_campaign_runs WHERE run_id=$1",
+                run_id,
+            )
+            quest_status = str(quest_row["status"]) if quest_row else ""
+            quest_completed = bool(
+                quest_row
+                and (
+                    quest_status == "completed"
+                    or int(quest_row["completion_count"] or 0) > 0
+                )
+            )
+            if replay_run and not replay_run["is_canonical"] and quest_completed:
+                await self.bot.pool.execute(
+                    """
+                    UPDATE fable_campaign_runs
+                    SET current_node_key=$2, status='active', updated_at=NOW()
+                    WHERE run_id=$1
+                    """,
+                    run_id,
+                    node["id"],
+                )
+                await ctx.send(
+                    f"Chronicle replay recognizes your completed objective for "
+                    f"**{node.get('title')}** and continues without granting it again."
+                )
+                await self._advance_campaign_after_quest(
+                    ctx,
+                    quest_record_from_node(campaign, node),
+                )
+                return
+            if quest_status == "active":
+                await self.bot.pool.execute(
+                    """
+                    UPDATE fable_campaign_runs
+                    SET current_node_key=$2, status='active', updated_at=NOW()
+                    WHERE run_id=$1
+                    """,
+                    run_id,
+                    node["id"],
+                )
+                await ctx.send(
+                    f"Campaign chapter **{node.get('title')}** resumed. "
+                    f"Continue it through `$quests`."
+                )
+                await self._send_campaign_encounter(ctx, node)
+                return
             await ctx.send(f"Campaign chapter **{node.get('title')}** is ready: {exc}")
             return
+        await self.bot.pool.execute(
+            """
+            UPDATE fable_campaign_runs
+            SET current_node_key=$2, status='active', updated_at=NOW()
+            WHERE run_id=$1
+            """,
+            run_id,
+            node["id"],
+        )
         await self._send_quest_accept_messages(ctx, accept_data)
         await self._send_campaign_encounter(ctx, node)
 
@@ -3861,18 +4743,16 @@ class Quests(commands.Cog):
 
         async with self.bot.pool.acquire() as conn:
             async with conn.transaction():
-                state = await conn.fetchrow(
-                    """
-                    SELECT status, current_node_key, history_json
-                    FROM fable_campaign_runs
-                    WHERE user_id=$1 AND campaign_key=$2 AND is_canonical=TRUE
-                    FOR UPDATE
-                    """,
+                state = await self._selected_campaign_run(
+                    conn,
                     ctx.author.id,
-                    campaign_key,
+                    campaign_key=campaign_key,
+                    statuses=("active",),
+                    for_update=True,
                 )
                 if not state or state["current_node_key"] != node_key:
                     return
+                run_id = str(state["run_id"])
                 history = list(self._load_progress(state["history_json"]) or [])
                 if node_key not in history:
                     history.append(node_key)
@@ -3882,6 +4762,7 @@ class Quests(commands.Cog):
                     effects=node.get("effects") or [],
                     unlocks=node.get("unlocks") or [],
                     event_key=f"campaign:{campaign_key}:quest:{node_key}",
+                    run_id=run_id,
                     conn=conn,
                 )
                 edges = await self._available_campaign_edges(
@@ -3889,6 +4770,8 @@ class Quests(commands.Cog):
                     node.get("next") or [],
                     conn=conn,
                     campaign_key=campaign_key,
+                    run_id=run_id,
+                    campaign=campaign,
                 )
                 if len(edges) == 1:
                     edge = edges[0]
@@ -3902,18 +4785,33 @@ class Quests(commands.Cog):
                                 f"campaign:{campaign_key}:auto:"
                                 f"{node_key}:{edge['target']}"
                             ),
+                            run_id=run_id,
                             conn=conn,
                         )
                     )
-                await conn.execute(
-                    """
-                    UPDATE fable_campaign_runs SET history_json=$3, updated_at=NOW()
-                    WHERE user_id=$1 AND campaign_key=$2 AND is_canonical=TRUE
-                    """,
-                    ctx.author.id,
-                    campaign_key,
-                    json.dumps(history),
-                )
+                if len(edges) == 1:
+                    await conn.execute(
+                        """
+                        UPDATE fable_campaign_runs
+                        SET current_node_key=$2, status='entering',
+                            history_json=$3, updated_at=NOW()
+                        WHERE run_id=$1
+                        """,
+                        run_id,
+                        edges[0]["target"],
+                        json.dumps(history),
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        UPDATE fable_campaign_runs
+                        SET status=$2, history_json=$3, updated_at=NOW()
+                        WHERE run_id=$1
+                        """,
+                        run_id,
+                        "awaiting_choice",
+                        json.dumps(history),
+                    )
 
         if consequence_messages:
             await ctx.send("\n".join(consequence_messages))
@@ -3921,18 +4819,20 @@ class Quests(commands.Cog):
             await ctx.send("This chapter has no available next path. A GM may need to review its conditions.")
             return
         if len(edges) > 1:
-            async with self.bot.pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    UPDATE fable_campaign_runs SET status='awaiting_choice', updated_at=NOW()
-                    WHERE user_id=$1 AND campaign_key=$2 AND is_canonical=TRUE
-                    """,
-                    ctx.author.id,
-                    campaign_key,
-                )
-            await ctx.send(embed=self._campaign_choice_embed(campaign, node, edges))
+            await self._send_campaign_choice_prompt(
+                ctx,
+                campaign,
+                node,
+                edges,
+                run_id=run_id,
+            )
             return
-        await self._enter_campaign_node(ctx, campaign, edges[0]["target"])
+        await self._enter_campaign_node(
+            ctx,
+            campaign,
+            edges[0]["target"],
+            run_id=run_id,
+        )
 
     def _load_custom_quest_definition(self, row) -> dict:
         if not row:
@@ -4183,18 +5083,39 @@ class Quests(commands.Cog):
             passed = status == "completed"
             default_text = f"Complete campaign **{key}** first."
         elif condition_type == "campaign_choice":
-            campaign_key, _, choice_key = key.partition(":")
-            choices_raw = await conn.fetchval(
-                """
-                SELECT choices_json FROM fable_campaign_runs
-                WHERE user_id=$1 AND campaign_key=$2 AND is_canonical=TRUE
-                """,
-                user_id,
-                normalize_campaign_key(campaign_key),
-            )
+            choice_campaign_key, _, choice_key = key.partition(":")
+            if run_id and normalize_campaign_key(choice_campaign_key) == normalize_campaign_key(campaign_key):
+                choices_raw = await conn.fetchval(
+                    "SELECT choices_json FROM fable_campaign_runs WHERE run_id=$1",
+                    run_id,
+                )
+            else:
+                choices_raw = await conn.fetchval(
+                    """
+                    SELECT choices_json FROM fable_campaign_runs
+                    WHERE user_id=$1 AND campaign_key=$2 AND is_canonical=TRUE
+                    """,
+                    user_id,
+                    normalize_campaign_key(choice_campaign_key),
+                )
             choices = self._load_progress(choices_raw)
             passed = self._condition_compare(choices.get(choice_key), operator, expected)
-            default_text = f"Your earlier choice in **{campaign_key}** does not open this path."
+            default_text = f"Your earlier choice in **{choice_campaign_key}** does not open this path."
+        elif condition_type == "fable_reward":
+            reward_type = normalize_campaign_key(condition.get("field"))
+            present = await self.fable_state.has_reward(
+                conn,
+                user_id=user_id,
+                reward_type=reward_type,
+                reward_key=key,
+            )
+            expected_bool = str(expected).strip().lower() not in {
+                "0", "false", "no", "none",
+            }
+            passed = self._condition_compare(present, operator, expected_bool)
+            default_text = (
+                f"Requires {reward_type.replace('_', ' ')} reward **{key}**."
+            )
         elif condition_type in {
             "reputation",
             "faction_standing",
@@ -4204,6 +5125,71 @@ class Quests(commands.Cog):
             factions = self.bot.get_cog("Factions")
             if factions is None:
                 return False, "Faction requirements are temporarily unavailable."
+            is_replay = bool(
+                run_id
+                and not await conn.fetchval(
+                    "SELECT is_canonical FROM fable_campaign_runs WHERE run_id=$1",
+                    run_id,
+                )
+            )
+            if is_replay and condition_type != "system_unlock":
+                faction_key = normalize_campaign_key(key)
+                field = str(condition.get("field") or "rank").strip().lower()
+                if condition_type == "faction_membership":
+                    field = "membership"
+                    expected = normalize_campaign_key(expected) or "member"
+                exists, actual = await self.fable_state.get_state(
+                    conn,
+                    user_id=user_id,
+                    campaign_key=campaign_key,
+                    state_key=f"faction.{faction_key}.{field}",
+                    run_id=run_id,
+                )
+                if field == "tier":
+                    points_exists, points = await self.fable_state.get_state(
+                        conn,
+                        user_id=user_id,
+                        campaign_key=campaign_key,
+                        state_key=f"faction.{faction_key}.points",
+                        run_id=run_id,
+                    )
+                    definition = await factions.service.get_definition(
+                        faction_key,
+                        conn=conn,
+                    )
+                    ordered = sorted(
+                        definition.tiers,
+                        key=lambda tier: tier.minimum_points,
+                    )
+                    current_tier = ordered[0]
+                    for tier in ordered:
+                        if int(points or 0) >= tier.minimum_points:
+                            current_tier = tier
+                    target = next(
+                        (
+                            tier
+                            for tier in ordered
+                            if str(expected).casefold()
+                            in {tier.key.casefold(), tier.name.casefold()}
+                        ),
+                        None,
+                    )
+                    if operator in {"=", "==", "is", "!=", "is_not"}:
+                        actual = current_tier.key
+                        expected = target.key if target else expected
+                    else:
+                        actual = current_tier.rank
+                        expected = target.rank if target else expected
+                    exists = points_exists
+                elif not exists:
+                    actual = "none" if field == "membership" else 0
+                    exists = True
+                passed = self._condition_compare(actual, operator, expected)
+                default_text = (
+                    f"This alternate history requires {field} **{expected}** "
+                    f"with **{faction_key.replace('_', ' ').title()}**."
+                )
+                return passed, custom_description or default_text
             return await factions.evaluate_condition(user_id, condition, conn=conn)
         elif condition_type in STATE_CONDITION_TYPES | MODEL_CONDITION_TYPES:
             state_campaign_key = normalize_campaign_key(
@@ -4290,10 +5276,16 @@ class Quests(commands.Cog):
                 passed = bool(Badge.from_db(profile["badges"]) & badge)
             default_text = f"Earn the **{Badge.display_name_for(key.upper())}** badge."
         elif condition_type == "unlock":
-            rows = await conn.fetch(
-                "SELECT unlocks_json FROM fable_campaign_runs WHERE user_id=$1 AND is_canonical=TRUE",
-                user_id,
-            )
+            if run_id:
+                rows = await conn.fetch(
+                    "SELECT unlocks_json FROM fable_campaign_runs WHERE run_id=$1",
+                    run_id,
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT unlocks_json FROM fable_campaign_runs WHERE user_id=$1 AND is_canonical=TRUE",
+                    user_id,
+                )
             unlocks = {
                 str(unlock)
                 for row in rows
@@ -4401,24 +5393,23 @@ class Quests(commands.Cog):
                 return False, f"You must complete **{prereq_key}** first."
         campaign_key = normalize_campaign_key(access.get("campaign_key"))
         campaign_node_key = normalize_campaign_key(access.get("campaign_node_key"))
+        access_run_id = None
         if campaign_key and campaign_node_key:
-            current_node = await conn.fetchval(
-                """
-                SELECT current_node_key
-                FROM fable_campaign_runs
-                WHERE user_id=$1 AND campaign_key=$2
-                  AND is_canonical=TRUE AND status='active'
-                """,
+            access_run = await self._selected_campaign_run(
+                conn,
                 user_id,
-                campaign_key,
+                campaign_key=campaign_key,
+                statuses=("active", "entering"),
             )
-            if current_node != campaign_node_key:
+            access_run_id = str(access_run["run_id"]) if access_run else None
+            if not access_run or access_run["current_node_key"] != campaign_node_key:
                 return False, "This quest is not your current campaign chapter."
         conditions_ok, condition_reason = await self._evaluate_campaign_conditions(
             user_id,
             access.get("conditions") or [],
             conn=conn,
             campaign_key=campaign_key,
+            run_id=access_run_id,
         )
         if not conditions_ok:
             return False, condition_reason
@@ -6120,13 +7111,14 @@ class Quests(commands.Cog):
     async def campaign(self, ctx):
         state = await self.bot.pool.fetchrow(
             """
-            SELECT pc.campaign_key, pc.status, pc.current_node_key, pc.history_json,
+            SELECT pc.run_id, pc.run_kind, pc.is_canonical, pc.campaign_key,
+                   pc.status, pc.current_node_key, pc.history_json,
                    cc.title, pc.campaign_json_snapshot AS campaign_json
             FROM fable_campaign_runs pc
             JOIN campaign_content cc ON cc.campaign_key = pc.campaign_key
             LEFT JOIN fable_player_preferences fp ON fp.user_id = pc.user_id
-            WHERE pc.user_id=$1 AND pc.is_canonical=TRUE
-              AND pc.status IN ('active', 'awaiting_choice', 'awaiting_scenario')
+            WHERE pc.user_id=$1
+              AND pc.status IN ('entering', 'active', 'awaiting_choice', 'awaiting_scenario', 'awaiting_warfront')
             ORDER BY (pc.run_id = fp.selected_run_id) DESC, pc.updated_at DESC
             LIMIT 1
             """,
@@ -6155,15 +7147,40 @@ class Quests(commands.Cog):
         node = node_by_id(campaign, state["current_node_key"])
         if not node:
             return await ctx.send("Your campaign is pointing at a missing node. Please notify a GM.")
+        if state["status"] == "entering":
+            await ctx.send("Resuming your last campaign transition…")
+            return await self._enter_campaign_node(
+                ctx,
+                campaign,
+                node["id"],
+                run_id=str(state["run_id"]),
+            )
         if state["status"] == "awaiting_scenario" and node.get("type") == "scenario":
-            return await self._send_campaign_scenario_stage(ctx, campaign, node)
+            return await self._send_campaign_scenario_stage(
+                ctx,
+                campaign,
+                node,
+                run_id=str(state["run_id"]),
+            )
+        if state["status"] == "awaiting_warfront" and node.get("type") == "warfront":
+            return await self._send_campaign_warfront_plan(
+                ctx,
+                campaign,
+                node,
+                run_id=str(state["run_id"]),
+            )
         embed = discord.Embed(
             title=state["title"],
             description=node.get("description") or "Your story continues.",
             color=0x5D2E12,
         )
+        if not state["is_canonical"]:
+            embed.description = (
+                "**Chronicle replay — alternate history.**\n\n" + embed.description
+            )
         embed.add_field(name="Current Chapter", value=node.get("title") or node["id"], inline=False)
         embed.add_field(name="Progress", value=f"{len(self._load_progress(state['history_json']) or [])} chapter(s) completed")
+        choice_view = None
         if state["status"] == "awaiting_choice":
             raw_edges = (
                 node.get("options")
@@ -6176,6 +7193,8 @@ class Quests(commands.Cog):
                     raw_edges or [],
                     conn=conn,
                     campaign_key=state["campaign_key"],
+                    run_id=str(state["run_id"]),
+                    campaign=campaign,
                 )
             embed.add_field(
                 name="Decision",
@@ -6183,6 +7202,16 @@ class Quests(commands.Cog):
                 inline=False,
             )
             embed.set_footer(text="Choose with $campaign choose <number>")
+            if edges:
+                choice_view = CampaignActionView(
+                    cog=self,
+                    ctx=ctx,
+                    run_id=str(state["run_id"]),
+                    campaign_key=campaign["key"],
+                    node_key=node["id"],
+                    options=edges,
+                    action_kind="choose",
+                )
         elif node.get("type") == "quest":
             quest_key = self._campaign_quest_key(campaign, node)
             embed.add_field(name="Quest", value=f"`$quests` or `$quests turnin {quest_key}`", inline=False)
@@ -6197,7 +7226,9 @@ class Quests(commands.Cog):
                 inline=False,
             )
             embed.set_footer(text="Choose with $campaign choose <number>")
-        await ctx.send(embed=embed)
+        message = await ctx.send(embed=embed, view=choice_view)
+        if choice_view is not None:
+            choice_view.message = message
 
     @campaign.command(name="start", aliases=["begin"])
     @has_char()
@@ -6257,7 +7288,7 @@ class Quests(commands.Cog):
                     content_version, status, current_node_key,
                     history_json, choices_json, unlocks_json,
                     campaign_json_snapshot, started_at, updated_at
-                ) VALUES ($1,$2,$3,'canonical',TRUE,$4,'active',$5,'[]','{}','[]',$6,NOW(),NOW())
+                ) VALUES ($1,$2,$3,'canonical',TRUE,$4,'entering',$5,'[]','{}','[]',$6,NOW(),NOW())
                 """,
                 run_id,
                 ctx.author.id,
@@ -6278,25 +7309,152 @@ class Quests(commands.Cog):
                 run_id,
             )
         await ctx.send(f"You began **{campaign['title']}**.")
-        await self._enter_campaign_node(ctx, campaign, campaign["start_node"])
+        await self._enter_campaign_node(
+            ctx,
+            campaign,
+            campaign["start_node"],
+            run_id=run_id,
+        )
+
+    @campaign.command(name="replay", aliases=["newchronicle"])
+    @has_char()
+    async def campaign_replay(self, ctx, campaign_key: str):
+        """Begin an isolated alternate-history run after canonical completion."""
+        campaign_key = normalize_campaign_key(campaign_key)
+        async with self.bot.pool.acquire() as conn:
+            async with conn.transaction():
+                canonical = await conn.fetchrow(
+                    """
+                    SELECT campaign_json_snapshot, content_version
+                    FROM fable_campaign_runs
+                    WHERE user_id=$1 AND campaign_key=$2
+                      AND is_canonical=TRUE AND status='completed'
+                    FOR UPDATE
+                    """,
+                    ctx.author.id,
+                    campaign_key,
+                )
+                if not canonical:
+                    return await ctx.send(
+                        "Complete that campaign canonically before opening an alternate Chronicle."
+                    )
+                active_replay = await conn.fetchval(
+                    """
+                    SELECT run_id FROM fable_campaign_runs
+                    WHERE user_id=$1 AND campaign_key=$2 AND is_canonical=FALSE
+                      AND status IN ('entering','active','awaiting_choice','awaiting_scenario','awaiting_warfront')
+                    ORDER BY updated_at DESC LIMIT 1
+                    """,
+                    ctx.author.id,
+                    campaign_key,
+                )
+                if active_replay:
+                    return await ctx.send(
+                        f"An alternate Chronicle is already active. Focus it with "
+                        f"`$campaign select {str(active_replay)[:8]}`."
+                    )
+                campaign = self._load_progress(canonical["campaign_json_snapshot"])
+                start_node = node_by_id(campaign, campaign.get("start_node"))
+                if not start_node:
+                    return await ctx.send("The saved campaign snapshot has no valid start node.")
+                run_id = self.fable_state.new_run_id()
+                await conn.execute(
+                    """
+                    INSERT INTO fable_campaign_runs (
+                        run_id, user_id, campaign_key, run_kind, is_canonical,
+                        content_version, status, current_node_key,
+                        history_json, choices_json, unlocks_json,
+                        campaign_json_snapshot, started_at, updated_at
+                    ) VALUES ($1,$2,$3,'chronicle',FALSE,$4,'entering',$5,
+                              '[]','{}','[]',$6,NOW(),NOW())
+                    """,
+                    run_id,
+                    ctx.author.id,
+                    campaign_key,
+                    int(canonical["content_version"] or 1),
+                    campaign["start_node"],
+                    json.dumps(campaign, allow_nan=False, sort_keys=True),
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO fable_player_preferences (user_id, selected_run_id, updated_at)
+                    VALUES ($1,$2,NOW())
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        selected_run_id=EXCLUDED.selected_run_id, updated_at=NOW()
+                    """,
+                    ctx.author.id,
+                    run_id,
+                )
+        await ctx.send(
+            f"You opened an alternate Chronicle for **{campaign.get('title') or campaign_key}**. "
+            "Canonical choices and state will not be rewritten."
+        )
+        await self._enter_campaign_node(
+            ctx,
+            campaign,
+            campaign["start_node"],
+            run_id=run_id,
+        )
+
+    @campaign.command(name="runs", aliases=["histories"])
+    @has_char()
+    async def campaign_runs(self, ctx):
+        rows = await self.bot.pool.fetch(
+            """
+            SELECT fcr.run_id, fcr.campaign_key, fcr.run_kind, fcr.is_canonical,
+                   fcr.status, fcr.current_node_key,
+                   (fcr.run_id=fp.selected_run_id) AS selected
+            FROM fable_campaign_runs fcr
+            LEFT JOIN fable_player_preferences fp ON fp.user_id=fcr.user_id
+            WHERE fcr.user_id=$1
+            ORDER BY selected DESC, fcr.updated_at DESC
+            LIMIT 20
+            """,
+            ctx.author.id,
+        )
+        if not rows:
+            return await ctx.send("Your Chronicle has no campaign runs yet.")
+        embed = discord.Embed(
+            title="Chronicle Histories",
+            description="Focus one with `$campaign select <campaign key or run prefix>`. ",
+            color=0x5D2E12,
+        )
+        for run in rows:
+            kind = "Canonical" if run["is_canonical"] else "Alternate"
+            marker = " · Focused" if run["selected"] else ""
+            embed.add_field(
+                name=f"{run['campaign_key']} · {kind}{marker}",
+                value=(
+                    f"`{str(run['run_id'])[:8]}` · {str(run['status']).replace('_', ' ').title()}\n"
+                    f"Current: `{run['current_node_key']}`"
+                ),
+                inline=False,
+            )
+        await ctx.send(embed=embed)
 
     @campaign.command(name="select", aliases=["focus"])
     @has_char()
     async def campaign_select(self, ctx, campaign_key: str):
         """Select which active campaign Chronicle and choice commands control."""
-        campaign_key = normalize_campaign_key(campaign_key)
+        selector = str(campaign_key or "").strip().lower()
+        normalized_key = normalize_campaign_key(selector)
         async with self.bot.pool.acquire() as conn:
             run = await conn.fetchrow(
                 """
-                SELECT fcr.run_id, cc.title
+                SELECT fcr.run_id, fcr.is_canonical, cc.title
                 FROM fable_campaign_runs fcr
                 JOIN campaign_content cc ON cc.campaign_key=fcr.campaign_key
-                WHERE fcr.user_id=$1 AND fcr.campaign_key=$2
-                  AND fcr.is_canonical=TRUE
-                  AND fcr.status IN ('active', 'awaiting_choice', 'awaiting_scenario')
+                WHERE fcr.user_id=$1
+                  AND (fcr.run_id=$2 OR fcr.run_id LIKE $2 || '%' OR fcr.campaign_key=$3)
+                  AND fcr.status IN ('entering', 'active', 'awaiting_choice', 'awaiting_scenario', 'awaiting_warfront')
+                ORDER BY (fcr.run_id=$2) DESC, (fcr.run_id LIKE $2 || '%') DESC,
+                         (fcr.campaign_key=$3 AND fcr.is_canonical) DESC,
+                         fcr.updated_at DESC
+                LIMIT 1
                 """,
                 ctx.author.id,
-                campaign_key,
+                selector,
+                normalized_key,
             )
             if not run:
                 return await ctx.send("That campaign is not currently active in your Chronicle.")
@@ -6311,12 +7469,13 @@ class Quests(commands.Cog):
                 ctx.author.id,
                 run["run_id"],
             )
-        await ctx.send(f"Your Chronicle is now focused on **{run['title']}**.")
+        kind = "canonical history" if run["is_canonical"] else "alternate history"
+        await ctx.send(f"Your Chronicle is now focused on **{run['title']}** ({kind}).")
 
     @campaign.command(name="debugstate", aliases=["statejson"])
     @is_gm()
     async def campaign_debug_state(self, ctx, campaign_key: str = ""):
-        """Export the caller's canonical V2 run and typed state for development."""
+        """Export the caller's focused V2 run and typed state for development."""
         normalized_key = normalize_campaign_key(campaign_key)
         async with self.bot.pool.acquire() as conn:
             run = await conn.fetchrow(
@@ -6324,7 +7483,7 @@ class Quests(commands.Cog):
                 SELECT fcr.*
                 FROM fable_campaign_runs fcr
                 LEFT JOIN fable_player_preferences fp ON fp.user_id=fcr.user_id
-                WHERE fcr.user_id=$1 AND fcr.is_canonical=TRUE
+                WHERE fcr.user_id=$1
                   AND ($2='' OR fcr.campaign_key=$2)
                 ORDER BY (fcr.run_id=fp.selected_run_id) DESC, fcr.updated_at DESC
                 LIMIT 1
@@ -6333,7 +7492,7 @@ class Quests(commands.Cog):
                 normalized_key,
             )
             if not run:
-                return await ctx.send("No matching canonical Fable run was found.")
+                return await ctx.send("No matching Fable run was found.")
             story_state = await self.fable_state.snapshot(conn, str(run["run_id"]))
         payload = {
             "run_id": str(run["run_id"]),
@@ -6357,6 +7516,15 @@ class Quests(commands.Cog):
     @has_char()
     async def campaign_act(self, ctx, option: int):
         """Take an action in the focused campaign scenario."""
+        await self._resolve_campaign_act(ctx, option)
+
+    async def _resolve_campaign_act(
+        self,
+        ctx,
+        option: int,
+        *,
+        expected_prompt: tuple[str, str, str, str] | None = None,
+    ):
         consequence_messages = []
         outcome = None
         result_text = ""
@@ -6372,7 +7540,7 @@ class Quests(commands.Cog):
                     FROM fable_scenario_attempts fsa
                     JOIN fable_campaign_runs fcr ON fcr.run_id=fsa.run_id
                     LEFT JOIN fable_player_preferences fp ON fp.user_id=fcr.user_id
-                    WHERE fcr.user_id=$1 AND fcr.is_canonical=TRUE
+                    WHERE fcr.user_id=$1
                       AND fcr.status='awaiting_scenario'
                       AND fsa.status='active'
                     ORDER BY (fcr.run_id=fp.selected_run_id) DESC, fcr.updated_at DESC
@@ -6391,6 +7559,15 @@ class Quests(commands.Cog):
                 stage = self._scenario_stage(scenario, attempt["current_stage_key"])
                 if not stage:
                     return await ctx.send("The active scenario stage is missing.")
+                if expected_prompt is not None and expected_prompt != (
+                    str(attempt["run_id"]),
+                    attempt["campaign_key"],
+                    node["id"],
+                    stage["id"],
+                ):
+                    return await ctx.send(
+                        "That scenario button belongs to an earlier stage. Use `$campaign` to continue."
+                    )
                 actions = await self._available_scenario_actions(
                     ctx.author.id,
                     attempt["campaign_key"],
@@ -6398,6 +7575,7 @@ class Quests(commands.Cog):
                     stage,
                     conn=conn,
                     run_id=str(attempt["run_id"]),
+                    campaign=campaign,
                 )
                 if not actions:
                     return await ctx.send(
@@ -6419,6 +7597,7 @@ class Quests(commands.Cog):
                         unlocks=action.get("unlocks") or [],
                         event_key=action_event,
                         source=f"scenario:{scenario.get('key') or node['id']}",
+                        run_id=str(attempt["run_id"]),
                         conn=conn,
                     )
                 )
@@ -6454,6 +7633,7 @@ class Quests(commands.Cog):
                             unlocks=outcome.get("unlocks") or [],
                             event_key=f"{action_event}:outcome:{outcome['id']}",
                             source=f"scenario:{scenario.get('key') or node['id']}",
+                            run_id=str(attempt["run_id"]),
                             conn=conn,
                         )
                     )
@@ -6483,11 +7663,13 @@ class Quests(commands.Cog):
                     await conn.execute(
                         """
                         UPDATE fable_campaign_runs
-                        SET status='active', history_json=$2, updated_at=NOW()
+                        SET status='entering', current_node_key=$3,
+                            history_json=$2, updated_at=NOW()
                         WHERE run_id=$1
                         """,
                         attempt["run_id"],
                         json.dumps(completed_nodes),
+                        str(outcome.get("target") or ""),
                     )
                     target_node = str(outcome.get("target") or "")
 
@@ -6502,24 +7684,44 @@ class Quests(commands.Cog):
                 color=0x2F6B3F,
             )
             await ctx.send(embed=embed)
-            await self._enter_campaign_node(ctx, campaign, target_node)
+            await self._enter_campaign_node(
+                ctx,
+                campaign,
+                target_node,
+                run_id=str(attempt["run_id"]),
+            )
             return
-        await self._send_campaign_scenario_stage(ctx, campaign, node)
+        await self._send_campaign_scenario_stage(
+            ctx,
+            campaign,
+            node,
+            run_id=str(attempt["run_id"]),
+        )
 
     @campaign.command(name="choose", aliases=["choice"])
     @has_char()
     async def campaign_choose(self, ctx, option: int):
+        await self._resolve_campaign_choice(ctx, option)
+
+    async def _resolve_campaign_choice(
+        self,
+        ctx,
+        option: int,
+        *,
+        expected_prompt: tuple[str, str, str] | None = None,
+    ):
         async with self.bot.pool.acquire() as conn:
             async with conn.transaction():
                 state = await conn.fetchrow(
                     """
-                    SELECT pc.campaign_key, pc.current_node_key, pc.choices_json,
+                    SELECT pc.run_id, pc.campaign_key, pc.current_node_key,
+                           pc.choices_json,
                            pc.history_json,
                            pc.campaign_json_snapshot AS campaign_json
                     FROM fable_campaign_runs pc
                     JOIN campaign_content cc ON cc.campaign_key=pc.campaign_key
                     LEFT JOIN fable_player_preferences fp ON fp.user_id=pc.user_id
-                    WHERE pc.user_id=$1 AND pc.is_canonical=TRUE
+                    WHERE pc.user_id=$1
                       AND pc.status='awaiting_choice'
                     ORDER BY (pc.run_id = fp.selected_run_id) DESC, pc.updated_at DESC
                     LIMIT 1
@@ -6533,6 +7735,14 @@ class Quests(commands.Cog):
                 node = node_by_id(campaign, state["current_node_key"])
                 if not node:
                     return await ctx.send("This campaign choice points to a missing node.")
+                if expected_prompt is not None and expected_prompt != (
+                    str(state["run_id"]),
+                    state["campaign_key"],
+                    node["id"],
+                ):
+                    return await ctx.send(
+                        "That choice button belongs to an earlier decision. Use `$campaign` to continue."
+                    )
                 choices = self._load_progress(state["choices_json"])
                 history = list(self._load_progress(state["history_json"]) or [])
                 is_authored_choice = node.get("type") in CHOICE_NODE_TYPES
@@ -6548,6 +7758,8 @@ class Quests(commands.Cog):
                     raw_edges or [],
                     conn=conn,
                     campaign_key=state["campaign_key"],
+                    run_id=str(state["run_id"]),
+                    campaign=campaign,
                 )
                 if not edges:
                     return await ctx.send("No campaign paths are currently unlocked.")
@@ -6561,13 +7773,14 @@ class Quests(commands.Cog):
                 await conn.execute(
                     """
                     UPDATE fable_campaign_runs
-                    SET choices_json=$3, history_json=$4, updated_at=NOW()
-                    WHERE user_id=$1 AND campaign_key=$2 AND is_canonical=TRUE
+                    SET choices_json=$2, history_json=$3,
+                        current_node_key=$4, status='entering', updated_at=NOW()
+                    WHERE run_id=$1
                     """,
-                    ctx.author.id,
-                    state["campaign_key"],
+                    state["run_id"],
                     json.dumps(choices, sort_keys=True),
                     json.dumps(history),
+                    edge["target"],
                 )
                 consequence_messages = await self._apply_campaign_effects(
                     ctx.author.id,
@@ -6578,12 +7791,18 @@ class Quests(commands.Cog):
                         f"campaign:{state['campaign_key']}:choice:"
                         f"{node['id']}:{edge['target']}"
                     ),
+                    run_id=str(state["run_id"]),
                     conn=conn,
                 )
         await ctx.send(f"You chose **{edge.get('label') or 'Continue'}**.")
         if consequence_messages:
             await ctx.send("\n".join(consequence_messages))
-        await self._enter_campaign_node(ctx, campaign, edge["target"])
+        await self._enter_campaign_node(
+            ctx,
+            campaign,
+            edge["target"],
+            run_id=str(state["run_id"]),
+        )
 
     @campaign.command(name="reputation", aliases=["rep"])
     @has_char()
@@ -6592,6 +7811,1044 @@ class Quests(commands.Cog):
         if factions is None:
             return await ctx.send("Faction standing is temporarily unavailable.")
         await factions.send_overview(ctx)
+
+    async def _selected_campaign_state(self, user_id: int) -> tuple[object | None, dict]:
+        async with self.bot.pool.acquire() as conn:
+            run = await conn.fetchrow(
+                """
+                SELECT fcr.run_id, fcr.campaign_key, fcr.status,
+                       fcr.is_canonical, fcr.campaign_json_snapshot
+                FROM fable_campaign_runs fcr
+                LEFT JOIN fable_player_preferences fp ON fp.user_id=fcr.user_id
+                WHERE fcr.user_id=$1
+                ORDER BY (fcr.run_id=fp.selected_run_id) DESC, fcr.updated_at DESC
+                LIMIT 1
+                """,
+                user_id,
+            )
+            state = (
+                await self.fable_state.snapshot(conn, str(run["run_id"]))
+                if run
+                else {}
+            )
+        return run, state
+
+    async def _selected_campaign_context(
+        self,
+        user_id: int,
+        *,
+        statuses: tuple[str, ...] | None = None,
+    ) -> tuple[object | None, dict, dict]:
+        async with self.bot.pool.acquire() as conn:
+            run = await self._selected_campaign_run(
+                conn,
+                user_id,
+                statuses=statuses,
+            )
+            if not run:
+                return None, {}, {}
+            campaign = self._load_progress(run["campaign_json_snapshot"])
+            state = await self.fable_state.snapshot(conn, str(run["run_id"]))
+        return run, campaign, state
+
+    async def _campaign_companion_available(
+        self,
+        user_id: int,
+        campaign: dict,
+        companion: dict,
+        *,
+        conn,
+        run_id: str,
+        state: dict,
+    ) -> bool:
+        status = str(
+            state.get(f"companion.{companion['key']}.status", "active")
+        ).lower()
+        if status in {"left", "captured", "dead", "unavailable"}:
+            return False
+        allowed, _reason = await self._evaluate_campaign_conditions(
+            user_id,
+            companion.get("conditions") or [],
+            conn=conn,
+            campaign_key=campaign["key"],
+            run_id=run_id,
+        )
+        return allowed
+
+    @staticmethod
+    def _group_story_model_state(state: dict, prefix: str) -> dict[str, dict]:
+        grouped: dict[str, dict] = {}
+        namespace = f"{prefix}."
+        for state_key, value in state.items():
+            if not str(state_key).startswith(namespace):
+                continue
+            remainder = str(state_key)[len(namespace):]
+            entity_key, separator, field = remainder.partition(".")
+            if not separator or not entity_key or not field:
+                continue
+            grouped.setdefault(entity_key, {})[field] = value
+        return grouped
+
+    @staticmethod
+    def _story_state_display(value) -> str:
+        if isinstance(value, bool):
+            return "Yes" if value else "No"
+        if isinstance(value, list):
+            return ", ".join(str(entry).replace("_", " ").title() for entry in value) or "None"
+        if isinstance(value, dict):
+            return ", ".join(
+                f"{str(key).replace('_', ' ').title()}: {item}"
+                for key, item in list(value.items())[:8]
+            ) or "None"
+        return str(value).replace("_", " ").title()
+
+    async def _send_story_model_overview(
+        self,
+        ctx,
+        *,
+        prefix: str,
+        title: str,
+        empty_text: str,
+    ) -> None:
+        run, state = await self._selected_campaign_state(ctx.author.id)
+        if not run:
+            return await ctx.send("No campaign history was found.")
+        grouped = self._group_story_model_state(state, prefix)
+        if not grouped:
+            return await ctx.send(empty_text)
+        embed = discord.Embed(
+            title=title,
+            description=f"Campaign: `{run['campaign_key']}`",
+            color=0x5D2E12,
+        )
+        for entity_key, fields in list(sorted(grouped.items()))[:20]:
+            lines = [
+                f"**{field.replace('_', ' ').title()}:** {self._story_state_display(value)}"
+                for field, value in sorted(fields.items())
+            ]
+            embed.add_field(
+                name=entity_key.replace("_", " ").title(),
+                value="\n".join(lines)[:1024],
+                inline=False,
+            )
+        await ctx.send(embed=embed)
+
+    @campaign.command(name="companions", aliases=["relationships"])
+    @has_char()
+    async def campaign_companions(self, ctx):
+        """Show companion relationship, growth, status, and romance state."""
+        run, campaign, state = await self._selected_campaign_context(ctx.author.id)
+        if not run:
+            return await ctx.send("No campaign history is currently focused.")
+        companions = [
+            companion
+            for companion in campaign.get("companions") or []
+            if isinstance(companion, dict) and companion.get("key")
+        ]
+        if not companions:
+            return await self._send_story_model_overview(
+                ctx,
+                prefix="companion",
+                title="Campaign Companions",
+                empty_text="This campaign has not recorded any companion relationships yet.",
+            )
+        grouped = self._group_story_model_state(state, "companion")
+        active_party = set(state.get("party.active") or [])
+        embed = discord.Embed(
+            title="Campaign Companions",
+            description=f"Campaign: `{run['campaign_key']}`",
+            color=0x6B4C8A,
+        )
+        async with self.bot.pool.acquire() as conn:
+            for companion in companions[:20]:
+                available = await self._campaign_companion_available(
+                    ctx.author.id,
+                    campaign,
+                    companion,
+                    conn=conn,
+                    run_id=str(run["run_id"]),
+                    state=state,
+                )
+                fields = grouped.get(companion["key"], {})
+                lines = [
+                    f"**Role:** {companion.get('role') or 'Companion'}",
+                    f"**Status:** {'Available' if available else 'Unavailable'}",
+                ]
+                if companion["key"] in active_party:
+                    lines.append("**Party:** Travelling with you")
+                lines.extend(
+                    f"**{field.replace('_', ' ').title()}:** {self._story_state_display(value)}"
+                    for field, value in sorted(fields.items())
+                    if field != "status"
+                )
+                if companion.get("description"):
+                    lines.append(str(companion["description"]))
+                embed.add_field(
+                    name=companion.get("name") or companion["key"].replace("_", " ").title(),
+                    value="\n".join(lines)[:1024],
+                    inline=False,
+                )
+        await ctx.send(embed=embed)
+
+    @campaign.group(name="party", invoke_without_command=True)
+    @has_char()
+    async def campaign_party(self, ctx):
+        """Show the companions currently travelling with this run."""
+        run, campaign, state = await self._selected_campaign_context(ctx.author.id)
+        if not run:
+            return await ctx.send("No campaign history is currently focused.")
+        definitions = {
+            companion["key"]: companion
+            for companion in campaign.get("companions") or []
+            if isinstance(companion, dict) and companion.get("key")
+        }
+        active = list(state.get("party.active") or [])
+        embed = discord.Embed(
+            title="Travelling Party",
+            description=(
+                "No companions selected."
+                if not active
+                else "\n".join(
+                    f"• **{definitions.get(key, {}).get('name') or key.replace('_', ' ').title()}**"
+                    for key in active
+                )
+            ),
+            color=0x6B4C8A,
+        )
+        embed.set_footer(
+            text=(
+                f"Up to {int(campaign.get('party_size') or 2)} companions · "
+                "$campaign party add/remove <companion>"
+            )
+        )
+        await ctx.send(embed=embed)
+
+    @campaign_party.command(name="add")
+    @has_char()
+    async def campaign_party_add(self, ctx, *, companion_key: str):
+        key = normalize_campaign_key(companion_key)
+        run, campaign, state = await self._selected_campaign_context(
+            ctx.author.id,
+            statuses=("entering", "active", "awaiting_choice", "awaiting_scenario", "awaiting_warfront"),
+        )
+        if not run:
+            return await ctx.send("No active campaign run is focused.")
+        companion = next(
+            (
+                value for value in campaign.get("companions") or []
+                if isinstance(value, dict) and value.get("key") == key
+            ),
+            None,
+        )
+        if not companion:
+            return await ctx.send("That companion is not defined for this campaign.")
+        active = list(state.get("party.active") or [])
+        if key in active:
+            return await ctx.send(f"**{companion['name']}** is already travelling with you.")
+        if len(active) >= int(campaign.get("party_size") or 2):
+            return await ctx.send("Your travelling party is full. Remove someone first.")
+        async with self.bot.pool.acquire() as conn:
+            if not await self._campaign_companion_available(
+                ctx.author.id,
+                campaign,
+                companion,
+                conn=conn,
+                run_id=str(run["run_id"]),
+                state=state,
+            ):
+                return await ctx.send("That companion is not currently available to travel.")
+            active.append(key)
+            await self.fable_state.apply_effects(
+                conn,
+                user_id=ctx.author.id,
+                campaign_key=campaign["key"],
+                effects=[{"type": "state_set", "key": "party.active", "value": active}],
+                event_key=f"party:{self.fable_state.new_run_id()}",
+                source="campaign_party",
+                run_id=str(run["run_id"]),
+            )
+        await ctx.send(f"**{companion['name']}** joined your travelling party.")
+
+    @campaign_party.command(name="remove")
+    @has_char()
+    async def campaign_party_remove(self, ctx, *, companion_key: str):
+        key = normalize_campaign_key(companion_key)
+        run, campaign, state = await self._selected_campaign_context(ctx.author.id)
+        if not run:
+            return await ctx.send("No campaign history is currently focused.")
+        active = list(state.get("party.active") or [])
+        if key not in active:
+            return await ctx.send("That companion is not in your travelling party.")
+        active.remove(key)
+        async with self.bot.pool.acquire() as conn:
+            await self.fable_state.apply_effects(
+                conn,
+                user_id=ctx.author.id,
+                campaign_key=campaign["key"],
+                effects=[{"type": "state_set", "key": "party.active", "value": active}],
+                event_key=f"party:{self.fable_state.new_run_id()}",
+                source="campaign_party",
+                run_id=str(run["run_id"]),
+            )
+        await ctx.send(f"**{key.replace('_', ' ').title()}** left your travelling party.")
+
+    @campaign.command(name="camp", aliases=["campfire"])
+    @has_char()
+    async def campaign_camp(self, ctx, *, scene_key: str = ""):
+        run, campaign, state = await self._selected_campaign_context(ctx.author.id)
+        if not run:
+            return await ctx.send("No campaign history is currently focused.")
+        active_party = set(state.get("party.active") or [])
+        seen = set(state.get("camp.seen_scenes") or [])
+        available = []
+        async with self.bot.pool.acquire() as conn:
+            for companion in campaign.get("companions") or []:
+                if not isinstance(companion, dict):
+                    continue
+                for scene in companion.get("scenes") or []:
+                    if not isinstance(scene, dict):
+                        continue
+                    if scene.get("once", True) and scene.get("id") in seen:
+                        continue
+                    participants = set(scene.get("participants") or [])
+                    if scene.get("requires_party") and not participants.issubset(active_party):
+                        continue
+                    allowed, _reason = await self._evaluate_campaign_conditions(
+                        ctx.author.id,
+                        scene.get("conditions") or [],
+                        conn=conn,
+                        campaign_key=campaign["key"],
+                        run_id=str(run["run_id"]),
+                    )
+                    if allowed:
+                        available.append(scene)
+            available.sort(key=lambda scene: (int(scene.get("order") or 0), scene["id"]))
+            selected_key = normalize_campaign_key(scene_key)
+            if not selected_key:
+                if not available:
+                    return await ctx.send("No new camp scenes are currently available.")
+                embed = discord.Embed(
+                    title="Available Camp Scenes",
+                    description="Play one with `$campaign camp <scene id>`.",
+                    color=0x6B4C8A,
+                )
+                for scene in available[:20]:
+                    embed.add_field(
+                        name=scene.get("title") or scene["id"],
+                        value=f"`{scene['id']}`",
+                        inline=False,
+                    )
+                return await ctx.send(embed=embed)
+            scene = next((value for value in available if value.get("id") == selected_key), None)
+            if not scene:
+                return await ctx.send("That camp scene is unavailable or has already played.")
+            effects = list(scene.get("effects") or [])
+            if scene.get("once", True):
+                effects.append(
+                    {"type": "state_add", "key": "camp.seen_scenes", "value": scene["id"]}
+                )
+            messages = await self._apply_campaign_effects(
+                ctx.author.id,
+                campaign["key"],
+                effects=effects,
+                unlocks=scene.get("unlocks") or [],
+                event_key=(
+                    f"camp:{scene['id']}"
+                    if scene.get("once", True)
+                    else f"camp:{scene['id']}:{self.fable_state.new_run_id()}"
+                ),
+                source=f"camp:{scene['id']}",
+                run_id=str(run["run_id"]),
+                conn=conn,
+            )
+        embed = discord.Embed(
+            title=scene.get("title") or "Camp Scene",
+            description=scene.get("text") or "The party shares a quiet moment.",
+            color=0x6B4C8A,
+        )
+        if messages:
+            embed.add_field(name="Consequences", value="\n".join(messages)[:1024], inline=False)
+        await ctx.send(embed=embed)
+
+    @campaign.command(name="locations", aliases=["map", "regions"])
+    @has_char()
+    async def campaign_locations(self, ctx):
+        """Show persistent location and regional-control state."""
+        run, campaign, state = await self._selected_campaign_context(ctx.author.id)
+        if not run:
+            return await ctx.send("No campaign history is currently focused.")
+        locations = [
+            location
+            for location in campaign.get("locations") or []
+            if isinstance(location, dict)
+        ]
+        if not locations:
+            return await self._send_story_model_overview(
+                ctx,
+                prefix="location",
+                title="Campaign Locations",
+                empty_text="This campaign has not recorded any location changes yet.",
+            )
+        current = str(state.get("world.current_location") or "")
+        embed = discord.Embed(
+            title="Campaign Locations",
+            description="Inspect with `$campaign location <key>` or travel with `$campaign travel <key>`.",
+            color=0x3F6A52,
+        )
+        async with self.bot.pool.acquire() as conn:
+            for location in locations[:20]:
+                allowed, _reason = await self._evaluate_campaign_conditions(
+                    ctx.author.id,
+                    location.get("conditions") or [],
+                    conn=conn,
+                    campaign_key=campaign["key"],
+                    run_id=str(run["run_id"]),
+                )
+                if not allowed:
+                    continue
+                marker = " · Current" if location["key"] == current else ""
+                embed.add_field(
+                    name=f"{location['name']}{marker}",
+                    value=f"`{location['key']}`\n{location.get('description') or 'No description.'}"[:1024],
+                    inline=False,
+                )
+        if not embed.fields:
+            embed.description = "No authored locations are currently unlocked."
+        await ctx.send(embed=embed)
+
+    @campaign.command(name="location", aliases=["region"])
+    @has_char()
+    async def campaign_location(self, ctx, *, location_key: str):
+        key = normalize_campaign_key(location_key)
+        run, campaign, state = await self._selected_campaign_context(ctx.author.id)
+        if not run:
+            return await ctx.send("No campaign history is currently focused.")
+        location = next(
+            (
+                value for value in campaign.get("locations") or []
+                if isinstance(value, dict) and value.get("key") == key
+            ),
+            None,
+        )
+        if not location:
+            return await ctx.send("That location is not defined in this campaign.")
+        async with self.bot.pool.acquire() as conn:
+            allowed, reason = await self._evaluate_campaign_conditions(
+                ctx.author.id,
+                location.get("conditions") or [],
+                conn=conn,
+                campaign_key=campaign["key"],
+                run_id=str(run["run_id"]),
+            )
+            if not allowed:
+                return await ctx.send(reason or "That location is not currently available.")
+            available_services = []
+            for service in location.get("services") or []:
+                service_allowed, _service_reason = await self._evaluate_campaign_conditions(
+                    ctx.author.id,
+                    service.get("conditions") or [],
+                    conn=conn,
+                    campaign_key=campaign["key"],
+                    run_id=str(run["run_id"]),
+                )
+                if service_allowed:
+                    available_services.append(service)
+        embed = discord.Embed(
+            title=location["name"],
+            description=location.get("description") or "No description.",
+            color=0x3F6A52,
+        )
+        location_state = self._group_story_model_state(state, "location").get(key, {})
+        if location_state:
+            embed.add_field(
+                name="Current State",
+                value="\n".join(
+                    f"**{field.replace('_', ' ').title()}:** {self._story_state_display(value)}"
+                    for field, value in sorted(location_state.items())
+                )[:1024],
+                inline=False,
+            )
+        for service in available_services[:12]:
+            embed.add_field(
+                name=service.get("name") or service["key"],
+                value=(
+                    f"{service.get('description') or 'Available service.'}\n"
+                    f"Open: `$campaign service {service['key']}`"
+                )[:1024],
+                inline=False,
+            )
+        await ctx.send(embed=embed)
+
+    async def check_campaign_service_access(
+        self,
+        user_id: int,
+        service_key: str,
+        *,
+        campaign_key: str = "",
+        conn=None,
+    ) -> tuple[bool, str | None, dict | None]:
+        owns_connection = conn is None
+        if owns_connection:
+            conn = await self.bot.pool.acquire()
+        try:
+            run = await self._selected_campaign_run(
+                conn,
+                user_id,
+                campaign_key=campaign_key,
+            )
+            if not run:
+                return False, "No matching campaign history was found.", None
+            campaign = self._load_progress(run["campaign_json_snapshot"])
+            state = await self.fable_state.snapshot(conn, str(run["run_id"]))
+            current = str(state.get("world.current_location") or "")
+            normalized_service = normalize_campaign_key(service_key)
+            for location in campaign.get("locations") or []:
+                for service in location.get("services") or []:
+                    if service.get("key") != normalized_service:
+                        continue
+                    if current != location.get("key"):
+                        return False, f"Travel to **{location.get('name')}** first.", service
+                    location_allowed, location_reason = await self._evaluate_campaign_conditions(
+                        user_id,
+                        location.get("conditions") or [],
+                        conn=conn,
+                        campaign_key=campaign["key"],
+                        run_id=str(run["run_id"]),
+                    )
+                    if not location_allowed:
+                        return False, location_reason or "That location is currently unavailable.", service
+                    allowed, reason = await self._evaluate_campaign_conditions(
+                        user_id,
+                        service.get("conditions") or [],
+                        conn=conn,
+                        campaign_key=campaign["key"],
+                        run_id=str(run["run_id"]),
+                    )
+                    return allowed, reason, service
+            return False, "That campaign service does not exist.", None
+        finally:
+            if owns_connection:
+                await self.bot.pool.release(conn)
+
+    @campaign.command(name="service")
+    @has_char()
+    async def campaign_service(self, ctx, *, service_key: str):
+        allowed, reason, service = await self.check_campaign_service_access(
+            ctx.author.id,
+            service_key,
+        )
+        if not allowed or not service:
+            return await ctx.send(reason or "That service is not currently available.")
+        embed = discord.Embed(
+            title=service.get("name") or service["key"],
+            description=service.get("description") or "Campaign service unlocked.",
+            color=0x3F6A52,
+        )
+        embed.add_field(name="Open", value=f"`{service['command']}`", inline=False)
+        await ctx.send(embed=embed)
+
+    @campaign.command(name="travel")
+    @has_char()
+    async def campaign_travel(self, ctx, *, location_key: str):
+        key = normalize_campaign_key(location_key)
+        run, campaign, _state = await self._selected_campaign_context(
+            ctx.author.id,
+            statuses=("awaiting_choice",),
+        )
+        if not run:
+            return await ctx.send(
+                "Travel is available only while the focused campaign is waiting for a story decision."
+            )
+        location = next(
+            (
+                value for value in campaign.get("locations") or []
+                if isinstance(value, dict) and value.get("key") == key
+            ),
+            None,
+        )
+        if not location or not location.get("travel_node"):
+            return await ctx.send("That location is not an available travel destination.")
+        target_node = node_by_id(campaign, location["travel_node"])
+        if not target_node:
+            return await ctx.send("That destination points to a missing story beat.")
+        messages = []
+        async with self.bot.pool.acquire() as conn:
+            async with conn.transaction():
+                allowed, reason = await self._evaluate_campaign_conditions(
+                    ctx.author.id,
+                    location.get("conditions") or [],
+                    conn=conn,
+                    campaign_key=campaign["key"],
+                    run_id=str(run["run_id"]),
+                )
+                if allowed:
+                    allowed, reason = await self._evaluate_campaign_conditions(
+                        ctx.author.id,
+                        target_node.get("requirements") or [],
+                        conn=conn,
+                        campaign_key=campaign["key"],
+                        run_id=str(run["run_id"]),
+                    )
+                if not allowed:
+                    return await ctx.send(reason or "That route is currently locked.")
+                messages = await self._apply_campaign_effects(
+                    ctx.author.id,
+                    campaign["key"],
+                    effects=[
+                        {
+                            "type": "state_set",
+                            "key": "world.current_location",
+                            "value": location["key"],
+                        },
+                        {
+                            "type": "state_add",
+                            "key": "world.visited_locations",
+                            "value": location["key"],
+                        },
+                    ],
+                    event_key=f"travel:{location['key']}:{self.fable_state.new_run_id()}",
+                    source=f"travel:{location['key']}",
+                    run_id=str(run["run_id"]),
+                    conn=conn,
+                )
+                await conn.execute(
+                    """
+                    UPDATE fable_campaign_runs
+                    SET current_node_key=$2, status='entering', updated_at=NOW()
+                    WHERE run_id=$1
+                    """,
+                    run["run_id"],
+                    location["travel_node"],
+                )
+        await ctx.send(f"You travel toward **{location['name']}**.")
+        if messages:
+            await ctx.send("\n".join(messages))
+        await self._enter_campaign_node(
+            ctx,
+            campaign,
+            location["travel_node"],
+            run_id=str(run["run_id"]),
+        )
+
+    @campaign.command(name="home", aliases=["cottage"])
+    @has_char()
+    async def campaign_home(self, ctx):
+        run, campaign, state = await self._selected_campaign_context(ctx.author.id)
+        if not run:
+            return await ctx.send("No campaign history is currently focused.")
+        home = next(
+            (
+                location for location in campaign.get("locations") or []
+                if isinstance(location, dict) and location.get("home")
+            ),
+            None,
+        )
+        async with self.bot.pool.acquire() as conn:
+            upgrades = await self.fable_state.list_rewards(
+                conn,
+                user_id=ctx.author.id,
+                reward_type="home_upgrade",
+            )
+        embed = discord.Embed(
+            title=(home or {}).get("name") or "Campaign Home",
+            description=(home or {}).get("description") or "Your persistent campaign home.",
+            color=0x8A6541,
+        )
+        if upgrades:
+            embed.add_field(
+                name="Permanent Upgrades",
+                value="\n".join(
+                    f"• {str(upgrade.get('display_name') or upgrade.get('reward_key')).replace('_', ' ').title()}"
+                    for upgrade in upgrades[:20]
+                ),
+                inline=False,
+            )
+        home_state = {
+            key: value
+            for key, value in state.items()
+            if key.startswith("home.") or key.startswith("village.")
+        }
+        if home_state:
+            embed.add_field(
+                name="Current State",
+                value="\n".join(
+                    f"**{key.replace('.', ' ').replace('_', ' ').title()}:** {self._story_state_display(value)}"
+                    for key, value in sorted(home_state.items())[:15]
+                )[:1024],
+                inline=False,
+            )
+        await ctx.send(embed=embed)
+
+    @campaign.command(name="war", aliases=["warstate"])
+    @has_char()
+    async def campaign_war(self, ctx):
+        """Show authored faction-war values for the selected campaign."""
+        await self._send_story_model_overview(
+            ctx,
+            prefix="war",
+            title="Faction War State",
+            empty_text="This campaign has not recorded any faction-war state yet.",
+        )
+
+    async def _focused_warfront_attempt(self, conn, user_id: int, *, for_update: bool = False):
+        lock = " FOR UPDATE OF fwa, fcr" if for_update else ""
+        return await conn.fetchrow(
+            f"""
+            SELECT fwa.attempt_id, fwa.run_id, fwa.player_front_key,
+                   fwa.assignments_json, fwa.result_json,
+                   fcr.campaign_key, fcr.current_node_key,
+                   fcr.campaign_json_snapshot AS campaign_json
+            FROM fable_warfront_attempts fwa
+            JOIN fable_campaign_runs fcr ON fcr.run_id=fwa.run_id
+            LEFT JOIN fable_player_preferences fp ON fp.user_id=fcr.user_id
+            WHERE fcr.user_id=$1 AND fcr.status='awaiting_warfront'
+              AND fwa.status='planning'
+            ORDER BY (fcr.run_id=fp.selected_run_id) DESC, fcr.updated_at DESC
+            LIMIT 1{lock}
+            """,
+            user_id,
+        )
+
+    @campaign.command(name="warplan", aliases=["fronts"])
+    @has_char()
+    async def campaign_warplan(self, ctx):
+        async with self.bot.pool.acquire() as conn:
+            attempt = await self._focused_warfront_attempt(conn, ctx.author.id)
+        if not attempt:
+            return await ctx.send("No warfront is currently awaiting assignments.")
+        campaign = self._load_progress(attempt["campaign_json"])
+        node = node_by_id(campaign, attempt["current_node_key"])
+        if not node or node.get("type") != "warfront":
+            return await ctx.send("The focused warfront points to invalid campaign content.")
+        await self._send_campaign_warfront_plan(
+            ctx,
+            campaign,
+            node,
+            run_id=str(attempt["run_id"]),
+        )
+
+    @campaign.command(name="assign")
+    @has_char()
+    async def campaign_assign(self, ctx, asset_key: str, front_key: str):
+        asset_key = normalize_campaign_key(asset_key)
+        front_key = normalize_campaign_key(front_key)
+        async with self.bot.pool.acquire() as conn:
+            async with conn.transaction():
+                attempt = await self._focused_warfront_attempt(
+                    conn,
+                    ctx.author.id,
+                    for_update=True,
+                )
+                if not attempt:
+                    return await ctx.send("No warfront is currently awaiting assignments.")
+                campaign = self._load_progress(attempt["campaign_json"])
+                node = node_by_id(campaign, attempt["current_node_key"])
+                warfront = (node or {}).get("warfront") or {}
+                available_fronts = await self._available_warfront_fronts(
+                    ctx.author.id,
+                    campaign,
+                    warfront,
+                    conn=conn,
+                    run_id=str(attempt["run_id"]),
+                )
+                front = next(
+                    (value for value in available_fronts if value.get("id") == front_key),
+                    None,
+                )
+                if not front:
+                    return await ctx.send("That front is not available in this operation.")
+                if asset_key == "player":
+                    await conn.execute(
+                        """
+                        UPDATE fable_warfront_attempts
+                        SET player_front_key=$2, updated_at=NOW()
+                        WHERE attempt_id=$1
+                        """,
+                        attempt["attempt_id"],
+                        front_key,
+                    )
+                    return await ctx.send(f"You will personally lead **{front['title']}**.")
+                asset = self._warfront_asset(warfront, asset_key)
+                if not asset:
+                    return await ctx.send("That companion or allied force is not defined here.")
+                available = await self._available_warfront_assets(
+                    ctx.author.id,
+                    campaign,
+                    warfront,
+                    conn=conn,
+                    run_id=str(attempt["run_id"]),
+                )
+                if asset_key not in {value["key"] for value in available}:
+                    return await ctx.send("That force is not currently available.")
+                assignments = self._load_progress(attempt["assignments_json"])
+                for assigned_front, values in list(assignments.items()):
+                    assignments[assigned_front] = [
+                        value for value in values or [] if value != asset_key
+                    ]
+                target_assets = list(assignments.get(front_key) or [])
+                if len(target_assets) >= int(front.get("max_assets") or 1):
+                    return await ctx.send("That front has no remaining assignment slots.")
+                target_assets.append(asset_key)
+                assignments[front_key] = target_assets
+                await conn.execute(
+                    """
+                    UPDATE fable_warfront_attempts
+                    SET assignments_json=$2, updated_at=NOW()
+                    WHERE attempt_id=$1
+                    """,
+                    attempt["attempt_id"],
+                    json.dumps(assignments, sort_keys=True),
+                )
+        await ctx.send(
+            f"Assigned **{asset.get('name') or asset_key}** to **{front['title']}**."
+        )
+
+    @campaign.command(name="unassign")
+    @has_char()
+    async def campaign_unassign(self, ctx, *, asset_key: str):
+        asset_key = normalize_campaign_key(asset_key)
+        async with self.bot.pool.acquire() as conn:
+            async with conn.transaction():
+                attempt = await self._focused_warfront_attempt(
+                    conn,
+                    ctx.author.id,
+                    for_update=True,
+                )
+                if not attempt:
+                    return await ctx.send("No warfront is currently awaiting assignments.")
+                if asset_key == "player":
+                    await conn.execute(
+                        """
+                        UPDATE fable_warfront_attempts
+                        SET player_front_key='', updated_at=NOW()
+                        WHERE attempt_id=$1
+                        """,
+                        attempt["attempt_id"],
+                    )
+                    return await ctx.send("Your personal front assignment was cleared.")
+                assignments = self._load_progress(attempt["assignments_json"])
+                removed = False
+                for front_key, values in list(assignments.items()):
+                    filtered = [value for value in values or [] if value != asset_key]
+                    removed = removed or len(filtered) != len(values or [])
+                    assignments[front_key] = filtered
+                if not removed:
+                    return await ctx.send("That force is not currently assigned.")
+                await conn.execute(
+                    """
+                    UPDATE fable_warfront_attempts
+                    SET assignments_json=$2, updated_at=NOW()
+                    WHERE attempt_id=$1
+                    """,
+                    attempt["attempt_id"],
+                    json.dumps(assignments, sort_keys=True),
+                )
+        await ctx.send(f"Unassigned **{asset_key.replace('_', ' ').title()}**.")
+
+    @campaign.command(name="deploy", aliases=["resolvefronts"])
+    @has_char()
+    async def campaign_deploy(self, ctx):
+        consequence_messages = []
+        async with self.bot.pool.acquire() as conn:
+            async with conn.transaction():
+                attempt = await self._focused_warfront_attempt(
+                    conn,
+                    ctx.author.id,
+                    for_update=True,
+                )
+                if not attempt:
+                    return await ctx.send("No warfront is currently awaiting deployment.")
+                campaign = self._load_progress(attempt["campaign_json"])
+                node = node_by_id(campaign, attempt["current_node_key"])
+                if not node or node.get("type") != "warfront":
+                    return await ctx.send("The focused warfront points to invalid campaign content.")
+                warfront = node.get("warfront") or {}
+                player_front = str(attempt["player_front_key"] or "")
+                if not self._warfront_front(warfront, player_front):
+                    return await ctx.send(
+                        "Choose the front you will personally lead with `$campaign assign player <front>`."
+                    )
+                assignments = self._load_progress(attempt["assignments_json"])
+                available_assets = await self._available_warfront_assets(
+                    ctx.author.id,
+                    campaign,
+                    warfront,
+                    conn=conn,
+                    run_id=str(attempt["run_id"]),
+                )
+                available_fronts = await self._available_warfront_fronts(
+                    ctx.author.id,
+                    campaign,
+                    warfront,
+                    conn=conn,
+                    run_id=str(attempt["run_id"]),
+                )
+                active_front_keys = {front["id"] for front in available_fronts}
+                if player_front not in active_front_keys:
+                    return await ctx.send(
+                        "Choose an available front with `$campaign assign player <front>`."
+                    )
+                assignments = {
+                    front_key: values
+                    for front_key, values in assignments.items()
+                    if front_key in active_front_keys
+                }
+                active_warfront = {**warfront, "fronts": available_fronts}
+                eligible_outcome_ids = set()
+                for candidate in warfront.get("outcomes") or []:
+                    allowed, _reason = await self._evaluate_campaign_conditions(
+                        ctx.author.id,
+                        candidate.get("conditions") or [],
+                        conn=conn,
+                        campaign_key=campaign["key"],
+                        run_id=str(attempt["run_id"]),
+                    )
+                    if allowed:
+                        eligible_outcome_ids.add(candidate["id"])
+                try:
+                    resolution = resolve_warfront(
+                        active_warfront,
+                        assignments,
+                        player_front,
+                        available_assets,
+                        eligible_outcome_ids=eligible_outcome_ids,
+                    )
+                except ValueError as exc:
+                    return await ctx.send(
+                        f"This warfront cannot deploy yet: {exc}"
+                    )
+                results = resolution["fronts"]
+                success_count = resolution["successes"]
+                outcome = resolution["outcome"]
+                for result in results:
+                    front = self._warfront_front(warfront, result["front"])
+                    result_kind = "success" if result["success"] else "failure"
+                    consequence_messages.extend(
+                        await self._apply_campaign_effects(
+                            ctx.author.id,
+                            campaign["key"],
+                            effects=front.get(f"{result_kind}_effects") or [],
+                            unlocks=front.get(f"{result_kind}_unlocks") or [],
+                            event_key=(
+                                f"warfront:{attempt['attempt_id']}:{front['id']}:{result_kind}"
+                            ),
+                            source=f"warfront:{warfront.get('key') or node['id']}",
+                            run_id=str(attempt["run_id"]),
+                            conn=conn,
+                        )
+                    )
+                consequence_messages.extend(
+                    await self._apply_campaign_effects(
+                        ctx.author.id,
+                        campaign["key"],
+                        effects=outcome.get("effects") or [],
+                        unlocks=outcome.get("unlocks") or [],
+                        event_key=f"warfront:{attempt['attempt_id']}:outcome:{outcome['id']}",
+                        source=f"warfront:{warfront.get('key') or node['id']}",
+                        run_id=str(attempt["run_id"]),
+                        conn=conn,
+                    )
+                )
+                history = list(
+                    self._load_progress(
+                        await conn.fetchval(
+                            "SELECT history_json FROM fable_campaign_runs WHERE run_id=$1",
+                            attempt["run_id"],
+                        )
+                    ) or []
+                )
+                if node["id"] not in history:
+                    history.append(node["id"])
+                result_payload = {
+                    "outcome": outcome["id"],
+                    "target": outcome["target"],
+                    "successes": success_count,
+                    "fronts": results,
+                }
+                await conn.execute(
+                    """
+                    UPDATE fable_warfront_attempts
+                    SET status='completed', result_json=$2,
+                        completed_at=NOW(), updated_at=NOW()
+                    WHERE attempt_id=$1
+                    """,
+                    attempt["attempt_id"],
+                    json.dumps(result_payload, sort_keys=True),
+                )
+                await conn.execute(
+                    """
+                    UPDATE fable_campaign_runs
+                    SET status='entering', current_node_key=$2,
+                        history_json=$3, updated_at=NOW()
+                    WHERE run_id=$1
+                    """,
+                    attempt["run_id"],
+                    outcome["target"],
+                    json.dumps(history),
+                )
+        embed = discord.Embed(
+            title=outcome.get("title") or "Warfront Resolved",
+            description=outcome.get("description") or "The operation changes the war.",
+            color=0x2F6B3F,
+        )
+        for result in results:
+            embed.add_field(
+                name=f"{'Victory' if result['success'] else 'Loss'} · {result['title']}",
+                value=f"Power {result['power']} / Difficulty {result['difficulty']}",
+                inline=False,
+            )
+        if consequence_messages:
+            embed.add_field(
+                name="Consequences",
+                value="\n".join(consequence_messages)[:1024],
+                inline=False,
+            )
+        await ctx.send(embed=embed)
+        await self._enter_campaign_node(
+            ctx,
+            campaign,
+            outcome["target"],
+            run_id=str(attempt["run_id"]),
+        )
+
+    @campaign.command(name="ending", aliases=["epilogue"])
+    @has_char()
+    async def campaign_ending(self, ctx):
+        """Replay the immutable ending summary for the selected campaign."""
+        run = await self.bot.pool.fetchrow(
+            """
+            SELECT fcr.campaign_key, fcr.is_canonical, fcr.ending_snapshot_json
+            FROM fable_campaign_runs fcr
+            LEFT JOIN fable_player_preferences fp ON fp.user_id=fcr.user_id
+            WHERE fcr.user_id=$1
+              AND fcr.status='completed'
+            ORDER BY (fcr.run_id=fp.selected_run_id) DESC, fcr.completed_at DESC
+            LIMIT 1
+            """,
+            ctx.author.id,
+        )
+        if not run:
+            return await ctx.send("Complete a campaign before revisiting its epilogue.")
+        snapshot = self._load_progress(run["ending_snapshot_json"])
+        embed = discord.Embed(
+            title=str(snapshot.get("ending_title") or "Campaign Epilogue"),
+            description=(
+                f"Campaign: `{run['campaign_key']}` · "
+                f"{'Canonical' if run['is_canonical'] else 'Alternate Chronicle'}"
+            ),
+            color=0x2F6B3F,
+        )
+        for fragment in list(snapshot.get("epilogue") or [])[:12]:
+            if not isinstance(fragment, dict):
+                continue
+            embed.add_field(
+                name=str(fragment.get("title") or "Aftermath")[:256],
+                value=str(fragment.get("text") or "No record.")[:1024],
+                inline=False,
+            )
+        if not embed.fields:
+            embed.description += "\n\nThis ending predates modular epilogue records."
+        await ctx.send(embed=embed)
 
     @campaign.command(name="rewards", aliases=["legacy", "collection"])
     @has_char()
