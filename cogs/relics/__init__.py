@@ -1240,6 +1240,100 @@ class Relics(commands.Cog):
             await self._announce_and_dispatch(result.grant, channel)
         return result
 
+    async def backfill_raid_relic_alts(self) -> dict[str, int]:
+        """Mirror existing Divine Ember state from linked mains to their alts."""
+
+        await self.ensure_tables()
+        relic_keys = tuple(RELIC_SETS["divine_embers"]["relics"])
+        async with self.bot.pool.acquire() as conn:
+            async with conn.transaction():
+                result = await conn.fetchrow(
+                    """
+                    WITH source AS (
+                        SELECT alt_links.alt AS alt_id,
+                               relic_progress.relic_key,
+                               relic_progress.resonance,
+                               relic_progress.pity_attempts,
+                               relic_progress.updated_at,
+                               relics.obtained_at
+                        FROM alt_links
+                        JOIN profile AS alt_profile
+                            ON alt_profile."user" = alt_links.alt
+                        JOIN relic_progress
+                            ON relic_progress.user_id = alt_links.main
+                        LEFT JOIN relics
+                            ON relics.user_id = relic_progress.user_id
+                           AND relics.relic_key = relic_progress.relic_key
+                        WHERE relic_progress.relic_key = ANY($1::TEXT[])
+                    ),
+                    copied_relics AS (
+                        INSERT INTO relics (user_id, relic_key, obtained_at)
+                        SELECT alt_id, relic_key, obtained_at
+                        FROM source
+                        WHERE obtained_at IS NOT NULL
+                        ON CONFLICT (user_id, relic_key) DO NOTHING
+                        RETURNING user_id
+                    ),
+                    synced_progress AS (
+                        INSERT INTO relic_progress
+                            (user_id, relic_key, resonance, pity_attempts, updated_at)
+                        SELECT alt_id, relic_key, resonance, pity_attempts, updated_at
+                        FROM source
+                        ON CONFLICT (user_id, relic_key) DO UPDATE
+                        SET resonance = GREATEST(
+                                relic_progress.resonance, EXCLUDED.resonance
+                            ),
+                            pity_attempts = GREATEST(
+                                relic_progress.pity_attempts, EXCLUDED.pity_attempts
+                            ),
+                            updated_at = GREATEST(
+                                relic_progress.updated_at, EXCLUDED.updated_at
+                            )
+                        WHERE relic_progress.resonance < EXCLUDED.resonance
+                           OR relic_progress.pity_attempts < EXCLUDED.pity_attempts
+                        RETURNING user_id
+                    ),
+                    copied_claims AS (
+                        INSERT INTO relic_milestone_claims
+                            (user_id, set_key, milestone_key, claimed_at)
+                        SELECT alt_links.alt,
+                               relic_milestone_claims.set_key,
+                               relic_milestone_claims.milestone_key,
+                               relic_milestone_claims.claimed_at
+                        FROM alt_links
+                        JOIN profile AS alt_profile
+                            ON alt_profile."user" = alt_links.alt
+                        JOIN relic_milestone_claims
+                            ON relic_milestone_claims.user_id = alt_links.main
+                        WHERE relic_milestone_claims.set_key = 'divine_embers'
+                        ON CONFLICT (user_id, set_key, milestone_key) DO NOTHING
+                        RETURNING user_id
+                    )
+                    SELECT
+                        (SELECT COUNT(*) FROM copied_relics) AS relics_copied,
+                        (SELECT COUNT(*) FROM synced_progress) AS progress_synced,
+                        (SELECT COUNT(*) FROM copied_claims) AS claims_copied,
+                        COALESCE(
+                            ARRAY(SELECT DISTINCT alt_id FROM source),
+                            ARRAY[]::BIGINT[]
+                        ) AS alt_ids
+                    """,
+                    relic_keys,
+                )
+
+        badge_awards = 0
+        for alt_id in result["alt_ids"] or ():
+            if await self._grant_relic_sovereign_badge(int(alt_id)):
+                badge_awards += 1
+
+        return {
+            "alts_checked": len(result["alt_ids"] or ()),
+            "relics_copied": int(result["relics_copied"] or 0),
+            "progress_synced": int(result["progress_synced"] or 0),
+            "claims_copied": int(result["claims_copied"] or 0),
+            "badges_awarded": badge_awards,
+        }
+
     async def attempt_dragon_relic_drop(
         self,
         user_id: int,
