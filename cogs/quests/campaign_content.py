@@ -20,6 +20,7 @@ NODE_TYPES = {
 }
 CHOICE_NODE_TYPES = {"choice", "dialogue"}
 MAX_PROMPT_OPTIONS = 20
+CUTSCENE_PRESENTATIONS = {"cutscene", "dialogue"}
 OBJECTIVE_SOURCES = {
     "none",
     "pve",
@@ -344,6 +345,34 @@ def _as_list(value: object) -> list:
     return copy.deepcopy(value) if isinstance(value, list) else []
 
 
+def _normalize_cutscene(raw: object) -> dict:
+    """Canonicalize narrative pages and Battle Tower-style dialogue lines."""
+    cutscene = _as_dict(raw)
+    explicit_presentation = cutscene.get("presentation") or cutscene.get("type")
+    presentation = str(
+        explicit_presentation
+        or ("dialogue" if isinstance(cutscene.get("lines"), list) else "cutscene")
+    ).strip().lower()
+    entries = (
+        _as_list(cutscene.get("lines"))
+        if presentation == "dialogue" and isinstance(cutscene.get("lines"), list)
+        else _as_list(cutscene.get("pages"))
+    )
+    normalized_entries = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            normalized_entries.append(entry)
+            continue
+        page = copy.deepcopy(entry)
+        if presentation == "dialogue" or page.get("speaker"):
+            page["presentation"] = "dialogue"
+        normalized_entries.append(page)
+    cutscene["presentation"] = presentation
+    cutscene["pages"] = normalized_entries
+    cutscene.pop("lines", None)
+    return cutscene
+
+
 def _positive_int(value: object, default: int = 1) -> int:
     try:
         return max(1, int(value))
@@ -470,7 +499,12 @@ def normalize_package(raw: object) -> dict:
     package.setdefault("schema_version", SCHEMA_VERSION)
     package["campaigns"] = _as_list(package.get("campaigns"))
     package["standalone_quests"] = _as_list(package.get("standalone_quests"))
-    package["cutscenes"] = _as_list(package.get("cutscenes"))
+    package["cutscenes"] = [
+        _normalize_cutscene(cutscene)
+        if isinstance(cutscene, dict)
+        else copy.deepcopy(cutscene)
+        for cutscene in _as_list(package.get("cutscenes"))
+    ]
     package["monsters"] = _as_list(package.get("monsters"))
     package["reference"] = _as_dict(package.get("reference"))
     package.setdefault("exported_at", datetime.now(timezone.utc).isoformat())
@@ -505,7 +539,12 @@ def normalize_package(raw: object) -> dict:
             node["next"] = _normalize_edges(node.get("next"))
             node["options"] = _normalize_edges(node.get("options"))
             node["quest"] = _as_dict(node.get("quest"))
-            node["cutscenes"] = _as_dict(node.get("cutscenes"))
+            node["cutscenes"] = {
+                str(slot): _normalize_cutscene(cutscene)
+                if isinstance(cutscene, dict)
+                else copy.deepcopy(cutscene)
+                for slot, cutscene in _as_dict(node.get("cutscenes")).items()
+            }
             node["encounter"] = _as_dict(node.get("encounter"))
             node["scenario"] = _normalize_scenario(node.get("scenario"), node["id"])
             node["warfront"] = _normalize_warfront(node.get("warfront"), node["id"])
@@ -1130,6 +1169,12 @@ def validate_package(raw: object) -> dict:
             _validate_effects(node.get("effects"), f"Node `{node_id}`", errors)
             _validate_unlocks(node.get("unlocks"), f"Node `{node_id}`", errors)
             _validate_epilogue(node.get("epilogue"), f"Node `{node_id}`", errors)
+            for slot, cutscene in (node.get("cutscenes") or {}).items():
+                _validate_cutscene(
+                    cutscene,
+                    f"Node `{node_id}` {slot} cutscene",
+                    errors,
+                )
 
             if node_type == "quest":
                 _validate_quest_node(campaign_key, node, quest_keys, errors)
@@ -1159,6 +1204,20 @@ def validate_package(raw: object) -> dict:
             errors,
         )
 
+    cutscene_keys: set[str] = set()
+    for cutscene_index, cutscene in enumerate(package["cutscenes"], start=1):
+        owner = f"cutscenes[{cutscene_index}]"
+        if not isinstance(cutscene, dict):
+            errors.append(f"{owner} must be an object.")
+            continue
+        cutscene_key = normalize_key(cutscene.get("key"))
+        if not cutscene_key:
+            errors.append(f"{owner}.key is required.")
+        elif cutscene_key in cutscene_keys:
+            errors.append(f"Duplicate cutscene key `{cutscene_key}`.")
+        cutscene_keys.add(cutscene_key)
+        _validate_cutscene(cutscene, owner, errors)
+
     monster_keys: set[str] = set()
     monster_names: set[str] = set()
     for monster in package["monsters"]:
@@ -1180,6 +1239,38 @@ def validate_package(raw: object) -> dict:
 
     package["reference"] = build_reference_catalog(package["monsters"])
     return package
+
+
+def _validate_cutscene(cutscene: object, owner: str, errors: list[str]) -> None:
+    if not isinstance(cutscene, dict):
+        errors.append(f"{owner} must be an object.")
+        return
+    presentation = str(cutscene.get("presentation") or "cutscene").strip().lower()
+    if presentation not in CUTSCENE_PRESENTATIONS:
+        supported = ", ".join(sorted(CUTSCENE_PRESENTATIONS))
+        errors.append(f"{owner} presentation must be one of: {supported}.")
+        return
+    pages = cutscene.get("pages")
+    if not isinstance(pages, list) or not pages:
+        noun = "dialogue line" if presentation == "dialogue" else "page"
+        errors.append(f"{owner} needs at least one {noun}.")
+        return
+    for index, page in enumerate(pages, start=1):
+        page_owner = f"{owner} entry {index}"
+        if not isinstance(page, dict):
+            errors.append(f"{page_owner} must be an object.")
+            continue
+        is_dialogue = (
+            presentation == "dialogue"
+            or str(page.get("presentation") or "").strip().lower() == "dialogue"
+            or bool(str(page.get("speaker") or "").strip())
+        )
+        if is_dialogue and not str(page.get("speaker") or "").strip():
+            errors.append(f"{page_owner} needs a speaker.")
+        if not str(page.get("text") or "").strip() and not str(
+            page.get("image") or ""
+        ).strip():
+            errors.append(f"{page_owner} needs text or an image.")
 
 
 def _validate_campaign_systems(

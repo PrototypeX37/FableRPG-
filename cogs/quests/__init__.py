@@ -2,6 +2,7 @@ import io
 import json
 import logging
 import random
+import re
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from pathlib import Path
@@ -630,6 +631,8 @@ class QuestPageView(View):
         self.pages = pages
         self.current_page = 0
         self.user_id = user_id
+        self.completed = False
+        self.message = None
         self._update_buttons()
 
     def _update_buttons(self):
@@ -644,8 +647,8 @@ class QuestPageView(View):
 
         next_button = Button(
             style=discord.ButtonStyle.secondary,
-            emoji="▶️",
-            disabled=self.current_page >= len(self.pages) - 1,
+            emoji="✅" if self.current_page >= len(self.pages) - 1 else "▶️",
+            label="Continue" if self.current_page >= len(self.pages) - 1 else None,
         )
         next_button.callback = self.next_callback
 
@@ -677,12 +680,29 @@ class QuestPageView(View):
         )
 
     async def next_callback(self, interaction):
+        if self.current_page >= len(self.pages) - 1:
+            self.completed = True
+            self.stop()
+            await interaction.response.edit_message(
+                embed=self.pages[self.current_page],
+                view=None,
+            )
+            return
         self.current_page += 1
         self._update_buttons()
         await interaction.response.edit_message(
             embed=self.pages[self.current_page],
             view=self,
         )
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
 
 
 class QuestJournalCategorySelect(discord.ui.Select):
@@ -2816,19 +2836,31 @@ class Quests(commands.Cog):
             return True, None
         return False, "Watch the Gregapocalypse intro with `$greg` before taking Greg quests."
 
-    async def play_cutscene(self, ctx, cutscene_key: str, *, mark_seen: bool = True) -> bool:
+    async def play_cutscene(
+        self,
+        ctx,
+        cutscene_key: str,
+        *,
+        mark_seen: bool = True,
+        wait_for_completion: bool = False,
+    ) -> bool:
         row = await self._fetch_cutscene_row(cutscene_key)
         if not row:
             return False
         pages_data = self._load_progress(row["pages_json"])
         if not isinstance(pages_data, list) or not pages_data:
             return False
-        pages = self._create_story_pages(
+        pages = self._create_cutscene_pages(
             pages_data,
             str(row["title"] or "Quest Scene"),
+            ctx,
         )
         view = QuestPageView(pages, ctx.author.id)
-        await ctx.send(embed=pages[0], view=view)
+        view.message = await ctx.send(embed=pages[0], view=view)
+        if wait_for_completion:
+            await view.wait()
+            if not view.completed:
+                return False
         if mark_seen:
             await self._mark_cutscene_seen(ctx.author.id, cutscene_key)
         return True
@@ -2891,14 +2923,33 @@ class Quests(commands.Cog):
 
     def _campaign_cutscene_payload(self, campaign: dict, node: dict, slot: str) -> tuple[str, dict] | None:
         payload = (node.get("cutscenes") or {}).get(slot)
-        if not isinstance(payload, dict) or not payload.get("pages"):
+        if not isinstance(payload, dict):
+            return None
+        presentation = str(
+            payload.get("presentation") or payload.get("type") or "cutscene"
+        ).strip().lower()
+        if presentation == "dialogue":
+            entries = payload.get("lines") or payload.get("pages") or []
+        else:
+            entries = payload.get("pages") or payload.get("lines") or []
+        if not isinstance(entries, list) or not entries:
+            return None
+        pages = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            page = dict(entry)
+            if presentation == "dialogue" or page.get("speaker"):
+                page["presentation"] = "dialogue"
+            pages.append(page)
+        if not pages:
             return None
         key = normalize_campaign_key(
             payload.get("key") or f"{campaign['key']}_{node['id']}_{slot}"
         )
         return key, {
             "title": str(payload.get("title") or node.get("title") or "Campaign Scene"),
-            "pages": payload.get("pages") or [],
+            "pages": pages,
         }
 
     async def _import_standalone_quest(self, conn, quest: dict, created_by: int) -> None:
@@ -3958,9 +4009,18 @@ class Quests(commands.Cog):
     ) -> bool:
         payload = self._campaign_cutscene_payload(campaign, node, slot)
         if not payload:
-            return False
+            return True
         cutscene_key, _definition = payload
-        return await self.play_cutscene(ctx, cutscene_key)
+        completed = await self.play_cutscene(
+            ctx,
+            cutscene_key,
+            wait_for_completion=True,
+        )
+        if not completed:
+            await ctx.send(
+                "Your campaign scene has paused. Use `$campaign` when you are ready to continue."
+            )
+        return completed
 
     @staticmethod
     def _scenario_stage(scenario: dict, stage_key: str) -> dict | None:
@@ -4436,7 +4496,8 @@ class Quests(commands.Cog):
         if attempt_was_completed:
             await ctx.send("This completed scenario has an invalid saved outcome. Ask a GM to inspect it.")
             return
-        await self._play_campaign_node_cutscene(ctx, campaign, node, "enter")
+        if not await self._play_campaign_node_cutscene(ctx, campaign, node, "enter"):
+            return
         await self._send_campaign_scenario_stage(
             ctx,
             campaign,
@@ -4637,7 +4698,8 @@ class Quests(commands.Cog):
                     )
             if messages:
                 await ctx.send("\n".join(messages))
-            await self._play_campaign_node_cutscene(ctx, campaign, node, "enter")
+            if not await self._play_campaign_node_cutscene(ctx, campaign, node, "enter"):
+                return
             if not edges:
                 await ctx.send(
                     "No story responses are currently unlocked. "
@@ -4724,7 +4786,13 @@ class Quests(commands.Cog):
             run_id,
             node["id"],
         )
-        await self._send_quest_accept_messages(ctx, accept_data)
+        cutscene_completed = await self._send_quest_accept_messages(
+            ctx,
+            accept_data,
+            wait_for_cutscene=True,
+        )
+        if not cutscene_completed:
+            return
         await self._send_campaign_encounter(ctx, node)
 
     async def _advance_campaign_after_quest(self, ctx, custom_def: dict) -> None:
@@ -5876,7 +5944,13 @@ class Quests(commands.Cog):
             "accept_cutscene_key": accept_cutscene_key,
         }
 
-    async def _send_quest_accept_messages(self, ctx, accept_data: dict) -> None:
+    async def _send_quest_accept_messages(
+        self,
+        ctx,
+        accept_data: dict,
+        *,
+        wait_for_cutscene: bool = False,
+    ) -> bool:
         embed = discord.Embed(
             title=f"Quest Accepted: {accept_data['title']}",
             description=accept_data["description"],
@@ -5893,7 +5967,12 @@ class Quests(commands.Cog):
 
         accept_cutscene_key = str(accept_data.get("accept_cutscene_key") or "").strip()
         if accept_cutscene_key:
-            await self.play_cutscene(ctx, accept_cutscene_key)
+            return await self.play_cutscene(
+                ctx,
+                accept_cutscene_key,
+                wait_for_completion=wait_for_cutscene,
+            )
+        return True
 
     def _parse_bool(self, raw: str | None) -> bool | None:
         if raw is None:
@@ -6020,18 +6099,63 @@ class Quests(commands.Cog):
         page_total = len(story_pages)
 
         for index, page in enumerate(story_pages, start=1):
-            description = page["text"]
+            description = str(page.get("text") or "")
             subtitle = str(page.get("subtitle") or "").strip()
             if subtitle:
                 description = f"**{subtitle}**\n\n{description}"
             embed = discord.Embed(
-                title=page["title"],
+                title=str(page.get("title") or footer_prefix or "Story Scene"),
                 description=description,
                 color=0x1F0D0D,
             )
             image_url = str(page.get("image") or "").strip()
             if image_url:
                 embed.set_image(url=image_url)
+            embed.set_footer(text=f"{footer_prefix} {index}/{page_total}")
+            pages.append(embed)
+
+        return pages
+
+    def _create_cutscene_pages(self, cutscene_pages, footer_prefix: str, ctx):
+        """Render narrative pages and Battle Tower-style dialogue in one scene."""
+        pages = []
+        page_total = len(cutscene_pages)
+        author = ctx.author
+        player_name = str(
+            getattr(author, "display_name", None)
+            or getattr(author, "name", "Player")
+        )
+        display_avatar = getattr(author, "display_avatar", None)
+        avatar_url = str(getattr(display_avatar, "url", "") or "")
+
+        for index, page in enumerate(cutscene_pages, start=1):
+            is_dialogue = (
+                str(page.get("presentation") or "").strip().lower() == "dialogue"
+                or bool(str(page.get("speaker") or "").strip())
+            )
+            if not is_dialogue:
+                story_page = self._create_story_pages([page], footer_prefix)[0]
+                story_page.set_footer(text=f"{footer_prefix} {index}/{page_total}")
+                pages.append(story_page)
+                continue
+
+            speaker = str(page.get("speaker") or page.get("title") or "Storyteller")
+            text = str(page.get("text") or "")
+            speaker = speaker.replace("{PLAYER}", player_name)
+            text = text.replace("{PLAYER}", player_name)
+            speaker = re.sub(r"\bPLAYER\b", player_name, speaker)
+            text = re.sub(r"\bPLAYER\b", player_name, text)
+            thumbnail = str(page.get("thumbnail") or page.get("avatar") or "").strip()
+            if thumbnail == "PLAYER_AVATAR":
+                thumbnail = avatar_url
+
+            embed = discord.Embed(
+                title=speaker,
+                description=text,
+                color=0x003366,
+            )
+            if thumbnail:
+                embed.set_thumbnail(url=thumbnail)
             embed.set_footer(text=f"{footer_prefix} {index}/{page_total}")
             pages.append(embed)
 
@@ -7098,7 +7222,21 @@ class Quests(commands.Cog):
                 embed.set_footer(text="This quest is now complete.")
             await ctx.send(embed=embed)
             if custom_def.get("turnin_cutscene_key"):
-                await self.play_cutscene(ctx, custom_def["turnin_cutscene_key"])
+                access = custom_def.get("access") or {}
+                is_campaign_quest = bool(
+                    normalize_campaign_key(access.get("campaign_key"))
+                    and normalize_campaign_key(access.get("campaign_node_key"))
+                )
+                cutscene_completed = await self.play_cutscene(
+                    ctx,
+                    custom_def["turnin_cutscene_key"],
+                    wait_for_completion=is_campaign_quest,
+                )
+                if is_campaign_quest and not cutscene_completed:
+                    await ctx.send(
+                        "Your campaign is paused after this scene. Use `$campaign` to resume it."
+                    )
+                    return
             await self._advance_campaign_after_quest(ctx, custom_def)
             if quest_key == "greg_finale":
                 if greg_badge_granted:
@@ -7169,6 +7307,26 @@ class Quests(commands.Cog):
                 node,
                 run_id=str(state["run_id"]),
             )
+        if state["status"] == "active" and node.get("type") == "quest":
+            quest_key = self._campaign_quest_key(campaign, node)
+            quest_status = await self.bot.pool.fetchval(
+                "SELECT status FROM player_quests WHERE user_id=$1 AND quest_key=$2",
+                ctx.author.id,
+                quest_key,
+            )
+            if str(quest_status or "") == "completed":
+                if not await self._play_campaign_node_cutscene(
+                    ctx,
+                    campaign,
+                    node,
+                    "turnin",
+                ):
+                    return
+                await self._advance_campaign_after_quest(
+                    ctx,
+                    quest_record_from_node(campaign, node),
+                )
+                return
         embed = discord.Embed(
             title=state["title"],
             description=node.get("description") or "Your story continues.",

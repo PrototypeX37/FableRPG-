@@ -65,6 +65,24 @@
           "title": "The Ruined Shrine",
           "description": "Prisoners call from the trees while the caravan leader escapes toward the pass.",
           "requirements": [],
+          "cutscenes": {
+            "enter": {
+              "presentation": "dialogue",
+              "title": "Voices at the Shrine",
+              "lines": [
+                {
+                  "speaker": "Prisoner",
+                  "text": "Please, {PLAYER}. The caravan leader left us here for the ash to take.",
+                  "thumbnail": ""
+                },
+                {
+                  "speaker": "PLAYER",
+                  "text": "Then I need to decide quickly.",
+                  "thumbnail": "PLAYER_AVATAR"
+                }
+              ]
+            }
+          },
           "options": [
             {
               "label": "Rescue the prisoners",

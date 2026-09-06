@@ -534,6 +534,31 @@ class Raid(commands.Cog):
 
         self.auto_raid_check.cancel()
 
+    def _spawn_alert_role(self, guild):
+        """Return the opt-in role used for Ragnarok raid announcements."""
+        if guild is None or not self.spawn_announcement_role_id:
+            return None
+        try:
+            role_id = int(self.spawn_announcement_role_id)
+        except (TypeError, ValueError):
+            return None
+        return guild.get_role(role_id)
+
+    async def _send_raid_alert(self, channel, guild, announcement):
+        """Ping opted-in members for a Ragnarok spawn or defeat announcement."""
+        role = self._spawn_alert_role(guild)
+        if role is None:
+            return None
+        return await channel.send(
+            f"{role.mention} {announcement}",
+            allowed_mentions=discord.AllowedMentions(
+                everyone=False,
+                users=False,
+                roles=True,
+                replied_user=False,
+            ),
+        )
+
     @staticmethod
     def _round_raid_number(value):
         """Return a float rounded to Ragnarok's two-decimal precision."""
@@ -1278,11 +1303,13 @@ class Raid(commands.Cog):
                         try:
                             current_channel = self.bot.get_channel(channel_id)
                             if current_channel:
-                                role_id = self.spawn_announcement_role_id
-                                role = discord.utils.get(guild.roles, id=role_id)
-                                content = f"{role.mention} Ragnarok spawned! 15 Minutes until he is vulnerable..."
-                                sent_msg = await current_channel.send(content, allowed_mentions=discord.AllowedMentions(roles=True))
-                                message_ids.append(sent_msg.id)
+                                sent_msg = await self._send_raid_alert(
+                                    current_channel,
+                                    guild,
+                                    "Ragnarok spawned! 15 Minutes until he is vulnerable...",
+                                )
+                                if sent_msg is not None:
+                                    message_ids.append(sent_msg.id)
                         except Exception as e:
                             error_message = f"Error in channel with ID {channel_id}: {e}. continuing.."
                             print(error_message)
@@ -1883,6 +1910,12 @@ class Raid(commands.Cog):
                 
             summary_channel = self.bot.get_channel(self.summary_channel_id)
             if summary_channel and 'summary' in locals():
+                if self.boss["hp"] < 1 and self.bot.config.bot.is_beta:
+                    await self._send_raid_alert(
+                        summary_channel,
+                        guild,
+                        "Ragnarok has been defeated!",
+                    )
                 await summary_channel.send(summary)
 
             try:
@@ -2018,11 +2051,13 @@ class Raid(commands.Cog):
                         try:
                             channel = self.bot.get_channel(channel_id)  # Assumes ctx.guild is available
                             if channel:
-                                role_id = self.spawn_announcement_role_id
-                                role = discord.utils.get(ctx.guild.roles, id=role_id)
-                                content = f"{role.mention} Ragnarok spawned! 15 Minutes until he is vulnerable..."
-                                sent_msg = await channel.send(content, allowed_mentions=discord.AllowedMentions(roles=True))
-                                message_ids.append(sent_msg.id)
+                                sent_msg = await self._send_raid_alert(
+                                    channel,
+                                    ctx.guild,
+                                    "Ragnarok spawned! 15 Minutes until he is vulnerable...",
+                                )
+                                if sent_msg is not None:
+                                    message_ids.append(sent_msg.id)
                         except Exception as e:
                             error_message = f"Error in channel with ID {channel_id}: {e}. continuing.."
                             await ctx.send(error_message)
@@ -2613,7 +2648,14 @@ class Raid(commands.Cog):
                         ":small_blue_diamond:" if self.boss["hp"] < 1 else ":vibration_mode:"
                     )
             summary_channel = self.bot.get_channel(self.summary_channel_id)
-            summary_msg = await summary_channel.send(summary)
+            if summary_channel and 'summary' in locals():
+                if self.boss["hp"] < 1 and self.bot.config.bot.is_beta:
+                    await self._send_raid_alert(
+                        summary_channel,
+                        ctx.guild,
+                        "Ragnarok has been defeated!",
+                    )
+                summary_msg = await summary_channel.send(summary)
 
                 #await ctx.send("attempting to clear keys...")
             try:
@@ -5750,6 +5792,48 @@ class Raid(commands.Cog):
                 " dragon that roams this land? Raids got you covered!\nJoin the support"
                 " server (`{prefix}support`) for more information."
             ).format(prefix=ctx.clean_prefix)
+        )
+
+    @commands.command(
+        name="raidalerts",
+        aliases=["raidalert", "legendaryalerts"],
+        brief="Manage Legendary Raid alerts",
+    )
+    @commands.guild_only()
+    async def raidalerts(self, ctx, setting: str = None):
+        """Opt in to or out of Legendary Raid spawn and defeat pings."""
+        role = self._spawn_alert_role(ctx.guild)
+        if role is None:
+            return await ctx.send("Legendary Raid alerts have not been configured yet.")
+
+        me = getattr(ctx.guild, "me", None)
+        if role.managed or (me is not None and role >= me.top_role):
+            return await ctx.send(
+                "I cannot manage the Legendary Raid alert role. Move it below my highest role."
+            )
+
+        normalized = setting.strip().lower() if setting else None
+        if normalized not in (None, "on", "off"):
+            return await ctx.send(
+                f"Use `{ctx.clean_prefix}raidalerts`, `{ctx.clean_prefix}raidalerts on`, or "
+                f"`{ctx.clean_prefix}raidalerts off`."
+            )
+
+        enable = normalized == "on" if normalized else role not in ctx.author.roles
+        try:
+            if enable and role not in ctx.author.roles:
+                await ctx.author.add_roles(role, reason="Legendary Raid alert opt-in")
+            elif not enable and role in ctx.author.roles:
+                await ctx.author.remove_roles(role, reason="Legendary Raid alert opt-out")
+        except discord.HTTPException:
+            return await ctx.send(
+                "I do not have permission to manage the Legendary Raid alert role."
+            )
+
+        await ctx.send(
+            "🔔 Legendary Raid alerts are **on**."
+            if enable
+            else "🔕 Legendary Raid alerts are **off**."
         )
 
 

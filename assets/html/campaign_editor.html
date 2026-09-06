@@ -20,12 +20,14 @@
     header { min-height:72px; display:flex; align-items:center; gap:9px; padding:10px 18px; border-bottom:1px solid rgba(242,198,109,.16); background:rgba(9,12,18,.88); backdrop-filter:blur(18px) saturate(130%); position:sticky; top:0; z-index:20; box-shadow:0 8px 28px rgba(0,0,0,.22); }
     header h1 { font-size:18px; margin:0 auto 0 0; color:var(--gold); }
     .layout { display:grid; grid-template-columns:292px minmax(560px,1fr) 350px; min-height:calc(100vh - 72px); }
-    aside,.inspector { position:sticky; top:72px; height:calc(100vh - 72px); background:rgba(15,19,28,.88); padding:16px; overflow:auto; scrollbar-color:#3b465d transparent; }
-    aside { border-right:1px solid var(--line-soft); }
+    aside,.inspector { position:sticky; top:72px; min-width:0; height:calc(100vh - 72px); background:rgba(15,19,28,.88); padding:16px; overflow:auto; scrollbar-color:#3b465d transparent; }
+    aside { overflow-x:hidden; border-right:1px solid var(--line-soft); }
     .inspector { border-left:1px solid var(--line-soft); }
     main { padding:24px; overflow:auto; max-width:1180px; width:100%; margin:0 auto; }
-    .tabs { display:flex; gap:6px; margin-bottom:14px; }
+    .tabs { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; width:100%; margin-bottom:14px; }
+    .tabs button { width:100%; min-width:0; padding:9px 6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .tabs button.active { background:#765124; border-color:var(--gold); }
+    #sidebar { min-width:0; }
     .section { border:1px solid var(--line-soft); background:linear-gradient(145deg,rgba(20,26,38,.96),rgba(15,19,28,.96)); border-radius:var(--radius); padding:18px; margin-bottom:16px; box-shadow:0 10px 28px rgba(0,0,0,.12); }
     .section h2,.section h3 { color:var(--gold); margin:0 0 12px; }
     .section h2 { font-size:18px; }.section h3 { font-size:15px; }
@@ -177,10 +179,10 @@
       .mobile-drawer-head button { min-height:44px; }
       aside .tabs {
         position:sticky; top:65px; z-index:2; display:grid;
-        grid-template-columns:repeat(4,1fr); gap:5px;
+        grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px;
         padding:6px 0 10px; margin-bottom:10px; background:var(--panel);
       }
-      aside .tabs button { min-width:0; min-height:44px; padding:6px 3px; font-size:12px; }
+      aside .tabs button { width:100%; min-width:0; min-height:44px; padding:6px; font-size:12px; }
       .mobile-scrim {
         position:fixed; inset:0; z-index:25; width:100%; height:100%;
         padding:0; border:0; border-radius:0; background:rgba(0,0,0,.66);
@@ -222,8 +224,7 @@
       .row-head h2,.row-head h3 { width:100%; margin-right:0; }
       .row-head strong { flex:1 1 150px; }
       .row-head button { min-height:40px; }
-      .tabs { overflow-x:auto; scrollbar-width:none; }
-      .tabs::-webkit-scrollbar { display:none; }
+      .tabs { overflow:visible; }
       .list-item { min-height:52px; padding:11px; }
       button { touch-action:manipulation; }
       input,textarea,select { min-height:46px; padding:10px; border-radius:8px; font-size:16px; }
@@ -636,9 +637,12 @@ function renderRewardFields(r,path){let type=r.type||'none';if(type==='money')re
 function renderRewardBundle(r,path){r.rewards=Array.isArray(r.rewards)?r.rewards:[];let childTypes=rewardTypes.filter(type=>type!=='bundle');let rows=r.rewards.map((reward,index)=>{let rewardPath=`${path}.rewards[${index}]`;return `<div class="row bundle-item"><div class="row-head"><strong>Bundle reward ${index+1}</strong><button class="mini danger" onclick="${path}.rewards.splice(${index},1);render()">Remove</button></div>${selectField('Reward type',childTypes,reward.type||'none',`${rewardPath}=rewardDefaults(this.value);render()`)}${renderRewardFields(reward,rewardPath)}</div>`}).join('');return `<div class="context-note">A bundle grants every reward below in one safe, duplicate-resistant turn-in.</div>${rows||'<div class="empty">This bundle is empty. Add its first reward.</div>'}<button class="mini" onclick="${path}.rewards.push(rewardDefaults('money'));render()">+ Add reward to bundle</button>`}
 function renderRewardFor(r,path){let type=r.type||'none',body=type==='bundle'?renderRewardBundle(r,path):renderRewardFields(r,path);return `<div class="section"><h3>Reward</h3><div class="section-kicker">What the player permanently or immediately earns</div><p class="help">Permanent rewards are account-wide and automatically resist duplicate grants.</p>${selectField('Reward type',rewardTypes,type,`${path}=rewardDefaults(this.value);render()`)}${body}</div>`}
 
-function renderCutscenes(n){return `<div class="section"><h3>Cutscenes</h3>${renderCutsceneSlot(n,'accept','Before quest')}${renderCutsceneSlot(n,'turnin','After turn-in')}</div>`}
-function renderCutsceneSlot(n,slot,label){let cs=n.cutscenes[slot];if(!cs)return `<button onclick="addCutscene('${slot}')">+ Add ${esc(label)} cutscene</button>`;cs.pages=cs.pages||[];return `<div class="row"><div class="row-head"><strong>${esc(label)}</strong><button class="mini danger" onclick="delete currentNode().cutscenes['${slot}'];render()">Remove</button></div>${field('Cutscene title',cs.title||'',`currentNode().cutscenes['${slot}'].title=this.value`)}${cs.pages.map((p,i)=>`<div class="row"><div class="row-head"><strong>Page ${i+1}</strong><button class="mini danger" onclick="currentNode().cutscenes['${slot}'].pages.splice(${i},1);render()">Delete</button></div>${field('Page title',p.title||'',`currentNode().cutscenes['${slot}'].pages[${i}].title=this.value`)}${field('Subtitle',p.subtitle||'',`currentNode().cutscenes['${slot}'].pages[${i}].subtitle=this.value`)}${area('Text',p.text||'',`currentNode().cutscenes['${slot}'].pages[${i}].text=this.value`)}${field('Image URL',p.image||'',`currentNode().cutscenes['${slot}'].pages[${i}].image=this.value`)}</div>`).join('')}<button onclick="currentNode().cutscenes['${slot}'].pages.push({title:'',subtitle:'',text:'',image:''});render()">+ Add Page</button></div>`}
-function addCutscene(slot){currentNode().cutscenes[slot]={title:currentNode().title,pages:[{title:currentNode().title,subtitle:'',text:'',image:''}]};render()}
+function renderCutscenes(n){return `<div class="section"><h3>Cutscenes &amp; dialogue</h3><p class="help">Choose full-width narrated pages or Battle Tower-style speaker portraits and dialogue lines.</p>${renderCutsceneSlot(n,'accept','Before quest')}${renderCutsceneSlot(n,'turnin','After turn-in')}</div>`}
+function cutscenePresentation(cs){return String(cs?.presentation||cs?.type||(Array.isArray(cs?.lines)?'dialogue':'cutscene')).toLowerCase()==='dialogue'?'dialogue':'cutscene'}
+function setCutscenePresentation(slot,presentation){let cs=currentNode().cutscenes[slot];cs.presentation=presentation;cs.pages=cs.pages||cs.lines||[];delete cs.lines;for(let page of cs.pages){if(presentation==='dialogue'){page.presentation='dialogue';page.speaker=page.speaker||page.title||'STORYTELLER';page.thumbnail=page.thumbnail||page.image||''}else{delete page.presentation;page.title=page.title||page.speaker||cs.title||'Story Scene';page.image=page.image||page.thumbnail||''}}render()}
+function addCutsceneEntry(slot){let cs=currentNode().cutscenes[slot],presentation=cutscenePresentation(cs);cs.pages=cs.pages||cs.lines||[];delete cs.lines;cs.pages.push(presentation==='dialogue'?{presentation:'dialogue',speaker:'STORYTELLER',text:'',thumbnail:''}:{title:'',subtitle:'',text:'',image:''});render()}
+function renderCutsceneSlot(n,slot,label){let cs=n.cutscenes[slot];if(!cs)return `<button onclick="addCutscene('${slot}')">+ Add ${esc(label)} scene</button>`;cs.pages=cs.pages||cs.lines||[];delete cs.lines;let presentation=cutscenePresentation(cs),dialogue=presentation==='dialogue',entries=cs.pages.map((p,i)=>dialogue?`<div class="row"><div class="row-head"><strong>Dialogue line ${i+1}</strong><button class="mini danger" onclick="currentNode().cutscenes['${slot}'].pages.splice(${i},1);render()">Delete</button></div>${field('Speaker',p.speaker||p.title||'',`currentNode().cutscenes['${slot}'].pages[${i}].speaker=this.value`,'text','Use PLAYER to show the player character’s display name.')}${area('Dialogue',p.text||'',`currentNode().cutscenes['${slot}'].pages[${i}].text=this.value`,'Use PLAYER or {PLAYER} anywhere the player character’s name should appear.')}${field('Portrait URL',p.thumbnail||p.avatar||'',`currentNode().cutscenes['${slot}'].pages[${i}].thumbnail=this.value`,'text','Use PLAYER_AVATAR for the player portrait, or paste an image URL.')}</div>`:`<div class="row"><div class="row-head"><strong>Page ${i+1}</strong><button class="mini danger" onclick="currentNode().cutscenes['${slot}'].pages.splice(${i},1);render()">Delete</button></div>${field('Page title',p.title||p.speaker||'',`currentNode().cutscenes['${slot}'].pages[${i}].title=this.value`)}${field('Subtitle',p.subtitle||'',`currentNode().cutscenes['${slot}'].pages[${i}].subtitle=this.value`)}${area('Text',p.text||'',`currentNode().cutscenes['${slot}'].pages[${i}].text=this.value`)}${field('Image URL',p.image||p.thumbnail||'',`currentNode().cutscenes['${slot}'].pages[${i}].image=this.value`)}</div>`).join('');return `<div class="row"><div class="row-head"><strong>${esc(label)}</strong><button class="mini danger" onclick="delete currentNode().cutscenes['${slot}'];render()">Remove</button></div><div class="grid2">${selectField('Presentation',['cutscene','dialogue'],presentation,`setCutscenePresentation('${slot}',this.value)`,'Cutscene uses full-width story pages. Dialogue uses a speaker, portrait, and one line at a time.')}${field('Scene title',cs.title||'',`currentNode().cutscenes['${slot}'].title=this.value`)}</div>${entries}<button onclick="addCutsceneEntry('${slot}')">+ Add ${dialogue?'Dialogue Line':'Page'}</button></div>`}
+function addCutscene(slot){currentNode().cutscenes[slot]={presentation:'cutscene',title:currentNode().title,pages:[{title:currentNode().title,subtitle:'',text:'',image:''}]};render()}
 
 function renderEncounter(n){
   let e=n.encounter||(n.encounter={kind:'none',party:{min:1,max:1},settings:{}});e.party=e.party||{min:1,max:1};
@@ -748,6 +752,7 @@ function renderMonster(){let m=data.monsters[selectedMonster];if(!m){main.innerH
 function showPlayerPreview(){
   let c=currentCampaign(),n=currentNode();if(!c||!n)return toast('Select a story beat to preview.');
   let choices=(n.type==='choice'||n.type==='dialogue')?n.options:(n.type==='scene'||n.type==='travel'?n.next:[]),body=`<div class="preview-card"><span class="pill">${esc(n.type)}</span><h2>${esc(n.title)}</h2><p>${esc(n.description||'No player-facing text yet.').replace(/\n/g,'<br>')}</p>`;
+  let scene=n.cutscenes?.enter||n.cutscenes?.accept;if(scene){let presentation=cutscenePresentation(scene),entries=scene.pages||scene.lines||[];if(presentation==='dialogue')body+=`<div class="row"><strong>${esc(scene.title||'Dialogue')}</strong>${entries.map(line=>`<p><span class="pill">${esc(line.speaker||'Speaker')}</span> ${esc(line.text||'No dialogue yet.').replace(/\n/g,'<br>')}</p>`).join('')}</div>`;else if(entries.length)body+=`<div class="row"><strong>${esc(scene.title||'Cutscene')}</strong><p>${esc(entries[0].text||'No cutscene text yet.').replace(/\n/g,'<br>')}</p><span class="pill">${entries.length} page${entries.length===1?'':'s'}</span></div>`}
   if(n.type==='quest'){let objective=n.quest?.objective||{};body+=`<div class="row"><strong>Quest objective</strong><p>${esc(n.quest?.offer_text||'No offer text yet.')}</p><span class="pill">${esc(objective.source||'none')}</span><span class="pill">${esc(objective.required_count||0)} required</span></div>`}
   if(n.type==='scenario'){let stage=(n.scenario?.stages||[]).find(x=>x.id===n.scenario?.start_stage)||n.scenario?.stages?.[0];body+=`<div class="row"><strong>${esc(stage?.title||'Opening stage')}</strong><p>${esc(stage?.description||'No stage description yet.')}</p>${(stage?.actions||[]).map((action,index)=>`<button class="preview-choice">${index+1}. ${esc(action.label||'Act')}</button>`).join('')}</div>`}
   if(n.type==='warfront'){let w=n.warfront||{};body+=`<div class="row"><strong>${esc(w.title||'Warfront plan')}</strong><p>${esc(w.description||'Allocate your forces.')}</p>${(w.fronts||[]).map(front=>`<button class="preview-choice"><strong>${esc(front.title||front.id)}</strong><br><span class="subtle">Difficulty ${esc(front.difficulty??0)} · ${esc(front.max_assets??0)} force slot(s)</span></button>`).join('')}</div>`}
@@ -939,6 +944,12 @@ function validateCampaignGraph(c,errors){
   let reachable=new Set(),frontier=byId.has(c.start_node)?[c.start_node]:[];while(frontier.length){let id=frontier.pop();if(reachable.has(id))continue;reachable.add(id);frontier.push(...(adjacency.get(id)||[]))}for(let id of byId.keys())if(!reachable.has(id))errors.push(`${c.key}/${id}: unreachable from the opening story beat`);
   let reverse=new Map(c.nodes.map(node=>[node.id,new Set()]));for(let [source,targets] of adjacency)for(let target of targets)reverse.get(target)?.add(source);let canFinish=new Set(endings),work=[...endings];while(work.length){let id=work.pop();for(let previous of reverse.get(id)||[])if(!canFinish.has(previous)){canFinish.add(previous);work.push(previous)}}for(let id of reachable)if(!canFinish.has(id))errors.push(`${c.key}/${id}: cannot reach an ending`)
 }
+function validateCutsceneDefinition(cutscene,owner,errors){
+  if(!cutscene||typeof cutscene!=='object'||Array.isArray(cutscene)){errors.push(`${owner}: scene must be an object`);return}
+  let rawPresentation=String(cutscene.presentation||cutscene.type||(Array.isArray(cutscene.lines)?'dialogue':'cutscene')).toLowerCase();if(!['cutscene','dialogue'].includes(rawPresentation)){errors.push(`${owner}: presentation must be cutscene or dialogue`);return}let presentation=cutscenePresentation(cutscene),entries=Array.isArray(cutscene.pages)?cutscene.pages:(Array.isArray(cutscene.lines)?cutscene.lines:[]);
+  if(!entries.length){errors.push(`${owner}: add at least one ${presentation==='dialogue'?'dialogue line':'page'}`);return}
+  entries.forEach((entry,index)=>{let item=`${owner} entry ${index+1}`;if(!entry||typeof entry!=='object'||Array.isArray(entry)){errors.push(`${item}: must be an object`);return}let dialogue=presentation==='dialogue'||entry.presentation==='dialogue'||String(entry.speaker||'').trim();if(dialogue&&!String(entry.speaker||'').trim())errors.push(`${item}: dialogue needs a speaker`);if(!String(entry.text||'').trim()&&!String(entry.image||'').trim())errors.push(`${item}: add text or an image`)})
+}
 function validatePackage(){
   let errors=[];
   if(data.schema!==SCHEMA)errors.push('Wrong schema.');
@@ -957,6 +968,7 @@ function validatePackage(){
       if(!['quest','choice','dialogue','scene','travel','scenario','warfront','ending'].includes(n.type))errors.push(`${owner}: unsupported node type ${n.type}`);
       validateConditions(n.requirements,`${owner} requirements`,errors);validateEffects(n.effects,`${owner} effects`,errors);
       validateEpilogue(n.epilogue,owner,errors);
+      for(let [slot,cutscene] of Object.entries(n.cutscenes||{}))validateCutsceneDefinition(cutscene,`${owner} ${slot} scene`,errors);
       for(let e of edges||[]){if(!ids.has(e.target))errors.push(`${owner}: missing target ${e.target}`);validateConditions(e.conditions,`${owner} -> ${e.target}`,errors);validateEffects(e.effects,`${owner} -> ${e.target}`,errors)}
       if(n.type==='choice'&&(n.options||[]).length<2)errors.push(`${owner}: choice needs at least 2 options`);
       if(n.type==='dialogue'&&!(n.options||[]).length)errors.push(`${owner}: dialogue needs at least 1 response`);
@@ -979,6 +991,7 @@ function validatePackage(){
     let owner=`standalone quest ${index+1}`,key=keyify(quest?.quest_key);if(!key)errors.push(`${owner}: quest key is required`);if(questKeys.has(key))errors.push(`Duplicate quest key: ${key}`);questKeys.add(key);
     validateObjectiveAndTurnin(quest?.objective,quest?.turnin,owner,errors);validateRewardDefinition(quest?.reward,owner,errors);let prerequisites=(quest?.prerequisites||[]).map(keyify);if(new Set(prerequisites).size!==prerequisites.length)errors.push(`${owner}: duplicate prerequisites`);if(prerequisites.includes(key))errors.push(`${owner}: quest cannot require itself`);validateConditions(quest?.access?.conditions,owner,errors)
   }
+  let cutsceneKeys=new Set();for(let [index,cutscene] of (data.cutscenes||[]).entries()){let owner=`cutscene ${index+1}`,key=keyify(cutscene?.key);if(!key)errors.push(`${owner}: key is required`);if(cutsceneKeys.has(key))errors.push(`Duplicate cutscene key: ${key}`);cutsceneKeys.add(key);validateCutsceneDefinition(cutscene,owner,errors)}
   for(let m of data.monsters||[]){m.key=keyify(m.key||m.name);if(!m.name)errors.push('A monster has no name.');if(monsterNames.has(String(m.name).toLowerCase()))errors.push(`Duplicate monster: ${m.name}`);monsterNames.add(String(m.name).toLowerCase())}
   return errors;
 }
