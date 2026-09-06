@@ -1679,7 +1679,10 @@ class Raid(commands.Cog):
                         current_channel = self.bot.get_channel(channel_id)
                         if current_channel:
                             for p in page.pages:
-                                await current_channel.send(p[4:-4])
+                                await current_channel.send(
+                                    p[4:-4],
+                                    allowed_mentions=discord.AllowedMentions.none(),
+                                )
 
                     while True:
                         try:
@@ -1698,14 +1701,16 @@ class Raid(commands.Cog):
                                 )
                                 if current_balance < bid:
                                     await msg.channel.send(
-                                        f"{msg.author.mention} You don't have enough money to place this bid."
+                                        f"{msg.author.mention} You don't have enough money to place this bid.",
+                                        allowed_mentions=discord.AllowedMentions.none(),
                                     )
                                     continue
 
                                 # Check if current bidder is already the highest bidder
                                 if current_bidder == previous_bidder:
                                     await msg.channel.send(
-                                        f"{msg.author.mention} You already have the highest bid."
+                                        f"{msg.author.mention} You already have the highest bid.",
+                                        allowed_mentions=discord.AllowedMentions.none(),
                                     )
                                     continue
 
@@ -1736,7 +1741,10 @@ class Raid(commands.Cog):
                                     content = f"{msg.author.mention} bids **${bid}**!\nThe minimum next bid is **${next_bid}**."
                                 else:
                                     content = f"{msg.author.mention} bids **${bid}**!"
-                                await current_channel.send(content)
+                                await current_channel.send(
+                                    content,
+                                    allowed_mentions=discord.AllowedMentions.none(),
+                                )
 
                     msg_content = (
                         f"Auction done! Winner is <@{highest_bid[0]}> with"
@@ -1760,7 +1768,10 @@ class Raid(commands.Cog):
                     for channel_id in channels_ids:
                         current_channel = self.bot.get_channel(channel_id)
                         if current_channel:
-                            await current_channel.send(msg_content)
+                            await current_channel.send(
+                                msg_content,
+                                allowed_mentions=discord.AllowedMentions.none(),
+                            )
 
                     cash_pool = hp * 0.9
                     self.raid = {
@@ -1824,7 +1835,8 @@ class Raid(commands.Cog):
                                         current_channel = self.bot.get_channel(channel_id)
                                         if current_channel:
                                             await current_channel.send(
-                                                f"💰 {user.mention}'s Raider abilities earned them an extra ${bonus_amount:,.0f}!"
+                                                f"💰 {user.mention}'s Raider abilities earned them an extra ${bonus_amount:,.0f}!",
+                                                allowed_mentions=discord.AllowedMentions.none(),
                                             )
 
                     # Send the final message to all channels
@@ -1916,7 +1928,10 @@ class Raid(commands.Cog):
                         guild,
                         "Ragnarok has been defeated!",
                     )
-                await summary_channel.send(summary)
+                await summary_channel.send(
+                    summary,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
 
             try:
                 self.raid.clear()
@@ -2414,7 +2429,10 @@ class Raid(commands.Cog):
                         channel = self.bot.get_channel(channel_id)
                         if channel:
                             for p in page.pages:
-                                await channel.send(p[4:-4])
+                                await channel.send(
+                                    p[4:-4],
+                                    allowed_mentions=discord.AllowedMentions.none(),
+                                )
 
 
                     while True:
@@ -2434,14 +2452,16 @@ class Raid(commands.Cog):
                                 )
                                 if current_balance < bid:
                                     await msg.channel.send(
-                                        f"{msg.author.mention} You don't have enough money to place this bid."
+                                        f"{msg.author.mention} You don't have enough money to place this bid.",
+                                        allowed_mentions=discord.AllowedMentions.none(),
                                     )
                                     continue
 
                                 # Check if current bidder is already the highest bidder
                                 if current_bidder == previous_bidder:
                                     await msg.channel.send(
-                                        f"{msg.author.mention} You already have the highest bid."
+                                        f"{msg.author.mention} You already have the highest bid.",
+                                        allowed_mentions=discord.AllowedMentions.none(),
                                     )
                                     continue
 
@@ -2472,7 +2492,10 @@ class Raid(commands.Cog):
                                     content = f"{msg.author.mention} bids **${bid}**!\nThe minimum next bid is **${next_bid}**."
                                 else:
                                     content = f"{msg.author.mention} bids **${bid}**!"
-                                await channel.send(content)
+                                await channel.send(
+                                    content,
+                                    allowed_mentions=discord.AllowedMentions.none(),
+                                )
 
                     msg_content = (
                         f"Auction done! Winner is <@{highest_bid[0]}> with"
@@ -2504,7 +2527,10 @@ class Raid(commands.Cog):
                     for channel_id in channels_ids:
                         channel = self.bot.get_channel(channel_id)
                         if channel:
-                            await channel.send(msg_content)
+                            await channel.send(
+                                msg_content,
+                                allowed_mentions=discord.AllowedMentions.none(),
+                            )
 
 
                     cash_pool = hp * 1.3
@@ -2569,7 +2595,8 @@ class Raid(commands.Cog):
                                         channel = self.bot.get_channel(channel_id)
                                         if channel:
                                             await channel.send(
-                                                f"💰 {user.mention}'s Raider abilities earned them an extra ${bonus_amount:,.0f}!"
+                                                f"💰 {user.mention}'s Raider abilities earned them an extra ${bonus_amount:,.0f}!",
+                                                allowed_mentions=discord.AllowedMentions.none(),
                                             )
 
                     # Send the final message to all channels
@@ -2655,7 +2682,10 @@ class Raid(commands.Cog):
                         ctx.guild,
                         "Ragnarok has been defeated!",
                     )
-                summary_msg = await summary_channel.send(summary)
+                summary_msg = await summary_channel.send(
+                    summary,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
 
                 #await ctx.send("attempting to clear keys...")
             try:

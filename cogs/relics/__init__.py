@@ -1336,8 +1336,10 @@ class Relics(commands.Cog):
             await self.ensure_tables()
             async with self.bot.pool.acquire() as conn:
                 rows = await conn.fetch(
-                    'SELECT "user", god FROM profile '
-                    'WHERE "user" = ANY($1) AND god IS NOT NULL',
+                    'SELECT profile."user", profile.god, alt_links.alt '
+                    'FROM profile '
+                    'LEFT JOIN alt_links ON alt_links.main = profile."user" '
+                    'WHERE profile."user" = ANY($1) AND profile.god IS NOT NULL',
                     unique_ids,
                 )
             channel = getattr(ctx, "channel", None)
@@ -1346,12 +1348,25 @@ class Relics(commands.Cog):
                 if relic_key not in RELIC_INDEX:
                     continue
                 try:
-                    await self.attempt_relic_drop(
+                    result = await self.attempt_relic_drop(
                         row["user"], relic_key, "raid", channel
                     )
                 except Exception:
                     self.logger.exception(
                         "Raid relic attempt failed for user %s", row["user"]
+                    )
+                    continue
+
+                alt_id = row["alt"]
+                if result.grant is None or alt_id is None:
+                    continue
+                try:
+                    await self.grant_relic(int(alt_id), relic_key, channel)
+                except Exception:
+                    self.logger.exception(
+                        "Raid relic sync failed from user %s to alt %s",
+                        row["user"],
+                        alt_id,
                     )
         except Exception:
             self.logger.exception("Failed to prepare raid relic attempts")
