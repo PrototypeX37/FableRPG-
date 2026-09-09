@@ -559,6 +559,33 @@ class Raid(commands.Cog):
             ),
         )
 
+    async def _send_raid_auction_page(self, channel, content):
+        """Notify listed survivors who have enabled Legendary Raid alerts."""
+        guild = channel.guild
+        role = self._spawn_alert_role(guild)
+        users = []
+        if role is not None:
+            for user_id in dict.fromkeys(re.findall(r"<@!?(\d+)>", content)):
+                member = guild.get_member(int(user_id))
+                if member is None:
+                    try:
+                        member = await guild.fetch_member(int(user_id))
+                    except discord.HTTPException:
+                        # Keep the auction available without guessing alert preferences.
+                        continue
+                if role in member.roles:
+                    users.append(member)
+
+        return await channel.send(
+            content,
+            allowed_mentions=discord.AllowedMentions(
+                everyone=False,
+                users=users,
+                roles=False,
+                replied_user=False,
+            ),
+        )
+
     @staticmethod
     def _round_raid_number(value):
         """Return a float rounded to Ragnarok's two-decimal precision."""
@@ -1679,9 +1706,8 @@ class Raid(commands.Cog):
                         current_channel = self.bot.get_channel(channel_id)
                         if current_channel:
                             for p in page.pages:
-                                await current_channel.send(
-                                    p[4:-4],
-                                    allowed_mentions=discord.AllowedMentions.none(),
+                                await self._send_raid_auction_page(
+                                    current_channel, p[4:-4]
                                 )
 
                     while True:
@@ -2429,9 +2455,8 @@ class Raid(commands.Cog):
                         channel = self.bot.get_channel(channel_id)
                         if channel:
                             for p in page.pages:
-                                await channel.send(
-                                    p[4:-4],
-                                    allowed_mentions=discord.AllowedMentions.none(),
+                                await self._send_raid_auction_page(
+                                    channel, p[4:-4]
                                 )
 
 
@@ -5831,7 +5856,7 @@ class Raid(commands.Cog):
     )
     @commands.guild_only()
     async def raidalerts(self, ctx, setting: str = None):
-        """Opt in to or out of Legendary Raid spawn and defeat pings."""
+        """Opt in to or out of Legendary Raid spawn, defeat, and auction pings."""
         role = self._spawn_alert_role(ctx.guild)
         if role is None:
             return await ctx.send("Legendary Raid alerts have not been configured yet.")
