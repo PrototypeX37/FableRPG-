@@ -1434,7 +1434,7 @@ class Raid(commands.Cog):
                         conn=conn,
                     )
                     if raid_hp == 17776:
-                        stathp = profile["stathp"] * 50
+                        stathp = profile["stathp"] * rpgtools.STAT_HEALTH_PER_POINT
                         level = rpgtools.xptolevel(profile["xp"])
                         raidhp = profile["health"] + 200 + (level * 15) + stathp
                     else:
@@ -2197,7 +2197,7 @@ class Raid(commands.Cog):
                         conn=conn,
                     )
                     if raid_hp == 17776:
-                        stathp = profile["stathp"] * 50
+                        stathp = profile["stathp"] * rpgtools.STAT_HEALTH_PER_POINT
                         level = rpgtools.xptolevel(profile["xp"])
                         raidhp = profile["health"] + 200 + (level * 15) + stathp
                     else:
@@ -5085,7 +5085,7 @@ class Raid(commands.Cog):
                     )
                     
                     # Calculate raid HP - higher than normal
-                    stathp = float(profile["stathp"]) * 50 * donator_bonus
+                    stathp = float(profile["stathp"]) * rpgtools.STAT_HEALTH_PER_POINT * donator_bonus
                     level = rpgtools.xptolevel(profile["xp"])
                     raidhp = (float(profile["health"]) + 200 + (level * 15) + stathp) * donator_bonus
                     
@@ -5518,7 +5518,7 @@ class Raid(commands.Cog):
                     atk = player_data["atkmultiply"] + statatk
                     deff = player_data["defmultiply"] + statdeff
 
-                    stathp = player_data["stathp"] * 50
+                    stathp = player_data["stathp"] * rpgtools.STAT_HEALTH_PER_POINT
                     base = 200 + (level * 15)
                     amulet_hp = player_data["amulet_hp"] or 0  # Handle null case
                     hp = player_data["health"] + stathp + base + amulet_hp
@@ -5597,7 +5597,7 @@ class Raid(commands.Cog):
                     atk = player_data["atkmultiply"] + statatk
                     deff = player_data["defmultiply"] + statdeff
 
-                    stathp = player_data["stathp"] * 50
+                    stathp = player_data["stathp"] * rpgtools.STAT_HEALTH_PER_POINT
                     base = 200 + (level * 15)
                     hp = player_data["health"] + stathp + base
                     hplevel = player_data["hplevel"]

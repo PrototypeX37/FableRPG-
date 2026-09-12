@@ -576,7 +576,7 @@ class Hunt(commands.Cog):
             return None
         dmg, deff = await self.bot.get_raidstats(member, conn=conn)
         level = rpgtools.xptolevel(profile["xp"])
-        hp = profile["health"] + 250 + level * 15 + profile["stathp"] * 50
+        hp = profile["health"] + 250 + level * 15 + profile["stathp"] * rpgtools.STAT_HEALTH_PER_POINT
         return {
             "member": member,
             "hp": float(hp),

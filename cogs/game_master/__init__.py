@@ -1342,7 +1342,19 @@ class GameMaster(commands.Cog):
 
         # Keep the original special-user restriction
         try:
-        
+            if not self.martigive_allowed_user_id:
+                return await ctx.send(
+                    "❌ martigive configuration error: "
+                    "`martigive_allowed_user_id` is missing or empty.\n"
+                    f"Loaded value: `{self.martigive_allowed_user_id!r}`"
+                )
+
+            if ctx.author.id != int(self.martigive_allowed_user_id):
+                return await ctx.send(
+                    "❌ You are not allowed to use martigive.\n"
+                    f"Your ID: `{ctx.author.id}`\n"
+                    f"Allowed ID: `{self.martigive_allowed_user_id}`"
+                )
 
             if money == 0:
                 return await self._safe_ctx_send(
@@ -1423,6 +1435,7 @@ class GameMaster(commands.Cog):
                 response = (
                     f"✅ Gave **${money:,}** each to "
                     f"**{len(valid_ids):,} users**.\n"
+                    f"Total generated: **${total_given:,}**."
                 )
 
                 if missing_ids:
@@ -4412,6 +4425,90 @@ class GameMaster(commands.Cog):
                 await ctx.send("\n".join(messages))
             else:
                 await ctx.send("All players already have valid stat allocations and stat point totals.")
+
+    @is_gm()
+    @commands.command(
+        hidden=True,
+        name="globalspreset",
+        aliases=["resetallstats", "refundallsp", "resetallsp"],
+        brief=_("Refund every player's allocated stat points"),
+    )
+    async def globalspreset(self, ctx):
+        """Zero all allocated stats and refund those points to every profile."""
+        if not await ctx.confirm(
+            "⚠️ This will reset ATK, DEF, and HP allocations for EVERY player and "
+            "refund all allocated points back to unused SP. Continue?"
+        ):
+            return await ctx.send("Global stat reset cancelled.")
+
+        async with self.bot.pool.acquire() as conn:
+            async with conn.transaction():
+                summary = await conn.fetchrow(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (
+                            WHERE COALESCE(statatk, 0) <> 0
+                               OR COALESCE(statdef, 0) <> 0
+                               OR COALESCE(stathp, 0) <> 0
+                        ) AS affected_players,
+                        COALESCE(SUM(
+                            GREATEST(COALESCE(statatk, 0), 0)
+                          + GREATEST(COALESCE(statdef, 0), 0)
+                          + GREATEST(COALESCE(stathp, 0), 0)
+                        ), 0) AS refunded_points
+                    FROM profile;
+                    """
+                )
+
+                await conn.execute(
+                    """
+                    UPDATE profile
+                    SET statpoints = GREATEST(COALESCE(statpoints, 0), 0)
+                                   + GREATEST(COALESCE(statatk, 0), 0)
+                                   + GREATEST(COALESCE(statdef, 0), 0)
+                                   + GREATEST(COALESCE(stathp, 0), 0),
+                        statatk = 0,
+                        statdef = 0,
+                        stathp = 0;
+                    """
+                )
+
+        affected = int(summary["affected_players"] or 0)
+        refunded = int(summary["refunded_points"] or 0)
+        await ctx.send(
+            f"✅ Global stat reset complete. Reset **{affected:,}** player(s) and "
+            f"refunded **{refunded:,} SP** in total."
+        )
+
+    @is_gm()
+    @commands.command(
+        hidden=True,
+        name="giveallresetpotion",
+        aliases=["giveallresetpotions", "resetpotionall", "globalresetpotion"],
+        brief=_("Give every player one reset potion"),
+    )
+    async def giveallresetpotion(self, ctx):
+        """Give exactly one additional reset potion to every existing profile."""
+        if not await ctx.confirm(
+            "Give **1 Reset Potion** to every player profile?"
+        ):
+            return await ctx.send("Global reset-potion grant cancelled.")
+
+        async with self.bot.pool.acquire() as conn:
+            granted = await conn.fetchval(
+                """
+                WITH updated AS (
+                    UPDATE profile
+                    SET resetpotion = COALESCE(resetpotion, 0) + 1
+                    RETURNING 1
+                )
+                SELECT COUNT(*) FROM updated;
+                """
+            )
+
+        await ctx.send(
+            f"✅ Gave **1 Reset Potion** to **{int(granted or 0):,}** player(s)."
+        )
 
     @is_gm()
     @commands.command(

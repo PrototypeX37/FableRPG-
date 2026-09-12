@@ -402,9 +402,9 @@ class Bot(commands.AutoShardedBot):
                 "allocated_defense_points": statdef,
                 "unspent_stat_points": unspent_statpoints,
                 "stat_point_effects": {
-                    "attack": "+0.1 attack multiplier per point",
-                    "defense": "+0.1 defense multiplier per point",
-                    "health": "+50 maximum HP per point",
+                    "attack": f"+{rpgtools.STAT_ATTACK_DEFENSE_PER_POINT} attack multiplier per point",
+                    "defense": f"+{rpgtools.STAT_ATTACK_DEFENSE_PER_POINT} defense multiplier per point",
+                    "health": f"+{rpgtools.STAT_HEALTH_PER_POINT} maximum HP per point",
                 },
                 "allocated_attack_multiplier_bonus": statatk * rpgtools.STAT_ATTACK_DEFENSE_PER_POINT,
                 "allocated_defense_multiplier_bonus": statdef * rpgtools.STAT_ATTACK_DEFENSE_PER_POINT,

@@ -971,7 +971,7 @@ class BattleFactory:
             # Calculate health
             base_health = 200
             health = result['health'] + base_health
-            stathp = result['stathp'] * 50
+            stathp = result['stathp'] * rpgtools.STAT_HEALTH_PER_POINT
             total_health = health + (level * 15) + stathp
 
             # Add equipped amulet HP

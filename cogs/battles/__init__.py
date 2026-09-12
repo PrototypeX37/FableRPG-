@@ -5510,7 +5510,7 @@ class Battles(commands.Cog):
                                 minion1_level = rpgtools.xptolevel(minion1_result['xp'])
                                 base_health = 200
                                 minion1_health = minion1_result['health'] + base_health
-                                minion1_stathp = minion1_result['stathp'] * 50
+                                minion1_stathp = minion1_result['stathp'] * rpgtools.STAT_HEALTH_PER_POINT
                                 minion1_total_hp = minion1_health + (minion1_level * 15) + minion1_stathp
                             else:
                                 minion1_total_hp = 250  # fallback
@@ -5521,7 +5521,7 @@ class Battles(commands.Cog):
                                 minion2_level = rpgtools.xptolevel(minion2_result['xp'])
                                 base_health = 200
                                 minion2_health = minion2_result['health'] + base_health
-                                minion2_stathp = minion2_result['stathp'] * 50
+                                minion2_stathp = minion2_result['stathp'] * rpgtools.STAT_HEALTH_PER_POINT
                                 minion2_total_hp = minion2_health + (minion2_level * 15) + minion2_stathp
                             else:
                                 minion2_total_hp = 150  # fallback

@@ -3380,9 +3380,9 @@ class AIPlayer(commands.Cog):
                 "health": int(profile["stathp"] or 0),
             },
             "per_point_effects": {
-                "attack": "+0.1 raid attack multiplier",
-                "defense": "+0.1 raid defense multiplier",
-                "health": "+50 fresh maximum combat HP",
+                "attack": "+0.2 raid attack multiplier",
+                "defense": "+0.2 raid defense multiplier",
+                "health": f"+{rpgtools.STAT_HEALTH_PER_POINT} fresh maximum combat HP",
             },
             "does_not_change_adventure_success": True,
             "allocation_is_permanent_without_a_reset_potion": True,

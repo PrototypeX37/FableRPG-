@@ -1634,7 +1634,7 @@ class IceDragonChallenge(commands.Cog):
                     # Get base health and stat HP
                     base_health = 200.0
                     health = float(result['health']) + base_health
-                    stathp = float(result['stathp']) * 50.0
+                    stathp = float(result['stathp']) * rpgtools.STAT_HEALTH_PER_POINT
 
                     amulet_query = '''
                                         SELECT * 
@@ -1914,7 +1914,7 @@ class IceDragonChallenge(commands.Cog):
             xp = result["xp"]
             base_health = 250
             health = result['health'] + base_health
-            stathp = result['stathp'] * 50
+            stathp = result['stathp'] * rpgtools.STAT_HEALTH_PER_POINT
             dmg, deff = await self.bot.get_raidstats(playername, conn=conn)
             player_level = rpgtools.xptolevel(xp)
             total_health = health + (player_level * 5)

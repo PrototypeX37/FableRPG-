@@ -1299,7 +1299,7 @@ class Tournament(commands.Cog):
 
                 base_health = 200.0
                 health = float(result['health']) + base_health
-                stathp = float(result['stathp']) * 50.0
+                stathp = float(result['stathp']) * rpgtools.STAT_HEALTH_PER_POINT
                 player_classes = result['class']
                 dmg, deff = await self.bot.get_raidstats(player, conn=conn)
 
@@ -2215,7 +2215,7 @@ class Tournament(commands.Cog):
                                 # Extract the health value from the result
                                 base_health = 200
                                 health = result['health'] + base_health
-                                stathp = result['stathp'] * 50
+                                stathp = result['stathp'] * rpgtools.STAT_HEALTH_PER_POINT
 
                                 # Calculate total health based on level and add to current health
                                 level = rpgtools.xptolevel(

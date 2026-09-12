@@ -2862,7 +2862,7 @@ class Easter(commands.Cog):
                 # Get base health and stat HP
                 base_health = 200
                 health = self.ensure_float(result['health']) + base_health
-                stathp = self.ensure_float(result['stathp']) * 50
+                stathp = self.ensure_float(result['stathp']) * rpgtools.STAT_HEALTH_PER_POINT
                 
                 # Get raid stats
                 dmg, deff = await self.bot.get_raidstats(player, conn=conn)

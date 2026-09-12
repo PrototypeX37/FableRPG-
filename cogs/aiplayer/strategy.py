@@ -24,6 +24,7 @@ from classes.classes import (
     from_string as class_from_string,
 )
 from utils.elements import calculate_element_modifier
+from utils import misc as rpgtools
 
 
 CLASS_KNOWLEDGE = {
@@ -467,7 +468,7 @@ def combat_health_state(
     """Describe Fable's battle HP without treating profile.health as current HP."""
     base_hp = 200.0
     level_hp = max(1, int(level)) * 15.0
-    allocated_hp = float(allocated_health_points or 0) * 50.0
+    allocated_hp = float(allocated_health_points or 0) * rpgtools.STAT_HEALTH_PER_POINT
     profile_bonus = float(profile_health_bonus or 0)
     amulet_bonus = float(amulet_hp or 0)
     baseline_max_hp = base_hp + level_hp + allocated_hp + profile_bonus + amulet_bonus
@@ -478,7 +479,7 @@ def combat_health_state(
         "profile_health_bonus": round(profile_bonus, 2),
         "profile_health_bonus_is_current_hp": False,
         "allocated_health_points": round(float(allocated_health_points or 0), 2),
-        "hp_per_allocated_point": 50,
+        "hp_per_allocated_point": rpgtools.STAT_HEALTH_PER_POINT,
         "base_hp": int(base_hp),
         "level_hp": round(level_hp, 2),
         "amulet_hp": round(amulet_bonus, 2),

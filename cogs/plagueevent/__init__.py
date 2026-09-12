@@ -8,6 +8,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from collections import deque
 
 from utils.elements import calculate_element_modifier
+from utils import misc as rpgtools
 
 # Define ranks and their corresponding XP thresholds and abilities
 RANKS = {
@@ -1265,7 +1266,7 @@ class PlagueOfTheUndying(commands.Cog):
 
                     base_health = Decimal('250')
                     health = Decimal(str(result['health'])) + base_health
-                    stathp = Decimal(str(result['stathp'])) * Decimal('50')
+                    stathp = Decimal(str(result['stathp'])) * rpgtools.STAT_HEALTH_PER_POINT
                     dmg, deff = await self.bot.get_raidstats(ctx.author, conn=conn)
 
                     total_health = health + (Decimal(str(player_level)) * Decimal('5')) + stathp

@@ -9,6 +9,7 @@ from collections import deque
 from cogs.shard_communication import user_on_cooldown as user_cooldown
 
 from utils.checks import is_gm
+from utils import misc as rpgtools
 from utils.elements import (
     SUPER_EFFECTIVE_MODIFIER,
     WEAK_MODIFIER,
@@ -420,7 +421,7 @@ class SoulforgeDefender(commands.Cog):
 
                     base_health = 200.0
                     health = float(result['health']) + base_health
-                    stathp = float(result['stathp']) * 50.0
+                    stathp = float(result['stathp']) * rpgtools.STAT_HEALTH_PER_POINT
                     player_classes = result['class']
                     dmg, deff = await self.bot.get_raidstats(ctx.author, conn=conn)
 

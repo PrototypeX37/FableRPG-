@@ -1254,7 +1254,7 @@ class StatPointsView(discord.ui.View):
         embed.add_field(name="Health", value=str(int(self.snapshot["stathp"])), inline=True)
         embed.add_field(
             name="Per Point",
-            value="Attack: **+0.2** • Defense: **+0.2** • Health: **+50**",
+            value=f"Attack: **+{rpgtools.STAT_ATTACK_DEFENSE_PER_POINT}** • Defense: **+{rpgtools.STAT_ATTACK_DEFENSE_PER_POINT}** • Health: **+{rpgtools.STAT_HEALTH_PER_POINT}**",
             inline=False,
         )
         embed.set_footer(text="Choose a stat, enter an amount, then review the before/after preview.")
@@ -4117,7 +4117,7 @@ class Profile(commands.Cog):
             )
             level = int(rpgtools.xptolevel(self._safe_int(profile_data.get("xp"), 0)))
             base_hp = self._safe_float(profile_data.get("health"), 0.0)
-            stat_hp = self._safe_float(profile_data.get("stathp"), 0.0) * 50.0
+            stat_hp = self._safe_float(profile_data.get("stathp"), 0.0) * rpgtools.STAT_HEALTH_PER_POINT
             level_hp = 200.0 + (level * 15.0)
             amulet_hp = self._safe_float(amulet_data.get("hp"), 0.0) if amulet_data else 0.0
             total_health = base_hp + stat_hp + level_hp + amulet_hp
