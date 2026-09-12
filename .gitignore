@@ -59,3 +59,4 @@ audit/hunt_mechanics_review.md
 audit/hunt_mechanics_check.py
 tests/test_hunt_combat.py
 tests/test_hunt_notifications.py
+tests/test_tower_challenge_scaling.py

@@ -74,10 +74,6 @@ JURY_MAJOR_BONUS_CACHE_MULTIPLIER = Decimal("1.00")
 logger = logging.getLogger(__name__)
 
 BT_CHALLENGE_MIN_PRESTIGE = 5
-BT_CHALLENGE_PRESTIGE_STEP = Decimal("0.035")
-BT_CHALLENGE_PRESTIGE_CAP = 30
-BT_CHALLENGE_BASE_STAT_STEP = Decimal("0.055")
-BT_CHALLENGE_BASE_STAT_CAP = 30
 
 
 def _pve_location_marker(
@@ -4590,12 +4586,6 @@ class Battles(commands.Cog):
     def _bt_challenge_mode_label(mode):
         return "Ironman" if mode == "ironman" else "Boss Rush"
 
-    def _bt_challenge_scale_snapshot(self, player_combatant, pet_combatant):
-        return self.battle_factory._build_jury_scale_snapshot_from_combatants(
-            player_combatant,
-            pet_combatant,
-        )
-
     async def _bt_challenge_prestige_available(self, ctx, row, mode, active_ironman=False):
         prestige = int(row["prestige"] or 0) if row else 0
         mode_label = self._bt_challenge_mode_label(mode)
@@ -4624,67 +4614,27 @@ class Battles(commands.Cog):
                 return False
         return True
 
-    def _bt_challenge_prestige_multiplier(self, prestige):
-        prestige_over = max(0, min(BT_CHALLENGE_PRESTIGE_CAP, int(prestige or 0)) - BT_CHALLENGE_MIN_PRESTIGE)
-        return Decimal("1") + (Decimal(prestige_over) * BT_CHALLENGE_PRESTIGE_STEP)
-
-    def _bt_challenge_base_multiplier(self, prestige):
-        capped = max(0, min(BT_CHALLENGE_BASE_STAT_CAP, int(prestige or 0)))
-        return Decimal("1") + (Decimal(capped) * BT_CHALLENGE_BASE_STAT_STEP)
-
     def _bt_challenge_reward_multiplier(self, prestige):
         prestige_over = max(0, int(prestige or 0) - BT_CHALLENGE_MIN_PRESTIGE)
         return Decimal("1") + (Decimal(prestige_over) * Decimal("0.04"))
 
     @staticmethod
-    def _bt_challenge_difficulty_prestige(prestige):
-        prestige = max(0, int(prestige or 0))
-        return max(0, prestige - (prestige // 5))
+    def _bt_challenge_difficulty_prestige(prestige, mode):
+        reductions = {"bossrush": 1, "ironman": 3}
+        return max(0, int(prestige or 0) - reductions[mode])
 
-    def _bt_challenge_floor_factor(self, floor, mode):
-        floor = max(1, min(30, int(floor or 1)))
-        progress = Decimal(floor - 1) / Decimal("29")
-        if mode == "bossrush":
-            return Decimal("0.85") + (progress * Decimal("0.15"))
-        return Decimal("0.55") + (progress * Decimal("0.45"))
-
-    def _scale_bt_challenge_enemy_spec(self, spec, floor, slot, prestige, snapshot, mode):
+    def _scale_bt_challenge_enemy_spec(self, spec, floor, slot, prestige):
+        """Use ordinary tower prestige multipliers, independent of player/pet power."""
         scaled = dict(spec)
-
-        floor = max(1, min(30, int(floor or 1)))
-        is_boss = slot == "boss"
-        prestige_multiplier = self._bt_challenge_prestige_multiplier(prestige)
-        base_multiplier = self._bt_challenge_base_multiplier(prestige)
-        floor_factor = self._bt_challenge_floor_factor(floor, mode)
-        if mode == "bossrush":
-            round_budget = Decimal("2.75") if is_boss else Decimal("1.45")
-            hp_pressure = Decimal("0.035") if is_boss else Decimal("0.027")
-            armor_pct = Decimal("0.15") if is_boss else Decimal("0.105")
-        else:
-            round_budget = Decimal("2.25") if is_boss else Decimal("1.15")
-            hp_pressure = Decimal("0.030") if is_boss else Decimal("0.022")
-            armor_pct = Decimal("0.13") if is_boss else Decimal("0.09")
-        round_budget *= prestige_multiplier * floor_factor
-
-        attack_base = Decimal(str((snapshot or {}).get("attack_base", 1) or 1))
-        hp_base = Decimal(str((snapshot or {}).get("hp_base", 1) or 1))
-        defense_base = Decimal(str((snapshot or {}).get("defense_base", 1) or 1))
-
-        base_hp = Decimal(str(spec.get("hp", 100) or 100))
-        base_attack = Decimal(str(spec.get("attack", 20) or 20))
-        base_defense = Decimal(str(spec.get("defense", 10) or 10))
-
-        hp = max(base_hp * base_multiplier, attack_base * round_budget)
-        damage_pressure = (
-            defense_base
-            + (hp_base * hp_pressure * prestige_multiplier * floor_factor)
-        )
-        damage = max(base_attack * base_multiplier, damage_pressure)
-        armor = max(base_defense * base_multiplier, attack_base * armor_pct * prestige_multiplier)
-
-        scaled["hp"] = max(1, int(round(float(hp))))
-        scaled["attack"] = max(1, int(round(float(damage))))
-        scaled["defense"] = max(0, int(round(float(armor))))
+        prestige = max(0, int(prestige or 0))
+        hp_multiplier = 1 + (0.20 * prestige)
+        stat_multiplier = 1 + (0.25 * prestige)
+        # Match the normal tower's exemption for floor 16's player-stat minions.
+        if int(floor) == 16 and slot != "boss":
+            hp_multiplier = stat_multiplier = 1
+        scaled["hp"] = max(1, int(round(float(spec.get("hp", 100)) * hp_multiplier)))
+        scaled["attack"] = max(1, int(round(float(spec.get("attack", 20)) * stat_multiplier)))
+        scaled["defense"] = max(0, int(round(float(spec.get("defense", 10)) * stat_multiplier)))
         return scaled
 
     def _bt_bossrush_rewards(self, prestige):
@@ -5734,7 +5684,7 @@ class Battles(commands.Cog):
             await self.add_player_to_fight(ctx.author.id)
             carried_hp = {}
             announced_difficulty = False
-            difficulty_prestige = self._bt_challenge_difficulty_prestige(prestige)
+            difficulty_prestige = self._bt_challenge_difficulty_prestige(prestige, "ironman")
             while 1 <= floor <= 30:
                 try:
                     level_data = self.levels[str(floor)]
@@ -5762,7 +5712,6 @@ class Battles(commands.Cog):
                 player_team = Team("Player", [player_combatant])
                 if pet_combatant:
                     player_team.add_combatant(pet_combatant)
-                scale_snapshot = self._bt_challenge_scale_snapshot(player_combatant, pet_combatant)
 
                 enemy_team = Team("Enemy", [])
                 for slot, fallback_name in (("minion1", "Minion"), ("minion2", "Minion"), ("boss", "Boss")):
@@ -5782,8 +5731,6 @@ class Battles(commands.Cog):
                         floor,
                         slot,
                         difficulty_prestige,
-                        scale_snapshot,
-                        "ironman",
                     )
                     enemy = await self.battle_factory.create_monster_combatant(spec, name=name)
                     if slot == "boss":
@@ -5794,8 +5741,7 @@ class Battles(commands.Cog):
                     await ctx.send(
                         f"🏔️ **Ironman difficulty:** prestige **{difficulty_prestige}** enemy stats "
                         f"(current tower prestige **{prestige}**) "
-                        f"(power snapshot ATK {scale_snapshot['attack_base']:,} / "
-                        f"HP {scale_snapshot['hp_base']:,} / DEF {scale_snapshot['defense_base']:,})."
+                        "— normal tower scaling, prestige minus 3."
                     )
                     announced_difficulty = True
 
@@ -5983,8 +5929,7 @@ class Battles(commands.Cog):
             player_team = Team("Player", [player_combatant])
             if pet_combatant:
                 player_team.add_combatant(pet_combatant)
-            scale_snapshot = self._bt_challenge_scale_snapshot(player_combatant, pet_combatant)
-            difficulty_prestige = self._bt_challenge_difficulty_prestige(prestige)
+            difficulty_prestige = self._bt_challenge_difficulty_prestige(prestige, "bossrush")
 
             enemy_team = Team("Enemy", [])
             for spec in boss_specs:
@@ -5993,8 +5938,6 @@ class Battles(commands.Cog):
                     spec.get("floor", 30),
                     "boss",
                     difficulty_prestige,
-                    scale_snapshot,
-                    "bossrush",
                 )
                 boss = await self.battle_factory.create_monster_combatant(scaled_spec, name=scaled_spec["name"])
                 setattr(boss, "is_boss", True)
@@ -6007,9 +5950,7 @@ class Battles(commands.Cog):
                     f"No minions. No mercy. Six bosses, one you.\n**{lineup}**\n"
                     "Fall anywhere along the line and you leave with nothing.\n"
                     f"Enemy stats use prestige **{difficulty_prestige}** "
-                    f"(current tower prestige **{prestige}**) and your current "
-                    f"ATK {scale_snapshot['attack_base']:,} / HP {scale_snapshot['hp_base']:,} / "
-                    f"DEF {scale_snapshot['defense_base']:,} power snapshot."
+                    f"(current tower prestige **{prestige}**) — normal tower scaling, prestige minus 1."
                 ),
                 color=0xC0392B,
             )
