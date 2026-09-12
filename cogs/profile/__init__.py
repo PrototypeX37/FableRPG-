@@ -2052,11 +2052,11 @@ class Profile(commands.Cog):
 
         xp_value = self._safe_int(profile.get("xp"), 0)
         level = int(rpgtools.xptolevel(xp_value))
-        floor = rpgtools.levels.get(level, 0)
-        ceil = rpgtools.levels.get(min(level + 1, rpgtools.MAX_LEVEL), floor)
+        floor = rpgtools.xp_for_level(level)
+        ceil = rpgtools.xp_for_level(level + 1)
         xp_progress = (
-            1.0
-            if level >= rpgtools.MAX_LEVEL or ceil <= floor
+            0.0
+            if ceil <= floor
             else max(0.0, min(1.0, (xp_value - floor) / (ceil - floor)))
         )
         luck_raw = float(profile.get("luck") or 0.3)
@@ -3595,12 +3595,6 @@ class Profile(commands.Cog):
 
                 current_level = rpgtools.xptolevel(profile['xp'])
                 current_xp = profile['xp']
-                max_level = max(rpgtools.levels)
-                if current_level >= max_level:
-                    await ctx.send(f"You are already at max level ({max_level}).")
-                    await self.bot.reset_cooldown(ctx)
-                    return
-
                 async with self.bot.pool.acquire() as conn:
                     # Consume the candy
                     await conn.execute(
@@ -3645,12 +3639,6 @@ class Profile(commands.Cog):
 
                 current_level = rpgtools.xptolevel(profile['xp'])
                 current_xp = profile['xp']
-                max_level = max(rpgtools.levels)
-                if current_level >= max_level:
-                    await ctx.send(f"You are already at max level ({max_level}).")
-                    await self.bot.reset_cooldown(ctx)
-                    return
-
                 async with self.bot.pool.acquire() as conn:
                     # Consume the candy
                     await conn.execute(

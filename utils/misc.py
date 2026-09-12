@@ -134,7 +134,33 @@ BASE_LEVELS = {
     100: 132625263,
 }
 levels = dict(BASE_LEVELS)
-MAX_LEVEL = max(levels)
+MAX_TABLE_LEVEL = max(levels)
+
+# Levels above the legacy table continue indefinitely (within the database XP
+# integer range).  The final stretch of the old curve increases the XP cost of
+# each level by ~75,000, so preserve that progression rather than introducing a
+# sudden new curve at level 101.
+POST_100_LEVEL_COST_GROWTH = 75_000
+_POST_100_BASE_XP = levels[MAX_TABLE_LEVEL]
+_POST_100_BASE_COST = levels[MAX_TABLE_LEVEL] - levels[MAX_TABLE_LEVEL - 1]
+
+
+def xp_for_level(level):
+    """Return the total XP threshold for *level*.
+
+    Levels 1-100 retain their historical thresholds exactly.  Above 100, each
+    next level costs 75,000 XP more than the previous one.
+    """
+    level = max(1, int(level or 1))
+    if level <= MAX_TABLE_LEVEL:
+        return levels[level]
+
+    steps = level - MAX_TABLE_LEVEL
+    return (
+        _POST_100_BASE_XP
+        + steps * _POST_100_BASE_COST
+        + POST_100_LEVEL_COST_GROWTH * steps * (steps + 1) // 2
+    )
 
 
 def random_token(id_):
@@ -155,21 +181,39 @@ def nice_join(iterable):
 
 
 def xptolevel(xp):
-    for level, point in levels.items():
-        if xp == point:
-            return level
-        elif xp < point:
-            return level - 1
-    return MAX_LEVEL
+    xp = max(0, int(xp or 0))
+
+    # Preserve the exact legacy table through level 100.
+    if xp < _POST_100_BASE_XP:
+        for level, point in levels.items():
+            if xp == point:
+                return level
+            elif xp < point:
+                return level - 1
+        return MAX_TABLE_LEVEL
+
+    # Find an upper bound, then binary-search the generated post-100 curve.
+    # This stays fast even for extremely large XP values.
+    low = MAX_TABLE_LEVEL
+    high = MAX_TABLE_LEVEL + 1
+    while xp_for_level(high) <= xp:
+        low = high
+        high *= 2
+
+    while low + 1 < high:
+        mid = (low + high) // 2
+        if xp_for_level(mid) <= xp:
+            low = mid
+        else:
+            high = mid
+    return low
 
 
 def xptonextlevel(xp):
+    xp = max(0, int(xp or 0))
     level = xptolevel(xp)
-    if level >= MAX_LEVEL:
-        return "Infinity"
-    else:
-        nextxp = levels[level + 1]
-        return f"{nextxp - xp}"
+    nextxp = xp_for_level(level + 1)
+    return f"{nextxp - xp}"
 
 
 def stat_points_earned(old_level, new_level):
