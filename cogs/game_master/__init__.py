@@ -1423,7 +1423,6 @@ class GameMaster(commands.Cog):
                 response = (
                     f"✅ Gave **${money:,}** each to "
                     f"**{len(valid_ids):,} users**.\n"
-                    f"Total generated: **${total_given:,}**."
                 )
 
                 if missing_ids:
