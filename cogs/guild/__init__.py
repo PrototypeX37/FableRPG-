@@ -17,9 +17,11 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 import asyncio
+import json
 
 from contextlib import suppress
 from datetime import timedelta, datetime
+from typing import Union
 
 import discord
 from discord import Embed
@@ -27,6 +29,7 @@ from discord import Embed
 from discord.enums import ButtonStyle
 from discord.ext import commands
 from discord.http import handle_message_parameters
+from discord.ui import View
 from discord.ui.button import Button
 
 from classes.converters import (
@@ -53,13 +56,749 @@ from utils.checks import (
     is_gm,
 )
 from utils.i18n import _, locale_doc
-from utils.joins import JoinView
 from utils.markdown import escape_markdown
+
+
+class GuildAdventureJoinView(View):
+    def __init__(
+        self,
+        bot,
+        guild_id: int,
+        ends_at: datetime,
+        session_key: str,
+        members_key: str,
+    ) -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.guild_id = guild_id
+        self.ends_at = ends_at
+        self.session_key = session_key
+        self.members_key = members_key
+        ids_section = getattr(self.bot.config, "ids", None)
+        guild_ids = getattr(ids_section, "guild", {}) if ids_section else {}
+        if not isinstance(guild_ids, dict):
+            guild_ids = {}
+        self.prohibited_user_id = guild_ids.get("prohibited_user_id")
+
+        join_button = Button(
+            style=ButtonStyle.primary,
+            label=_("Join the adventure!"),
+            custom_id=f"guildadv_join:{guild_id}",
+        )
+        join_button.callback = self.button_pressed
+        self.add_item(join_button)
+
+    async def button_pressed(self, interaction) -> None:
+        if self.prohibited_user_id and interaction.user.id == self.prohibited_user_id:
+            return await interaction.response.send_message(
+                _("You are prohibited from joining."), ephemeral=True
+            )
+
+        if datetime.utcnow() >= self.ends_at:
+            return await interaction.response.send_message(
+                _("The join window has closed."), ephemeral=True
+            )
+
+        if await self.bot.redis.get(self.session_key) is None:
+            return await interaction.response.send_message(
+                _("The join window has closed."), ephemeral=True
+            )
+
+        if guard_assignment := await self.bot.get_city_guard(interaction.user.id):
+            return await interaction.response.send_message(
+                _(
+                    "You are currently stationed as a city guard in **{city}** and cannot join guild adventures."
+                ).format(city=guard_assignment["city"]),
+                ephemeral=True,
+            )
+
+        added = await self.bot.redis.sadd(self.members_key, interaction.user.id)
+        if added:
+            await interaction.response.send_message(
+                _("You joined the adventure."), ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                _("You already joined."), ephemeral=True
+            )
+
+
+class GuildValueModal(discord.ui.Modal):
+    def __init__(self, dashboard: "GuildDashboardView", action: str):
+        titles = {"invest": "Deposit to Guild Bank", "adventure": "Start Guild Adventure"}
+        super().__init__(title=titles[action])
+        self.dashboard = dashboard
+        self.action = action
+        self.value = discord.ui.TextInput(
+            label="Amount" if action == "invest" else "Join timer in seconds",
+            default="1000" if action == "invest" else "600",
+            max_length=12,
+        )
+        self.add_item(self.value)
+
+    async def on_submit(self, interaction):
+        try:
+            value = int(str(self.value.value))
+        except ValueError:
+            return await interaction.response.send_message("Value must be a whole number.", ephemeral=True)
+        if value <= 0 or (self.action == "adventure" and value > 3600):
+            return await interaction.response.send_message(
+                "Use a positive amount; adventure timers may be at most 3,600 seconds.",
+                ephemeral=True,
+            )
+        command_name = "guild invest" if self.action == "invest" else "guild adventure"
+        kwargs = {"amount": str(value)} if self.action == "invest" else {"timer": value}
+        await interaction.response.defer()
+        ok, message = await self.dashboard.invoke(command_name, **kwargs)
+        await interaction.followup.send(message, ephemeral=True)
+
+
+class GuildDashboardView(discord.ui.View):
+    def __init__(self, cog, ctx):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.ctx = ctx
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("This guild dashboard is not yours.", ephemeral=True)
+            return False
+        return True
+
+    async def invoke(self, command_name, **kwargs):
+        command = self.ctx.bot.get_command(command_name)
+        if command is None:
+            return False, f"`{command_name}` is unavailable."
+        previous = self.ctx.command
+        self.ctx.command = command
+        try:
+            try:
+                allowed = await command.can_run(self.ctx)
+            except commands.CheckFailure as exc:
+                return False, str(exc).strip() or "You do not have permission for that guild action."
+            if not allowed:
+                return False, "You do not have permission for that guild action."
+            await command.callback(self.cog, self.ctx, **kwargs)
+            return True, "Guild action opened in this channel."
+        except Exception as exc:
+            return False, f"Guild action failed: {exc}"
+        finally:
+            self.ctx.command = previous
+
+    async def run(self, interaction, command_name, **kwargs):
+        await interaction.response.defer(ephemeral=True)
+        ok, message = await self.invoke(command_name, **kwargs)
+        await interaction.followup.send(message, ephemeral=True)
+
+    @discord.ui.button(label="Members", style=discord.ButtonStyle.primary, row=0)
+    async def members(self, interaction, button):
+        await self.run(interaction, "guild members")
+
+    @discord.ui.button(label="Richest", style=discord.ButtonStyle.primary, row=0)
+    async def richest(self, interaction, button):
+        await self.run(interaction, "guild richest")
+
+    @discord.ui.button(label="Best XP", style=discord.ButtonStyle.primary, row=0)
+    async def best(self, interaction, button):
+        await self.run(interaction, "guild best")
+
+    @discord.ui.button(label="Deposit", style=discord.ButtonStyle.success, row=0)
+    async def deposit(self, interaction, button):
+        await interaction.response.send_modal(GuildValueModal(self, "invest"))
+
+    @discord.ui.button(label="Adventure Status", style=discord.ButtonStyle.secondary, row=1)
+    async def status(self, interaction, button):
+        await self.run(interaction, "guild status")
+
+    @discord.ui.button(label="Start Adventure", style=discord.ButtonStyle.success, row=1)
+    async def adventure(self, interaction, button):
+        await interaction.response.send_modal(GuildValueModal(self, "adventure"))
+
+    @discord.ui.button(label="Timers", style=discord.ButtonStyle.secondary, row=1)
+    async def timers(self, interaction, button):
+        await self.run(interaction, "guild timers")
+
+    @discord.ui.button(label="City Alerts", style=discord.ButtonStyle.secondary, row=1)
+    async def alerts(self, interaction, button):
+        await self.run(interaction, "guild cityalerts")
+
+    @discord.ui.button(label="Management Help", style=discord.ButtonStyle.secondary, row=2)
+    async def management(self, interaction, button):
+        await interaction.response.send_message(
+            "**Guild management shortcuts**\n"
+            "`guild invite @user` • `guild promote @user` • `guild demote @user` • `guild kick @user`\n"
+            "`guild pay <amount> @user` • `guild distribute ...` • `guild upgrade`\n"
+            "`guild rename <name>` • `guild description <text>` • `guild icon <url>`\n"
+            "`guild cityalerts set` • `guild cityalerts role @role`",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger, row=2)
+    async def close(self, interaction, button):
+        await interaction.response.edit_message(view=None)
+        self.stop()
 
 
 class Guild(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self._guild_adventure_join_tasks: dict[int, asyncio.Task] = {}
+        self._resume_guild_adventure_joins_task = self.bot.loop.create_task(
+            self._resume_guild_adventure_joins()
+        )
+
+    async def _guild_city_under_attack(self, guild_id: int, conn=None) -> str | None:
+        if not guild_id:
+            return None
+
+        city = await self.bot.get_owned_city(guild_id, conn=conn)
+        if not city:
+            return None
+
+        city_status = await self.bot.redis.execute_command("GET", f"city:{city['name']}")
+        if city_status and city_status.decode() == "under attack":
+            return city["name"]
+        return None
+
+    async def _get_guild_city_alert_settings(self, guild_id: int):
+        await self.bot._ensure_city_war_tables()
+        return await self.bot.pool.fetchrow(
+            'SELECT "city_attack_channel", "city_attack_role_id" FROM guild WHERE "id"=$1;',
+            guild_id,
+        )
+
+    async def _resolve_guild_city_alert_channel(self, channel_id: int | None):
+        parsed_channel_id = self.bot._coerce_positive_int(channel_id)
+        if not parsed_channel_id:
+            return None
+
+        channel = self.bot.get_channel(parsed_channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(parsed_channel_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return None
+
+        return channel if isinstance(channel, discord.TextChannel) else None
+
+    def cog_unload(self):
+        if self._resume_guild_adventure_joins_task:
+            self._resume_guild_adventure_joins_task.cancel()
+        for task in self._guild_adventure_join_tasks.values():
+            task.cancel()
+        self._guild_adventure_join_tasks.clear()
+
+    def _guild_adventure_join_session_key(self, guild_id: int) -> str:
+        return f"guildadv_join:{guild_id}"
+
+    def _guild_adventure_join_members_key(self, guild_id: int) -> str:
+        return f"guildadv_join:{guild_id}:members"
+
+    async def _load_guild_adventure_join_session(self, guild_id: int):
+        data = await self.bot.redis.get(self._guild_adventure_join_session_key(guild_id))
+        if data is None:
+            return None
+        if isinstance(data, bytes):
+            data = data.decode("utf-8")
+        return json.loads(data)
+
+    async def _save_guild_adventure_join_session(
+        self,
+        session: dict,
+        ends_at: datetime,
+        buffer_seconds: int = 86400,
+    ) -> None:
+        remaining = max(0, int((ends_at - datetime.utcnow()).total_seconds()))
+        ttl_seconds = remaining + buffer_seconds
+        session_key = self._guild_adventure_join_session_key(session["guild_id"])
+        members_key = self._guild_adventure_join_members_key(session["guild_id"])
+        await self.bot.redis.set(session_key, json.dumps(session), ex=ttl_seconds)
+        await self.bot.redis.expire(members_key, ttl_seconds)
+
+    async def _delete_guild_adventure_join_session(self, guild_id: int) -> None:
+        await self.bot.redis.delete(
+            self._guild_adventure_join_session_key(guild_id),
+            self._guild_adventure_join_members_key(guild_id),
+        )
+
+    async def _attach_guild_adventure_join_view(self, session: dict) -> None:
+        try:
+            guild_id = int(session["guild_id"])
+            message_id = int(session["message_id"])
+            ends_at = datetime.fromisoformat(session["ends_at"])
+        except (KeyError, ValueError, TypeError):
+            return
+        view = GuildAdventureJoinView(
+            self.bot,
+            guild_id,
+            ends_at,
+            self._guild_adventure_join_session_key(guild_id),
+            self._guild_adventure_join_members_key(guild_id),
+        )
+        self.bot.add_view(view, message_id=message_id)
+
+    def _schedule_guild_adventure_join_finalize(
+        self,
+        guild_id: int,
+        session: dict | None = None,
+    ) -> None:
+        task = self._guild_adventure_join_tasks.get(guild_id)
+        if task and not task.done():
+            return
+        self._guild_adventure_join_tasks[guild_id] = asyncio.create_task(
+            self._finalize_guild_adventure_join(guild_id, session=session)
+        )
+
+    async def _resume_guild_adventure_joins(self) -> None:
+        try:
+            keys = await self.bot.redis.keys("guildadv_join:*")
+        except Exception:
+            return
+
+        for key in keys:
+            if isinstance(key, bytes):
+                key_str = key.decode("utf-8")
+            else:
+                key_str = str(key)
+            if key_str.endswith(":members"):
+                continue
+            try:
+                guild_id = int(key_str.split(":")[-1])
+            except ValueError:
+                continue
+
+            session = await self._load_guild_adventure_join_session(guild_id)
+            if not session:
+                continue
+
+            try:
+                await self._attach_guild_adventure_join_view(session)
+            except Exception:
+                continue
+            self._schedule_guild_adventure_join_finalize(guild_id, session=session)
+
+    async def _disable_guild_adventure_join_view(
+        self, channel_id: int, message_id: int
+    ) -> None:
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return
+        try:
+            message = await channel.fetch_message(message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return
+        with suppress(discord.Forbidden, discord.HTTPException):
+            await message.edit(view=None)
+
+    async def _finalize_guild_adventure_join(
+        self, guild_id: int, session: dict | None = None
+    ) -> None:
+        try:
+            if session is None:
+                session = await self._load_guild_adventure_join_session(guild_id)
+            if not session:
+                return
+
+            await self.bot.wait_until_ready()
+
+            ends_at = datetime.fromisoformat(session["ends_at"])
+            now = datetime.utcnow()
+            if ends_at > now:
+                await asyncio.sleep((ends_at - now).total_seconds())
+
+            session = await self._load_guild_adventure_join_session(guild_id)
+            if not session:
+                return
+
+            channel_id = int(session["channel_id"])
+            message_id = int(session["message_id"])
+            starter_id = int(session["starter_id"])
+
+            await self._disable_guild_adventure_join_view(channel_id, message_id)
+
+            members_key = self._guild_adventure_join_members_key(guild_id)
+            member_ids = await self.bot.redis.smembers(members_key)
+            member_ids = [
+                int(m.decode("utf-8") if isinstance(m, bytes) else m)
+                for m in member_ids
+            ]
+
+            if starter_id not in member_ids:
+                member_ids.insert(0, starter_id)
+
+            guild = await self.bot.pool.fetchrow(
+                'SELECT * FROM guild WHERE "id"=$1;', guild_id
+            )
+            if not guild:
+                await self._delete_guild_adventure_join_session(guild_id)
+                return
+
+            joined = []
+            joined_ids: list[int] = []
+            difficulty = 0
+
+            async with self.bot.pool.acquire() as conn:
+                starter_profile = await conn.fetchrow(
+                    'SELECT "xp" FROM profile WHERE "user"=$1;',
+                    starter_id,
+                )
+                starter_guard = await self.bot.get_city_guard(starter_id, conn=conn)
+                if starter_profile and not starter_guard:
+                    difficulty += int(rpgtools.xptolevel(starter_profile["xp"]))
+                    starter_user = self.bot.get_user(starter_id) or await self.bot.fetch_user(
+                        starter_id
+                    )
+                    if starter_user:
+                        joined.append(starter_user)
+                    joined_ids.append(starter_id)
+
+                seen = {starter_id}
+                for user_id in member_ids:
+                    if user_id in seen:
+                        continue
+                    seen.add(user_id)
+                    user = await conn.fetchrow(
+                        'SELECT * FROM profile WHERE "user"=$1;', user_id
+                    )
+                    if user and user["guild"] == guild["id"] and not await self.bot.get_city_guard(
+                        user_id,
+                        conn=conn,
+                    ):
+                        difficulty += int(rpgtools.xptolevel(user["xp"]))
+                        user_obj = self.bot.get_user(user_id) or await self.bot.fetch_user(
+                            user_id
+                        )
+                        if user_obj:
+                            joined.append(user_obj)
+                        joined_ids.append(user_id)
+
+            async with self.bot.pool.acquire() as conn:
+                await conn.execute(
+                    'UPDATE guild SET advmembers=$1 WHERE "id"=$2;',
+                    joined_ids,
+                    guild["id"],
+                )
+
+            if len(joined_ids) < 3:
+                await self.bot.redis.execute_command(
+                    "DEL", f"guildcd:{guild_id}:guild adventure"
+                )
+                channel = self.bot.get_channel(channel_id)
+                if channel is None:
+                    try:
+                        channel = await self.bot.fetch_channel(channel_id)
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        channel = None
+                if channel:
+                    await channel.send(
+                        _("You didn't get enough other players for the guild adventure.")
+                    )
+                await self._delete_guild_adventure_join_session(guild_id)
+                return
+
+            adventure_types = [
+                {
+                    "name": "Dragon Hunt",
+                    "description": "Your guild embarks on a quest to slay the mighty dragon threatening the kingdom.",
+                    "events": [
+                        "The guild encounters a band of goblins and swiftly defeats them.",
+                        "A member finds a mysterious artifact in an ancient ruin.",
+                        "The guild is ambushed by bandits but manages to escape.",
+                        "A friendly wizard offers the guild a magical boon.",
+                        "The dragon appears and a fierce battle ensues.",
+                        "The guild sets up camp and tells stories by the fire.",
+                        "They find a village destroyed by the dragon.",
+                        "A merchant sells them rare potions at a discount.",
+                        "They cross a dangerous river with the help of a giant turtle.",
+                        "One member deciphers ancient runes that foretell their destiny.",
+                        "A thunderstorm forces the guild to take shelter in a cave.",
+                        "They rescue a kidnapped nobleman who rewards them handsomely.",
+                        "A bridge collapses, but the guild engineers a solution.",
+                        "They encounter a rival guild seeking the same dragon.",
+                        "An old hermit gives cryptic advice about the dragon.",
+                        "They find tracks leading directly to the dragon's lair.",
+                        "The guild navigates through a labyrinthine forest.",
+                        "They are haunted by illusions created by mischievous spirits.",
+                        "A member's courage inspires the others during a tough challenge.",
+                        "They discover the dragon has offspring to protect.",
+                    ],
+                },
+                {
+                    "name": "Treasure Expedition",
+                    "description": "Your guild sets out to find the lost treasure of the pirate king.",
+                    "events": [
+                        "The guild sails through a storm and loses some supplies.",
+                        "They discover a map leading to a hidden island.",
+                        "A sea monster attacks the ship but is repelled.",
+                        "They find the treasure but it is guarded by undead pirates.",
+                        "The guild returns home with the treasure.",
+                        "They befriend a talking parrot that knows secrets.",
+                        "A mutiny nearly breaks out but is quickly quelled.",
+                        "They navigate treacherous reefs with expert sailing.",
+                        "An island tribe offers them shelter and guidance.",
+                        "They decode a series of riddles to unlock a vault.",
+                        "A cursed idol brings them misfortune until discarded.",
+                        "They race against another crew to reach the treasure first.",
+                        "A member falls overboard but is heroically rescued.",
+                        "They barter with merfolk for safe passage.",
+                        "An old sea chart reveals hidden hazards.",
+                        "They encounter ghost ships that vanish at dawn.",
+                        "A volcanic eruption forces them to flee an island.",
+                        "They hold a festive celebration after a major victory.",
+                        "They repair their ship after damage from coral reefs.",
+                        "A mysterious fog causes them to lose their way.",
+                    ],
+                },
+                {
+                    "name": "Rescue Mission",
+                    "description": "Your guild is tasked with rescuing a kidnapped prince from a dark fortress.",
+                    "events": [
+                        "The guild infiltrates the fortress under the cover of night.",
+                        "They disable traps set throughout the corridors.",
+                        "A guard almost raises the alarm but is subdued.",
+                        "They find a secret passage leading to the dungeon.",
+                        "An imprisoned sage provides valuable information.",
+                        "They encounter a powerful sorcerer and engage in a magical duel.",
+                        "A riddle blocks their path; solving it opens a hidden door.",
+                        "They disguise themselves as enemy soldiers.",
+                        "An ally inside the fortress aids their mission.",
+                        "They rescue the prince and escape through underground tunnels.",
+                        "A betrayal from within complicates their escape.",
+                        "They are chased by enemy forces but manage to evade them.",
+                        "The guild fights off a group of shadow creatures.",
+                        "They find valuable documents exposing a conspiracy.",
+                        "A dragon guards the final exit; they must outsmart it.",
+                        "They use a stolen airship to flee the fortress.",
+                        "An ancient artifact grants them temporary invisibility.",
+                        "They set traps to slow down pursuers.",
+                        "A daring leap across rooftops ensures their getaway.",
+                        "They are hailed as heroes upon returning the prince.",
+                    ],
+                },
+                {
+                    "name": "Mystic Journey",
+                    "description": "Your guild ventures into the Mystic Realms to retrieve a legendary relic.",
+                    "events": [
+                        "They enter a portal to a realm of endless sky.",
+                        "Gravity shifts, challenging their navigation skills.",
+                        "They negotiate with elemental spirits for safe passage.",
+                        "A member gains prophetic visions.",
+                        "They solve a puzzle that alters reality around them.",
+                        "They battle with creatures made of pure energy.",
+                        "A time distortion causes confusion among the guild.",
+                        "They find the relic but must choose between power and wisdom.",
+                        "A guardian tests their worthiness through trials.",
+                        "They experience illusions that test their resolve.",
+                        "An astral storm threatens to scatter them across dimensions.",
+                        "They learn ancient secrets about the universe.",
+                        "A paradox forces them to confront alternate versions of themselves.",
+                        "They receive a blessing that enhances their abilities.",
+                        "They must answer philosophical questions to proceed.",
+                        "They encounter a being that embodies chaos.",
+                        "The realm starts collapsing, and they must escape quickly.",
+                        "They forge an alliance with celestial beings.",
+                        "They witness the birth of a star.",
+                        "Upon returning, they realize time has moved differently.",
+                    ],
+                },
+                {
+                    "name": "Underground Expedition",
+                    "description": "Your guild explores ancient ruins beneath the city in search of lost knowledge.",
+                    "events": [
+                        "They decipher old inscriptions that guide them deeper.",
+                        "A cave-in forces them to find an alternative route.",
+                        "They battle giant subterranean creatures.",
+                        "They find a hidden library filled with forbidden texts.",
+                        "Traps test their agility and wit.",
+                        "They encounter a subterranean civilization.",
+                        "A cursed artifact causes strange phenomena.",
+                        "They must cross an underground lake inhabited by a leviathan.",
+                        "They solve a centuries-old mystery.",
+                        "A maze confuses their sense of direction.",
+                        "They find evidence of an advanced ancient society.",
+                        "Magical darkness impedes their progress.",
+                        "They must perform a ritual to unlock a sealed door.",
+                        "They face a moral dilemma regarding the use of forbidden knowledge.",
+                        "An earthquake threatens to bury them alive.",
+                        "They discover a vein of precious minerals.",
+                        "They are pursued by shadowy figures.",
+                        "They uncover the resting place of a legendary hero.",
+                        "Ancient guardians challenge their right to be there.",
+                        "They emerge with newfound wisdom and artifacts.",
+                    ],
+                },
+                {
+                    "name": "Defend the Realm",
+                    "description": "Your guild leads the defense against an invading army.",
+                    "events": [
+                        "They fortify the city walls in preparation.",
+                        "A spy is caught and provides valuable intelligence.",
+                        "They train local militia to bolster defenses.",
+                        "An inspiring speech raises the morale of the defenders.",
+                        "They set traps to slow the enemy's advance.",
+                        "A siege engine breaches the outer gate.",
+                        "They rally the defenders for a counterattack.",
+                        "They coordinate a daring raid behind enemy lines.",
+                        "They rescue trapped civilians during the battle.",
+                        "The enemy commander challenges them to a duel.",
+                        "They use magical barriers to protect the city.",
+                        "They repel waves of enemy attackers.",
+                        "A storm disrupts enemy formations.",
+                        "They capture enemy banners as trophies.",
+                        "They hold the line against overwhelming odds.",
+                        "They repair damaged fortifications mid-battle.",
+                        "They call in allies from neighboring towns.",
+                        "A hero sacrifices themselves to secure victory.",
+                        "They negotiate a ceasefire under tense conditions.",
+                        "They celebrate their hard-won victory.",
+                    ],
+                },
+                {
+                    "name": "Sea of Secrets",
+                    "description": "Your guild sails into uncharted waters to uncover ancient secrets.",
+                    "events": [
+                        "They discover a ghost ship drifting aimlessly.",
+                        "A thick fog surrounds the ship, disorienting the crew.",
+                        "They find a bottle containing a cryptic message.",
+                        "They navigate treacherous waters filled with hidden reefs.",
+                        "A siren's song lures them off course.",
+                        "They encounter a whirlpool and narrowly escape.",
+                        "They find a sunken temple beneath the waves.",
+                        "They battle a kraken guarding a hidden passage.",
+                        "They uncover ancient carvings that hint at lost civilizations.",
+                        "They recover a relic from a shipwreck.",
+                        "They face a mutiny but restore order.",
+                        "They barter with sea spirits for guidance.",
+                        "They spot a legendary sea creature.",
+                        "They survive a battle with pirates seeking the same treasure.",
+                        "They witness a rare celestial event over the ocean.",
+                        "They are challenged to a race by a rival crew.",
+                        "They rescue sailors from a shipwreck.",
+                        "A water elemental tests their worthiness.",
+                        "They find an underwater cave filled with pearls.",
+                        "They must navigate using only the stars after instruments fail.",
+                        "A member befriends a dolphin that guides them.",
+                        "They survive a battle with pirates seeking the same treasure.",
+                        "They sail through a sea of bioluminescent creatures.",
+                        "They encounter a massive sea turtle that offers wisdom.",
+                        "They help to calm a raging storm with magical artifacts.",
+                        "They discover an island that appears only once every century.",
+                    ],
+                },
+            ]
+
+            adventure_type = random.choice(adventure_types)
+            time = timedelta(hours=difficulty * 0.05)
+
+            def format_timedelta(td):
+                total_seconds = int(td.total_seconds())
+                days = total_seconds // 86400
+                hours = (total_seconds % 86400) // 3600
+                minutes = (total_seconds % 3600) // 60
+                seconds = total_seconds % 60
+
+                parts = []
+                if days > 0:
+                    parts.append(f"{days}d")
+                if hours > 0 or days > 0:
+                    parts.append(f"{hours}h")
+                if minutes > 0 or hours > 0 or days > 0:
+                    parts.append(f"{minutes}m")
+                if seconds > 0 and days == 0:
+                    parts.append(f"{seconds}s")
+
+                return " ".join(parts) if parts else "0s"
+
+            formatted_time = format_timedelta(time)
+
+            await self.bot.start_guild_adventure(
+                guild["id"], difficulty, time, adventure_type
+            )
+
+            gold = 1000
+            channel_id_db = await self.bot.pool.fetchval(
+                'UPDATE guild SET "money"="money"+$1 WHERE "id"=$2 RETURNING "channel";',
+                gold,
+                guild_id,
+            )
+            print(f"Fetched channel ID: {channel_id_db} (Type: {type(channel_id_db)})")
+
+            embed = Embed(
+                title=f"Guild Adventure Started for **{guild['name']}**!",
+                description=(
+                    f"**Adventure:** {adventure_type['name']}\n\n"
+                    f"{adventure_type['description']}"
+                ),
+                color=discord.Color.blue(),
+            )
+            embed.add_field(
+                name="Participants",
+                value=", ".join([u.mention for u in joined]) if joined else "None",
+                inline=False,
+            )
+            embed.add_field(
+                name="Difficulty",
+                value=f"**{difficulty}**",
+                inline=True,
+            )
+            embed.add_field(
+                name="Estimated Time",
+                value=f"**{formatted_time}**",
+                inline=True,
+            )
+            embed.set_footer(text="Good luck, adventurers!")
+            embed.timestamp = discord.utils.utcnow()
+
+            if channel_id_db:
+                try:
+                    if isinstance(channel_id_db, str) and channel_id_db.isdigit():
+                        channel_id_db = int(channel_id_db)
+                    elif not isinstance(channel_id_db, int):
+                        channel_id_db = None
+
+                    if channel_id_db:
+                        guild_channel = self.bot.get_channel(channel_id_db)
+                        if guild_channel:
+                            with suppress(discord.Forbidden, discord.HTTPException):
+                                await guild_channel.send(embed=embed)
+                        else:
+                            print(f"Guild channel with ID {channel_id_db} not found.")
+                except TypeError as e:
+                    print(f"Error converting channel ID to int: {e}")
+            else:
+                print("No channel ID found in the database.")
+
+            command_channel = self.bot.get_channel(channel_id)
+            if command_channel is None:
+                try:
+                    command_channel = await self.bot.fetch_channel(channel_id)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    command_channel = None
+            if command_channel:
+                await command_channel.send(embed=embed)
+
+            await self._delete_guild_adventure_join_session(guild_id)
+        except Exception as e:
+            import traceback
+
+            error_message = f"Error occurred: {e}\n"
+            error_message += traceback.format_exc()
+            channel = None
+            if session:
+                try:
+                    channel = self.bot.get_channel(int(session["channel_id"]))
+                except Exception:
+                    channel = None
+            if channel:
+                await channel.send(error_message)
+            print(error_message)
+        finally:
+            current = asyncio.current_task()
+            if self._guild_adventure_join_tasks.get(guild_id) is current:
+                self._guild_adventure_join_tasks.pop(guild_id, None)
 
     @has_char()
     @commands.group(invoke_without_command=True, brief=_("Interact with your guild."))
@@ -95,6 +834,7 @@ class Guild(commands.Cog):
             membercount = await conn.fetchval(
                 'SELECT count(*) FROM profile WHERE "guild"=$1;', guild["id"]
             )
+            bank_caps = await self.bot.get_guild_bank_caps(guild["id"], conn=conn)
         text = _("Members")
         embed = discord.Embed(title=guild["name"], description=guild["description"])
         embed.add_field(
@@ -102,10 +842,23 @@ class Guild(commands.Cog):
             value=f"{membercount}/{guild['memberlimit']} {text}",
         )
         leader = await rpgtools.lookup(self.bot, guild["leader"])
+        effective_bank_limit = (
+            bank_caps["effective_limit"] if bank_caps else int(guild["banklimit"])
+        )
+        bank_value = f"**${guild['money']}** / **${effective_bank_limit}**"
+        if bank_caps and effective_bank_limit != bank_caps["base_limit"]:
+            city_bonus = effective_bank_limit - bank_caps["base_limit"]
+            bank_value = (
+                f"{bank_value}\n"
+                + _("Base cap: ${base} (+${bonus} city bonus)").format(
+                    base=bank_caps["base_limit"],
+                    bonus=city_bonus,
+                )
+            )
         embed.add_field(name=_("Leader"), value=leader)
         embed.add_field(
             name="Guild Bank",
-            value=f"**${guild['money']}** / **${guild['banklimit']}**",
+            value=bank_value,
         )
         url = await ImageUrl(ImageFormat.all_static).convert(
             ctx, guild["icon"], silent=True
@@ -115,7 +868,9 @@ class Guild(commands.Cog):
         embed.set_footer(text=_("Guild ID: {id}").format(id=guild["id"]))
         if guild["badge"]:
             embed.set_image(url=guild["badge"])
-        await ctx.send(embed=embed)
+        own_guild_id = ctx.character_data.get("guild") if getattr(ctx, "character_data", None) else None
+        view = GuildDashboardView(self, ctx) if own_guild_id and int(own_guild_id) == int(guild["id"]) else None
+        await ctx.send(embed=embed, view=view)
 
     @guild.command(brief=_("Show a specific guild"))
     @locale_doc
@@ -798,6 +1553,229 @@ class Guild(commands.Cog):
             _("**Guild logs will go to {channel} ** ✅").format(channel=channel.mention)
         )
 
+    @commands.has_permissions(administrator=True, manage_channels=True)
+    @is_guild_leader()
+    @guild.group(
+        name="cityalerts",
+        aliases=["cityalert", "citywaralerts"],
+        invoke_without_command=True,
+        brief=_("Show or manage the city attack alert relay."),
+    )
+    @locale_doc
+    async def cityalerts(self, ctx):
+        _(
+            """Show or manage the guild's city attack alert relay.
+
+            Use `{prefix}guild cityalerts set` in the channel you want alerts sent to.
+            Use `{prefix}guild cityalerts role <role>` to optionally ping a role when the alert is relayed.
+
+            Only guild leaders can use this command."""
+        )
+        settings = await self._get_guild_city_alert_settings(ctx.character_data["guild"])
+        channel_id = self.bot._coerce_positive_int(
+            settings["city_attack_channel"] if settings else None
+        )
+        role_id = self.bot._coerce_positive_int(
+            settings["city_attack_role_id"] if settings else None
+        )
+
+        channel = await self._resolve_guild_city_alert_channel(channel_id)
+        role = channel.guild.get_role(role_id) if channel and role_id else None
+
+        if channel:
+            channel_text = channel.mention
+        elif channel_id:
+            channel_text = _("Unavailable channel (`{channel_id}`)").format(
+                channel_id=channel_id
+            )
+        else:
+            channel_text = _("Not configured")
+
+        if role:
+            role_text = f"@{discord.utils.escape_mentions(role.name)}"
+        elif role_id:
+            role_text = _("Unavailable role (`{role_id}`)").format(role_id=role_id)
+        else:
+            role_text = _("No ping role")
+
+        await ctx.send(
+            _(
+                "**City attack alerts**\n"
+                "Channel: {channel}\n"
+                "Ping role: {role}\n\n"
+                "Use `{prefix}guild cityalerts set` in the target channel to update it."
+            ).format(
+                channel=channel_text,
+                role=role_text,
+                prefix=ctx.clean_prefix,
+            )
+        )
+
+    @commands.has_permissions(administrator=True, manage_channels=True)
+    @is_guild_leader()
+    @cityalerts.command(name="set", brief=_("Set the city attack alert channel."))
+    @locale_doc
+    async def cityalerts_set(self, ctx, channel: discord.TextChannel = None):
+        _(
+            """`[channel]` - The channel to relay city attack alerts to, defaults to the current channel
+
+            Set the guild's city attack alert relay channel.
+            You must have administrator and Manage Channels permissions in the target server/channel.
+
+            Only guild leaders can use this command."""
+        )
+        channel = channel or ctx.channel
+        author_permissions = channel.permissions_for(ctx.author)
+        if not author_permissions.administrator or not author_permissions.manage_channels:
+            return await ctx.send(
+                _(
+                    "You need administrator and Manage Channels permissions in {channel} to use it for city attack alerts."
+                ).format(channel=channel.mention)
+            )
+
+        bot_permissions = channel.permissions_for(ctx.me)
+        if not bot_permissions.send_messages:
+            return await ctx.send(
+                _("I cannot send messages in {channel}.").format(channel=channel.mention)
+            )
+
+        settings = await self._get_guild_city_alert_settings(ctx.character_data["guild"])
+        existing_role_id = self.bot._coerce_positive_int(
+            settings["city_attack_role_id"] if settings else None
+        )
+        role = channel.guild.get_role(existing_role_id) if existing_role_id else None
+        preserved_role_id = existing_role_id if role else None
+        if role and not (role.mentionable or bot_permissions.mention_everyone):
+            preserved_role_id = None
+
+        if not await ctx.confirm(
+            _("{channel} will receive city attack alerts for your guild. Are you sure?").format(
+                channel=channel.mention
+            )
+        ):
+            return
+
+        await self.bot.pool.execute(
+            'UPDATE guild SET "city_attack_channel"=$1, "city_attack_role_id"=$2 WHERE "id"=$3;',
+            channel.id,
+            preserved_role_id,
+            ctx.character_data["guild"],
+        )
+
+        message = _("**City attack alerts will go to {channel}.** ✅").format(
+            channel=channel.mention
+        )
+        if existing_role_id and preserved_role_id is None:
+            message += " " + _(
+                "The configured ping role was cleared because it is not valid for that channel."
+            )
+        await ctx.send(message)
+
+    @commands.has_permissions(administrator=True, manage_channels=True)
+    @is_guild_leader()
+    @cityalerts.command(name="role", brief=_("Set the optional city attack ping role."))
+    @locale_doc
+    async def cityalerts_role(self, ctx, role: discord.Role):
+        _(
+            """`<role>` - The role to ping when a city attack alert is relayed
+
+            Set the optional role to ping for city attack alerts.
+            The role must be in the same server as the configured alert channel.
+
+            Only guild leaders can use this command."""
+        )
+        settings = await self._get_guild_city_alert_settings(ctx.character_data["guild"])
+        channel_id = self.bot._coerce_positive_int(
+            settings["city_attack_channel"] if settings else None
+        )
+        role_text = f"@{discord.utils.escape_mentions(role.name)}"
+        if not channel_id:
+            return await ctx.send(
+                _(
+                    "Set an alert channel first with `{prefix}guild cityalerts set`."
+                ).format(prefix=ctx.clean_prefix)
+            )
+
+        channel = await self._resolve_guild_city_alert_channel(channel_id)
+        if channel is None:
+            return await ctx.send(
+                _(
+                    "Your configured city alert channel is unavailable. Set it again with `{prefix}guild cityalerts set`."
+                ).format(prefix=ctx.clean_prefix)
+            )
+
+        if role.guild.id != channel.guild.id:
+            return await ctx.send(
+                _(
+                    "{role} is not in the same server as the configured alert channel {channel}."
+                ).format(role=role_text, channel=channel.mention)
+            )
+
+        author_permissions = channel.permissions_for(ctx.author)
+        if not author_permissions.administrator or not author_permissions.manage_channels:
+            return await ctx.send(
+                _(
+                    "You need administrator and Manage Channels permissions in {channel} to configure its city attack ping role."
+                ).format(channel=channel.mention)
+            )
+
+        bot_permissions = channel.permissions_for(ctx.me)
+        if not role.mentionable and not bot_permissions.mention_everyone:
+            return await ctx.send(
+                _(
+                    "I cannot ping {role} in {channel}. Make the role mentionable or give me permission to mention everyone there."
+                ).format(role=role_text, channel=channel.mention)
+            )
+
+        await self.bot.pool.execute(
+            'UPDATE guild SET "city_attack_role_id"=$1 WHERE "id"=$2;',
+            role.id,
+            ctx.character_data["guild"],
+        )
+        await ctx.send(
+            _("**City attack alerts will ping {role}.** ✅").format(role=role_text)
+        )
+
+    @commands.has_permissions(administrator=True, manage_channels=True)
+    @is_guild_leader()
+    @cityalerts.command(
+        name="disable",
+        aliases=["off", "remove"],
+        brief=_("Disable the city attack alert relay."),
+    )
+    @locale_doc
+    async def cityalerts_disable(self, ctx):
+        _(
+            """Disable the guild's city attack alert relay and clear the optional ping role.
+
+            Only guild leaders can use this command."""
+        )
+        await self.bot.pool.execute(
+            'UPDATE guild SET "city_attack_channel"=NULL, "city_attack_role_id"=NULL WHERE "id"=$1;',
+            ctx.character_data["guild"],
+        )
+        await ctx.send(_("City attack alerts have been disabled."))
+
+    @commands.has_permissions(administrator=True, manage_channels=True)
+    @is_guild_leader()
+    @cityalerts.command(
+        name="roleclear",
+        aliases=["roleremove", "roleoff"],
+        brief=_("Remove the city attack ping role."),
+    )
+    @locale_doc
+    async def cityalerts_roleclear(self, ctx):
+        _(
+            """Remove the optional ping role for city attack alerts.
+
+            Only guild leaders can use this command."""
+        )
+        await self.bot.pool.execute(
+            'UPDATE guild SET "city_attack_role_id"=NULL WHERE "id"=$1;',
+            ctx.character_data["guild"],
+        )
+        await ctx.send(_("The city attack ping role has been cleared."))
+
     @has_guild()
     @guild.command(brief=_("Show the richest guild members"))
     @locale_doc
@@ -904,7 +1882,11 @@ class Guild(commands.Cog):
             g = await conn.fetchrow(
                 'SELECT * FROM guild WHERE "id"=$1;', ctx.character_data["guild"]
             )
-            if g["banklimit"] < g["money"] + amount:
+            bank_caps = await self.bot.get_guild_bank_caps(g["id"], conn=conn)
+            effective_limit = (
+                bank_caps["effective_limit"] if bank_caps else int(g["banklimit"])
+            )
+            if effective_limit < g["money"] + amount:
                 return await ctx.send(_("The bank would be full."))
             profile_money = await conn.fetchval(
                 'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2 RETURNING'
@@ -971,30 +1953,49 @@ class Guild(commands.Cog):
             return await ctx.send(
                 _("For me? I'm flattered, but I can't accept this...")
             )
+        error = None
         async with self.bot.pool.acquire() as conn:
-            guild = await conn.fetchrow(
-                'SELECT * FROM guild WHERE "id"=$1;', ctx.character_data["guild"]
-            )
-            if guild["money"] < amount:
-                return await ctx.send(_("Your guild is too poor."))
-            await conn.execute(
-                'UPDATE guild SET "money"="money"-$1 WHERE "id"=$2;',
-                amount,
-                guild["id"],
-            )
-            await conn.execute(
-                'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
-                amount,
-                member.id,
-            )
-            await self.bot.log_transaction(
-                ctx,
-                from_=0,
-                to=member,
-                subject="guild pay",
-                data={"Gold": amount},
-                conn=conn,
-            )
+            async with conn.transaction():
+                # Lock the guild row so concurrent withdrawals cannot each read the
+                # same balance and all pass the affordability check.
+                guild = await conn.fetchrow(
+                    'SELECT * FROM guild WHERE "id"=$1 FOR UPDATE;',
+                    ctx.character_data["guild"],
+                )
+                if city_name := await self._guild_city_under_attack(
+                    guild["id"], conn=conn
+                ):
+                    error = _(
+                        "Your city **{city}** is under attack, so guild bank withdrawals are disabled right now."
+                    ).format(city=city_name)
+                elif guild["money"] < amount:
+                    error = _("Your guild is too poor.")
+                else:
+                    # Conditional debit: only succeeds if the funds are still there.
+                    debited = await conn.fetchval(
+                        'UPDATE guild SET "money"="money"-$1 WHERE "id"=$2 AND'
+                        ' "money">=$1 RETURNING "money";',
+                        amount,
+                        guild["id"],
+                    )
+                    if debited is None:
+                        error = _("Your guild is too poor.")
+                    else:
+                        await conn.execute(
+                            'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                            amount,
+                            member.id,
+                        )
+                        await self.bot.log_transaction(
+                            ctx,
+                            from_=0,
+                            to=member,
+                            subject="guild pay",
+                            data={"Gold": amount},
+                            conn=conn,
+                        )
+        if error:
+            return await ctx.send(error)
         if guild["channel"]:
             with suppress(discord.Forbidden, discord.HTTPException):
                 with handle_message_parameters(
@@ -1045,22 +2046,38 @@ class Guild(commands.Cog):
             amounts[for_each * member[1]].append(member[0].id)
         # a bit ugly, but we get a dict {amount: [list of players]}
 
+        error = None
         async with self.bot.pool.acquire() as conn:
-            guild = await conn.fetchrow(
-                'SELECT * FROM guild WHERE "id"=$1;', ctx.character_data["guild"]
-            )
-            if guild["money"] < amount:
-                return await ctx.send(_("Your guild is too poor."))
-
-            await conn.execute(
-                'UPDATE guild SET "money"="money"-$1 WHERE "id"=$2;',
-                amount,
-                ctx.character_data["guild"],
-            )
-            await conn.executemany(
-                'UPDATE profile SET "money"="money"+$1 WHERE "user"=ANY($2);',
-                amounts.items(),
-            )
+            async with conn.transaction():
+                guild = await conn.fetchrow(
+                    'SELECT * FROM guild WHERE "id"=$1 FOR UPDATE;',
+                    ctx.character_data["guild"],
+                )
+                if city_name := await self._guild_city_under_attack(
+                    guild["id"], conn=conn
+                ):
+                    error = _(
+                        "Your city **{city}** is under attack, so guild bank withdrawals are disabled right now."
+                    ).format(city=city_name)
+                elif guild["money"] < amount:
+                    error = _("Your guild is too poor.")
+                else:
+                    debited = await conn.fetchval(
+                        'UPDATE guild SET "money"="money"-$1 WHERE "id"=$2 AND'
+                        ' "money">=$1 RETURNING "money";',
+                        amount,
+                        ctx.character_data["guild"],
+                    )
+                    if debited is None:
+                        error = _("Your guild is too poor.")
+                    else:
+                        await conn.executemany(
+                            'UPDATE profile SET "money"="money"+$1 WHERE'
+                            ' "user"=ANY($2);',
+                            amounts.items(),
+                        )
+        if error:
+            return await ctx.send(error)
 
         nice_members = rpgtools.nice_join([str(member) for member in members])
         if guild["channel"]:
@@ -1095,6 +2112,12 @@ class Guild(commands.Cog):
             guild = await conn.fetchrow(
                 'SELECT * FROM guild WHERE "id"=$1;', ctx.character_data["guild"]
             )
+            if city_name := await self._guild_city_under_attack(guild["id"], conn=conn):
+                return await ctx.send(
+                    _("Your city **{city}** is under attack, so guild bank withdrawals are disabled right now.").format(
+                        city=city_name
+                    )
+                )
 
             current_limit = guild["banklimit"]  # e.g. 500000, 1000000, etc.
             current_upgrades = guild["upgrade"]  # how many 250k base upgrades
@@ -1152,6 +2175,12 @@ class Guild(commands.Cog):
                 'SELECT * FROM guild WHERE "id"=$1;',
                 ctx.character_data["guild"]
             )
+            if city_name := await self._guild_city_under_attack(guild_data["id"], conn=conn):
+                return await ctx.send(
+                    _("Your city **{city}** came under attack, so guild bank withdrawals are disabled right now.").format(
+                        city=city_name
+                    )
+                )
             if guild_data["money"] < cost:
                 return await ctx.send(
                     _(
@@ -1235,6 +2264,19 @@ class Guild(commands.Cog):
         async with self.bot.pool.acquire() as conn:
             guild1 = await conn.fetchrow('SELECT * FROM guild WHERE "id"=$1;', guild1)
             guild2 = await conn.fetchrow('SELECT * FROM guild WHERE "id"=$1;', guild2)
+            if city_name := await self._guild_city_under_attack(guild1["id"], conn=conn):
+                return await ctx.send(
+                    _("Your city **{city}** is under attack, so your guild cannot risk bank gold right now.").format(
+                        city=city_name
+                    )
+                )
+            if city_name := await self._guild_city_under_attack(guild2["id"], conn=conn):
+                return await ctx.send(
+                    _("{enemy}'s city **{city}** is under attack, so their guild cannot risk bank gold right now.").format(
+                        enemy=enemy,
+                        city=city_name,
+                    )
+                )
             if guild1["money"] < amount or guild2["money"] < amount:
                 return await ctx.send(_("One of the guilds can't pay the price."))
             size1 = await conn.fetchval(
@@ -1389,12 +2431,26 @@ class Guild(commands.Cog):
                 )
             )
         async with self.bot.pool.acquire() as conn:
-            money1, bank1 = await conn.fetchval(
-                'SELECT ("money", "banklimit") FROM guild WHERE "id"=$1;', guild1["id"]
-            )
-            money2, bank2 = await conn.fetchval(
-                'SELECT ("money", "banklimit") FROM guild WHERE "id"=$1;', guild2["id"]
-            )
+            bank1_caps = await self.bot.get_guild_bank_caps(guild1["id"], conn=conn)
+            bank2_caps = await self.bot.get_guild_bank_caps(guild2["id"], conn=conn)
+            if city_name := await self._guild_city_under_attack(guild1["id"], conn=conn):
+                return await ctx.send(
+                    _("Guild battle payout was cancelled because **{guild}** is defending **{city}** right now.").format(
+                        guild=guild1["name"],
+                        city=city_name,
+                    )
+                )
+            if city_name := await self._guild_city_under_attack(guild2["id"], conn=conn):
+                return await ctx.send(
+                    _("Guild battle payout was cancelled because **{guild}** is defending **{city}** right now.").format(
+                        guild=guild2["name"],
+                        city=city_name,
+                    )
+                )
+            money1 = bank1_caps["guild"]["money"]
+            bank1 = bank1_caps["effective_limit"]
+            money2 = bank2_caps["guild"]["money"]
+            bank2 = bank2_caps["effective_limit"]
             if money1 < amount or money2 < amount:
                 return await ctx.send(_("Some guild spent the money??? Bad looser!"))
             if wins1 > wins2:
@@ -1461,20 +2517,42 @@ class Guild(commands.Cog):
                     f"**{guild1['name']}** and **{guild2['name']}** tied."
                 )
 
+    @has_char()
     @is_gm()
     @guild.command()
-    async def adventurereset(self, ctx):
-
-
-        guild_id = ctx.character_data["guild"]
-        keys_to_delete = await self.bot.redis.keys(f"guildcd:{guild_id}:*")
-
+    async def adventurereset(self, ctx, profile: Union[discord.Member, int] = None):
+        try:
+            # If no profile provided, use the command author
+            if profile is None:
+                profile_id = ctx.author.id
+            elif isinstance(profile, discord.Member):
+                profile_id = profile.id
+            else:
+                profile_id = profile
+            
+            # Query the database to get the guild for this profile
+            async with self.bot.pool.acquire() as conn:
+                guild_id = await conn.fetchval(
+                    "SELECT guild FROM profile WHERE profile.user = $1", 
+                    profile_id
+                )
+            
+            if guild_id is None:
+                await ctx.send(f"No profile found for user ID {profile_id}.")
+                return
+            
+            # Get all cooldown keys for this guild
+            keys_to_delete = await self.bot.redis.keys(f"guildcd:{guild_id}:*")
+            
             # Delete each matching key
-        if keys_to_delete:
-            await ctx.bot.redis.delete(*keys_to_delete)
-            await ctx.send(f"All cooldown entries for guild ID {guild_id} have been deleted.")
-        else:
-            await ctx.send(f"No cooldown entries found for guild ID {guild_id}.")
+            if keys_to_delete:
+                await self.bot.redis.delete(*keys_to_delete)
+                await ctx.send(f"All cooldown entries for guild ID {guild_id} have been deleted.")
+            else:
+                await ctx.send(f"No cooldown entries found for guild ID {guild_id}.")
+                
+        except Exception as e:
+            await ctx.send(f"An error occurred: {e}")
 
     @is_guild_officer()
     @guild_cooldown(86400)
@@ -1497,8 +2575,16 @@ class Guild(commands.Cog):
         try:
             if timer > 86400:
                 return await ctx.send("Timer cannot exceed 1 day")
-            # Check if the guild is already on an adventure
-            if await self.bot.get_guild_adventure(ctx.character_data["guild"]):
+            guild_id = ctx.character_data["guild"]
+            if guard_assignment := await self.bot.get_city_guard(ctx.author.id):
+                await self.bot.reset_guild_cooldown(ctx)
+                return await ctx.send(
+                    _(
+                        "You are currently stationed as a city guard in **{city}** and cannot start a guild adventure."
+                    ).format(city=guard_assignment["city"])
+                )
+
+            if await self.bot.get_guild_adventure(guild_id):
                 await self.bot.reset_guild_cooldown(ctx)
                 return await ctx.send(
                     _(
@@ -1507,436 +2593,91 @@ class Guild(commands.Cog):
                     ).format(prefix=ctx.clean_prefix)
                 )
 
-            # Fetch guild information
+            existing = await self._load_guild_adventure_join_session(guild_id)
+            if existing:
+                ends_at = datetime.fromisoformat(existing["ends_at"])
+                now = datetime.utcnow()
+                if now < ends_at:
+                    remaining = int((ends_at - now).total_seconds())
+                    hours, remainder = divmod(remaining, 3600)
+                    minutes, seconds = divmod(remainder, 60)
+                    parts = []
+                    if hours > 0:
+                        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+                    if minutes > 0 or hours > 0:
+                        parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+                    if seconds > 0 and hours == 0:
+                        parts.append(f"{seconds} second{'s' if seconds != 1 else ''}")
+                    time_str = " ".join(parts) if parts else "0s"
+                    await ctx.send(
+                        _("A guild adventure join is already open. Time left: {time}.").format(
+                            time=time_str
+                        )
+                    )
+                    await self._attach_guild_adventure_join_view(existing)
+                    self._schedule_guild_adventure_join_finalize(
+                        guild_id, session=existing
+                    )
+                else:
+                    await ctx.send(
+                        _("A previous guild adventure join is being finalized. Please wait.")
+                    )
+                    await self._attach_guild_adventure_join_view(existing)
+                    self._schedule_guild_adventure_join_finalize(
+                        guild_id, session=existing
+                    )
+                return
+
             guild = await self.bot.pool.fetchrow(
-                'SELECT * FROM guild WHERE "id"=$1;', ctx.character_data["guild"]
+                'SELECT * FROM guild WHERE "id"=$1;', guild_id
+            )
+            if not guild:
+                return await ctx.send(_("No guild found."))
+
+            hours, remainder = divmod(timer, 3600)
+            minutes, seconds = divmod(remainder, 60)
+
+            time_parts = []
+            if hours > 0:
+                time_parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+            if minutes > 0 or hours > 0:
+                time_parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+            if seconds > 0 and hours == 0:
+                time_parts.append(f"{seconds} second{'s' if seconds != 1 else ''}")
+            time_str = " ".join(time_parts) if time_parts else "0s"
+
+            ends_at = datetime.utcnow() + timedelta(seconds=timer)
+            session_key = self._guild_adventure_join_session_key(guild_id)
+            members_key = self._guild_adventure_join_members_key(guild_id)
+            view = GuildAdventureJoinView(
+                self.bot, guild_id, ends_at, session_key, members_key
             )
 
-            # Create a view for joining the adventure
-            view = JoinView(
-                Button(style=ButtonStyle.primary, label=_("Join the adventure!")),
-                message=_("You joined the adventure."),
-                timeout=timer,
-            )
-
-            mins = timer / 60
-
-            # Send the join message
-            await ctx.send(
+            message = await ctx.send(
                 _(
                     "{author} seeks a guild adventure for **{guild}**! Click the button to"
-                    " join! Unlimited players can join in the next {mins} minutes. The minimum"
+                    " join! Unlimited players can join in the next {time}. The minimum"
                     " of players required is 3."
-                ).format(author=ctx.author.mention, guild=guild["name"]),
+                ).format(author=ctx.author.mention, guild=guild["name"], time=time_str),
                 view=view,
             )
 
-            # Calculate difficulty based on the command invoker's XP
-            difficulty = int(rpgtools.xptolevel(ctx.character_data["xp"]))
-
-            # Wait for 10 minutes to gather participants
-            await asyncio.sleep(timer)
-
-            # Stop the view to prevent further interactions
-            view.stop()
-
-            joined = []
-
-            command_user = self.bot.get_user(ctx.author.id) or await self.bot.fetch_user(ctx.author.id)
-            joined.append(command_user)
-
-            async with self.bot.pool.acquire() as conn:
-                for u in view.joined:
-                    user = await conn.fetchrow(
-                        'SELECT * FROM profile WHERE "user"=$1;', u.id
-                    )
-                    if user and user["guild"] == guild["id"]:
-                        difficulty += int(rpgtools.xptolevel(user["xp"]))
-                        joined.append(u)
-
-            # Update the guild's advmembers with only valid members
-            async with self.bot.pool.acquire() as conn:
-                user_ids = [u.id for u in joined]
-                await conn.execute(
-                    'UPDATE guild SET advmembers=$1 WHERE "id"=$2;',
-                    user_ids, guild["id"]
-                )
-
-            # Check if enough players joined
-            if len(joined) < 3:
-                await self.bot.reset_guild_cooldown(ctx)
-                return await ctx.send(
-                    _("You didn't get enough other players for the guild adventure.")
-                )
-
-            adventure_types = [
-                {
-                    'name': 'Dragon Hunt',
-                    'description': 'Your guild embarks on a quest to slay the mighty dragon threatening the kingdom.',
-                    'events': [
-                        'The guild encounters a band of goblins and swiftly defeats them.',
-                        'A member finds a mysterious artifact in an ancient ruin.',
-                        'The guild is ambushed by bandits but manages to escape.',
-                        'A friendly wizard offers the guild a magical boon.',
-                        'The dragon appears and a fierce battle ensues.',
-                        'The guild sets up camp and tells stories by the fire.',
-                        'They find a village destroyed by the dragon.',
-                        'A merchant sells them rare potions at a discount.',
-                        'They cross a dangerous river with the help of a giant turtle.',
-                        'One member deciphers ancient runes that foretell their destiny.',
-                        'A thunderstorm forces the guild to take shelter in a cave.',
-                        'They rescue a kidnapped nobleman who rewards them handsomely.',
-                        'A bridge collapses, but the guild engineers a solution.',
-                        'They encounter a rival guild seeking the same dragon.',
-                        'An old hermit gives cryptic advice about the dragon.',
-                        'They find tracks leading directly to the dragon’s lair.',
-                        'The guild navigates through a labyrinthine forest.',
-                        'They are haunted by illusions created by mischievous spirits.',
-                        'A member\'s courage inspires the others during a tough challenge.',
-                        'They discover the dragon has offspring to protect.',
-                    ],
-                },
-                {
-                    'name': 'Treasure Expedition',
-                    'description': 'Your guild sets out to find the lost treasure of the pirate king.',
-                    'events': [
-                        'The guild sails through a storm and loses some supplies.',
-                        'They discover a map leading to a hidden island.',
-                        'A sea monster attacks the ship but is repelled.',
-                        'They find the treasure but it is guarded by undead pirates.',
-                        'The guild returns home with the treasure.',
-                        'They befriend a talking parrot that knows secrets.',
-                        'A mutiny nearly breaks out but is quickly quelled.',
-                        'They navigate treacherous reefs with expert sailing.',
-                        'An island tribe offers them shelter and guidance.',
-                        'They decode a series of riddles to unlock a vault.',
-                        'A cursed idol brings them misfortune until discarded.',
-                        'They race against another crew to reach the treasure first.',
-                        'A member falls overboard but is heroically rescued.',
-                        'They barter with merfolk for safe passage.',
-                        'An old sea chart reveals hidden hazards.',
-                        'They encounter ghost ships that vanish at dawn.',
-                        'A volcanic eruption forces them to flee an island.',
-                        'They hold a festive celebration after a major victory.',
-                        'They repair their ship after damage from coral reefs.',
-                        'A mysterious fog causes them to lose their way.',
-                    ],
-                },
-                {
-                    'name': 'Rescue Mission',
-                    'description': 'Your guild is tasked with rescuing a kidnapped prince from a dark fortress.',
-                    'events': [
-                        'The guild infiltrates the fortress under the cover of night.',
-                        'They disable traps set throughout the corridors.',
-                        'A guard almost raises the alarm but is subdued.',
-                        'They find a secret passage leading to the dungeon.',
-                        'An imprisoned sage provides valuable information.',
-                        'They encounter a powerful sorcerer and engage in a magical duel.',
-                        'A riddle blocks their path; solving it opens a hidden door.',
-                        'They disguise themselves as enemy soldiers.',
-                        'An ally inside the fortress aids their mission.',
-                        'They rescue the prince and escape through underground tunnels.',
-                        'A betrayal from within complicates their escape.',
-                        'They are chased by enemy forces but manage to evade them.',
-                        'The guild fights off a group of shadow creatures.',
-                        'They find valuable documents exposing a conspiracy.',
-                        'A dragon guards the final exit; they must outsmart it.',
-                        'They use a stolen airship to flee the fortress.',
-                        'An ancient artifact grants them temporary invisibility.',
-                        'They set traps to slow down pursuers.',
-                        'A daring leap across rooftops ensures their getaway.',
-                        'They are hailed as heroes upon returning the prince.',
-                    ],
-                },
-                {
-                    'name': 'Mystic Journey',
-                    'description': 'Your guild ventures into the Mystic Realms to retrieve a legendary relic.',
-                    'events': [
-                        'They enter a portal to a realm of endless sky.',
-                        'Gravity shifts, challenging their navigation skills.',
-                        'They negotiate with elemental spirits for safe passage.',
-                        'A member gains prophetic visions.',
-                        'They solve a puzzle that alters reality around them.',
-                        'They battle with creatures made of pure energy.',
-                        'A time distortion causes confusion among the guild.',
-                        'They find the relic but must choose between power and wisdom.',
-                        'A guardian tests their worthiness through trials.',
-                        'They experience illusions that test their resolve.',
-                        'An astral storm threatens to scatter them across dimensions.',
-                        'They learn ancient secrets about the universe.',
-                        'A paradox forces them to confront alternate versions of themselves.',
-                        'They receive a blessing that enhances their abilities.',
-                        'They must answer philosophical questions to proceed.',
-                        'They encounter a being that embodies chaos.',
-                        'The realm starts collapsing, and they must escape quickly.',
-                        'They forge an alliance with celestial beings.',
-                        'They witness the birth of a star.',
-                        'Upon returning, they realize time has moved differently.',
-                    ],
-                },
-                {
-                    'name': 'Underground Expedition',
-                    'description': 'Your guild explores ancient ruins beneath the city in search of lost knowledge.',
-                    'events': [
-                        'They decipher old inscriptions that guide them deeper.',
-                        'A cave-in forces them to find an alternative route.',
-                        'They battle giant subterranean creatures.',
-                        'They find a hidden library filled with forbidden texts.',
-                        'Traps test their agility and wit.',
-                        'They encounter a subterranean civilization.',
-                        'A cursed artifact causes strange phenomena.',
-                        'They must cross an underground lake inhabited by a leviathan.',
-                        'They solve a centuries-old mystery.',
-                        'A maze confuses their sense of direction.',
-                        'They find evidence of an advanced ancient society.',
-                        'Magical darkness impedes their progress.',
-                        'They must perform a ritual to unlock a sealed door.',
-                        'They face a moral dilemma regarding the use of forbidden knowledge.',
-                        'An earthquake threatens to bury them alive.',
-                        'They discover a vein of precious minerals.',
-                        'They are pursued by shadowy figures.',
-                        'They uncover the resting place of a legendary hero.',
-                        'Ancient guardians challenge their right to be there.',
-                        'They emerge with newfound wisdom and artifacts.',
-                    ],
-                },
-                {
-                    'name': 'Defend the Realm',
-                    'description': 'Your guild leads the defense against an invading army.',
-                    'events': [
-                        'They fortify the city walls in preparation.',
-                        'A spy is caught and provides valuable intelligence.',
-                        'They train local militia to bolster defenses.',
-                        'An inspiring speech raises the morale of the defenders.',
-                        'They repel the first wave of attackers.',
-                        'They sabotage enemy siege equipment.',
-                        'A duel between champions decides a battle.',
-                        'They negotiate a temporary ceasefire.',
-                        'A traitor within their ranks is discovered.',
-                        'Reinforcements arrive just in time.',
-                        'They devise a clever strategy to outmaneuver the enemy.',
-                        'A nighttime raid disrupts enemy plans.',
-                        'They protect civilians during the chaos.',
-                        'A mystical barrier shields the city temporarily.',
-                        'They capture the enemy commander.',
-                        'They intercept enemy communications.',
-                        'Weather conditions hinder the enemy advance.',
-                        'They uncover a plot that extends beyond the invasion.',
-                        'Victory is achieved, and they are celebrated as heroes.',
-                        'They establish a lasting peace treaty.',
-                    ],
-                },
-                {
-                    'name': 'Cursed Forest',
-                    'description': 'Your guild ventures into a cursed forest to lift a dark enchantment.',
-                    'events': [
-                        'They navigate through thick, unnatural fog.',
-                        'Whispers in the wind test their sanity.',
-                        'They encounter a witch who offers cryptic help.',
-                        'An enchanted grove provides temporary respite.',
-                        'They are attacked by corrupted wildlife.',
-                        'They must break a curse on a trapped spirit.',
-                        'They find a hidden glade with healing properties.',
-                        'A puzzle involving enchanted trees blocks their path.',
-                        'They confront the source of the curse.',
-                        'They perform a ritual to cleanse the forest.',
-                        'They resist illusions meant to lead them astray.',
-                        'They collect rare herbs with magical properties.',
-                        'They find an ancient altar with dark powers.',
-                        'A member is momentarily possessed by a malevolent force.',
-                        'They discover the forest was once a thriving village.',
-                        'They receive aid from forest guardians.',
-                        'They set up protective wards for safety.',
-                        'They learn the curse is tied to a powerful relic.',
-                        'They face a moral choice impacting the forest\'s fate.',
-                        'The forest begins to heal as they lift the curse.',
-                    ],
-                },
-                {
-                    'name': 'Skyship Voyage',
-                    'description': 'Your guild takes to the skies on a magical airship to explore floating islands.',
-                    'events': [
-                        'They fend off sky pirates boarding the ship.',
-                        'A mechanical failure requires quick repairs.',
-                        'They discover a floating island with ancient ruins.',
-                        'They encounter a flock of hostile sky creatures.',
-                        'They rescue travelers stranded on a cloud island.',
-                        'They navigate through a storm of magical energy.',
-                        'An onboard celebration boosts morale.',
-                        'They find a lost city above the clouds.',
-                        'They trade with sky nomads.',
-                        'They avoid a colossal flying beast.',
-                        'They explore a temple that defies gravity.',
-                        'They experience a time distortion at high altitude.',
-                        'They collect samples of rare airborne flora.',
-                        'They decode messages from an old captain\'s log.',
-                        'They survive an encounter with a sky kraken.',
-                        'They harness wind currents to increase speed.',
-                        'They face a dilemma when encountering a rival airship in distress.',
-                        'They map uncharted territories.',
-                        'They establish a skyport for future expeditions.',
-                        'They return with treasures and tales from the skies.',
-                    ],
-                },
-                {
-                    'name': 'Tournament of Champions',
-                    'description': 'Your guild participates in a grand tournament to prove their prowess.',
-                    'events': [
-                        'They compete in archery contests.',
-                        'They engage in a grand melee battle.',
-                        'They solve intricate puzzles under time pressure.',
-                        'They form alliances with other competitors.',
-                        'A sabotage attempt is uncovered.',
-                        'They face a moral test of honor and integrity.',
-                        'They participate in magical duels.',
-                        'They impress the crowd with exceptional skill.',
-                        'They navigate a challenging obstacle course.',
-                        'They are offered bribes to throw a match.',
-                        'They attend a royal banquet with dignitaries.',
-                        'They uncover a plot to rig the tournament.',
-                        'They earn the favor of a noble patron.',
-                        'They are challenged by a mysterious masked competitor.',
-                        'They receive magical enhancements for the competition.',
-                        'They face trials that test their teamwork.',
-                        'They participate in a storytelling contest.',
-                        'They win the tournament and gain fame.',
-                        'They choose to share their prize with the less fortunate.',
-                        'They are invited to join an elite order of champions.',
-                    ],
-                },
-                {
-                    'name': 'Desert Caravan',
-                    'description': 'Your guild escorts a caravan across a perilous desert.',
-                    'events': [
-                        'They fend off raiders attacking the caravan.',
-                        'They navigate a sandstorm that obscures the path.',
-                        'They find an oasis and replenish supplies.',
-                        'They negotiate with desert nomads.',
-                        'They uncover ancient ruins buried in the sand.',
-                        'They encounter a mythical sandworm.',
-                        'They solve a conflict between caravan members.',
-                        'They survive extreme temperatures and scarce resources.',
-                        'They protect the caravan from nocturnal predators.',
-                        'They discover a hidden cache of treasure.',
-                        'They are guided by the stars when maps fail.',
-                        'They tell tales around the campfire.',
-                        'They avert a crisis when water supplies run low.',
-                        'They help a lost traveler find their way.',
-                        'They face a moral choice involving scarce resources.',
-                        'They experience a mirage that nearly leads them astray.',
-                        'They find ancient writings that tell of lost civilizations.',
-                        'They reach their destination against all odds.',
-                        'They are rewarded generously by the caravan leader.',
-                        'They establish new trade routes for future prosperity.',
-                    ],
-                },
-                {
-                    'name': 'Oceanic Odyssey',
-                    'description': 'Your guild sets sail to explore uncharted waters and discover hidden islands.',
-                    'events': [
-                        'They discover an island inhabited by friendly giants.',
-                        'A siren\'s song lures them towards dangerous rocks.',
-                        'They find a message in a bottle that leads to treasure.',
-                        'They help a stranded sea creature return to its family.',
-                        'They navigate through a maze of whirlpools.',
-                        'A ghost ship sails alongside them, offering cryptic warnings.',
-                        'They encounter a floating market with exotic goods.',
-                        'A stowaway is found onboard and shares valuable information.',
-                        'They witness a rare celestial event over the ocean.',
-                        'They are challenged to a race by a rival crew.',
-                        'They rescue sailors from a shipwreck.',
-                        'A water elemental tests their worthiness.',
-                        'They find an underwater cave filled with pearls.',
-                        'They must navigate using only the stars after instruments fail.',
-                        'A member befriends a dolphin that guides them.',
-                        'They survive a battle with pirates seeking the same treasure.',
-                        'They sail through a sea of bioluminescent creatures.',
-                        'They encounter a massive sea turtle that offers wisdom.',
-                        'They help to calm a raging storm with magical artifacts.',
-                        'They discover an island that appears only once every century.',
-                    ],
-                },
-                # Include all other adventure types and their events here
-                # (As in previous messages)
-            ]
-
-            # Select a random adventure type
-            adventure_type = random.choice(adventure_types)
-
-            # Calculate adventure time based on difficulty
-            time = timedelta(hours=difficulty * 0.05)
-
-            # Start the guild adventure with the selected adventure type
-            await self.bot.start_guild_adventure(guild["id"], difficulty, time, adventure_type)
-
-            # Update the guild's money and fetch the channel ID
-            gold = 1000  # Define how gold is calculated or fetched
-            channel_id = await self.bot.pool.fetchval(
-                'UPDATE guild SET "money"="money"+$1 WHERE "id"=$2 RETURNING "channel";',
-                gold,
-                ctx.character_data["guild"],
-            )
-            print(f"Fetched channel ID: {channel_id} (Type: {type(channel_id)})")
-
-            # Create the embed for adventure start
-            embed = Embed(
-                title=f"Guild Adventure Started for **{guild['name']}**!",
-                description=f"**Adventure:** {adventure_type['name']}\n\n{adventure_type['description']}",
-                color=discord.Color.blue()
-            )
-            embed.add_field(
-                name="Participants",
-                value=", ".join([u.mention for u in joined]),
-                inline=False
-            )
-            embed.add_field(
-                name="Difficulty",
-                value=f"**{difficulty}**",
-                inline=True
-            )
-            embed.add_field(
-                name="Estimated Time",
-                value=f"**{time}**",
-                inline=True
-            )
-            embed.set_footer(text="Good luck, adventurers!")
-            embed.timestamp = discord.utils.utcnow()  # Adds the current timestamp
-
-            # Send the embed to the guild's channel
-            if channel_id:
-                try:
-                    # Ensure channel_id is an integer
-                    if isinstance(channel_id, str) and channel_id.isdigit():
-                        channel_id = int(channel_id)
-                    elif isinstance(channel_id, int):
-                        pass
-                    else:
-                        print("Unexpected channel ID type or format.")
-                        channel_id = None
-
-                    if channel_id:
-                        guild_channel = self.bot.get_channel(channel_id)
-                        if guild_channel:
-                            with suppress(discord.Forbidden, discord.HTTPException):
-                                await guild_channel.send(embed=embed)
-                        else:
-                            print(f"Guild channel with ID {channel_id} not found.")
-                except TypeError as e:
-                    print(f"Error converting channel ID to int: {e}")
-            else:
-                print("No channel ID found in the database.")
-
-            # Send the embed to the command invoker
-            await ctx.send(embed=embed)
+            session = {
+                "guild_id": guild_id,
+                "channel_id": ctx.channel.id,
+                "message_id": message.id,
+                "starter_id": ctx.author.id,
+                "ends_at": ends_at.isoformat(),
+            }
+            await self.bot.redis.sadd(members_key, ctx.author.id)
+            await self._save_guild_adventure_join_session(session, ends_at)
+            self.bot.add_view(view, message_id=message.id)
+            self._schedule_guild_adventure_join_finalize(guild_id, session=session)
         except Exception as e:
             import traceback
             error_message = f"Error occurred: {e}\n"
             error_message += traceback.format_exc()
             await ctx.send(error_message)
-            print(error_message)
-
-
-
     @has_guild()
     @guild.command(brief=_("View your guild adventure's status"))
     @locale_doc
@@ -2102,9 +2843,29 @@ class Guild(commands.Cog):
 
                     # Ensure each field has 1024 or fewer characters
                     if xp_summary:
-                        # Split into chunks to ensure no field exceeds 1024 characters
-                        chunk_size = 1024
-                        chunks = [xp_summary[i:i + chunk_size] for i in range(0, len(xp_summary), chunk_size)]
+                        # Join the XP summary into a single string
+                        xp_text = "\n".join(xp_summary)
+                        
+                        # Split into chunks to ensure no field exceeds 900 characters (safe limit)
+                        chunk_size = 900
+                        chunks = []
+                        current_chunk = ""
+                        
+                        for line in xp_summary:
+                            # If adding this line would exceed the limit, start a new chunk
+                            # This ensures we don't break in the middle of a user's XP entry
+                            if len(current_chunk) + len(line) + 1 > chunk_size:
+                                if current_chunk:
+                                    chunks.append(current_chunk.strip())
+                                current_chunk = line
+                            else:
+                                current_chunk += "\n" + line if current_chunk else line
+                        
+                        # Add the last chunk if it exists
+                        if current_chunk:
+                            chunks.append(current_chunk.strip())
+                        
+                        # Add fields for each chunk
                         for i, chunk in enumerate(chunks, 1):
                             xp_embed.add_field(
                                 name=f"XP Gains (Part {i})",
@@ -2161,13 +2922,35 @@ class Guild(commands.Cog):
 
 
             else:
+                # Format time for display - handle timedelta properly
+                def format_timedelta_display(td):
+                    total_seconds = int(td.total_seconds())
+                    days = total_seconds // 86400
+                    hours = (total_seconds % 86400) // 3600
+                    minutes = (total_seconds % 3600) // 60
+                    seconds = total_seconds % 60
+                    
+                    parts = []
+                    if days > 0:
+                        parts.append(f"{days}d")
+                    if hours > 0 or days > 0:  # Show hours if there are any, or if showing days
+                        parts.append(f"{hours}h")
+                    if minutes > 0 or hours > 0 or days > 0:  # Show minutes if there are any, or if showing hours/days
+                        parts.append(f"{minutes}m")
+                    if seconds > 0 and days == 0:  # Only show seconds if not showing days
+                        parts.append(f"{seconds}s")
+                    
+                    return " ".join(parts) if parts else "0s"
+
+                formatted_remain = format_timedelta_display(remain_time)
+                
                 await ctx.send(
                     _(
                         "Your guild is currently on an adventure: **{adventure_name}**.\n"
                         "Time remaining: `{remain}`"
                     ).format(
                         adventure_name=adventure_type['name'],
-                        remain=str(remain_time).split(".")[0],
+                        remain=formatted_remain,
                     )
                 )
         except Exception as e:
@@ -2175,7 +2958,7 @@ class Guild(commands.Cog):
             error_message = f"Error occurred: {e}\n"
             error_message += traceback.format_exc()
 
-            print(error_message)
+            await ctx.send(error_message)
 
     @has_guild()
     @guild.command(
@@ -2204,8 +2987,33 @@ class Guild(commands.Cog):
             )
             timers = f"{timers}\n{text}"
         if adv and not adv[2]:
+            # Format the time to make it more readable
+            remain_time = adv[1]
+            
+            # Format timedelta properly
+            def format_timedelta_display(td):
+                total_seconds = int(td.total_seconds())
+                days = total_seconds // 86400
+                hours = (total_seconds % 86400) // 3600
+                minutes = (total_seconds % 3600) // 60
+                seconds = total_seconds % 60
+                
+                parts = []
+                if days > 0:
+                    parts.append(f"{days}d")
+                if hours > 0 or days > 0:  # Show hours if there are any, or if showing days
+                    parts.append(f"{hours}h")
+                if minutes > 0 or hours > 0 or days > 0:  # Show minutes if there are any, or if showing hours/days
+                    parts.append(f"{minutes}m")
+                if seconds > 0 and days == 0:  # Only show seconds if not showing days
+                    parts.append(f"{seconds}s")
+                
+                return " ".join(parts) if parts else "0s"
+            
+            formatted_time = format_timedelta_display(remain_time)
+            
             text = _("Guild adventure is running and will be done after {time}").format(
-                time=adv[1]
+                time=formatted_time
             )
             timers = f"{timers}\n{text}"
         await ctx.send(f"```{timers}```")

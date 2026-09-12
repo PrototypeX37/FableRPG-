@@ -467,6 +467,21 @@ def update_pet() -> "_CheckDecorator":
 
 
 def is_god() -> "_CheckDecorator":
+    async def predicate(ctx: Context) -> bool:
+        try:
+            async with ctx.bot.pool.acquire() as conn:
+                result = await conn.fetchrow(
+                    "SELECT 1 FROM gods WHERE user_id = $1",
+                    ctx.author.id
+                )
+            return result is not None
+        except Exception as e:
+            await ctx.send(f"God Check Error: {str(e)}")
+            return False
+
+    return commands.check(predicate)
+
+def is_god_old() -> "_CheckDecorator":
     """Checks for a user to be a god."""
 
     def predicate(ctx: Context) -> bool:
@@ -514,6 +529,26 @@ async def has_money(bot: "Bot", userid: int, money: int, conn=None) -> bool:
         await bot.pool.release(conn)
     return res
 
+def is_patreon(min_tier: int = 1) -> "_CheckDecorator":
+    async def predicate(ctx: Context) -> bool:
+        resolved_tier = await ctx.bot.get_effective_donator_tier(
+            ctx.author.id,
+            sync_profile=True,
+        )
+
+        if resolved_tier >= min_tier:
+            return True
+
+        try:
+            required_rank = DonatorRank(min_tier)
+        except ValueError:
+            required_rank = DonatorRank.basic
+        raise NoPatron(required_rank)
+
+    setattr(predicate, "__fable_required_patreon_tier__", int(min_tier))
+    return commands.check(predicate)
+
+
 
 async def guild_has_money(bot: "Bot", guildid: int, money: int) -> bool:
     res = await bot.pool.fetchval('SELECT money FROM guild WHERE "id"=$1;', guildid)
@@ -522,9 +557,16 @@ async def guild_has_money(bot: "Bot", guildid: int, money: int) -> bool:
 
 def is_gm() -> "_CheckDecorator":
     async def predicate(ctx: Context) -> bool:
-        return (
-                ctx.author.id in ctx.bot.config.game.game_masters
-        )
+        try:
+            async with ctx.bot.pool.acquire() as conn:
+                result = await conn.fetchrow(
+                    "SELECT 1 FROM game_masters WHERE user_id = $1", 
+                    ctx.author.id
+                )
+            return result is not None
+        except Exception as e:
+            await ctx.send(f"GM Check Error: {str(e)}")
+            return False
 
     return commands.check(predicate)
 
@@ -533,16 +575,20 @@ def is_patron(role: str = "basic") -> "_CheckDecorator":
     async def predicate(ctx: Context) -> bool:
         if await user_is_patron(ctx.bot, ctx.author, role):
             return True
-        else:
-            return True
+        raise NoPatron(getattr(DonatorRank, role))
 
+    setattr(predicate, "__fable_required_patron_role__", role)
     return commands.check(predicate)
 
 
 async def user_is_patron(bot: "Bot", user: discord.User, role: str = "basic") -> bool:
-    actual_role = getattr(DonatorRank, role)
-    rank = await bot.get_donator_rank(user.id)
-    return True
+    required_rank = getattr(DonatorRank, role)
+    user_id = user.id if hasattr(user, "id") else int(user)
+    effective_tier = await bot.get_effective_donator_tier(
+        user_id,
+        sync_profile=True,
+    )
+    return effective_tier >= required_rank.value
 
 
 def is_supporter() -> "_CheckDecorator":

@@ -92,23 +92,26 @@ class Timer:
 class Scheduling(commands.Cog):
     def __init__(self, bot: Bot) -> None:
         self.bot = bot
-        self._handles = 0 in self.bot.shard_ids
+        self._handles = 0 in self.bot.shard_ids  # Determines if this shard should handle reminders
+        ids_section = getattr(self.bot.config, "ids", None)
+        scheduler_ids = getattr(ids_section, "scheduler", {}) if ids_section else {}
+        if not isinstance(scheduler_ids, dict):
+            scheduler_ids = {}
+        self.error_report_user_id = scheduler_ids.get("error_report_user_id")
 
         self._have_data = asyncio.Event()
         self._current_timer = None
-        self.reminder_check.start()
 
         if self._handles:
-            self._task = asyncio.create_task(self.dispatch_timers())
-        else:
-            self._task = None
+            self.reminder_check.start()  # Start only on the designated shard
+
 
     async def get_active_timer(self, *, connection=None, days=7) -> Timer | None:
-        query = 'SELECT * FROM reminders WHERE "end" < (CURRENT_DATE + $1::interval) ORDER BY "end" LIMIT 1;'
-        con = connection or self.bot.pool
+            query = 'SELECT * FROM reminders WHERE "end" < (CURRENT_DATE + $1::interval) ORDER BY "end" LIMIT 1;'
+            con = connection or self.bot.pool
 
-        record = await con.fetchrow(query, timedelta(days=days))
-        return Timer(record=record) if record else None
+            record = await con.fetchrow(query, timedelta(days=days))
+            return Timer(record=record) if record else None
 
     async def wait_for_active_timers(self, *, conn=None, days=7) -> Timer:
         async with self.bot.pool.acquire() as conn:
@@ -177,12 +180,11 @@ class Scheduling(commands.Cog):
             return reminders
         except Exception as e:
             # If an exception occurs, send a direct message to a specific user
-            user_id = 295173706496475136  # ID of the user to send the message to
-            user = self.bot.get_user(user_id)
+            user = self.bot.get_user(self.error_report_user_id) if self.error_report_user_id else None
             if user:
                 await user.send(f"An exception occurred while fetching reminders: {e}")
             else:
-                print(f"Failed to send DM: User {user_id} not found")
+                print("Failed to send DM: Error report user not found")
             return []
 
     @tasks.loop(seconds=1)  # Adjust the interval as needed
@@ -224,17 +226,23 @@ class Scheduling(commands.Cog):
             if type != "adventure":
             # Send the reminder message
                 await channel.send(f"{user.mention} you wanted to be reminded about {content} {formatted_timedelta} ago.")
+                async with self.bot.pool.acquire() as connection:
+                    async with connection.transaction():
+                        await connection.execute(
+                            "DELETE FROM reminders WHERE id = $1",
+                            reminder_id
+                        )
             else:
                 await channel.send(
                     f"{user.mention} adventure level: **{content}** is finished!")
 
-            # Delete the reminder from the database
-            async with self.bot.pool.acquire() as connection:
-                async with connection.transaction():
-                    await connection.execute(
-                        "DELETE FROM reminders WHERE id = $1",
-                        reminder_id
-                    )
+                # Delete the reminder from the database
+                async with self.bot.pool.acquire() as connection:
+                    async with connection.transaction():
+                        await connection.execute(
+                            "DELETE FROM reminders WHERE id = $1",
+                            reminder_id
+                        )
         except Exception as e:
                     # Send a message to a specific user if any other error occurs
                 async with self.bot.pool.acquire() as connection:

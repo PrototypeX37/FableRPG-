@@ -29,7 +29,9 @@ from discord.errors import NotFound
 
 from utils import random
 
-levels = {
+STAT_POINT_INTERVAL = 2
+
+BASE_LEVELS = {
     1: 0,
     2: 1500,
     3: 9000,
@@ -131,6 +133,8 @@ levels = {
     99: 129013829,
     100: 132625263,
 }
+levels = dict(BASE_LEVELS)
+MAX_LEVEL = max(levels)
 
 
 def random_token(id_):
@@ -156,16 +160,22 @@ def xptolevel(xp):
             return level
         elif xp < point:
             return level - 1
-    return 50
+    return MAX_LEVEL
 
 
 def xptonextlevel(xp):
     level = xptolevel(xp)
-    if level == 100:
+    if level >= MAX_LEVEL:
         return "Infinity"
     else:
         nextxp = levels[level + 1]
         return f"{nextxp - xp}"
+
+
+def stat_points_earned(old_level, new_level):
+    old_level = max(0, int(old_level or 0))
+    new_level = max(old_level, int(new_level or 0))
+    return (new_level // STAT_POINT_INTERVAL) - (old_level // STAT_POINT_INTERVAL)
 
 
 def calcchance(
@@ -197,6 +207,35 @@ def calcchance(
         else:
             success = round(success / luck)
         return randomn <= success
+
+
+def calcchance_probability(
+        sword, shield, dungeon, level, luck, booster=False, bonus=0
+):
+    """Return the exact success percentage for the random process in calcchance."""
+    favorable_rolls = 0
+    outcome_count = 0
+    booster_shift = 25 if booster else 0
+    for difficulty_roll in range(1, 8):
+        for level_adjustment in (level, -level / Decimal("2")):
+            success = (
+                    sword
+                    + shield
+                    + 75
+                    - (dungeon * difficulty_roll)
+                    + level_adjustment
+                    + bonus
+            )
+            if success >= 0:
+                success = round(success * luck)
+            else:
+                success = round(success / luck)
+            favorable_rolls += max(
+                0,
+                min(101, int(success) + booster_shift + 1),
+            )
+            outcome_count += 101
+    return (favorable_rolls / outcome_count) * 100
 
 
 async def lookup(bot, userid, return_none=False):

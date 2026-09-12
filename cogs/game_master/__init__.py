@@ -17,6 +17,7 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 import asyncio
+import datetime
 import secrets
 from asyncio import subprocess
 from collections import defaultdict
@@ -25,7 +26,8 @@ import csv
 import aiohttp
 import discord
 import discord
-from discord.ext import commands, menus
+from discord.ext import commands
+from discord.ui import View, Button, Modal, TextInput
 from utils import misc as rpgtools
 
 from discord import Object, HTTPException
@@ -39,6 +41,11 @@ import json
 
 from classes.converters import CrateRarity, IntFromTo, IntGreaterThan, UserWithCharacter
 from classes.items import ItemType
+from cogs.battles.extensions.elements import ElementExtension
+from cogs.newwerewolf.core import all_talisman_roles
+from cogs.newwerewolf.core import parse_custom_roles
+from cogs.newwerewolf.core import Role as NewWerewolfRole
+from cogs.newwerewolf.core import talisman_base_role
 from cogs.shard_communication import user_on_cooldown as user_cooldown
 from utils import random
 from utils.checks import has_char, is_gm
@@ -62,20 +69,712 @@ from classes.bot import Bot
 from classes.context import Context
 from classes.converters import UserWithCharacter
 from utils import shell
+from utils.april_fools import APRIL_FOOLS_GREG_FLAG
+from utils.birthday import (
+    BirthdayAssistantState,
+    get_active_birthday_assistant,
+    parse_birthday_duration,
+)
 from utils.misc import random_token
+from typing import Union
 
 CHANNEL_BLACKLIST = ['⟢super-secrets〡🤫', '⟢god-spammit〡💫', '⟢gm-logs〡📝', 'Accepted Suggestions']
 CATEGORY_NAME = '╰• ☣ | ☣ FABLE RPG ☣ | ☣ •╯'
 
 
 class GameMaster(commands.Cog):
+    PET_COMPENSATION_ALLOWED_USER_ID = 295173706496475136
+    CITY_ATTACK_LOCK_ALLOWED_USER_ID = 295173706496475136
+    CITY_DEFENSE_REFUND_ALLOWED_USER_ID = 295173706496475136
+    CITY_ATTACK_LOCK_CHANNEL_ID = 1403273049284804730
+    CITY_ATTACK_LOCK_KEY = "citywars:lock_until"
+    CITY_DEFENSE_REFUND_COSTS = {
+        "cannons": 200000,
+        "archers": 100000,
+        "outer wall": 500000,
+        "inner wall": 200000,
+        "moat": 150000,
+        "tower": 200000,
+        "ballista": 100000,
+    }
+    EVENT_DISPLAY_NAMES = {
+        "halloween": "Halloween",
+        "wintersday": "Wintersday",
+        "lunar_new_year": "Lunar New Year",
+        "valentine": "Valentine",
+        "snowballfight": "Snowball Fight",
+        "greg_finale_open": "Greg Finale Open",
+    }
+    EVENT_DEFAULTS = {
+        "halloween": False,
+        "wintersday": False,
+        "lunar_new_year": False,
+        "valentine": False,
+        "snowballfight": False,
+        "greg_finale_open": False,
+    }
+    EVENT_ALIASES = {
+        "halloween": "halloween",
+        "spooky": "halloween",
+        "spookyshop": "halloween",
+        "ss": "halloween",
+        "wintersday": "wintersday",
+        "winter": "wintersday",
+        "christmas": "wintersday",
+        "xmas": "wintersday",
+        "cs": "wintersday",
+        "lunar": "lunar_new_year",
+        "lny": "lunar_new_year",
+        "lunar_new_year": "lunar_new_year",
+        "lunarnewyear": "lunar_new_year",
+        "lunar new year": "lunar_new_year",
+        "valentine": "valentine",
+        "valentines": "valentine",
+        "snowballfight": "snowballfight",
+        "snowball": "snowballfight",
+        "snowball_fight": "snowballfight",
+        "snowball fight": "snowballfight",
+        "snowball-fight": "snowballfight",
+        "greg_finale_open": "greg_finale_open",
+        "gregfinaleopen": "greg_finale_open",
+        "greg finale open": "greg_finale_open",
+        "gregfinale": "greg_finale_open",
+        "greg finale": "greg_finale_open",
+    }
+    EVENT_SHOP_DEFAULTS = {
+        "halloween": {
+            "ssuncommon": 10,
+            "ssrare": 5,
+            "ssmagic": 3,
+            "sslegendary": 2,
+            "ssfortune": 1,
+            "ssdivine": 1,
+            "ssbg": 1,
+            "ssclass": 1,
+            "sstoken": 5,
+            "sstot": 10,
+        },
+        "lunar_new_year": {
+            "lnyuncommon": 10,
+            "lnyrare": 5,
+            "lnymagic": 3,
+            "lnylegendary": 2,
+            "lnyfortune": 1,
+            "lnydivine": 1,
+            "lnytoken": 5,
+            "lnybag": 10,
+        },
+    }
+    APRIL_FOOLS_DISPLAY_NAMES = {
+        APRIL_FOOLS_GREG_FLAG: "Greg Mask",
+    }
+    APRIL_FOOLS_DEFAULTS = {
+        APRIL_FOOLS_GREG_FLAG: False,
+    }
+    APRIL_FOOLS_ALIASES = {
+        "greg": APRIL_FOOLS_GREG_FLAG,
+        "gregmask": APRIL_FOOLS_GREG_FLAG,
+        "greg_mode": APRIL_FOOLS_GREG_FLAG,
+        "gregmode": APRIL_FOOLS_GREG_FLAG,
+    }
+    GM_CONSUMABLE_ALIASES = {
+        "petage": {"consumable_type": "pet_age_potion", "display_name": "Pet Age Potion"},
+        "pet age potion": {"consumable_type": "pet_age_potion", "display_name": "Pet Age Potion"},
+        "pet speed growth potion": {
+            "consumable_type": "pet_speed_growth_potion",
+            "display_name": "Pet Speed Growth Potion",
+        },
+        "petspeed": {
+            "consumable_type": "pet_speed_growth_potion",
+            "display_name": "Pet Speed Growth Potion",
+        },
+        "pet xp potion": {"consumable_type": "pet_xp_potion", "display_name": "Pet XP Potion"},
+        "petxp": {"consumable_type": "pet_xp_potion", "display_name": "Pet XP Potion"},
+        "pet mind wipe": {"consumable_type": "pet_mind_wipe", "display_name": "Pet Mind Wipe"},
+        "petmindwipe": {"consumable_type": "pet_mind_wipe", "display_name": "Pet Mind Wipe"},
+        "mindwipe": {"consumable_type": "pet_mind_wipe", "display_name": "Pet Mind Wipe"},
+        "petelement": {"consumable_type": "pet_element_scroll", "display_name": "Pet Element Scroll"},
+        "petelementscroll": {"consumable_type": "pet_element_scroll", "display_name": "Pet Element Scroll"},
+        "pet element scroll": {"consumable_type": "pet_element_scroll", "display_name": "Pet Element Scroll"},
+        "pet element change": {"consumable_type": "pet_element_scroll", "display_name": "Pet Element Scroll"},
+        "weapelement": {
+            "consumable_type": "weapon_element_scroll",
+            "display_name": "Weapon Element Scroll",
+        },
+        "weapon element scroll": {
+            "consumable_type": "weapon_element_scroll",
+            "display_name": "Weapon Element Scroll",
+        },
+        "elementscroll": {
+            "consumable_type": "weapon_element_scroll",
+            "display_name": "Weapon Element Scroll",
+        },
+    }
+
     def __init__(self, bot):
         self.bot = bot
+        ids_section = getattr(self.bot.config, "ids", None)
+        gm_ids = getattr(ids_section, "game_master", {}) if ids_section else {}
+        gods_ids = getattr(ids_section, "gods", {}) if ids_section else {}
+        if not isinstance(gm_ids, dict):
+            gm_ids = {}
+        if not isinstance(gods_ids, dict):
+            gods_ids = {}
+        self.martigive_allowed_user_id = gm_ids.get("martigive_allowed_user_id")
+        self.protected_user_id = gm_ids.get("protected_user_id")
+        self.auction_channel_id = gm_ids.get("auction_channel_id")
+        self.auction_ping_role_id = gm_ids.get("auction_ping_role_id")
+        self.gm_role_id = gm_ids.get("gm_role_id")
+        self.assign_roles_role_id = gm_ids.get("assign_roles_role_id")
+        self.jail_guild_id = gm_ids.get("jail_guild_id")
+        self.gmunjail_special_user_id = gm_ids.get("gmunjail_special_user_id")
+        self.god_admin_role_id = gm_ids.get("god_admin_role_id")
+        eval_allowed_user_ids = gm_ids.get("eval_allowed_user_ids", [])
+        self.eval_allowed_user_ids = eval_allowed_user_ids if isinstance(eval_allowed_user_ids, list) else []
+        support_roles = gods_ids.get("support_god_role_ids", {})
+        self.support_god_role_ids = support_roles if isinstance(support_roles, dict) else {}
+        self.godless_role_id = gods_ids.get("godless_role_id")
         self.top_auction = None
         self._last_result = None
         self.auction_entry = None
-        self.patron_ids = self.load_patron_ids()
         self.isbid = False
+        self.event_flags = {}
+        self.april_fools_flags = {}
+        if not hasattr(self.bot, "birthday_assistant_state"):
+            self.bot.birthday_assistant_state = None
+
+    @staticmethod
+    def _normalize_consumable_alias(alias: str) -> str:
+        if not alias:
+            return ""
+        return " ".join(alias.lower().replace("_", " ").replace("-", " ").split())
+
+    def _resolve_gm_consumable_item(self, item: str) -> dict[str, object] | None:
+        normalized_item = self._normalize_consumable_alias(item)
+        if not normalized_item:
+            return None
+
+        item_data = self.GM_CONSUMABLE_ALIASES.get(normalized_item)
+        if item_data:
+            return {"grant_type": "consumable", **item_data}
+
+        role_part = None
+        for prefix in (
+            "newwerewolf talisman ",
+            "newwerewolf talismans ",
+            "nww talisman ",
+            "nww talismans ",
+        ):
+            if normalized_item.startswith(prefix):
+                role_part = normalized_item[len(prefix):].strip()
+                break
+        if role_part is None and normalized_item.endswith(" talisman"):
+            role_part = normalized_item[:-len(" talisman")].strip()
+
+        if not role_part:
+            return None
+
+        parsed_roles, invalid_tokens = parse_custom_roles(role_part)
+        if invalid_tokens or len(parsed_roles) != 1:
+            return None
+
+        role = talisman_base_role(parsed_roles[0])
+        if role is None:
+            return None
+        role_name = role.name.title().replace("_", " ")
+        return {
+            "grant_type": "talisman",
+            "role": role,
+            "display_name": f"NewWerewolf {role_name} Talisman",
+        }
+
+    @staticmethod
+    def _newwerewolf_role_display_name(role: NewWerewolfRole) -> str:
+        return role.name.title().replace("_", " ")
+
+    @staticmethod
+    def _all_talisman_roles() -> list[NewWerewolfRole]:
+        return all_talisman_roles()
+
+    async def _parse_user_ids_from_text(self, id_text: str) -> list[int]:
+        user_ids: list[int] = []
+        for item in str(id_text or "").replace(",", " ").split():
+            token = item.strip()
+            if not token:
+                continue
+            if token.startswith("<@") and token.endswith(">"):
+                token = token[2:-1].replace("!", "")
+            if not token.isdigit():
+                raise ValueError(f"Invalid user ID or mention: {item}")
+            user_ids.append(int(token))
+        return list(dict.fromkeys(user_ids))
+
+    def _parse_talisman_roles(self, raw_roles: str) -> list[NewWerewolfRole]:
+        normalized_roles = " ".join(str(raw_roles or "").casefold().split())
+        if normalized_roles in {"all", "every", "everything"}:
+            return self._all_talisman_roles()
+
+        parsed_roles, invalid_tokens = parse_custom_roles(raw_roles)
+        if invalid_tokens or not parsed_roles:
+            invalid_display = ", ".join(invalid_tokens) if invalid_tokens else raw_roles
+            raise ValueError(f"Invalid talisman role list: {invalid_display}")
+
+        unique_roles: list[NewWerewolfRole] = []
+        seen: set[NewWerewolfRole] = set()
+        for role in parsed_roles:
+            normalized_role = talisman_base_role(role)
+            if normalized_role is None or normalized_role in seen:
+                continue
+            seen.add(normalized_role)
+            unique_roles.append(normalized_role)
+        return unique_roles
+
+    async def _ensure_newwerewolf_talisman_tables(self) -> bool:
+        newwerewolf_cog = self.bot.get_cog("NewWerewolf")
+        if newwerewolf_cog is None:
+            return False
+        try:
+            await newwerewolf_cog._ensure_role_xp_tables()
+        except Exception:
+            return False
+        return True
+
+    async def _parse_talisman_batch_arguments(
+        self,
+        raw_args: str,
+    ) -> tuple[list[int], list[NewWerewolfRole]]:
+        parts = re.split(r"\s*(?:\||--)\s*", str(raw_args or ""), maxsplit=1)
+        if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+            raise ValueError(
+                "Use `<roles> | <discord ids>` or `<discord ids> | <roles>`."
+            )
+
+        parse_errors: list[str] = []
+        for roles_text, ids_text in ((parts[0], parts[1]), (parts[1], parts[0])):
+            try:
+                roles = self._parse_talisman_roles(roles_text)
+                user_ids = await self._parse_user_ids_from_text(ids_text)
+            except ValueError as exc:
+                parse_errors.append(str(exc))
+                continue
+
+            if not user_ids:
+                parse_errors.append("No valid user IDs provided.")
+                continue
+            return user_ids, roles
+
+        if parse_errors:
+            raise ValueError(parse_errors[-1])
+        raise ValueError("Could not parse talisman roles and Discord IDs.")
+
+    async def _fetch_character_user_ids(self) -> list[int]:
+        rows = await self.bot.pool.fetch('SELECT "user" FROM profile ORDER BY "user" ASC;')
+        return [int(row["user"]) for row in rows]
+
+    async def _filter_character_user_ids(self, user_ids: list[int]) -> tuple[list[int], list[int]]:
+        if not user_ids:
+            return [], []
+        rows = await self.bot.pool.fetch(
+            'SELECT "user" FROM profile WHERE "user" = ANY($1::bigint[])',
+            user_ids,
+        )
+        valid_ids = {int(row["user"]) for row in rows}
+        found = [user_id for user_id in user_ids if user_id in valid_ids]
+        missing = [user_id for user_id in user_ids if user_id not in valid_ids]
+        return found, missing
+
+    def _roll_random_talisman_counts(
+        self,
+        *,
+        amount: int,
+        roles_pool: list[NewWerewolfRole] | None = None,
+    ) -> dict[NewWerewolfRole, int]:
+        pool = roles_pool or self._all_talisman_roles()
+        if amount <= 0 or not pool:
+            return {}
+        counts: dict[NewWerewolfRole, int] = {}
+        for _ in range(amount):
+            chosen_role = random.choice(pool)
+            counts[chosen_role] = counts.get(chosen_role, 0) + 1
+        return counts
+
+    async def _grant_talisman_quantity(
+        self,
+        conn,
+        *,
+        user_id: int,
+        role: NewWerewolfRole,
+        amount: int,
+    ) -> int:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO newwerewolf_talisman_inventory (user_id, role_name, quantity, updated_at)
+            VALUES ($1, $2, $3, now())
+            ON CONFLICT (user_id, role_name)
+            DO UPDATE SET
+                quantity = newwerewolf_talisman_inventory.quantity + EXCLUDED.quantity,
+                updated_at = now()
+            RETURNING quantity
+            """,
+            user_id,
+            role.name.casefold(),
+            amount,
+        )
+        return int(row["quantity"] or 0) if row else 0
+
+    async def _grant_talisman_counts_to_user(
+        self,
+        conn,
+        *,
+        user_id: int,
+        talisman_counts: dict[NewWerewolfRole, int],
+    ) -> None:
+        for role, count in talisman_counts.items():
+            if count <= 0:
+                continue
+            await self._grant_talisman_quantity(
+                conn,
+                user_id=user_id,
+                role=role,
+                amount=count,
+            )
+
+    async def _grant_talismans_to_users(
+        self,
+        user_ids: list[int],
+        *,
+        amount: int,
+        specific_roles: list[NewWerewolfRole] | None = None,
+    ) -> dict[NewWerewolfRole, int]:
+        aggregate_counts: dict[NewWerewolfRole, int] = {}
+        if not user_ids:
+            return aggregate_counts
+
+        async with self.bot.pool.acquire() as conn:
+            async with conn.transaction():
+                for user_id in user_ids:
+                    talisman_counts = (
+                        {role: int(amount) for role in specific_roles}
+                        if specific_roles
+                        else self._roll_random_talisman_counts(amount=int(amount))
+                    )
+                    for role, count in talisman_counts.items():
+                        aggregate_counts[role] = aggregate_counts.get(role, 0) + count
+                    await self._grant_talisman_counts_to_user(
+                        conn,
+                        user_id=user_id,
+                        talisman_counts=talisman_counts,
+                    )
+
+        return aggregate_counts
+
+    def _format_talisman_breakdown(
+        self,
+        talisman_counts: dict[NewWerewolfRole, int],
+    ) -> str:
+        if not talisman_counts:
+            return "None"
+        parts = [
+            f"{count}x {self._newwerewolf_role_display_name(role)} Talisman"
+            for role, count in sorted(
+                talisman_counts.items(),
+                key=lambda item: self._newwerewolf_role_display_name(item[0]).lower(),
+            )
+        ]
+        return ", ".join(parts)
+
+    async def _log_talisman_grant(
+        self,
+        ctx,
+        *,
+        source: str,
+        target_count: int,
+        amount: int,
+        mode: str,
+        breakdown: str,
+        missing_ids: list[int] | None = None,
+    ) -> None:
+        extra_lines = []
+        if missing_ids is not None:
+            extra_lines.append(f"Skipped IDs: **{len(missing_ids)}**")
+        with handle_message_parameters(
+            content=(
+                f"**{ctx.author}** ran `{source}`.\n"
+                f"Targets with characters: **{target_count}**\n"
+                f"{chr(10).join(extra_lines) + chr(10) if extra_lines else ''}"
+                f"Amount: **{amount}**\n"
+                f"Mode: **{mode}**\n"
+                f"Breakdown: {breakdown}\n"
+                f"Reason: *<{ctx.message.jump_url}>*"
+            )
+        ) as params:
+            await self.bot.http.send_message(
+                self.bot.config.game.gm_log_channel,
+                params=params,
+            )
+
+    async def _safe_ctx_send(self, ctx, *args, **kwargs):
+        try:
+            return await ctx.send(*args, **kwargs)
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+
+    @commands.command(hidden=True, brief=_("Disable city attacks for a number of days"))
+    async def gmlockcityattacks(self, ctx, days: float):
+        """Disable city attacks for X days. Use 0 to re-enable them."""
+        if ctx.author.id != self.CITY_ATTACK_LOCK_ALLOWED_USER_ID:
+            return await self._safe_ctx_send(ctx, "You are not allowed to run this command.")
+
+        if days < 0:
+            return await self._safe_ctx_send(ctx, "Days must be zero or greater.")
+
+        announcement_channel = self.bot.get_channel(self.CITY_ATTACK_LOCK_CHANNEL_ID)
+        if announcement_channel is None:
+            try:
+                announcement_channel = await self.bot.fetch_channel(self.CITY_ATTACK_LOCK_CHANNEL_ID)
+            except Exception:
+                announcement_channel = None
+
+        if days == 0:
+            await self.bot.redis.execute_command("DEL", self.CITY_ATTACK_LOCK_KEY)
+            announcement = "City attacks have been re-enabled."
+            if announcement_channel:
+                await announcement_channel.send(announcement)
+            return await self._safe_ctx_send(ctx, announcement)
+
+        seconds = max(1, int(days * 86400))
+        unlock_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=seconds)
+        unlock_timestamp = int(unlock_time.timestamp())
+
+        await self.bot.redis.execute_command(
+            "SET",
+            self.CITY_ATTACK_LOCK_KEY,
+            unlock_timestamp,
+            "EX",
+            seconds,
+        )
+
+        announcement = (
+            "City attacks have been disabled until "
+            f"{discord.utils.format_dt(unlock_time, style='F')} "
+            f"({discord.utils.format_dt(unlock_time, style='R')})."
+        )
+        if announcement_channel:
+            await announcement_channel.send(announcement)
+
+        await self._safe_ctx_send(ctx, announcement)
+
+    @commands.command(
+        hidden=True,
+        aliases=["gmrefunddefenses", "gmrefundcitydefences", "gmrefunddefences"],
+        brief=_("Refund and clear all city defenses"),
+    )
+    async def gmrefundcitydefenses(self, ctx):
+        """Refund all stored city defenses to the current owner guild bank and clear them."""
+        if ctx.author.id != self.CITY_DEFENSE_REFUND_ALLOWED_USER_ID:
+            return await self._safe_ctx_send(
+                ctx,
+                "You are not allowed to run this command.",
+            )
+
+        if not await ctx.confirm(
+            _(
+                "Refund every city defense to the owning guild bank and delete all defense rows? This ignores bank-cap overflow."
+            )
+        ):
+            return await self._safe_ctx_send(ctx, _("City defense refund cancelled."))
+
+        async with self.bot.pool.acquire() as conn:
+            async with conn.transaction():
+                defense_rows = await conn.fetch(
+                    """
+                    SELECT
+                        d.id,
+                        d.city,
+                        LOWER(d.name) AS defense_name,
+                        c.owner AS guild_id,
+                        g.name AS guild_name
+                    FROM defenses d
+                    LEFT JOIN city c ON c.name = d.city
+                    LEFT JOIN guild g ON g.id = c.owner
+                    ORDER BY d.city, d.id;
+                    """
+                )
+
+                if not defense_rows:
+                    return await self._safe_ctx_send(
+                        ctx,
+                        _("There are no stored city defenses to refund."),
+                    )
+
+                refund_totals = defaultdict(int)
+                refunded_rows = 0
+                total_refunded = 0
+                orphaned_rows = 0
+                unknown_rows = 0
+                guild_names = {}
+
+                for row in defense_rows:
+                    defense_cost = self.CITY_DEFENSE_REFUND_COSTS.get(
+                        row["defense_name"],
+                        0,
+                    )
+
+                    if defense_cost <= 0:
+                        unknown_rows += 1
+                        continue
+
+                    guild_id = row["guild_id"]
+                    if guild_id in (None, 1):
+                        orphaned_rows += 1
+                        continue
+
+                    refund_totals[int(guild_id)] += int(defense_cost)
+                    guild_names[int(guild_id)] = row["guild_name"] or str(guild_id)
+                    refunded_rows += 1
+                    total_refunded += int(defense_cost)
+
+                for guild_id, amount in refund_totals.items():
+                    await conn.execute(
+                        'UPDATE guild SET "money"="money"+$1 WHERE "id"=$2;',
+                        amount,
+                        guild_id,
+                    )
+
+                deleted_count = len(defense_rows)
+                await conn.execute("DELETE FROM defenses;")
+
+        guild_summary = ", ".join(
+            f"{guild_names[guild_id]}: ${amount:,}"
+            for guild_id, amount in sorted(
+                refund_totals.items(),
+                key=lambda item: (-item[1], guild_names[item[0]].casefold()),
+            )
+        )
+        if not guild_summary:
+            guild_summary = "No guild refunds were applied."
+
+        summary = (
+            f"Refunded {refunded_rows} city defenses for ${total_refunded:,} "
+            f"across {len(refund_totals)} guilds, then removed {deleted_count} defense rows."
+        )
+        if orphaned_rows:
+            summary += f" {orphaned_rows} defenses in system-owned or missing cities were removed without refund."
+        if unknown_rows:
+            summary += f" {unknown_rows} defenses had no known refund value and were removed without refund."
+
+        await self._safe_ctx_send(ctx, summary)
+        await self._safe_ctx_send(ctx, guild_summary)
+
+    async def _scan_redis_keys(self, match_pattern: str, count: int = 1000) -> list[str]:
+        cursor = 0
+        found_keys: list[str] = []
+
+        while True:
+            cursor_value, batch = await self.bot.redis.execute_command(
+                "SCAN",
+                cursor,
+                "MATCH",
+                match_pattern,
+                "COUNT",
+                count,
+            )
+
+            if isinstance(cursor_value, (bytes, bytearray)):
+                cursor = int(cursor_value.decode())
+            else:
+                cursor = int(cursor_value)
+
+            for key in batch or []:
+                if isinstance(key, (bytes, bytearray)):
+                    found_keys.append(key.decode())
+                else:
+                    found_keys.append(str(key))
+
+            if cursor == 0:
+                break
+
+        return list(dict.fromkeys(found_keys))
+
+    async def _grant_consumable_quantity(self, conn, user_id: int, consumable_type: str, amount: int):
+        rows = await conn.fetch(
+            """
+            SELECT id, quantity
+            FROM user_consumables
+            WHERE user_id = $1 AND consumable_type = $2
+            ORDER BY id ASC;
+            """,
+            user_id,
+            consumable_type,
+        )
+
+        if not rows:
+            await conn.execute(
+                """
+                INSERT INTO user_consumables (user_id, consumable_type, quantity)
+                VALUES ($1, $2, $3);
+                """,
+                user_id,
+                consumable_type,
+                amount,
+            )
+            return {"new_quantity": amount, "duplicates_removed": 0}
+
+        primary_id = rows[0]["id"]
+        total_quantity = sum(int(row["quantity"] or 0) for row in rows)
+        new_quantity = total_quantity + amount
+        duplicate_ids = [row["id"] for row in rows[1:]]
+
+        await conn.execute(
+            "UPDATE user_consumables SET quantity = $1 WHERE id = $2;",
+            new_quantity,
+            primary_id,
+        )
+        if duplicate_ids:
+            await conn.execute(
+                "DELETE FROM user_consumables WHERE id = ANY($1::bigint[]);",
+                duplicate_ids,
+            )
+
+        return {
+            "new_quantity": new_quantity,
+            "duplicates_removed": len(duplicate_ids),
+        }
+
+    async def _fetch_pet_compensation_user_ids(self, conn):
+        pet_logs_exists = await conn.fetchval(
+            "SELECT to_regclass('public.pet_logs') IS NOT NULL;"
+        )
+
+        if pet_logs_exists:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT profile."user" AS user_id
+                FROM profile
+                JOIN (
+                    SELECT user_id
+                    FROM monster_pets
+                    WHERE user_id > 0
+                    UNION
+                    SELECT user_id
+                    FROM pet_logs
+                    WHERE user_id > 0
+                ) AS pet_owners ON pet_owners.user_id = profile."user"
+                ORDER BY profile."user" ASC;
+                """
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT profile."user" AS user_id
+                FROM profile
+                JOIN monster_pets ON monster_pets.user_id = profile."user"
+                WHERE monster_pets.user_id > 0
+                ORDER BY profile."user" ASC;
+                """
+            )
+
+        return [int(row["user_id"]) for row in rows]
 
     @is_gm()
     @commands.command(brief=_("Publish an announcement"))
@@ -112,49 +811,6 @@ class GameMaster(commands.Cog):
 
     @is_gm()
     @commands.command(
-        hidden=True, brief=_("Clear donator cache for a user")
-    )
-    @locale_doc
-    async def code(self, ctx, tier: int, userid):
-
-        try:
-            try:
-                user = await self.bot.fetch_user(int(userid))
-            except discord.errors.NotFound:
-                await ctx.send("Invalid user ID. Please provide a valid Discord user ID.")
-                return
-
-            if tier < 1 or tier > 4:
-                await ctx.send("Invalid tier. Please provide a validtier level.")
-                return
-
-            generated_code = '-'.join(
-                ''.join(secrets.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(5)) for _ in range(5))
-
-            await self.bot.pool.execute(
-                'INSERT INTO patreon_keys ("key", "tier", "discordid") VALUES ($1, $2, $3);', generated_code, str(tier),
-                int(userid)
-            )
-
-            user_id = userid  # Replace with the specific user ID
-
-            try:
-                # Fetch the user from Discord's servers
-                user = await self.bot.fetch_user(user_id)
-
-                # Send a direct message to the user
-                await user.send(
-                    f'Thank you so much for your support! You can redeem your perks using $patreonredeem and the following code: {generated_code}')
-                await ctx.send('Message sent.')
-            except discord.NotFound:
-                await ctx.send('User not found.')
-
-            await ctx.send(f"Generated code: {generated_code}")
-        except Exception as e:
-            await ctx.send(e)
-
-    @is_gm()
-    @commands.command(
         hidden=True, aliases=["gmcdc"], brief=_("Clear donator cache for a user")
     )
     @locale_doc
@@ -182,9 +838,9 @@ class GameMaster(commands.Cog):
                 amount,
                 id_,
             )
-        await ctx.send(f"You granted **{other} {amount}** favor.")
+        await self._safe_ctx_send(ctx, f"You granted **{other} {amount}** favor.")
         with handle_message_parameters(
-                content="**{gm}** granted **{other}** {amount} favor.".format(
+                content="**{gm}** granted **{other}** {amount} favor. {reason}".format(
                     gm=ctx.author,
                     amount=amount,
                     other=other,
@@ -195,6 +851,198 @@ class GameMaster(commands.Cog):
                 self.bot.config.game.gm_log_channel,
                 params=params,
             )
+
+    import discord
+    from discord.ext import commands
+
+
+    @commands.command(name="processpet")
+    @is_gm()  # Using existing decorator
+    async def process_pet(self, ctx, user_id: int, *, names_input: str):
+        """
+        Process one or more pets for a user.
+        Usage: $processpet [user_id] [name1, name2, name3, ...]
+        """
+        try:
+            # Split names by comma and strip whitespace
+            names = [name.strip() for name in names_input.split(',')]
+
+            if not names:
+                return await ctx.send("Please provide at least one pet name.")
+
+            # Load monsters.json
+            try:
+                with open('monsters.json', 'r') as f:
+                    monsters_data = json.load(f)
+            except FileNotFoundError:
+                return await ctx.send("Error: monsters.json not found.")
+            except json.JSONDecodeError:
+                return await ctx.send("Error: monsters.json is not valid JSON.")
+
+            # Process each name
+            results = []
+            for name in names:
+                result = await self.process_single_pet(ctx, user_id, name, monsters_data)
+                results.append(result)
+
+            # Combine and send results
+            result_message = "\n\n".join(results)
+            await ctx.send(result_message)
+        except Exception as e:
+            await ctx.send(e)
+
+    async def process_single_pet(self, ctx, user_id: int, name: str, monsters_data: dict) -> str:
+        """Process a single pet and return the result message."""
+        # First, search in monsters.json
+        found_monster = None
+
+        # Search through all levels in monsters.json
+        for level, monsters in monsters_data.items():
+            for monster in monsters:
+                if monster.get('name', '').lower() == name.lower():
+                    found_monster = monster
+                    break
+            if found_monster:
+                break
+
+        # If not found in JSON, search in postgres database
+        if not found_monster:
+            try:
+                async with self.bot.pool.acquire() as conn:
+                    db_monster = await conn.fetchrow(
+                        """
+                        SELECT result_name as name, hp, attack, defense, element, url
+                        FROM splice_combinations
+                        WHERE LOWER(result_name) = LOWER($1)
+                        """,
+                        name
+                    )
+
+                    if db_monster:
+                        found_monster = dict(db_monster)
+            except Exception as e:
+                return f"Error searching database for {name}: {str(e)}"
+
+        # If monster not found in either source
+        if not found_monster:
+            return f"❌ Monster '{name}' not found in monsters.json or database."
+
+        # Generate IVs
+        iv_percentage, hp_iv, attack_iv, defense_iv = self.generate_ivs()
+
+        # Calculate stats
+        baby_hp = round(found_monster.get('hp', 0) * 0.25) + hp_iv
+        baby_attack = round(found_monster.get('attack', 0) * 0.25) + attack_iv
+        baby_defense = round(found_monster.get('defense', 0) * 0.25) + defense_iv
+        element = found_monster.get('element', 'Normal')
+        url = found_monster.get('url', '')
+
+        # Growth stages - setting up for baby stage
+        growth_stages = {
+            1: {"stage": "baby", "growth_time": 2, "stat_multiplier": 0.25, "hunger_modifier": 1.0},
+            2: {"stage": "juvenile", "growth_time": 2, "stat_multiplier": 0.50, "hunger_modifier": 0.8},
+            3: {"stage": "young", "growth_time": 1, "stat_multiplier": 0.75, "hunger_modifier": 0.6},
+            4: {"stage": "adult", "growth_time": None, "stat_multiplier": 1.0, "hunger_modifier": 0.0},
+        }
+
+        baby_stage = growth_stages[1]
+        stat_multiplier = baby_stage["stat_multiplier"]
+        growth_time_interval = datetime.timedelta(days=baby_stage["growth_time"])
+        growth_time = datetime.datetime.utcnow() + growth_time_interval
+
+        # Insert into database
+        try:
+            new_name = name  # Using the original name
+            async with self.bot.pool.acquire() as conn:
+                new_pet_id = await conn.fetchval(
+                    """
+                    INSERT INTO monster_pets 
+                    (user_id, name, hp, attack, defense, element, default_name, url, growth_stage, growth_time, "IV") 
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) 
+                    RETURNING id
+                    """,
+                    user_id,
+                    new_name,
+                    baby_hp,
+                    baby_attack,
+                    baby_defense,
+                    element,
+                    new_name,
+                    url,
+                    'baby',
+                    growth_time,
+                    iv_percentage
+                )
+
+                # Create embed to show the pet
+                embed = discord.Embed(
+                    title=f"New Pet: {new_name}",
+                    description=f"Added to <@{user_id}>'s collection!",
+                    color=0x00ff00
+                )
+
+                embed.add_field(name="HP", value=f"{baby_hp} (+{hp_iv} IV)", inline=True)
+                embed.add_field(name="Attack", value=f"{baby_attack} (+{attack_iv} IV)", inline=True)
+                embed.add_field(name="Defense", value=f"{baby_defense} (+{defense_iv} IV)", inline=True)
+                embed.add_field(name="Element", value=element, inline=True)
+                embed.add_field(name="IV Rating", value=f"{iv_percentage:.2f}%", inline=True)
+                embed.add_field(name="Growth Stage", value="Baby", inline=True)
+                embed.set_thumbnail(url=url)
+
+                await ctx.send(embed=embed)
+
+                return f"✅ Created pet '{new_name}' (ID: {new_pet_id}) for <@{user_id}> with IV: {iv_percentage:.2f}%"
+        except Exception as e:
+            return f"❌ Error creating pet '{name}': {str(e)}"
+
+    def generate_ivs(self):
+        """Generate IV values for a pet."""
+        import random
+        iv_percentage = random.uniform(10, 1000)
+        if iv_percentage < 20:
+            iv_percentage = random.uniform(90, 100)
+        elif iv_percentage < 70:
+            iv_percentage = random.uniform(80, 90)
+        elif iv_percentage < 150:
+            iv_percentage = random.uniform(70, 80)
+        elif iv_percentage < 350:
+            iv_percentage = random.uniform(60, 70)
+        elif iv_percentage < 700:
+            iv_percentage = random.uniform(50, 60)
+        else:
+            iv_percentage = random.uniform(30, 50)
+
+        # Calculate total IV points (50 points max as per your comment about halving)
+        total_iv_points = (iv_percentage / 100) * 100
+
+        # Allocate IV points
+        def allocate_iv_points(total_points):
+            a = random.random()
+            b = random.random()
+            c = random.random()
+            total = a + b + c
+            hp_iv = total_points * (a / total)
+            attack_iv = total_points * (b / total)
+            defense_iv = total_points * (c / total)
+            hp_iv = int(round(hp_iv))
+            attack_iv = int(round(attack_iv))
+            defense_iv = int(round(defense_iv))
+            iv_sum = hp_iv + attack_iv + defense_iv
+            if iv_sum != int(round(total_points)):
+                diff = int(round(total_points)) - iv_sum
+                max_iv = max(hp_iv, attack_iv, defense_iv)
+                if hp_iv == max_iv:
+                    hp_iv += diff
+                elif attack_iv == max_iv:
+                    attack_iv += diff
+                else:
+                    defense_iv += diff
+            return hp_iv, attack_iv, defense_iv
+
+        hp_iv, attack_iv, defense_iv = allocate_iv_points(total_iv_points)
+
+        return iv_percentage, hp_iv, attack_iv, defense_iv
+
 
 
     @is_gm()
@@ -210,8 +1058,7 @@ class GameMaster(commands.Cog):
         )
         id_ = other if isinstance(other, int) else other.id
 
-        if id_ == 295173706496475136:
-            await ctx.send("You're funny..")
+
 
         try:
             await self.bot.pool.execute(
@@ -220,7 +1067,7 @@ class GameMaster(commands.Cog):
             self.bot.bans.add(id_)
             await self.bot.reload_bans()
 
-            await ctx.send(_("Banned: {other}").format(other=other))
+            await self._safe_ctx_send(ctx, _("Banned: {other}").format(other=other))
 
             with handle_message_parameters(
                     content="**{gm}** banned **{other}**.\n\nReason: *{reason}*".format(
@@ -236,28 +1083,24 @@ class GameMaster(commands.Cog):
         except UniqueViolationError:
             await ctx.send(_("{other} is already banned.").format(other=other))
 
+
+    @is_gm()
+    @commands.command(hidden=True, aliases=["sendcust"], brief=_("none"))
+    @locale_doc
+    async def testcust(self, ctx):
+        await ctx.send("test")
+        try:
+            success = True
+            self.bot.dispatch("adventure_completion", ctx, success)
+        except Exception as e:
+            await ctx.send(e)
+
+
     @is_gm()
     @commands.command(hidden=True, brief=_("Bot-unban a user"))
     async def reloadbans(self, ctx):
         await self.bot.reload_bans()
         await ctx.send("Bans Reloaded")
-
-    @is_gm()
-    @commands.command(hidden=True)
-    async def changetier(self, ctx, userID: int, tier: int):
-        # Validate the tier input
-        if tier not in [0, 1, 2, 3, 4]:
-            await ctx.send("Invalid tier value. Please choose a tier between 0 and 4.")
-            return
-
-        # Update the tier using the PostgreSQL connection with placeholders
-        async with self.bot.pool.acquire() as connection:
-            await connection.execute(
-                'UPDATE profile SET "tier" = $1 WHERE "user" = $2',
-                tier, userID
-            )
-
-        await ctx.send(f"Tier for user ID {userID} has been updated to {tier}.")
 
     @is_gm()
     @commands.command(hidden=True, brief=_("Bot-unban a user"))
@@ -277,7 +1120,7 @@ class GameMaster(commands.Cog):
             self.bot.bans.remove(id_)
             await self.bot.reload_bans()
 
-            await ctx.send(_("Unbanned: {other}").format(other=other))
+            await self._safe_ctx_send(ctx, _("Unbanned: {other}").format(other=other))
 
             with handle_message_parameters(
                     content="**{gm}** unbanned **{other}**.\n\nReason: *{reason}*".format(
@@ -321,13 +1164,103 @@ class GameMaster(commands.Cog):
         )
 
         # Send a confirmation message to the context
-        await ctx.send(f"{member.display_name} now has {new_value} weapon tokens!")
+        await self._safe_ctx_send(ctx, f"{member.display_name} now has {new_value} weapon tokens!")
 
         with handle_message_parameters(
                 content="**{gm}** gave **{tokens}** to **{member}**.\n\nReason: *{reason}*".format(
                     gm=ctx.author,
                     tokens=tokens,
                     member=member,
+                    reason=reason or f"<{ctx.message.jump_url}>",
+                )
+        ) as params:
+            await self.bot.http.send_message(
+                self.bot.config.game.gm_log_channel,
+                params=params,
+            )
+
+    @is_gm()
+    @commands.command(hidden=True, brief=_("Grant daily streak restore points"))
+    @locale_doc
+    async def gmrestorepoints(
+            self,
+            ctx,
+            other: UserWithCharacter,
+            amount: int = 1,
+            *,
+            reason: str = None,
+    ):
+        _(
+            """`<other>` - A discord User with a character
+            `[amount]` - How many restore points to grant, defaults to 1. Negative values revoke.
+            `[reason]` - The reason this action was done, defaults to the command message link
+
+            Grants a user daily streak restore points, spent by the `restore` command.
+
+            If the user has never run `daily` their streak row is created first, seeded
+            with the same 3 points a first daily claim would have given them, and dated
+            in the past so this does not consume their claim for today. The stored total
+            is never allowed below zero.
+
+            Only Game Masters can use this command."""
+        )
+        if amount == 0:
+            return await self._safe_ctx_send(ctx, _("Amount cannot be zero."))
+
+        try:
+            async with self.bot.pool.acquire() as conn:
+                # daily creates this table lazily, so it may not exist yet
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS streaks (
+                        user_id BIGINT PRIMARY KEY,
+                        current_streak INTEGER DEFAULT 0,
+                        highest_days INTEGER DEFAULT 0,
+                        restore_points INTEGER DEFAULT 3,
+                        last_daily TIMESTAMP DEFAULT NOW()
+                    );
+                    """
+                )
+                new_value = await conn.fetchval(
+                    """
+                    INSERT INTO streaks (
+                        user_id,
+                        current_streak,
+                        highest_days,
+                        restore_points,
+                        last_daily
+                    )
+                    VALUES (
+                        $1,
+                        0,
+                        0,
+                        GREATEST(3 + $2, 0),
+                        (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 days'
+                    )
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        restore_points = GREATEST(streaks.restore_points + $2, 0)
+                    RETURNING restore_points;
+                    """,
+                    other.id,
+                    amount,
+                )
+        except Exception as e:
+            return await self._safe_ctx_send(ctx, e)
+
+        await self._safe_ctx_send(
+            ctx,
+            _("**{other}** now has **{points}** streak restore point(s).").format(
+                other=other, points=new_value
+            ),
+        )
+
+        with handle_message_parameters(
+                content="**{gm}** granted **{amount}** streak restore point(s) to **{other}** "
+                        "(now **{points}**).\n\nReason: *{reason}*".format(
+                    gm=ctx.author,
+                    amount=amount,
+                    other=other,
+                    points=new_value,
                     reason=reason or f"<{ctx.message.jump_url}>",
                 )
         ) as params:
@@ -365,7 +1298,8 @@ class GameMaster(commands.Cog):
                 await self.bot.pool.execute(
                     'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;', money, other.id
                 )
-                await ctx.send(
+                await self._safe_ctx_send(
+                    ctx,
                     _(
                         "Successfully gave **${money}** without a loss for you to **{other}**."
                     ).format(money=money, other=other)
@@ -385,76 +1319,279 @@ class GameMaster(commands.Cog):
                     )
 
         except Exception as e:
-            await ctx.send(e)
+            await self._safe_ctx_send(ctx, e)
 
     @is_gm()
-    @commands.command(hidden=True, brief=_("Create money for multiple users"))
-    @locale_doc
-    async def martigive(
-            self,
-            ctx,
-            money: int,
-            others: commands.Greedy[UserWithCharacter],
-            *,
-            reason: str = None,
-    ):
-        _(
-            """`<money>` - the amount of money to generate for the users
-            `<others>` - One or more Discord Users with characters
-            `[reason]` - The reason this action was done, defaults to the command message link
+    @commands.command(
+        hidden=True,
+        aliases=["batchgive", "gmbatchgive"],
+        brief=_("Give money to multiple users at once")
+    )
+    async def martigive(self, ctx, money: int, *, targets: str):
+        """
+        Give the same amount of money to multiple users.
 
-            Gives the specified amount of money to multiple users without subtracting it from the command author's balance.
+        Usage:
+        $martigive 50000 123456789 987654321
+        $martigive 50000 @User1 @User2 @User3
+        $martigive 50000 123456789, 987654321, 555555555
+        $martigive 50000 123456789 987654321 | Event reward
 
-            Only Game Masters can use this command."""
-        )
+        Everything after | is treated as the reason.
+        """
 
-        if ctx.author.id != 700801066593419335:
-            return
-
+        # Keep the original special-user restriction
         try:
-            permissions = ctx.channel.permissions_for(ctx.guild.me)
+            if (
+                not self.martigive_allowed_user_id
+                or ctx.author.id != self.martigive_allowed_user_id
+            ):
+                return
 
-            if permissions.read_messages and permissions.send_messages:
-                updated_users = []
-                for other in others:
-                    await self.bot.pool.execute(
-                        'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;', money, other.id
-                    )
-                    updated_users.append(str(other))
-
-                # Send a single summary message
-                await ctx.send(
-                    _(
-                        "Successfully gave **${money}** to the following users without a loss for you: {users}."
-                    ).format(money=money, users=", ".join(updated_users))
+            if money == 0:
+                return await self._safe_ctx_send(
+                    ctx,
+                    "Amount cannot be zero."
                 )
 
-                # Log the action
+            # ---------------------------------
+            # Split target list from reason
+            # ---------------------------------
+            if "|" in targets:
+                targets_text, reason = targets.split("|", 1)
+                reason = reason.strip() or None
+            else:
+                targets_text = targets
+                reason = None
+
+            try:
+                # Uses your existing helper.
+                # Supports:
+                # 123 456 789
+                # 123,456,789
+                # <@123> <@456>
+                # <@!123>
+                user_ids = await self._parse_user_ids_from_text(targets_text)
+
+            except ValueError as exc:
+                return await self._safe_ctx_send(
+                    ctx,
+                    f"❌ {exc}"
+                )
+
+            if not user_ids:
+                return await self._safe_ctx_send(
+                    ctx,
+                    "❌ No users were supplied."
+                )
+
+            # Optional safety limit against accidental giant commands
+            if len(user_ids) > 500:
+                return await self._safe_ctx_send(
+                    ctx,
+                    "❌ Maximum batch size is 500 users."
+                )
+
+            try:
+                # ---------------------------------
+                # Find which IDs actually have chars
+                # ---------------------------------
+                valid_ids, missing_ids = await self._filter_character_user_ids(
+                    user_ids
+                )
+
+                if not valid_ids:
+                    return await self._safe_ctx_send(
+                        ctx,
+                        "❌ None of those Discord IDs have characters."
+                    )
+
+                # ---------------------------------
+                # ONE database query for whole batch
+                # ---------------------------------
+                await self.bot.pool.execute(
+                    '''
+                    UPDATE profile
+                    SET "money" = "money" + $1
+                    WHERE "user" = ANY($2::bigint[]);
+                    ''',
+                    money,
+                    valid_ids,
+                )
+
+                total_given = money * len(valid_ids)
+
+                # ---------------------------------
+                # Confirmation
+                # ---------------------------------
+                response = (
+                    f"✅ Gave **${money:,}** each to "
+                    f"**{len(valid_ids):,} users**.\n"
+                    f"Total generated: **${total_given:,}**."
+                )
+
+                if missing_ids:
+                    response += (
+                        f"\n⚠️ Skipped **{len(missing_ids):,}** IDs "
+                        "because they do not have characters."
+                    )
+
+                await self._safe_ctx_send(ctx, response)
+
+                # ---------------------------------
+                # GM log
+                # ---------------------------------
+                valid_display = ", ".join(
+                    f"<@{user_id}>"
+                    for user_id in valid_ids[:50]
+                )
+
+                if len(valid_ids) > 50:
+                    valid_display += (
+                        f", ... and {len(valid_ids) - 50:,} more"
+                    )
+
+                missing_display = ""
+                if missing_ids:
+                    missing_display = (
+                        f"\nSkipped IDs: **{len(missing_ids):,}**"
+                    )
+
                 with handle_message_parameters(
-                        content="**{gm}** gave **${money}** to **{users}**.\n\nReason: *{reason}*".format(
-                            gm=ctx.author,
-                            money=money,
-                            users=", ".join(updated_users),
-                            reason=reason or f"<{ctx.message.jump_url}>",
-                        )
+                    content=(
+                        f"**{ctx.author}** batch-gave **${money:,}** "
+                        f"to **{len(valid_ids):,} users**.\n"
+                        f"Total generated: **${total_given:,}**\n"
+                        f"{missing_display}\n\n"
+                        f"Recipients: {valid_display}\n\n"
+                        f"Reason: *{reason or f'<{ctx.message.jump_url}>'}*"
+                    )
                 ) as params:
                     await self.bot.http.send_message(
                         self.bot.config.game.gm_log_channel,
                         params=params,
                     )
 
-        except Exception as e:
-            await ctx.send(e)
+            except Exception as exc:
+                await self._safe_ctx_send(
+                    ctx,
+                    f"❌ Batch give failed: {exc}"
+                )
+        except Exception as exc:
+            await self._safe_ctx_send(
+                ctx,
+                f"❌ Batch give failed: {exc}"
+            )
 
+    @commands.is_owner()
     @commands.command(hidden=True, brief=_("Emergancy Shutdown"))
     async def shutdown(self, ctx):
         """Shuts down the bot"""
         # Check if the user invoking the command is the bot owner
-        if ctx.author.id == 118234287425191938:
-            await ctx.send("Shutting down... Bye!")
-            await self.bot.close()  # Gracefully close the bot
-        else:
-            await ctx.send("You don't have permission to use this command.")
+        await self.bot.close()  # Gracefully close the bot
+
+
+    @commands.command(name="generate_key")
+    @commands.is_owner()
+    async def generate_key(self, ctx, owner: str, is_admin: bool = False, expiration: str = "none",
+                           rate_limit: int = 100, custom_key: str = None):
+        """Generate a new API key (Owner only)"""
+        try:
+            # Calculate expiration date if needed
+            expiration_date = None
+            if expiration == "30days":
+                expiration_date = datetime.datetime.now() + datetime.timedelta(days=30)
+            elif expiration == "90days":
+                expiration_date = datetime.datetime.now() + datetime.timedelta(days=90)
+            elif expiration == "1year":
+                expiration_date = datetime.datetime.now() + datetime.timedelta(days=365)
+
+            # Use custom key or generate a new one
+            new_key = custom_key if custom_key else secrets.token_hex(32)
+
+            async with self.bot.pool.acquire() as connection:
+                await connection.execute(
+                    """
+                    INSERT INTO api_keys (key, owner, is_admin, rate_limit, expiration_date) 
+                    VALUES ($1, $2, $3, $4, $5)
+                    """,
+                    new_key, owner, is_admin, rate_limit, expiration_date
+                )
+
+            embed = discord.Embed(
+                title="API Key Generated",
+                description=f"Successfully generated API key for **{owner}**",
+                color=0x00ff00
+            )
+            embed.add_field(name="Key", value=f"`{new_key}`", inline=False)
+            embed.add_field(name="Admin", value=str(is_admin), inline=True)
+            embed.add_field(name="Rate Limit", value=str(rate_limit), inline=True)
+            embed.add_field(name="Expiration",
+                            value=expiration_date.strftime("%Y-%m-%d %H:%M:%S") if expiration_date else "Never",
+                            inline=True)
+
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            embed = discord.Embed(
+                title="Error",
+                description=f"Failed to generate API key: {str(e)}",
+                color=0xff0000
+            )
+            await ctx.send(embed=embed)
+
+
+    @is_gm()
+    @commands.hybrid_command()
+    async def resetdragon(self, ctx, channel_id: int = None):
+        """
+        Reset the dragon progress and weekly contributions.
+        Usage: $resetdragon [channel_id]
+        """
+        try:
+            async with self.bot.pool.acquire() as conn:
+                # Delete all rows from dragon_progress
+                await conn.execute('DELETE FROM dragon_progress')
+
+                # Insert fresh dragon_progress row
+                await conn.execute('''
+                    INSERT INTO dragon_progress (id, current_level, weekly_defeats, last_reset) 
+                    VALUES (1, 1, 0, $1)
+                ''', datetime.datetime.utcnow())
+
+                # Reset weekly_defeats in dragon_contributions
+                await conn.execute('''
+                    UPDATE dragon_contributions 
+                    SET weekly_defeats = 0
+                ''')
+
+                # Send confirmation to command user
+                await ctx.send("✅ Dragon has been reset successfully!")
+
+                # If channel_id is provided, send announcement
+                if channel_id:
+                    try:
+                        channel = self.bot.get_channel(channel_id)
+                        if channel:
+                            embed = discord.Embed(
+                                title="🐉 Dragon Reset",
+                                description="The Ice Dragon has been reset to level 1!\nAll weekly progress has been cleared.",
+                                color=0x87CEEB
+                            )
+                            embed.add_field(
+                                name="New Challenge Awaits!",
+                                value="The Frostbite Wyrm awaits new challengers... Will you face the dragon?",
+                                inline=False
+                            )
+                            await channel.send(embed=embed)
+                        else:
+                            await ctx.send("⚠️ Warning: Could not find the specified channel.")
+                    except Exception as e:
+                        await ctx.send(f"⚠️ Error sending announcement: {str(e)}")
+
+        except Exception as e:
+            await ctx.send(f"❌ Error resetting dragon: {str(e)}")
+
 
     @is_gm()
     @commands.command(hidden=True, brief=_("Create money"))
@@ -483,7 +1620,8 @@ class GameMaster(commands.Cog):
             await self.bot.pool.execute(
                 'UPDATE profile SET "eastereggs"="eastereggs"+$1 WHERE "user"=$2;', eggs, other.id
             )
-            await ctx.send(
+            await self._safe_ctx_send(
+                ctx,
                 _(
                     "Successfully gave **{money} eggs** without a loss for you to **{other}**."
                 ).format(money=eggs, other=other)
@@ -525,7 +1663,8 @@ class GameMaster(commands.Cog):
         await self.bot.pool.execute(
             'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;', money, other.id
         )
-        await ctx.send(
+        await self._safe_ctx_send(
+            ctx,
             _("Successfully removed **${money}** from **{other}**.").format(
                 money=money, other=other
             )
@@ -556,6 +1695,8 @@ class GameMaster(commands.Cog):
 
             Only Game Masters can use this command."""
         )
+
+
         if other.id in ctx.bot.config.game.game_masters:  # preserve deletion of admins
             return await ctx.send(_("Very funny..."))
         async with self.bot.pool.acquire() as conn:
@@ -583,7 +1724,7 @@ class GameMaster(commands.Cog):
                 other.id,
             )
             await self.bot.delete_profile(other.id, conn=conn)
-        await ctx.send(_("Successfully deleted the character."))
+        await self._safe_ctx_send(ctx, _("Successfully deleted the character."))
 
         with handle_message_parameters(
                 content="**{gm}** deleted **{other}**.\n\nReason: *{reason}*".format(
@@ -610,7 +1751,8 @@ class GameMaster(commands.Cog):
         if target.id in ctx.bot.config.game.game_masters:  # preserve renaming of admins
             return await ctx.send(_("Very funny..."))
 
-        await ctx.send(
+        await self._safe_ctx_send(
+            ctx,
             _("What shall the character's name be? (min. 3 letters, max. 20)")
         )
 
@@ -625,12 +1767,12 @@ class GameMaster(commands.Cog):
         try:
             name = await self.bot.wait_for("message", timeout=60, check=mycheck)
         except asyncio.TimeoutError:
-            return await ctx.send(_("Timeout expired."))
+            return await self._safe_ctx_send(ctx, _("Timeout expired."))
 
         await self.bot.pool.execute(
             'UPDATE profile SET "name"=$1 WHERE "user"=$2;', name.content, target.id
         )
-        await ctx.send(_("Renamed."))
+        await self._safe_ctx_send(ctx, _("Renamed."))
 
         with handle_message_parameters(
                 content="**{gm}** renamed **{target}** to **{name}**.\n\nReason: *{reason}*".format(
@@ -678,6 +1820,10 @@ class GameMaster(commands.Cog):
             return await ctx.send(_("Invalid item type."))
         if not -100 <= stat <= 201:
             return await ctx.send(_("Invalid stat."))
+
+
+        await self._safe_ctx_send(ctx, _("Done."))
+
         try:
             hand = item_type.get_hand().value
             await self.bot.create_item(
@@ -691,7 +1837,7 @@ class GameMaster(commands.Cog):
                 element=element,
             )
         except Exception as e:
-            await ctx.send(f"Error has occured {e}")
+            await self._safe_ctx_send(ctx, f"Error has occured {e}")
 
         message = "{gm} created a {item_type} with name {name} and stat {stat}.\n\nReason: *{reason}*".format(
             gm=ctx.author,
@@ -701,16 +1847,413 @@ class GameMaster(commands.Cog):
             reason=reason or f"<{ctx.message.jump_url}>",
         )
 
-        await ctx.send(_("Done."))
-
         with handle_message_parameters(content=message) as params:
             await self.bot.http.send_message(
-                self.bot.config.game.gm_log_channel, params=params
+                self.bot.config.game.gm_log_weapon_channel, params=params
             )
 
         for user in self.bot.owner_ids:
             user = await self.bot.get_user_global(user)
             await user.send(message)
+
+    @is_gm()
+    @commands.command(
+        hidden=True,
+        aliases=["gmconsumable", "gmgivecons"],
+        brief=_("Grant premium consumables or NewWerewolf talismans"),
+    )
+    @locale_doc
+    async def gmgiveconsumable(
+            self,
+            ctx,
+            target: UserWithCharacter,
+            item: str,
+            amount: int = 1,
+            *,
+            reason: str = None,
+    ):
+        _(
+            """`<target>` - A discord User with character
+            `<item>` - One of: petage, petspeed, petxp, petmindwipe, petelement, weapelement, or a NewWerewolf talisman such as `werewolf talisman`
+            `[amount]` - Optional amount to grant, defaults to 1
+            `[reason]` - The reason this action was done, defaults to the command message link
+
+            Grant premium consumables or NewWerewolf talismans directly.
+            For multi-word item names, use quotes.
+
+            Only Game Masters can use this command."""
+        )
+        item_data = self._resolve_gm_consumable_item(item)
+        if not item_data:
+            valid_items = (
+                "petage, pet age potion, pet_age_potion, petspeed, "
+                "pet speed growth potion, pet_speed_growth_potion, "
+                "petxp, pet xp potion, pet_xp_potion, "
+                "petmindwipe, mindwipe, pet mind wipe, pet_mind_wipe, "
+                "petelement, petelementscroll, pet element scroll, pet element change, pet_element_scroll, "
+                "weapelement, elementscroll, weapon element scroll, weapon_element_scroll, "
+                "or quoted role talismans such as \"werewolf talisman\" / \"aura seer talisman\""
+            )
+            return await ctx.send(
+                _("Invalid consumable. Valid options: {items}").format(items=valid_items)
+            )
+
+        grant_type = str(item_data.get("grant_type") or "consumable")
+        display_name = item_data["display_name"]
+
+        if grant_type == "talisman" and not await self._ensure_newwerewolf_talisman_tables():
+            return await ctx.send(_("NewWerewolf talisman inventory is unavailable right now."))
+
+        async with self.bot.pool.acquire() as conn:
+            if grant_type == "talisman":
+                new_quantity = await self._grant_talisman_quantity(
+                    conn,
+                    user_id=target.id,
+                    role=item_data["role"],
+                    amount=amount,
+                )
+            else:
+                grant_result = await self._grant_consumable_quantity(
+                    conn,
+                    target.id,
+                    item_data["consumable_type"],
+                    amount,
+                )
+                new_quantity = grant_result["new_quantity"]
+
+        await self._safe_ctx_send(
+            ctx,
+            _(
+                "Granted **{amount}x {item_name}** to **{target}**. New quantity: **{quantity}**."
+            ).format(amount=amount, item_name=display_name, target=target, quantity=new_quantity)
+        )
+
+        with handle_message_parameters(
+                content="**{gm}** gave **{amount}x {item_name}** to **{target}**.\n\nReason: *{reason}*".format(
+                    gm=ctx.author,
+                    amount=amount,
+                    item_name=display_name,
+                    target=target,
+                    reason=reason or f"<{ctx.message.jump_url}>",
+                )
+        ) as params:
+            await self.bot.http.send_message(
+                self.bot.config.game.gm_log_channel,
+                params=params,
+            )
+
+    @is_gm()
+    @commands.command(
+        hidden=True,
+        name="gmtalismanall",
+        aliases=["gmgrantalltalisman", "gmalltalisman"],
+        brief=_("Grant NewWerewolf talismans to every user with a character"),
+    )
+    @locale_doc
+    async def gmtalismanall(
+        self,
+        ctx,
+        amount: IntGreaterThan(0) = 3,
+        *,
+        roles: str = None,
+    ):
+        _(
+            """Grant NewWerewolf talismans to every user with a character.
+
+            `{prefix}gmtalismanall`
+            `{prefix}gmtalismanall 5`
+            `{prefix}gmtalismanall 2 werewolf, avenger`
+            `{prefix}gmtalismanall 3 all`
+            `{prefix}gmtalismanall 3 random`
+
+            If no roles are provided, each user receives `amount` random talismans.
+            If roles are provided, each user receives `amount` of each listed talisman."""
+        )
+        if not hasattr(self.bot, "pool"):
+            return await ctx.send(_("Database connection unavailable."))
+        if not await self._ensure_newwerewolf_talisman_tables():
+            return await ctx.send(_("NewWerewolf talisman inventory is unavailable right now."))
+
+        specific_roles: list[NewWerewolfRole] | None = None
+        if roles and roles.strip().casefold() not in {"random", "rand", "any"}:
+            try:
+                specific_roles = self._parse_talisman_roles(roles)
+            except ValueError as exc:
+                return await ctx.send(_("❌ {error}").format(error=str(exc)))
+
+        user_ids = await self._fetch_character_user_ids()
+        if not user_ids:
+            return await self._safe_ctx_send(
+                ctx,
+                _("No users with characters were found."),
+            )
+
+        aggregate_counts = await self._grant_talismans_to_users(
+            user_ids,
+            amount=int(amount),
+            specific_roles=specific_roles,
+        )
+
+        if specific_roles:
+            role_list = ", ".join(
+                self._newwerewolf_role_display_name(role) for role in specific_roles
+            )
+            summary = _(
+                "Granted **{amount}x** each of **{roles}** talisman(s) to"
+                " **{count}** users with characters."
+            ).format(amount=amount, roles=role_list, count=len(user_ids))
+        else:
+            summary = _(
+                "Granted **{amount}** random NewWerewolf talisman(s) each to"
+                " **{count}** users with characters."
+            ).format(amount=amount, count=len(user_ids))
+
+        breakdown = self._format_talisman_breakdown(aggregate_counts)
+        await self._safe_ctx_send(
+            ctx,
+            f"{summary}\nBreakdown: {breakdown}",
+        )
+
+        await self._log_talisman_grant(
+            ctx,
+            source="gmtalismanall",
+            target_count=len(user_ids),
+            amount=int(amount),
+            mode="specific" if specific_roles else "random",
+            breakdown=breakdown,
+        )
+
+    @is_gm()
+    @commands.command(
+        hidden=True,
+        name="gmtalismanbatchrandom",
+        aliases=["gmrandomtalismanbatch", "gmtalbatchrandom"],
+        brief=_("Grant random NewWerewolf talismans to a list of Discord IDs"),
+    )
+    @locale_doc
+    async def gmtalismanbatchrandom(
+        self,
+        ctx,
+        amount: IntGreaterThan(0),
+        *,
+        id_text: str,
+    ):
+        _(
+            """Grant random NewWerewolf talismans to a list of Discord IDs.
+
+            `{prefix}gmtalismanbatchrandom 3 123456789,987654321`
+
+            Each valid target receives `amount` random talismans total."""
+        )
+        if not hasattr(self.bot, "pool"):
+            return await ctx.send(_("Database connection unavailable."))
+        if not await self._ensure_newwerewolf_talisman_tables():
+            return await ctx.send(_("NewWerewolf talisman inventory is unavailable right now."))
+
+        try:
+            user_ids = await self._parse_user_ids_from_text(id_text)
+        except ValueError as exc:
+            return await ctx.send(_("❌ {error}").format(error=str(exc)))
+        if not user_ids:
+            return await ctx.send(_("❌ No valid user IDs provided."))
+
+        valid_ids, missing_ids = await self._filter_character_user_ids(user_ids)
+        if not valid_ids:
+            return await ctx.send(_("❌ None of the provided users have a character."))
+
+        aggregate_counts = await self._grant_talismans_to_users(
+            valid_ids,
+            amount=int(amount),
+            specific_roles=None,
+        )
+
+        breakdown = self._format_talisman_breakdown(aggregate_counts)
+        summary = _(
+            "Granted **{amount}** random NewWerewolf talisman(s) each to"
+            " **{count}** user(s)."
+        ).format(amount=amount, count=len(valid_ids))
+        if missing_ids:
+            summary += _("\nSkipped IDs without characters: {ids}").format(
+                ids=", ".join(str(user_id) for user_id in missing_ids[:25])
+            )
+            if len(missing_ids) > 25:
+                summary += _(" ... and {count} more.").format(
+                    count=len(missing_ids) - 25
+                )
+        await self._safe_ctx_send(
+            ctx,
+            f"{summary}\nBreakdown: {breakdown}",
+        )
+
+        await self._log_talisman_grant(
+            ctx,
+            source="gmtalismanbatchrandom",
+            target_count=len(valid_ids),
+            amount=int(amount),
+            mode="random",
+            breakdown=breakdown,
+            missing_ids=missing_ids,
+        )
+
+    @is_gm()
+    @commands.command(
+        hidden=True,
+        name="gmtalismanbatchroles",
+        aliases=["gmtalismanbatch", "gmspecifictalismanbatch", "gmtalbatchroles"],
+        brief=_("Grant selected NewWerewolf talismans to a list of Discord IDs"),
+    )
+    @locale_doc
+    async def gmtalismanbatchroles(
+        self,
+        ctx,
+        amount: IntGreaterThan(0),
+        *,
+        args: str,
+    ):
+        _(
+            """Grant selected NewWerewolf talismans to a list of Discord IDs.
+
+            `{prefix}gmtalismanbatchroles 2 werewolf, avenger | 123456789,987654321`
+            `{prefix}gmtalismanbatchroles 3 all | 123456789,987654321`
+            `{prefix}gmtalismanbatchroles 2 123456789,987654321 | aura seer, avenger`
+
+            Each valid target receives `amount` of each listed talisman."""
+        )
+        if not hasattr(self.bot, "pool"):
+            return await ctx.send(_("Database connection unavailable."))
+        if not await self._ensure_newwerewolf_talisman_tables():
+            return await ctx.send(_("NewWerewolf talisman inventory is unavailable right now."))
+
+        try:
+            user_ids, selected_roles = await self._parse_talisman_batch_arguments(args)
+        except ValueError as exc:
+            return await ctx.send(_("❌ {error}").format(error=str(exc)))
+
+        valid_ids, missing_ids = await self._filter_character_user_ids(user_ids)
+        if not valid_ids:
+            return await ctx.send(_("❌ None of the provided users have a character."))
+
+        aggregate_counts = await self._grant_talismans_to_users(
+            valid_ids,
+            amount=int(amount),
+            specific_roles=selected_roles,
+        )
+
+        role_list = ", ".join(
+            self._newwerewolf_role_display_name(role) for role in selected_roles
+        )
+        summary = _(
+            "Granted **{amount}x** each of **{roles}** talisman(s) to"
+            " **{count}** user(s)."
+        ).format(amount=amount, roles=role_list, count=len(valid_ids))
+        if missing_ids:
+            summary += _("\nSkipped IDs without characters: {ids}").format(
+                ids=", ".join(str(user_id) for user_id in missing_ids[:25])
+            )
+            if len(missing_ids) > 25:
+                summary += _(" ... and {count} more.").format(
+                    count=len(missing_ids) - 25
+                )
+        await self._safe_ctx_send(
+            ctx,
+            f"{summary}\nBreakdown: {self._format_talisman_breakdown(aggregate_counts)}",
+        )
+
+        await self._log_talisman_grant(
+            ctx,
+            source="gmtalismanbatchroles",
+            target_count=len(valid_ids),
+            amount=int(amount),
+            mode=f"specific ({role_list})",
+            breakdown=self._format_talisman_breakdown(aggregate_counts),
+            missing_ids=missing_ids,
+        )
+
+    @is_gm()
+    @commands.command(
+        hidden=True,
+        name="gmtalismanpanel",
+        aliases=["gmtalismans", "gmtalismanui", "gmtalismanmenu"],
+        brief=_("Open an interactive NewWerewolf talisman grant panel"),
+    )
+    @locale_doc
+    async def gmtalismanpanel(self, ctx):
+        _(
+            """Open an interactive NewWerewolf talisman grant panel.
+
+            `{prefix}gmtalismanpanel`
+
+            Use the panel to choose:
+            - everyone with characters or specific Discord IDs
+            - amount
+            - random, all basic roles, or specific talismans
+
+            Only Game Masters can use this command."""
+        )
+        if not hasattr(self.bot, "pool"):
+            return await ctx.send(_("Database connection unavailable."))
+        if not await self._ensure_newwerewolf_talisman_tables():
+            return await ctx.send(_("NewWerewolf talisman inventory is unavailable right now."))
+
+        view = GMTalismanGrantView(ctx=ctx, gm_cog=self)
+        message = await ctx.send(embed=view.build_embed(), view=view)
+        view.message = message
+
+    @is_gm()
+    @commands.command(
+        hidden=True,
+        name="gmgrantpetcompensation",
+        brief=_("Grant pet compensation consumables"),
+    )
+    async def gmgrantpetcompensation(self, ctx):
+        """Grant pet compensation consumables to every distinct user who has ever owned a pet."""
+        if ctx.author.id != self.PET_COMPENSATION_ALLOWED_USER_ID:
+            return await ctx.send("You are not allowed to run this command.")
+
+        async with self.bot.pool.acquire() as conn:
+            async with conn.transaction():
+                user_ids = await self._fetch_pet_compensation_user_ids(conn)
+                if not user_ids:
+                    return await self._safe_ctx_send(ctx, "No qualifying pet owners were found.")
+
+                duplicate_rows_removed = 0
+                for user_id in user_ids:
+                    element_result = await self._grant_consumable_quantity(
+                        conn,
+                        user_id,
+                        "pet_element_scroll",
+                        2,
+                    )
+                    duplicate_rows_removed += element_result["duplicates_removed"]
+
+                    mind_wipe_result = await self._grant_consumable_quantity(
+                        conn,
+                        user_id,
+                        "pet_mind_wipe",
+                        1,
+                    )
+                    duplicate_rows_removed += mind_wipe_result["duplicates_removed"]
+
+        summary = (
+            f"Granted **2x Pet Element Scroll** and **1x Pet Mind Wipe** to "
+            f"**{len(user_ids)}** distinct pet owners. Removed **{duplicate_rows_removed}** "
+            f"duplicate consumable rows."
+        )
+        await self._safe_ctx_send(ctx, summary)
+
+        with handle_message_parameters(
+                content=(
+                    f"**{ctx.author}** ran `gmgrantpetcompensation` and granted "
+                    f"**2x Pet Element Scroll** and **1x Pet Mind Wipe** to "
+                    f"**{len(user_ids)}** distinct pet owners.\n\n"
+                    f"Duplicate consumable rows removed: **{duplicate_rows_removed}**.\n\n"
+                    f"Reason: *<{ctx.message.jump_url}>*"
+                )
+        ) as params:
+            await self.bot.http.send_message(
+                self.bot.config.game.gm_log_channel,
+                params=params,
+            )
 
     @is_gm()
     @commands.command(hidden=True, brief=_("Create crates"))
@@ -740,7 +2283,8 @@ class GameMaster(commands.Cog):
             amount,
             target.id,
         )
-        await ctx.send(
+        await self._safe_ctx_send(
+            ctx,
             _("Successfully gave **{amount}** {rarity} crates to **{target}**.").format(
                 amount=amount, target=target, rarity=rarity
             )
@@ -753,6 +2297,393 @@ class GameMaster(commands.Cog):
                     rarity=rarity,
                     target=target,
                     reason=reason or f"<{ctx.message.jump_url}>",
+                )
+        ) as params:
+            await self.bot.http.send_message(
+                self.bot.config.game.gm_log_channel,
+                params=params,
+            )
+
+    @is_gm()
+    @commands.command(hidden=True, brief=_("Give crafting resources to a player"))
+    @locale_doc
+    async def gmresource(
+            self,
+            ctx,
+            target: UserWithCharacter,
+            amount: int,
+            resource_type: str = None,
+            *,
+            reason: str = None,
+    ):
+        _("""Give crafting resources to a player.
+        
+        If no resource type is specified, a random resource will be given.
+        
+        **Parameters:**
+        - target: The player to give resources to
+        - amount: Amount of resources to give
+        - resource_type: Type of resource (optional, random if not specified)
+        - reason: Reason for giving resources (optional)
+        
+        **Examples:**
+        - `gmresource @player 10 dragon_scales` - Give 10 dragon scales
+        - `gmresource @player 5` - Give 5 random resources
+        - `gmresource @player 3 fire_gems Testing reward` - Give 3 fire gems with reason
+        """)
+        
+        # Get the amuletcrafting cog
+        amulet_cog = self.bot.get_cog('AmuletCrafting')
+        if not amulet_cog:
+            await ctx.send(_("❌ AmuletCrafting cog not found!"))
+            return
+            
+        # If no resource type specified, get a random one
+        if not resource_type:
+            # Get player level for level-appropriate random resource
+            user_level = await amulet_cog.get_player_level(target.id)
+            resource_type = amulet_cog.get_random_resource(user_level=user_level)
+            
+            if not resource_type:
+                await ctx.send(_("❌ Failed to generate random resource!"))
+                return
+                
+            resource_display_name = resource_type.replace('_', ' ').title()
+            await self._safe_ctx_send(
+                ctx,
+                _("🎲 No resource specified, giving random resource: **{resource}**").format(resource=resource_display_name),
+            )
+        else:
+            # Normalize the resource name
+            resource_type = amulet_cog.normalize_resource_name(resource_type)
+            if not resource_type:
+                await ctx.send(_("❌ Invalid resource type! Use `amulet resources` to see available resources."))
+                return
+            resource_display_name = resource_type.replace('_', ' ').title()
+        
+        # Give the resource
+        success = await amulet_cog.give_crafting_resource(target.id, resource_type, amount)
+        
+        if success:
+            await self._safe_ctx_send(
+                ctx,
+                _("✅ Successfully gave **{amount}x {resource}** to {target}!").format(
+                    amount=amount, resource=resource_display_name, target=target.mention
+                ),
+            )
+
+            # Log the action using the proper GM logging system
+            with handle_message_parameters(
+                    content="**{gm}** gave **{amount}x {resource}** to **{target}**.\n\nReason: *{reason}*".format(
+                        gm=ctx.author,
+                        amount=amount,
+                        resource=resource_display_name,
+                        target=target,
+                        reason=reason or f"<{ctx.message.jump_url}>",
+                    )
+            ) as params:
+                await self.bot.http.send_message(
+                    self.bot.config.game.gm_log_channel,
+                    params=params,
+                )
+        else:
+            await ctx.send(_("❌ Failed to give resource to {target}!").format(target=target.mention))
+
+    @is_gm()
+    @commands.command(hidden=True, brief=_("Give crafting resources to multiple players"))
+    @locale_doc
+    async def gmresourcebatch(
+            self,
+            ctx,
+            amount: int,
+            resource_type: str = None,
+            *,
+            id_text: str,
+    ):
+        _("""Give crafting resources to multiple players.
+        
+        If no resource type is specified, a random resource will be given to each player.
+        
+        **Parameters:**
+        - amount: Amount of resources to give to each player
+        - resource_type: Type of resource (optional, random if not specified)
+        - id_text: Comma-separated list of user IDs or mentions
+        
+        **Examples:**
+        - `gmresourcebatch 10 dragon_scales 123456789,987654321` - Give 10 dragon scales to two players
+        - `gmresourcebatch 5 123456789,987654321` - Give 5 random resources to two players
+        """)
+        
+        # Get the amuletcrafting cog
+        amulet_cog = self.bot.get_cog('AmuletCrafting')
+        if not amulet_cog:
+            await ctx.send(_("❌ AmuletCrafting cog not found!"))
+            return
+        
+        # Parse user IDs from the text
+        user_ids = []
+        for item in id_text.split(','):
+            item = item.strip()
+            try:
+                # Try to parse as user ID
+                user_id = int(item)
+                user_ids.append(user_id)
+            except ValueError:
+                # Try to parse as mention
+                if item.startswith('<@') and item.endswith('>'):
+                    user_id = int(item[2:-1].replace('!', ''))
+                    user_ids.append(user_id)
+                else:
+                    await ctx.send(_("❌ Invalid user ID or mention: {item}").format(item=item))
+                    return
+        
+        if not user_ids:
+            await ctx.send(_("❌ No valid user IDs provided!"))
+            return
+        
+        # Get user objects
+        users = []
+        for user_id in user_ids:
+            try:
+                user = await self.bot.fetch_user(user_id)
+                users.append(user)
+            except discord.NotFound:
+                await ctx.send(_("❌ User not found: {user_id}").format(user_id=user_id))
+                return
+        
+        success_count = 0
+        failed_users = []
+        
+        for user in users:
+            # If no resource type specified, get a random one for each user
+            current_resource_type = resource_type
+            if not current_resource_type:
+                # Get player level for level-appropriate random resource
+                user_level = await amulet_cog.get_player_level(user.id)
+                current_resource_type = amulet_cog.get_random_resource(user_level=user_level)
+                
+                if not current_resource_type:
+                    failed_users.append(f"{user} (Failed to generate random resource)")
+                    continue
+            else:
+                # Normalize the resource name
+                current_resource_type = amulet_cog.normalize_resource_name(current_resource_type)
+                if not current_resource_type:
+                    failed_users.append(f"{user} (Invalid resource type)")
+                    continue
+            
+            # Give the resource
+            success = await amulet_cog.give_crafting_resource(user.id, current_resource_type, amount)
+            
+            if success:
+                success_count += 1
+                resource_display_name = current_resource_type.replace('_', ' ').title()
+            else:
+                failed_users.append(f"{user} (Database error)")
+        
+        # Send summary
+        if success_count > 0:
+            resource_display = resource_type.replace('_', ' ').title() if resource_type else "Random Resources"
+            await self._safe_ctx_send(
+                ctx,
+                _("✅ Successfully gave **{amount}x {resource}** to **{count}** players!").format(
+                    amount=amount, resource=resource_display, count=success_count
+                ),
+            )
+
+            # Log the batch action using the proper GM logging system
+            user_list = ", ".join([str(user) for user in users[:success_count]])
+            with handle_message_parameters(
+                    content="**{gm}** gave **{amount}x {resource}** to **{users}**.\n\nReason: *{reason}*".format(
+                        gm=ctx.author,
+                        amount=amount,
+                        resource=resource_display,
+                        users=user_list,
+                        reason=f"<{ctx.message.jump_url}>",
+                    )
+            ) as params:
+                await self.bot.http.send_message(
+                    self.bot.config.game.gm_log_channel,
+                    params=params,
+                )
+        
+        if failed_users:
+            failed_list = "\n".join(failed_users)
+            await ctx.send(_("❌ Failed to give resources to:\n{failed_list}").format(failed_list=failed_list))
+
+    @is_gm()
+    @commands.command(hidden=True, brief=_("Create crates for multiple users"))
+    @locale_doc
+    async def gmcratebatch(
+            self,
+            ctx,
+            rarity: CrateRarity,
+            amount: int,
+            *,
+            id_text: str,
+    ):
+        _(
+            """`<rarity>` - the crates' rarity, can be common, uncommon, rare, magic or legendary
+            `<amount>` - the amount of crates to generate for each user, can be negative
+            `<id_text>` - Comma or space separated list of Discord user IDs
+
+            Generate a set amount of crates of one rarity for multiple users at once.
+
+            Only Game Masters can use this command."""
+        )
+        # Parse the user IDs from the input text
+        user_ids = []
+        for id_part in id_text.replace(',', ' ').split():
+            id_part = id_part.strip()
+            if id_part.isdigit():
+                user_ids.append(int(id_part))
+
+        if not user_ids:
+            await ctx.send(_("No valid user IDs provided."))
+            return
+
+        success_count = 0
+        failed_ids = []
+
+        # Process each user ID
+        for user_id in user_ids:
+            try:
+                # Check if the user has a character in the game
+                has_character = await self.bot.pool.fetchval(
+                    'SELECT EXISTS(SELECT 1 FROM profile WHERE "user"=$1);',
+                    user_id
+                )
+
+                if not has_character:
+                    failed_ids.append(str(user_id))
+                    continue
+
+                # Update the user's crates
+                await self.bot.pool.execute(
+                    f'UPDATE profile SET "crates_{rarity}"="crates_{rarity}"+$1 WHERE "user"=$2;',
+                    amount,
+                    user_id
+                )
+                success_count += 1
+            except Exception as e:
+                failed_ids.append(str(user_id))
+                print(f"Error giving crates to user ID {user_id}: {e}")
+
+        # Send a summary message
+        if success_count > 0:
+            await self._safe_ctx_send(
+                ctx,
+                _("Successfully gave **{amount}** {rarity} crates to **{count}** users.").format(
+                    amount=amount, count=success_count, rarity=rarity
+                )
+            )
+
+        if failed_ids:
+            failed_msg = _("Failed to add crates to {count} users").format(count=len(failed_ids))
+            if len(failed_ids) <= 10:
+                failed_msg += _(": {ids}").format(ids=', '.join(failed_ids))
+            else:
+                failed_msg += _(": {ids}...").format(ids=', '.join(failed_ids[:10]))
+            await self._safe_ctx_send(ctx, failed_msg)
+
+        # Log the action to the GM log channel
+        with handle_message_parameters(
+                content="**{gm}** gave **{amount}** {rarity} crates to **{count}** users in batch mode.\n\nReason: Batch distribution".format(
+                    gm=ctx.author,
+                    amount=amount,
+                    rarity=rarity,
+                    count=success_count,
+                )
+        ) as params:
+            await self.bot.http.send_message(
+                self.bot.config.game.gm_log_channel,
+                params=params,
+            )
+
+    @is_gm()
+    @commands.command(
+        hidden=True,
+        aliases=["gmdragoncoinsbatch", "gmdcbatch"],
+        brief=_("Give dragon coins to multiple users"),
+    )
+    @locale_doc
+    async def gmdragoncoinbatch(
+            self,
+            ctx,
+            amount: int,
+            *,
+            id_text: str,
+    ):
+        _(
+            """`<amount>` - the amount of Dragon Coins to give each user, can be negative
+            `<id_text>` - Comma or space separated list of Discord user IDs
+
+            Give a set amount of Dragon Coins to multiple users at once.
+
+            Only Game Masters can use this command."""
+        )
+        # Parse the user IDs from the input text
+        user_ids = []
+        for id_part in id_text.replace(',', ' ').split():
+            id_part = id_part.strip()
+            if id_part.isdigit():
+                user_ids.append(int(id_part))
+
+        if not user_ids:
+            await ctx.send(_("No valid user IDs provided."))
+            return
+
+        success_count = 0
+        failed_ids = []
+
+        # Process each user ID
+        for user_id in user_ids:
+            try:
+                # Check if the user has a character in the game
+                has_character = await self.bot.pool.fetchval(
+                    'SELECT EXISTS(SELECT 1 FROM profile WHERE "user"=$1);',
+                    user_id,
+                )
+
+                if not has_character:
+                    failed_ids.append(str(user_id))
+                    continue
+
+                # Update the user's Dragon Coins
+                await self.bot.pool.execute(
+                    'UPDATE profile SET dragoncoins = dragoncoins + $1 WHERE "user"=$2;',
+                    amount,
+                    user_id,
+                )
+                success_count += 1
+            except Exception as e:
+                failed_ids.append(str(user_id))
+                print(f"Error giving Dragon Coins to user ID {user_id}: {e}")
+
+        # Send a summary message
+        if success_count > 0:
+            await self._safe_ctx_send(
+                ctx,
+                _("Successfully gave **{amount}** Dragon Coins to **{count}** users.").format(
+                    amount=amount,
+                    count=success_count,
+                ),
+            )
+
+        if failed_ids:
+            failed_msg = _("Failed to add Dragon Coins to {count} users").format(count=len(failed_ids))
+            if len(failed_ids) <= 10:
+                failed_msg += _(": {ids}").format(ids=', '.join(failed_ids))
+            else:
+                failed_msg += _(": {ids}...").format(ids=', '.join(failed_ids[:10]))
+            await self._safe_ctx_send(ctx, failed_msg)
+
+        # Log the action to the GM log channel
+        with handle_message_parameters(
+                content="**{gm}** gave **{amount}** Dragon Coins to **{count}** users in batch mode.\n\nReason: Batch distribution".format(
+                    gm=ctx.author,
+                    amount=amount,
+                    count=success_count,
                 )
         ) as params:
             await self.bot.http.send_message(
@@ -781,9 +2712,22 @@ class GameMaster(commands.Cog):
             Only Game Masters can use this command."""
         )
         await self.bot.pool.execute(
-            'UPDATE profile SET "xp"="xp"+$1 WHERE "user"=$2;', amount, target.id
+            'UPDATE profile SET "xp"="xp"+$1::BIGINT WHERE "user"=$2;',
+            amount,
+            target.id,
         )
-        await ctx.send(
+        await self.bot.log_xp_watch_event(
+            ctx=ctx,
+            user_id=target.id,
+            delta=int(amount),
+            source="game_master.gmxp",
+            details={
+                "gm_id": ctx.author.id,
+                "reason": reason or "",
+            },
+        )
+        await self._safe_ctx_send(
+            ctx,
             _("Successfully gave **{amount}** XP to **{target}**.").format(
                 amount=amount, target=target
             )
@@ -801,6 +2745,214 @@ class GameMaster(commands.Cog):
                 self.bot.config.game.gm_log_channel,
                 params=params,
             )
+
+    @is_gm()
+    @commands.group(
+        hidden=True,
+        invoke_without_command=True,
+        name="xpwatch",
+        aliases=["xpwatchdog", "xpwd"],
+        brief=_("Manage XP watchdog users"),
+    )
+    @locale_doc
+    async def xpwatch(self, ctx):
+        _(
+            """Manage XP watchdog users and view tracked XP gain events.
+
+            `{prefix}xpwatch add <user> [note]`
+            `{prefix}xpwatch remove <user>`
+            `{prefix}xpwatch list`
+            `{prefix}xpwatch logs <user> [limit]`
+            """
+        )
+        return await self._safe_ctx_send(
+            ctx,
+            _(
+                "Usage: `{prefix}xpwatch add <user> [note]`, `{prefix}xpwatch remove"
+                " <user>`, `{prefix}xpwatch list`, `{prefix}xpwatch logs <user>"
+                " [limit]`."
+            ).format(prefix=ctx.clean_prefix),
+        )
+
+    @is_gm()
+    @xpwatch.command(name="add", aliases=["on", "enable"], hidden=True)
+    async def xpwatch_add(self, ctx, target: discord.User, *, note: str = None):
+        note_text = note.strip() if note else None
+        await self.bot.set_xp_watch(
+            user_id=target.id,
+            enabled=True,
+            added_by=ctx.author.id,
+            note=note_text,
+        )
+        if note_text:
+            return await self._safe_ctx_send(
+                ctx,
+                _(
+                    "XP watchdog enabled for **{user}** (`{user_id}`). Note: {note}"
+                ).format(
+                    user=str(target),
+                    user_id=target.id,
+                    note=note_text,
+                ),
+            )
+        return await self._safe_ctx_send(
+            ctx,
+            _("XP watchdog enabled for **{user}** (`{user_id}`).").format(
+                user=str(target),
+                user_id=target.id,
+            ),
+        )
+
+    @is_gm()
+    @xpwatch.command(name="remove", aliases=["off", "disable"], hidden=True)
+    async def xpwatch_remove(self, ctx, target: discord.User):
+        await self.bot.set_xp_watch(
+            user_id=target.id,
+            enabled=False,
+            added_by=ctx.author.id,
+        )
+        return await self._safe_ctx_send(
+            ctx,
+            _("XP watchdog disabled for **{user}** (`{user_id}`).").format(
+                user=str(target),
+                user_id=target.id,
+            ),
+        )
+
+    @staticmethod
+    def _chunk_watch_lines(lines: list[str], max_chars: int = 3800) -> list[str]:
+        if not lines:
+            return []
+        chunks = []
+        current = []
+        current_len = 0
+        for line in lines:
+            line_len = len(line) + 1
+            if current and current_len + line_len > max_chars:
+                chunks.append("\n".join(current))
+                current = []
+                current_len = 0
+            current.append(line)
+            current_len += line_len
+        if current:
+            chunks.append("\n".join(current))
+        return chunks
+
+    @is_gm()
+    @xpwatch.command(name="list", hidden=True)
+    async def xpwatch_list(self, ctx):
+        rows = await self.bot.fetch_xp_watchlist()
+        if not rows:
+            return await self._safe_ctx_send(ctx, _("No users are currently on XP watchdog."))
+
+        lines = []
+        for row in rows:
+            user_id = int(row["user_id"])
+            added_by = int(row["added_by"])
+            note = (row.get("note") or "").strip()
+            added_at = row.get("added_at")
+            added_text = _("unknown time")
+            if added_at is not None:
+                try:
+                    added_text = f"<t:{int(added_at.timestamp())}:R>"
+                except Exception:
+                    added_text = _("unknown time")
+            base_line = f"<@{user_id}> (`{user_id}`) - by <@{added_by}> - {added_text}"
+            if note:
+                base_line += f" - note: {note}"
+            lines.append(base_line)
+
+        pages = self._chunk_watch_lines(lines)
+        embeds = []
+        for idx, page in enumerate(pages, start=1):
+            embed = discord.Embed(
+                title=_("XP Watchdog Users"),
+                description=page,
+                colour=self.bot.config.game.primary_colour,
+            )
+            if len(pages) > 1:
+                embed.set_footer(
+                    text=_("Page {page}/{total}").format(page=idx, total=len(pages))
+                )
+            embeds.append(embed)
+
+        if len(embeds) == 1:
+            return await self._safe_ctx_send(ctx, embed=embeds[0])
+        return await self.bot.paginator.Paginator(extras=embeds).paginate(ctx)
+
+    @is_gm()
+    @xpwatch.command(name="logs", aliases=["events", "history"], hidden=True)
+    async def xpwatch_logs(
+        self,
+        ctx,
+        target: discord.User,
+        limit: IntFromTo(1, 200) = 50,
+    ):
+        rows = await self.bot.fetch_xp_watch_events(user_id=target.id, limit=int(limit))
+        if not rows:
+            return await self._safe_ctx_send(
+                ctx,
+                _(
+                    "No XP watchdog events found for **{user}** (`{user_id}`)."
+                ).format(user=str(target), user_id=target.id),
+            )
+
+        lines = []
+        for row in rows:
+            created_at = row.get("created_at")
+            timestamp_text = _("unknown time")
+            if created_at is not None:
+                try:
+                    timestamp_text = f"<t:{int(created_at.timestamp())}:F>"
+                except Exception:
+                    timestamp_text = _("unknown time")
+
+            details_obj = row.get("details")
+            details_text = ""
+            if isinstance(details_obj, dict) and details_obj:
+                details_pairs = [
+                    f"{key}={value}"
+                    for key, value in details_obj.items()
+                    if value not in (None, "")
+                ]
+                details_text = ", ".join(details_pairs)
+            elif details_obj:
+                details_text = str(details_obj)
+
+            if len(details_text) > 180:
+                details_text = details_text[:177] + "..."
+
+            old_xp = row.get("old_xp")
+            new_xp = row.get("new_xp")
+            old_xp_text = "?" if old_xp is None else str(old_xp)
+            new_xp_text = "?" if new_xp is None else str(new_xp)
+            command_name = row.get("command_name") or "n/a"
+            line = (
+                f"{timestamp_text} | +{int(row['xp_delta'])} XP | {row['source']} | "
+                f"cmd: {command_name} | {old_xp_text}->{new_xp_text}"
+            )
+            if details_text:
+                line += f" | {details_text}"
+            lines.append(line)
+
+        pages = self._chunk_watch_lines(lines)
+        embeds = []
+        for idx, page in enumerate(pages, start=1):
+            embed = discord.Embed(
+                title=_("XP Watchdog Logs"),
+                description=page,
+                colour=self.bot.config.game.primary_colour,
+            )
+            embed.set_author(name=str(target), icon_url=target.display_avatar.url)
+            if len(pages) > 1:
+                embed.set_footer(
+                    text=_("Page {page}/{total}").format(page=idx, total=len(pages))
+                )
+            embeds.append(embed)
+
+        if len(embeds) == 1:
+            return await self._safe_ctx_send(ctx, embed=embeds[0])
+        return await self.bot.paginator.Paginator(extras=embeds).paginate(ctx)
 
     import random
     @is_gm()
@@ -911,348 +3063,36 @@ class GameMaster(commands.Cog):
     @commands.command()
     async def gmegg(self, ctx, member: discord.Member, *, monster_name: str):
         """Generate an egg for a user with a specified monster."""
-        # Check if the monster exists
-        monster = None
+        # Load monsters data from JSON file
+        try:
+            with open("monsters.json", "r") as f:
+                monsters_data = json.load(f)
+        except Exception as e:
+            await ctx.send("Error loading monsters data. Please contact the admin.")
+            return
 
-        monsters = {
-            1: [
-                {"name": "Sneevil", "hp": 100, "attack": 95, "defense": 100, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Sneevil-removebg-preview.png"},
-                {"name": "Slime", "hp": 120, "attack": 100, "defense": 105, "element": "Water",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_slime.png"},
-                {"name": "Frogzard", "hp": 120, "attack": 90, "defense": 95, "element": "Nature",
-                 "url": "https://static.wikia.nocookie.net/aqwikia/images/d/d6/Frogzard.png"},
-                {"name": "Rat", "hp": 90, "attack": 100, "defense": 90, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Rat-removebg-preview.png"},
-                {"name": "Bat", "hp": 150, "attack": 95, "defense": 85, "element": "Wind",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Bat-removebg-preview.png"},
-                {"name": "Skeleton", "hp": 190, "attack": 105, "defense": 100, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Skelly-removebg-preview.png"},
-                {"name": "Imp", "hp": 180, "attack": 95, "defense": 85, "element": "Fire",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zZquzlh-removebg-preview.png"},
-                {"name": "Pixie", "hp": 100, "attack": 90, "defense": 80, "element": "Light",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_pixie-removebg-preview.png"},
-                {"name": "Zombie", "hp": 170, "attack": 100, "defense": 95, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zombie-removebg-preview.png"},
-                {"name": "Spiderling", "hp": 220, "attack": 95, "defense": 90, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_spider-removebg-preview.png"},
-                {"name": "Spiderling", "hp": 220, "attack": 95, "defense": 90, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_spider-removebg-preview.png"},
-                {"name": "Moglin", "hp": 200, "attack": 90, "defense": 85, "element": "Light",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Moglin.png"},
-                {"name": "Red Ant", "hp": 140, "attack": 105, "defense": 100, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_redant-removebg-preview.png"},
-                {"name": "Chickencow", "hp": 300, "attack": 150, "defense": 90, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChickenCow-removebg-preview.png"},
-                {"name": "Tog", "hp": 380, "attack": 105, "defense": 95, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Tog-removebg-preview.png"},
-                {"name": "Lemurphant", "hp": 340, "attack": 95, "defense": 80, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Lemurphant-removebg-preview.png"},
-                {"name": "Fire Imp", "hp": 200, "attack": 100, "defense": 90, "element": "Fire",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_zZquzlh-removebg-preview.png"},
-                {"name": "Zardman", "hp": 300, "attack": 95, "defense": 100, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Zardman-removebg-preview.png"},
-                {"name": "Wind Elemental", "hp": 165, "attack": 90, "defense": 85, "element": "Wind",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_WindElemental-removebg-preview.png"},
-                {"name": "Dark Wolf", "hp": 200, "attack": 100, "defense": 90, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DarkWolf-removebg-preview.png"},
-                {"name": "Treeant", "hp": 205, "attack": 105, "defense": 95, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Treeant-removebg-preview.png"},
-            ],
-            2: [
-                {"name": "Cyclops Warlord", "hp": 230, "attack": 160, "defense": 155, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_CR-removebg-preview.png"},
-                {"name": "Fishman Soldier", "hp": 200, "attack": 165, "defense": 160, "element": "Water",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Fisherman-removebg-preview.png"},
-                {"name": "Fire Elemental", "hp": 215, "attack": 150, "defense": 145, "element": "Fire",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_fire_elemental-removebg-preview.png"},
-                {"name": "Vampire Bat", "hp": 200, "attack": 170, "defense": 160, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_viO2oSJ-removebg-preview.png"},
-                {"name": "Blood Eagle", "hp": 195, "attack": 165, "defense": 150, "element": "Wind",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BloodEagle-removebg-preview.png"},
-                {"name": "Earth Elemental", "hp": 190, "attack": 175, "defense": 160, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Earth_Elemental-removebg-preview.png"},
-                {"name": "Fire Mage", "hp": 200, "attack": 160, "defense": 140, "element": "Fire",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireMage-removebg-preview.png"},
-                {"name": "Dready Bear", "hp": 230, "attack": 155, "defense": 150, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_dreddy-removebg-preview.png"},
-                {"name": "Undead Soldier", "hp": 280, "attack": 160, "defense": 155, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_UndeadSoldier-removebg-preview.png"},
-                {"name": "Skeleton Warrior", "hp": 330, "attack": 155, "defense": 150, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SkeelyWarrior-removebg-preview.png"},
-                {"name": "Giant Spider", "hp": 350, "attack": 160, "defense": 145, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DreadSpider-removebg-preview.png"},
-                {"name": "Castle spider", "hp": 310, "attack": 170, "defense": 160, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Castle-removebg-preview.png"},
-                {"name": "ConRot", "hp": 210, "attack": 165, "defense": 155, "element": "Water",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ConRot-removebg-preview.png"},
-                {"name": "Horc Warrior", "hp": 270, "attack": 175, "defense": 170, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_HorcWarrior-removebg-preview.png"},
-                {"name": "Shadow Hound", "hp": 300, "attack": 160, "defense": 150, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Hound-removebg-preview.png"},
-                {"name": "Fire Sprite", "hp": 290, "attack": 165, "defense": 155, "element": "Fire",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireSprite-removebg-preview.png"},
-                {"name": "Rock Elemental", "hp": 300, "attack": 160, "defense": 165, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Earth_Elemental-removebg-preview.png"},
-                {"name": "Shadow Serpent", "hp": 335, "attack": 155, "defense": 150, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadowSerpant-removebg-preview.png"},
-                {"name": "Dark Elemental", "hp": 340, "attack": 165, "defense": 155, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DarkEle-Photoroom.png"},
-                {"name": "Forest Guardian", "hp": 500, "attack": 250, "defense": 250, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ForestGuardian-removebg-preview.png"},
-            ],
-            3: [
-                {"name": "Mana Golem", "hp": 200, "attack": 220, "defense": 210, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_managolum-removebg-preview.png"},
-                {"name": "Karok the Fallen", "hp": 180, "attack": 215, "defense": 205, "element": "Ice",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_VIMs8un-removebg-preview.png"},
-                {"name": "Water Draconian", "hp": 220, "attack": 225, "defense": 200, "element": "Water",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_waterdrag-removebg-preview.png"},
-                {"name": "Shadow Creeper", "hp": 190, "attack": 220, "defense": 205, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_shadowcreep-removebg-preview.png"},
-                {"name": "Wind Djinn", "hp": 210, "attack": 225, "defense": 215, "element": "Wind",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_djinn-removebg-preview.png"},
-                {"name": "Autunm Fox", "hp": 205, "attack": 230, "defense": 220, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Autumn_Fox-removebg-preview.png"},
-                {"name": "Dark Draconian", "hp": 195, "attack": 220, "defense": 200, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_darkdom-removebg-preview.png"},
-                {"name": "Light Elemental", "hp": 185, "attack": 215, "defense": 210, "element": "Light",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_LightELemental-removebg-preview.png"},
-                {"name": "Undead Giant", "hp": 230, "attack": 220, "defense": 210, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_UndGiant-removebg-preview.png"},
-                {"name": "Chaos Spider", "hp": 215, "attack": 215, "defense": 205, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosSpider-removebg-preview.png"},
-                {"name": "Seed Spitter", "hp": 225, "attack": 220, "defense": 200, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SeedSpitter-removebg-preview.png"},
-                {"name": "Beach Werewolf", "hp": 240, "attack": 230, "defense": 220, "element": "Water",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BeachWerewold-removebg-preview.png"},
-                {"name": "Boss Dummy", "hp": 220, "attack": 225, "defense": 210, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BossDummy-removebg-preview.png"},
-                {"name": "Rock", "hp": 235, "attack": 225, "defense": 215, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Rock-removebg-preview.png"},
-                {"name": "Shadow Serpent", "hp": 200, "attack": 220, "defense": 205, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadoeSerpant-removebg-preview.png"},
-                {"name": "Flame Elemental", "hp": 210, "attack": 225, "defense": 210, "element": "Fire",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FireElemental-removebg-preview.png"},
-                {"name": "Bear", "hp": 225, "attack": 215, "defense": 220, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732611726453.png"},
-                {"name": "Chair", "hp": 215, "attack": 210, "defense": 215, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_chair-removebg-preview.png"},
-                {"name": "Chaos Serpant", "hp": 230, "attack": 220, "defense": 205, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosSerp-removebg-preview.png"},
-                {"name": "Gorillaphant", "hp": 240, "attack": 225, "defense": 210, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_gorillaserpant-removebg-preview.png"},
-            ],
-            4: [
-                {"name": "Hydra Head", "hp": 300, "attack": 280, "defense": 270, "element": "Water",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_hydra.png"},
-                {"name": "Blessed Deer", "hp": 280, "attack": 275, "defense": 265, "element": "Light",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BlessedDeer-removebg-preview.png"},
-                {"name": "Chaos Sphinx", "hp": 320, "attack": 290, "defense": 275, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaopsSpinx.png"},
-                {"name": "Inferno Dracolion", "hp": 290, "attack": 285, "defense": 270, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614284328.png"},
-                {"name": "Wind Cyclone", "hp": 310, "attack": 290, "defense": 280, "element": "Wind",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_WindElemental-removebg-preview.png"},
-                {"name": "Mr Cuddles", "hp": 305, "attack": 295, "defense": 285, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_mrcuddles-removebg-preview.png"},
-                {"name": "Infernal Fiend", "hp": 295, "attack": 285, "defense": 270, "element": "Fire",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614284328.png"},
-                {"name": "Dark Mukai", "hp": 285, "attack": 275, "defense": 265, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614826889.png"},
-                {"name": "Undead Berserker", "hp": 330, "attack": 285, "defense": 275, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732614863579.png"},
-                {"name": "Chaos Warrior", "hp": 315, "attack": 280, "defense": 270, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosWarrior-removebg-preview.png"},
-                {"name": "Dire Wolf", "hp": 325, "attack": 285, "defense": 275, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DireWolf-removebg-preview.png"},
-                {"name": "Skye Warrior", "hp": 340, "attack": 295, "defense": 285, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_SkyeWarrior-removebg-preview.png"},
-                {"name": "Death On Wings", "hp": 320, "attack": 290, "defense": 275, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DeathonWings-removebg-preview.png"},
-                {"name": "Chaorruption", "hp": 335, "attack": 295, "defense": 285, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Chaorruption-removebg-preview.png"},
-                {"name": "Shadow Beast", "hp": 300, "attack": 285, "defense": 270, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadowBeast-removebg-preview.png"},
-                {"name": "Hootbear", "hp": 310, "attack": 290, "defense": 275, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_HootBear-removebg-preview.png"},
-                {"name": "Anxiety", "hp": 325, "attack": 280, "defense": 290, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_anxiety-removebg-preview.png"},
-                {"name": "Twilly", "hp": 315, "attack": 275, "defense": 285, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Twilly-removebg-preview.png"},
-                {"name": "Black Cat", "hp": 330, "attack": 285, "defense": 270, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_QJsLMnk-removebg-preview.png"},
-                {"name": "Forest Guardian", "hp": 340, "attack": 290, "defense": 275, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ForestGuardian-removebg-preview.png"},
-            ],
-            5: [
-                {"name": "Chaos Dragon", "hp": 400, "attack": 380, "defense": 370, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaosDragon-removebg-preview.png"},
-                {"name": "Wooden Door", "hp": 380, "attack": 375, "defense": 365, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_WoodenDoor-removebg-preview.png"},
-                {"name": "Garvodeus", "hp": 420, "attack": 390, "defense": 375, "element": "Water",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Garvodeus-removebg-preview.png"},
-                {"name": "Shadow Lich", "hp": 390, "attack": 385, "defense": 370, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ShadowLich-removebg-preview.png"},
-                {"name": "Zorbak", "hp": 410, "attack": 390, "defense": 380, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Zorbak-removebg-preview.png"},
-                {"name": "Dwakel Rocketman", "hp": 405, "attack": 395, "defense": 385, "element": "Electric",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_DwarkalRock-removebg-preview.png"},
-                {"name": "Kathool", "hp": 395, "attack": 385, "defense": 370, "element": "Water",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Kathool-removebg-preview.png"},
-                {"name": "Celestial Hound", "hp": 385, "attack": 375, "defense": 365, "element": "Light",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_CelestialHound-removebg-preview.png"},
-                {"name": "Undead Raxgore", "hp": 430, "attack": 385, "defense": 375, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Raxfore-removebg-preview_1.png"},
-                {"name": "Droognax", "hp": 415, "attack": 380, "defense": 370, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Droognax-removebg-preview.png"},
-                {"name": "Corrupted Boar", "hp": 425, "attack": 385, "defense": 375, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Corrupted_Bear-removebg-preview.png"},
-                {"name": "Fressa", "hp": 440, "attack": 395, "defense": 385, "element": "Water",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Fressa-removebg-preview.png"},
-                {"name": "Grimskull", "hp": 420, "attack": 390, "defense": 375, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Grimskull-removebg-preview.png"},
-                {"name": "Chaotic Chicken", "hp": 435, "attack": 385, "defense": 380, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ChaoticChicken-removebg-preview.png"},
-                {"name": "Baelgar", "hp": 400, "attack": 385, "defense": 370, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Baelgar-removebg-preview.png"},
-                {"name": "Blood Dragon", "hp": 410, "attack": 390, "defense": 375, "element": "Fire",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BloodDragon-removebg-preview.png"},
-                {"name": "Avatar of Desolich", "hp": 425, "attack": 380, "defense": 390, "element": "Fire",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732696555786.png"},
-                {"name": "Piggy Drake", "hp": 415, "attack": 375, "defense": 385, "element": "Wind",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove-bg.ai_1732696596976.png"},
-                {"name": "Chaos Alteon", "hp": 430, "attack": 385, "defense": 370, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Chaos_Alteon-removebg-preview.png"},
-                {"name": "Argo", "hp": 440, "attack": 380, "defense": 375, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Argo-removebg-preview.png"},
-            ],
-            6: [
-                {"name": "Ultra Cuddles", "hp": 500, "attack": 470, "defense": 460, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_ultracuddles-removebg-preview.png"},
-                {"name": "General Pollution", "hp": 480, "attack": 465, "defense": 455, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_genpol-removebg-preview.png"},
-                {"name": "Manslayer Fiend", "hp": 520, "attack": 475, "defense": 460, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_manlsayer-removebg-preview.png"},
-                {"name": "The Hushed", "hp": 490, "attack": 470, "defense": 455, "element": "Light",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_hushed-removebg-preview.png"},
-                {"name": "The Jailer", "hp": 510, "attack": 475, "defense": 465, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_jailer-removebg-preview.png"},
-                {"name": "Thriller", "hp": 505, "attack": 480, "defense": 470, "element": "Electric",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Thriller-removebg-preview.png"},
-                {"name": "Dire Razorclaw", "hp": 495, "attack": 470, "defense": 455, "element": "Fire",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file.png"},
-                {"name": "Dollageddon", "hp": 485, "attack": 465, "defense": 455, "element": "Light",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Dollageddon-removebg-preview.png"},
-                {"name": "Gold Werewolf", "hp": 530, "attack": 475, "defense": 460, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Gold_Werewolf-removebg-preview.png"},
-                {"name": "FlameMane", "hp": 515, "attack": 470, "defense": 455, "element": "Fire",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FlameMane-removebg-preview.png"},
-                {"name": "Specimen 66", "hp": 525, "attack": 475, "defense": 460, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Specimen_66-removebg-preview.png"},
-                {"name": "Frank", "hp": 540, "attack": 480, "defense": 470, "element": "Electric",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Frank-removebg-preview.png"},
-                {"name": "French Horned ToadDragon", "hp": 520, "attack": 475, "defense": 460, "element": "Water",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file__1_-removebg-preview.png"},
-                {"name": "Mog Zard", "hp": 535, "attack": 475, "defense": 465, "element": "Earth",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_MogZard-removebg-preview.png"},
-                {"name": "Mo-Zard", "hp": 500, "attack": 470, "defense": 455, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file__2_-removebg-preview.png"},
-                {"name": "Nulgath", "hp": 510, "attack": 475, "defense": 460, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Nulgath-removebg-preview.png"},
-                {"name": "Proto Champion", "hp": 525, "attack": 465, "defense": 475, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file_3.png"},
-                {"name": "Trash Can", "hp": 515, "attack": 460, "defense": 470, "element": "Light",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_TrashCan-removebg-preview.png"},
-                {"name": "Turdragon", "hp": 530, "attack": 475, "defense": 460, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Turagon-removebg-preview.png"},
-                {"name": "Unending Avatar", "hp": 540, "attack": 470, "defense": 455, "element": "Nature",
-                 "url": " https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_file_4.png"},
-            ],
-            7: [
-                {"name": "Astral Dragon", "hp": 600, "attack": 570, "defense": 560, "element": "Light",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_AstralDragon.png"},
-                {"name": "Eise Horror", "hp": 580, "attack": 565, "defense": 555, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Elise_Horror-removebg-preview.png"},
-                {"name": "Asbane", "hp": 620, "attack": 575, "defense": 560, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Adbane.png"},
-                {"name": "Apephyryx", "hp": 590, "attack": 570, "defense": 555, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Apephryx-removebg-preview.png"},
-                {"name": "Enchantress", "hp": 610, "attack": 575, "defense": 565, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Enchantress-removebg-preview.png"},
-                {"name": "Queen of Monsters", "hp": 605, "attack": 580, "defense": 570, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_QueenOfMonsters-removebg-preview.png"},
-                {"name": "Krykan", "hp": 595, "attack": 570, "defense": 555, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Remove_background_project.png"},
-                {"name": "Painadin Overlord", "hp": 585, "attack": 565, "defense": 555, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Painadin_Overlord-removebg-preview.png"},
-                {"name": "EL-Blender", "hp": 630, "attack": 575, "defense": 560, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_EbilBlender-removebg-preview.png"},
-                {"name": "Key of Sholemoh", "hp": 615, "attack": 570, "defense": 555, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Key_of_Sholemoh-removebg-preview.png"},
-                {"name": "Specimen 30", "hp": 625, "attack": 575, "defense": 560, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Specimen_30.png"},
-                {"name": "Pinky", "hp": 640, "attack": 580, "defense": 570, "element": "Electric",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Pinky-removebg-preview.png"},
-                {"name": "Monster Cake", "hp": 620, "attack": 575, "defense": 560, "element": "Nature",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Monster_Cake-removebg-preview.png"},
-                {"name": "Angyler Fish", "hp": 635, "attack": 575, "defense": 565, "element": "Water",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Angyler_Fish-removebg-preview.png"},
-                {"name": "Big Bad Ancient.. Goose?", "hp": 600, "attack": 570, "defense": 555, "element": "Light",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_BigBadAncientGoose-removebg-preview.png"},
-                {"name": "Barlot Field", "hp": 610, "attack": 575, "defense": 560, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Barlot_Fiend-removebg-preview.png"},
-                {"name": "Barghest", "hp": 625, "attack": 565, "defense": 575, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Barghest-removebg-preview.png"},
-                {"name": "Yuzil", "hp": 615, "attack": 560, "defense": 570, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Yuzil.png"},
-                {"name": "Azkorath", "hp": 630, "attack": 575, "defense": 560, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Azkorath-removebg-preview.png"},
-                {"name": "Boto", "hp": 640, "attack": 570, "defense": 555, "element": "Water",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Boto.png"},
-            ],
-            8: [
-                {"name": "Meatmongous", "hp": 1200, "attack": 450, "defense": 600, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Meatmongous-removebg-preview.png"},
-                {"name": "Ebil Meta Dragon", "hp": 810, "attack": 770, "defense": 550, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_MetaDragon_n_Greg-transformed.png"},
-                {"name": "Shadow Nulgath", "hp": 850, "attack": 700, "defense": 700, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Shadow_Nulgath.png"},
-                {"name": "The First Speaker", "hp": 800, "attack": 600, "defense": 700, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_FirstSpeakerFix-Photoroom.png"},
-            ],
-            9: [
-                {"name": "Avatar Tynfdarius", "hp": 800, "attack": 780, "defense": 770, "element": "Fire",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Avatar_Tynfdarius-removebg-preview-transformed-Photoroom.png"},
-                {"name": "Mech-a-Knight", "hp": 780, "attack": 775, "defense": 790, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Mech-a-knight-removebg-preview-transformed.png"},
-                {"name": "Astraea's Engineer", "hp": 820, "attack": 790, "defense": 775, "element": "Light",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Engineer-removebg-preview-transformed.png"},
-            ],
-            10: [
-                {"name": "Deimos", "hp": 1200, "attack": 700, "defense": 900, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Deimos.png"},
-                {"name": "Void Dragon", "hp": 2500, "attack": 570, "defense": 575, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_6pnyUGr-Photoroom-Photoroom.png"},
-                {"name": "End of all things", "hp": 500, "attack": 2500, "defense": 700, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Beast-Photoroom-transformed-Photoroom.png"},
-            ],
-            11: [
-                {"name": "Drakath", "hp": 4000, "attack": 1022, "defense": 700, "element": "Corrupted",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Pngtreelightning_source_lightning_effect_purple_3916970.png"},
-                {"name": "Astraea", "hp": 3500, "attack": 723, "defense": 857, "element": "Light",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_5z90r962trs71_1-Photoroom.png"},
-                {"name": "Sepulchure", "hp": 3000, "attack": 1355, "defense": 600, "element": "Dark",
-                 "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_wakai-quketsuki-sepulchuredoomknightdoomblade-Photoroom.png"},
-            ]
-        }
-        for level_monsters in monsters.values():
-            for m in level_monsters:
+        # Search for the monster by name (ignoring case)
+        monster = None
+        for level_str, monster_list in monsters_data.items():
+            for m in monster_list:
                 if m["name"].lower() == monster_name.lower():
                     monster = m
                     break
             if monster:
                 break
+
+        if not monster:
+            async with self.bot.pool.acquire() as conn:
+                db_monster = await conn.fetchrow(
+                    """
+                    SELECT result_name AS name, hp, attack, defense, element, url
+                    FROM splice_combinations
+                    WHERE LOWER(result_name) = LOWER($1)
+                    """,
+                    monster_name,
+                )
+                if db_monster:
+                    monster = dict(db_monster)
 
         if not monster:
             await ctx.send(f"Monster '{monster_name}' not found.")
@@ -1272,10 +3112,6 @@ class GameMaster(commands.Cog):
                 member.id
             )
 
-        if pet_and_egg_count >= 5:
-            await ctx.send(
-                f"{member.display_name} cannot have more than 5 pets or eggs. Please release a pet or wait for an egg to hatch.")
-            return
 
         import random
 
@@ -1368,6 +3204,310 @@ class GameMaster(commands.Cog):
             await ctx.send(f"An error occurred: {e}")
 
     @is_gm()
+    @commands.command(name="gmhatchegg", aliases=["gmhatch"], brief=_("Force-hatch a monster egg by ID"))
+    async def gmhatchegg(self, ctx, egg_id: int):
+        """Force-hatch a monster egg by its database ID."""
+        pets_cog = self.bot.get_cog("Pets")
+        if pets_cog is None:
+            await ctx.send("Pets cog is not loaded.")
+            return
+
+        try:
+            async with self.bot.pool.acquire() as conn:
+                hatch_result = await pets_cog.hatch_monster_egg(conn, egg_id)
+
+            if hatch_result is None:
+                await ctx.send(f"No unhatched egg found with ID `{egg_id}`.")
+                return
+
+            try:
+                user = self.bot.get_user(hatch_result["user_id"])
+                if user:
+                    await user.send(
+                        f"Your **Egg** has been force-hatched by a GM into **{hatch_result['pet_name']}**."
+                    )
+            except:
+                pass
+
+            await ctx.send(
+                f"Egg `{egg_id}` hatched successfully for <@{hatch_result['user_id']}>. "
+                f"Created pet ID `{hatch_result['pet_id']}`: **{hatch_result['pet_name']}**."
+            )
+
+            with handle_message_parameters(
+                content=(
+                    f"**{ctx.author}** force-hatched egg **{egg_id}** for "
+                    f"**<@{hatch_result['user_id']}>**.\n\n"
+                    f"Created pet: **{hatch_result['pet_name']}** (`{hatch_result['pet_id']}`)\n\n"
+                    f"Reason: *<{ctx.message.jump_url}>*"
+                )
+            ) as params:
+                await self.bot.http.send_message(
+                    self.bot.config.game.gm_log_channel,
+                    params=params,
+                )
+        except Exception as e:
+            await ctx.send(f"An error occurred: {e}")
+
+    @is_gm()
+    @commands.command(name="gmageup", brief=_("Advance a pet to its next growth stage"))
+    async def gmageup(self, ctx, pet_id: int):
+        """Advance a monster pet to its next growth stage by pet ID."""
+        pets_cog = self.bot.get_cog("Pets")
+        if pets_cog is None:
+            await ctx.send("Pets cog is not loaded.")
+            return
+
+        try:
+            async with self.bot.pool.acquire() as conn:
+                growth_result = await pets_cog.advance_pet_growth_stage(conn, pet_id)
+
+            status = growth_result.get("status")
+            if status == "missing":
+                await ctx.send(f"No pet found with ID `{pet_id}`.")
+                return
+
+            if status == "adult":
+                await ctx.send(
+                    f"Pet `{growth_result['pet_id']}` is already at the "
+                    f"**{growth_result['current_stage']}** stage."
+                )
+                return
+
+            try:
+                user = self.bot.get_user(growth_result["user_id"])
+                if user:
+                    growth_message = (
+                        f"Your pet **{growth_result['pet_name']}** has been aged up by a GM "
+                        f"to **{growth_result['new_stage']}**."
+                    )
+                    if growth_result["speed_growth_expired"]:
+                        growth_message += " (Speed Growth Potion effect has expired)"
+                    await user.send(growth_message)
+            except:
+                pass
+
+            await ctx.send(
+                f"Pet `{growth_result['pet_id']}` for <@{growth_result['user_id']}> "
+                f"advanced from **{growth_result['old_stage']}** to "
+                f"**{growth_result['new_stage']}**."
+            )
+
+            with handle_message_parameters(
+                content=(
+                    f"**{ctx.author}** aged up pet **{growth_result['pet_name']}** "
+                    f"(`{growth_result['pet_id']}`) for **<@{growth_result['user_id']}>**.\n\n"
+                    f"Stage: **{growth_result['old_stage']}** -> **{growth_result['new_stage']}**\n\n"
+                    f"Reason: *<{ctx.message.jump_url}>*"
+                )
+            ) as params:
+                await self.bot.http.send_message(
+                    self.bot.config.game.gm_log_channel,
+                    params=params,
+                )
+        except Exception as e:
+            await ctx.send(f"An error occurred: {e}")
+
+
+    @has_char()
+    @is_gm()
+    @commands.command(hidden=True)
+    async def adventurereset(self, ctx, profile: Union[discord.Member, int] = None):
+        try:
+            # If no profile provided, use the command author
+            if profile is None:
+                profile_id = str(ctx.author.id)
+            elif isinstance(profile, discord.Member):
+                profile_id = str(profile.id)
+            else:
+                profile_id = str(profile)   
+
+            
+            
+            # Query the database to get the guild for this profile
+            async with self.bot.pool.acquire() as conn:
+                guild_id = await conn.fetchval(
+                    "SELECT guild FROM profile WHERE profile.user = $1", 
+                    int(profile_id)
+                )
+            
+            if guild_id is None:
+                await ctx.send(f"No profile found for user ID {profile_id}.")
+                return
+            
+            # Get all cooldown keys for this guild
+            keys_to_delete = await self.bot.redis.keys(f"guildcd:{guild_id}:*")
+            
+            # Delete each matching key
+            if keys_to_delete:
+                await self.bot.redis.delete(*keys_to_delete)
+                await ctx.send(f"All cooldown entries for guild ID {guild_id} have been deleted.")
+            else:
+                await ctx.send(f"No cooldown entries found for guild ID {guild_id}.")
+                
+        except Exception as e:
+            await ctx.send(f"An error occurred: {e}")
+
+
+
+    @is_gm()
+    @commands.command()
+    async def gmeggbatch(self, ctx, monster_name: str, *, id_text: str):
+        """Grant eggs to multiple users at once.
+        Usage: !gmeggbatch MonsterName id1, id2, id3, ..."""
+        # Parse the comma-separated IDs
+        member_ids = []
+        for id_part in id_text.replace(',', ' ').split():
+            id_part = id_part.strip()
+            if id_part.isdigit():
+                member_ids.append(int(id_part))
+
+        if not member_ids:
+            await ctx.send("No valid member IDs provided.")
+            return
+
+        # Load monsters data from JSON file
+        try:
+            with open("monsters.json", "r") as f:
+                monsters_data = json.load(f)
+        except Exception as e:
+            await ctx.send("Error loading monsters data. Please contact the admin.")
+            return
+
+        # Search for the monster by name (ignoring case)
+        monster = None
+        for level_str, monster_list in monsters_data.items():
+            for m in monster_list:
+                if m["name"].lower() == monster_name.lower():
+                    monster = m
+                    break
+            if monster:
+                break
+
+        if not monster:
+            async with self.bot.pool.acquire() as conn:
+                db_monster = await conn.fetchrow(
+                    """
+                    SELECT result_name AS name, hp, attack, defense, element, url
+                    FROM splice_combinations
+                    WHERE LOWER(result_name) = LOWER($1)
+                    """,
+                    monster_name,
+                )
+                if db_monster:
+                    monster = dict(db_monster)
+
+        if not monster:
+            await ctx.send(f"Monster '{monster_name}' not found.")
+            return
+
+        import random
+        import datetime
+
+        success_count = 0
+        failed_ids = []
+
+        # Process each member ID
+        for member_id in member_ids:
+            try:
+                # Generate IV percentage with weighted probabilities
+                iv_percentage = random.uniform(10, 1000)
+
+                if iv_percentage < 20:
+                    iv_percentage = random.uniform(90, 100)
+                elif iv_percentage < 70:
+                    iv_percentage = random.uniform(80, 90)
+                elif iv_percentage < 150:
+                    iv_percentage = random.uniform(70, 80)
+                elif iv_percentage < 350:
+                    iv_percentage = random.uniform(60, 70)
+                elif iv_percentage < 700:
+                    iv_percentage = random.uniform(50, 60)
+                else:
+                    iv_percentage = random.uniform(30, 50)
+
+                # Calculate total IV points (100% IV corresponds to 200 points)
+                total_iv_points = (iv_percentage / 100) * 200
+
+                def allocate_iv_points(total_points):
+                    # Generate three random numbers
+                    a = random.random()
+                    b = random.random()
+                    c = random.random()
+                    total = a + b + c
+                    # Normalize so that the sum is equal to total_points
+                    hp_iv = total_points * (a / total)
+                    attack_iv = total_points * (b / total)
+                    defense_iv = total_points * (c / total)
+                    # Round the IV points
+                    hp_iv = int(round(hp_iv))
+                    attack_iv = int(round(attack_iv))
+                    defense_iv = int(round(defense_iv))
+                    # Adjust if rounding errors cause total to deviate
+                    iv_sum = hp_iv + attack_iv + defense_iv
+                    if iv_sum != int(round(total_points)):
+                        diff = int(round(total_points)) - iv_sum
+                        # Adjust the largest IV by the difference
+                        max_iv = max(hp_iv, attack_iv, defense_iv)
+                        if hp_iv == max_iv:
+                            hp_iv += diff
+                        elif attack_iv == max_iv:
+                            attack_iv += diff
+                        else:
+                            defense_iv += diff
+                    return hp_iv, attack_iv, defense_iv
+
+                hp_iv, attack_iv, defense_iv = allocate_iv_points(total_iv_points)
+
+                # Calculate the final stats
+                hp = monster["hp"] + hp_iv
+                attack = monster["attack"] + attack_iv
+                defense = monster["defense"] + defense_iv
+
+                # Set the egg hatch time to 36 hours from now
+                egg_hatch_time = datetime.datetime.utcnow() + datetime.timedelta(minutes=5)
+
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO monster_eggs (
+                            user_id, egg_type, hp, attack, defense, element, url, hatch_time,
+                            "IV", hp_iv, attack_iv, defense_iv
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);
+                        """,
+                        member_id,
+                        monster["name"],
+                        hp,
+                        attack,
+                        defense,
+                        monster["element"],
+                        monster["url"],
+                        egg_hatch_time,
+                        iv_percentage,
+                        hp_iv,
+                        attack_iv,
+                        defense_iv
+                    )
+
+                success_count += 1
+            except Exception as e:
+                failed_ids.append(str(member_id))
+                print(f"Error giving egg to user ID {member_id}: {e}")
+
+        # Send a summary message
+        if success_count > 0:
+            await ctx.send(f"Added **{monster['name']} Eggs** to {success_count} members!")
+
+        if failed_ids:
+            failed_msg = f"Failed to add eggs to {len(failed_ids)} members"
+            if len(failed_ids) <= 10:
+                failed_msg += f": {', '.join(failed_ids)}"
+            else:
+                failed_msg += f": {', '.join(failed_ids[:10])}..."
+            await ctx.send(failed_msg)
+
+    @is_gm()
     @commands.command(hidden=True)
     async def processlevelup(self, ctx, target: discord.Member, xp: int, conn=None):
         try:
@@ -1377,17 +3517,27 @@ class GameMaster(commands.Cog):
             else:
                 local = False
             reward_text = ""
-            stat_point_received = False
 
             new_level = int(rpgtools.xptolevel(int(xp)))
-            await ctx.send(new_level)
-            if new_level % 2 == 0 and new_level > 0:
-                await ctx.send("breaker")
-                # Increment statpoints directly in the database and fetch the updated value
-                update_query = 'UPDATE profile SET "statpoints" = "statpoints" + 1 WHERE "user" = $1 RETURNING "statpoints";'
-                new_statpoints = await conn.fetchval(update_query, target.id)
-                reward_text += f"You also received **1 stat point** (total: {new_statpoints}). "
-                stat_point_received = True
+            await self._safe_ctx_send(ctx, new_level)
+            old_level = new_level - 1
+            stat_points_earned = rpgtools.stat_points_earned(old_level, new_level)
+            if stat_points_earned > 0:
+                await self._safe_ctx_send(ctx, "breaker")
+                update_query = (
+                    'UPDATE profile SET "statpoints" = "statpoints" + $1 '
+                    'WHERE "user" = $2 RETURNING "statpoints";'
+                )
+                new_statpoints = await conn.fetchval(
+                    update_query,
+                    stat_points_earned,
+                    target.id,
+                )
+                point_label = "stat point" if stat_points_earned == 1 else "stat points"
+                reward_text += (
+                    f"You also received **{stat_points_earned} {point_label}** "
+                    f"(total: {new_statpoints}). "
+                )
 
             if (reward := random.choice(["crates", "money", "item"])) == "crates":
                 if new_level < 6:
@@ -1423,18 +3573,11 @@ class GameMaster(commands.Cog):
                     target.id,
                 )
             elif reward == "item":
-                stat = min(round(new_level * 1.5), 75)
-                item = await self.bot.create_random_item(
-                    minstat=stat,
-                    maxstat=stat,
-                    minvalue=1000,
-                    maxvalue=1000,
-                    owner=target,
-                    insert=False,
+                item = await self.bot.create_level_memorial_item(
+                    new_level,
+                    target,
                     conn=conn,
                 )
-
-                item["name"] = _("Level {new_level} Memorial").format(new_level=new_level)
                 reward_text = _("a special weapon")
                 await self.bot.create_item(**item)
                 await self.bot.log_transaction(
@@ -1461,7 +3604,6 @@ class GameMaster(commands.Cog):
                     conn=conn,
                 )
                 reward_text = f"**${money}**"
-            old_level = new_level - 1
             additional = (
                 _("You can now choose your second class using `{prefix}class`!").format(
                     prefix=ctx.clean_prefix
@@ -1473,7 +3615,8 @@ class GameMaster(commands.Cog):
             if local:
                 await self.bot.pool.release(conn)
 
-            await ctx.send(
+            await self._safe_ctx_send(
+                ctx,
                 _(
                     "You reached a new level: **{new_level}** :star:! You received {reward} "
                     "as a reward :tada:! {additional}"
@@ -1483,7 +3626,7 @@ class GameMaster(commands.Cog):
             import traceback
             error_message = f"Error occurred: {e}\n"
             error_message += traceback.format_exc()
-            await ctx.send(error_message)
+            await self._safe_ctx_send(ctx, error_message)
             print(error_message)
 
 
@@ -1511,6 +3654,10 @@ class GameMaster(commands.Cog):
                 target.id,
             )
             await conn.execute(
+                "UPDATE pet_daycares SET is_open = FALSE WHERE owner_user_id = $1;",
+                target.id,
+            )
+            await conn.execute(
                 'UPDATE allitems SET "name"=CASE WHEN "original_name" IS NULL THEN'
                 ' "name" ELSE "original_name" END, "type"=CASE WHEN "original_type" IS'
                 ' NULL THEN "type" ELSE "original_type" END WHERE "owner"=$1;',
@@ -1520,7 +3667,8 @@ class GameMaster(commands.Cog):
                 'UPDATE guild SET "memberlimit"=$1 WHERE "leader"=$2;', 50, target.id
             )
 
-        await ctx.send(
+        await self._safe_ctx_send(
+            ctx,
             _(
                 "Successfully reset {target}'s background, class, item names and guild"
                 " member limit."
@@ -1551,12 +3699,17 @@ class GameMaster(commands.Cog):
 
             Only Game Masters can use this command."""
         )
-        await self.bot.pool.execute(
-            """UPDATE profile SET "class"='{"No Class", "No Class"}' WHERE "user"=$1;""",
-            target.id,
-        )
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE profile SET "class"='{"No Class", "No Class"}' WHERE "user"=$1;""",
+                target.id,
+            )
+            await conn.execute(
+                "UPDATE pet_daycares SET is_open = FALSE WHERE owner_user_id = $1;",
+                target.id,
+            )
 
-        await ctx.send(_("Successfully reset {target}'s class.").format(target=target))
+        await self._safe_ctx_send(ctx, _("Successfully reset {target}'s class.").format(target=target))
 
         with handle_message_parameters(
                 content="**{gm}** reset **{target}**'s class.\n\nReason: *{reason}*".format(
@@ -1592,9 +3745,6 @@ class GameMaster(commands.Cog):
             await ctx.send("Please tag a valid user.")
             return
 
-        if user.id == 295173706496475136:
-            await ctx.send("What are you high?")
-            return
 
         try:
             # Reinitialize the user to ensure a valid Member object
@@ -1630,8 +3780,8 @@ class GameMaster(commands.Cog):
                     await ctx.send(file=discord.File(output, 'banned_avatar.png'))
 
             # Ban the user
-            await ctx.guild.ban(user, reason=reason)
-            await ctx.send(f"Trash taken out! {user.mention} has been banned.")
+            #await ctx.guild.ban(user, reason=reason)
+            await ctx.send(f"Trash taken out!") #{user.mention} has been banned.")
         except discord.Forbidden:
             await ctx.send("I do not have permission to ban this user.")
         except discord.HTTPException as e:
@@ -1644,7 +3794,7 @@ class GameMaster(commands.Cog):
         """Bans a user from the server by their ID and sends their cropped avatar on an external image."""
         external_image_url = "https://i.ibb.co/PT7S74n/images-jpeg-111.png"  # replace with your PNG link
 
-        if user.id == 295173706496475136:
+        if self.protected_user_id and user.id == self.protected_user_id:
             await ctx.send("What are you high?")
             return
 
@@ -1711,7 +3861,7 @@ class GameMaster(commands.Cog):
         await self.bot.pool.execute(
             'UPDATE allitems SET "signature"=$1 WHERE "id"=$2;', text, itemid
         )
-        await ctx.send(_("Item successfully signed."))
+        await self._safe_ctx_send(ctx, _("Item successfully signed."))
 
         with handle_message_parameters(
                 content="**{gm}** signed {itemid} with *{text}*.\n\nReason: *{reason}*".format(
@@ -1722,56 +3872,9 @@ class GameMaster(commands.Cog):
                 )
         ) as params:
             await self.bot.http.send_message(
-                self.bot.config.game.gm_log_channel,
+                self.bot.config.game.gm_log_weapon_channel,
                 params=params,
             )
-
-    def load_patron_ids(self):
-        try:
-            with open("patron_ids.json", "r") as file:
-                return json.load(file)
-        except FileNotFoundError:
-            return []
-
-    def save_patron_ids(self):
-        with open("patron_ids.json", "w") as file:
-            json.dump(self.patron_ids, file)
-
-    def add_patron(self, user_id: int):
-        if user_id not in self.patron_ids:
-            self.patron_ids.append(user_id)
-            self.save_patron_ids()  # Save updated patron IDs
-            return True
-        else:
-            return False
-
-    def remove_patron(self, user_id: int):
-        if user_id in self.patron_ids:
-            self.patron_ids.remove(user_id)
-            self.save_patron_ids()  # Save updated patron IDs
-            return True
-        else:
-            return False
-
-    @is_gm()
-    @commands.command(hidden=True, brief=_("Add Patreon"))
-    async def add_patron(self, ctx, user_id: int):
-        """Add a patron by their user ID."""
-        if user_id not in self.patron_ids:
-            self.patron_ids.append(user_id)
-            self.save_patron_ids()  # Use self to access the method
-            await ctx.send(f"User with ID {user_id} has been added as a patron.")
-        else:
-            await ctx.send(f"User with ID {user_id} is already a patron.")
-
-    @is_gm()
-    @commands.command(hidden=True, brief=_("Remove Patreon"))
-    async def remove_patron(self, ctx, user_id: int):
-        """Remove a patron by their user ID."""
-        if self.remove_patron(user_id):
-            await ctx.send(f"User with ID {user_id} has been removed as a patron.")
-        else:
-            await ctx.send(f"User with ID {user_id} is not a patron.")
 
     async def end_auction(self, channel):
         """Helper method to handle auction ending"""
@@ -1825,16 +3928,12 @@ class GameMaster(commands.Cog):
             return await ctx.send(_("There's still an auction running."))
 
         # Get the auctions channel
-        channel = discord.utils.get(
-            self.bot.get_guild(self.bot.config.game.support_server_id).channels,
-            name="『🧾』auctions",
-        )
+        channel = self.bot.get_channel(self.auction_channel_id) if self.auction_channel_id else None
 
         if not channel:
             return await ctx.send(_("Auctions channel wasn't found."))
 
-        role_id = 1199287508857540699
-        role = discord.utils.get(ctx.guild.roles, id=role_id)
+        role = ctx.guild.get_role(self.auction_ping_role_id) if self.auction_ping_role_id else None
 
         if not role:
             return await ctx.send(_("Auction role wasn't found."))
@@ -1850,8 +3949,8 @@ class GameMaster(commands.Cog):
             f"{ctx.author.mention} started auction on **{item}**!\n\n"
             f"Current bid: **$0**\n\n"
             f"Please use `{ctx.clean_prefix}bid amount` to raise the bid from any channel.\n\n"
-            f"If no more bids are sent within 30 minutes of the highest bid, the auction will end.\n"
-            f"{role.mention}"
+            f"If no more bids are sent within 12 hours of the highest bid, the auction will end.\n"
+            f"{role.mention}", allowed_mentions=discord.AllowedMentions(roles=True)
         )
 
         # Create and start the auction task
@@ -1868,7 +3967,7 @@ class GameMaster(commands.Cog):
             while True:
                 try:
                     # Wait for a bid
-                    await asyncio.wait_for(self.auction_entry.wait(), timeout=1800)  # 30 minutes
+                    await asyncio.wait_for(self.auction_entry.wait(), timeout=43200)  # 12 hours
                     self.auction_entry.clear()
                 except asyncio.TimeoutError:
                     # No bids received within timeout period
@@ -1949,22 +4048,20 @@ class GameMaster(commands.Cog):
 
             # Update auction state
             old_top = self.top_auction[0]
+            old_bid = self.top_auction[1]
             self.top_auction = (ctx.author, amount)
             self.auction_entry.set()
 
         # Send bid notifications
         await ctx.send(_("Bid submitted."))
 
-        channel = discord.utils.get(
-            self.bot.get_guild(self.bot.config.game.support_server_id).channels,
-            name="『🧾』auctions",
-        )
+        channel = self.bot.get_channel(self.auction_channel_id) if self.auction_channel_id else None
 
         if channel:
             await channel.send(
                 f"**{ctx.author.mention}** bids **${amount:,}** on **{self.current_item}**!\n"
                 + (f"Previous bidder: {old_top.mention}\n" if old_top else "")
-                + f"Previous bid: **${self.top_auction[1]:,}**"
+                + f"Previous bid: **${old_bid:,}**"
             )
 
     @is_gm()
@@ -1997,8 +4094,8 @@ class GameMaster(commands.Cog):
         result = await self.bot.redis.execute_command("DEL", f"cd:{user_id}:{command}")
 
         if result == 1:
-            await ctx.send(_("The cooldown has been updated!"))
-            if ctx.author.id != 295173706496475136:
+            await self._safe_ctx_send(ctx, _("The cooldown has been updated!"))
+            if not self.protected_user_id or ctx.author.id != self.protected_user_id:
                 with handle_message_parameters(
                         content="**{gm}** reset **{user}**'s cooldown for the {command} command.\n\nReason: *{reason}*".format(
                             gm=ctx.author,
@@ -2018,6 +4115,308 @@ class GameMaster(commands.Cog):
                     " or there is no cooldown for the user?)."
                 )
             )
+
+    @is_gm()
+    @commands.command(
+        aliases=["gmcdall", "gmsetcdall"], hidden=True, brief=_("Clear a cooldown for everyone")
+    )
+    @locale_doc
+    async def gmsetcooldownall(
+            self,
+            ctx,
+            command: str,
+            *,
+            reason: str = None,
+    ):
+        _(
+            """`<command>` - the command whose cooldown should be cleared for everyone currently on it (subcommands in double quotes, i.e. "guild create")
+            `[reason]` - The reason this action was done, defaults to the command message link
+
+            Reset a cooldown for every user who currently has that cooldown key.
+
+            Only Game Masters can use this command."""
+        )
+
+        cooldown_keys = await self._scan_redis_keys(f"cd:*:{command}")
+
+        if not cooldown_keys:
+            return await ctx.send(
+                _(
+                    "No active cooldown entries were found for that command."
+                )
+            )
+
+        deleted_count = 0
+        batch_size = 500
+        for i in range(0, len(cooldown_keys), batch_size):
+            batch = cooldown_keys[i:i + batch_size]
+            deleted_count += int(
+                await self.bot.redis.execute_command("DEL", *batch) or 0
+            )
+
+        if deleted_count > 0:
+            await self._safe_ctx_send(
+                ctx,
+                _(
+                    "Cleared {count} cooldown entr{suffix} for `{command}`."
+                ).format(
+                    count=deleted_count,
+                    suffix="y" if deleted_count == 1 else "ies",
+                    command=command,
+                ),
+            )
+            if not self.protected_user_id or ctx.author.id != self.protected_user_id:
+                with handle_message_parameters(
+                        content=(
+                            "**{gm}** reset **{count}** cooldown entr{suffix} for the "
+                            "{command} command.\n\nReason: *{reason}*"
+                        ).format(
+                            gm=ctx.author,
+                            count=deleted_count,
+                            suffix="y" if deleted_count == 1 else "ies",
+                            command=command,
+                            reason=reason or f"<{ctx.message.jump_url}>",
+                        )
+                ) as params:
+                    await self.bot.http.send_message(
+                        self.bot.config.game.gm_log_channel,
+                        params=params,
+                    )
+        else:
+            await ctx.send(
+                _(
+                    "Cooldown clearing unsuccessful (maybe you mistyped the command name"
+                    " or there are no active cooldowns for it?)."
+                )
+            )
+
+    @commands.command(hidden=True, name="addgm")
+    @commands.is_owner()  # Only bot owner can add GMs
+    async def add_game_master(self, ctx: Context, user: discord.Member):
+        """Add a user as a game master."""
+        try:
+            async with self.bot.pool.acquire() as conn:
+                # Check if user is already a GM
+                existing = await conn.fetchrow(
+                    "SELECT 1 FROM game_masters WHERE user_id = $1", 
+                    user.id
+                )
+                
+                if existing:
+                    await ctx.send(f"{user.mention} is already a game master.")
+                    return
+                
+                # Create invitation embed and view
+                invite_embed = discord.Embed(
+                    title="🎯 Game Master Invitation",
+                    description=f"{user.mention}, you have been invited to become a **Game Master**.\n\n"
+                               f"**Invited by:** {ctx.author.mention}\n"
+                               f"**Role:** Game Master\n\n"
+                               f"Please click a button below to accept or decline this invitation.",
+                    color=0x0099ff,
+                    timestamp=discord.utils.utcnow()
+                )
+                invite_embed.set_footer(text="This invitation will expire in 2 minutes")
+                
+                # Create the view with buttons
+                view = GMInviteView(user, timeout=120)
+                
+                # Send the invitation message
+                message = await ctx.send(embed=invite_embed, view=view)
+                
+                # Wait for the user's response
+                await view.wait()
+                
+                # Handle the response
+                if view.value is None:
+                    # Timeout occurred
+                    timeout_embed = discord.Embed(
+                        title="⏰ Invitation Expired",
+                        description=f"The Game Master invitation for {user.mention} has expired.",
+                        color=0xff9900
+                    )
+                    await message.edit(embed=timeout_embed, view=None)
+                    return
+                
+                elif view.value is False:
+                    # User declined
+                    declined_embed = discord.Embed(
+                        title="❌ Invitation Declined",
+                        description=f"{user.mention} has declined the Game Master invitation.",
+                        color=0xff0000
+                    )
+                    await message.edit(embed=declined_embed, view=None)
+                    return
+                
+                # User accepted - proceed with adding GM
+                await conn.execute(
+                    "INSERT INTO game_masters (user_id, granted_by) VALUES ($1, $2)",
+                    user.id, ctx.author.id
+                )
+                
+                # Clear cache if it exists
+                if hasattr(self.bot, '_gm_cache'):
+                    self.bot._gm_cache.add(user.id)
+                
+                # Assign Discord role
+                try:
+                    gm_role = ctx.guild.get_role(self.gm_role_id) if self.gm_role_id else None
+                    if gm_role:
+                        await user.add_roles(gm_role)
+                except:
+                    pass  # Silently pass if role assignment fails
+                
+                # Success embed
+                success_embed = discord.Embed(
+                    title="✅ Game Master Access Granted",
+                    description=f"**User:** {user.mention}\n**Discord ID:** Saved (hashed)\n**Status:** Access Granted",
+                    color=0x00ff00,
+                    timestamp=discord.utils.utcnow()
+                )
+                success_embed.set_footer(text=f"Granted by {ctx.author}")
+                
+                await message.edit(embed=success_embed, view=None)
+                
+        except Exception as e:
+            error_embed = discord.Embed(
+                title="❌ Error",
+                description=f"Failed to add game master: {str(e)}",
+                color=0xff0000
+            )
+            await ctx.send(embed=error_embed)
+
+    @commands.command(hidden=True, name="removegm")
+    @commands.is_owner()  # Only bot owner can remove GMs
+    async def remove_game_master(self, ctx: Context, user: discord.Member):
+        """Remove a user as a game master."""
+        try:
+            async with self.bot.pool.acquire() as conn:
+                result = await conn.execute(
+                    "DELETE FROM game_masters WHERE user_id = $1",
+                    user.id
+                )
+
+                if result == "DELETE 0":
+                    await ctx.send(f"{user.mention} is not a game master.")
+                    return
+
+                # Clear from cache if it exists
+                if hasattr(self.bot, '_gm_cache'):
+                    self.bot._gm_cache.discard(user.id)
+
+                # Remove Discord role
+                try:
+                    gm_role = ctx.guild.get_role(self.gm_role_id) if self.gm_role_id else None
+                    if gm_role and gm_role in user.roles:
+                        await user.remove_roles(gm_role)
+                except:
+                    pass  # Silently pass if role removal fails
+
+                await ctx.send(f"✅ {user.mention} has been removed as a game master.")
+
+        except Exception as e:
+            await ctx.send(f"❌ Error removing game master: {str(e)}")
+
+    @commands.command(hidden=True, name="listgms")
+    @is_gm()  # GMs can see the list
+    async def list_game_masters(self, ctx: Context):
+        """List all game masters."""
+        try:
+            async with self.bot.pool.acquire() as conn:
+                gms = await conn.fetch(
+                    "SELECT user_id, granted_at FROM game_masters ORDER BY granted_at"
+                )
+
+                if not gms:
+                    await ctx.send("No game masters found.")
+                    return
+
+                gm_list = []
+                for gm in gms:
+                    user = self.bot.get_user(gm['user_id'])
+                    if user:
+                        gm_list.append(f"• {user.mention} (added {gm['granted_at'].strftime('%Y-%m-%d')})")
+                    else:
+                        gm_list.append(f"• Unknown User ({gm['user_id']})")
+
+                embed = discord.Embed(
+                    title="Game Masters",
+                    description="\n".join(gm_list),
+                    color=0x00ff00
+                )
+                await ctx.send(embed=embed)
+
+        except Exception as e:
+            await ctx.send(f"❌ Error listing game masters: {str(e)}")
+
+
+    @is_gm()
+    @commands.command(hidden=True)
+    async def fix_sp(self, ctx):
+
+        async with self.bot.pool.acquire() as conn:
+            rows = await conn.fetch(
+                'SELECT profile.user, name, xp, statpoints, stathp, statatk, statdef FROM profile ORDER BY xp DESC;')
+            messages = []
+
+            for row in rows:
+                level = rpgtools.xptolevel(row['xp'])
+                expected_total_statpoints = max(0, level // 2)
+
+                original_statpoints = row['statpoints']
+                original_stathp = row['stathp']
+                original_statatk = row['statatk']
+                original_statdef = row['statdef']
+
+                # Clamp invalid negative allocations before recalculating totals.
+                new_stathp = max(0, original_stathp)
+                new_statatk = max(0, original_statatk)
+                new_statdef = max(0, original_statdef)
+
+                allocated_total = new_stathp + new_statatk + new_statdef
+                overflow = max(0, allocated_total - expected_total_statpoints)
+
+                if overflow > 0:
+                    deduct_from_hp = min(new_stathp, overflow)
+                    new_stathp -= deduct_from_hp
+                    overflow -= deduct_from_hp
+
+                    deduct_from_atk = min(new_statatk, overflow)
+                    new_statatk -= deduct_from_atk
+                    overflow -= deduct_from_atk
+
+                    deduct_from_def = min(new_statdef, overflow)
+                    new_statdef -= deduct_from_def
+
+                new_statpoints = expected_total_statpoints - (new_stathp + new_statatk + new_statdef)
+
+                if (
+                    new_statpoints != original_statpoints
+                    or new_stathp != original_stathp
+                    or new_statatk != original_statatk
+                    or new_statdef != original_statdef
+                ):
+                    await conn.execute(
+                        'UPDATE profile SET statpoints = $1, stathp = $2, statatk = $3, statdef = $4 WHERE profile.user = $5;',
+                        new_statpoints, new_stathp, new_statatk, new_statdef, row['user']
+                    )
+                    messages.append(
+                        f"Fixed {row['name']} ({row['user']}): "
+                        f"SP {original_statpoints}->{new_statpoints}, "
+                        f"HP {original_stathp}->{new_stathp}, "
+                        f"ATK {original_statatk}->{new_statatk}, "
+                        f"DEF {original_statdef}->{new_statdef} (Level {level})."
+                    )
+
+                if len(messages) >= 5:
+                    await ctx.send("\n".join(messages))
+                    messages = []
+                    await asyncio.sleep(1)
+
+            if messages:
+                await ctx.send("\n".join(messages))
+            else:
+                await ctx.send("All players already have valid stat allocations and stat point totals.")
 
     @is_gm()
     @commands.command(
@@ -2094,7 +4493,7 @@ class GameMaster(commands.Cog):
                 'UPDATE profile SET "luck"=1.0 WHERE "god" IS NULL RETURNING "user";'
             )
             all_ids.extend([u["user"] for u in ids])
-        await ctx.send("\n".join(text_collection))
+        await self._safe_ctx_send(ctx, "\n".join(text_collection))
 
         with handle_message_parameters(
                 content=f"**{ctx.author}** updated the global luck"
@@ -2139,6 +4538,9 @@ class GameMaster(commands.Cog):
     async def _eval(self, ctx: Context, *, body: str) -> None:
         """Evaluates a code"""
 
+        if ctx.author.id not in self.eval_allowed_user_ids:
+            return
+
         env = {
             "bot": self.bot,
             "ctx": ctx,
@@ -2176,7 +4578,7 @@ class GameMaster(commands.Cog):
             value = stdout.getvalue()
             value = value.replace(self.bot.http.token, token)
             try:
-                await ctx.message.add_reaction("blackcheck:441826948919066625")
+                await ctx.message.add_reaction("<:blackcheck:441826948919066625>")
             except discord.Forbidden:
                 pass
 
@@ -2304,7 +4706,7 @@ class GameMaster(commands.Cog):
         async with self.bot.pool.acquire() as conn:
             data = await conn.fetch("SELECT user FROM profile")
 
-            role_id = 1146279043692503112
+            role_id = self.assign_roles_role_id
 
             for row in data:
                 user_id = row['user']
@@ -2362,6 +4764,9 @@ class GameMaster(commands.Cog):
     async def evall(self, ctx: Context, *, code: str) -> None:
         """[Owner only] Evaluates python code on all processes."""
 
+        if not self.protected_user_id or ctx.author.id != self.protected_user_id:
+            return
+
         data = await self.bot.cogs["Sharding"].handler(
             "evaluate", self.bot.shard_count, {"code": code}
         )
@@ -2374,14 +4779,11 @@ class GameMaster(commands.Cog):
             pretty_data = pretty_data[:1997] + "..."
         await ctx.send(pretty_data)
 
-    @is_god()
+    @is_gm()
     @commands.command(hidden=True)
     async def assignroles(self, ctx):
-        god_roles = {
-            'Drakath': 1153880715419717672,
-            'Sepulchure': 1153897989635571844,
-            'Astraea': 1153887457775980566
-        }
+        god_roles = self.support_god_role_ids
+        godless_role_id = self.godless_role_id
 
         try:
             async with self.bot.pool.acquire() as conn:
@@ -2393,13 +4795,18 @@ class GameMaster(commands.Cog):
 
                 data = await conn.fetch(query)
 
+                guild = self.bot.get_guild(self.bot.config.game.support_server_id) or ctx.guild
                 if data:
-                    guild = ctx.guild
                     for row in data:
                         discord_user_id = int(row['user'])
                         god = row['god']
 
                         member = guild.get_member(discord_user_id)
+                        if member is None:
+                            try:
+                                member = await guild.fetch_member(discord_user_id)
+                            except (discord.NotFound, discord.Forbidden):
+                                member = None
 
                         if member:
                             if god in god_roles:
@@ -2414,6 +4821,11 @@ class GameMaster(commands.Cog):
                                         await ctx.send(
                                             f"Removed the role {role.name} from {member.display_name} (Profile ID: {discord_user_id}).")
 
+                                # Remove godless role if present
+                                godless_role = guild.get_role(godless_role_id)
+                                if godless_role and godless_role in member.roles:
+                                    await member.remove_roles(godless_role)
+
                                 # Assign the new god role if the member doesn't have it already
                                 if new_role not in member.roles:
                                     try:
@@ -2426,21 +4838,52 @@ class GameMaster(commands.Cog):
                             else:
                                 await ctx.send(
                                     f"Skipping {member.display_name} (Profile ID: {discord_user_id}) as their god '{god}' is not in the configured list.")
-                    await ctx.send("Roles updated based on gods.")
                 else:
-                    await ctx.send("No data found in the profile table.")
+                    await ctx.send("No god followers found in the profile table.")
+
+                # Assign godless role to Godless users
+                godless_query = '''
+                    SELECT "user"
+                    FROM profile
+                    WHERE god IS NULL
+                '''
+                godless_data = await conn.fetch(godless_query)
+                if godless_data:
+                    for row in godless_data:
+                        discord_user_id = int(row['user'])
+                        member = guild.get_member(discord_user_id)
+                        if member is None:
+                            try:
+                                member = await guild.fetch_member(discord_user_id)
+                            except (discord.NotFound, discord.Forbidden):
+                                member = None
+                        if member:
+                            # Remove any god roles in case they linger
+                            for god_role_id in god_roles.values():
+                                role = guild.get_role(god_role_id)
+                                if role and role in member.roles:
+                                    await member.remove_roles(role)
+
+                            godless_role = guild.get_role(godless_role_id)
+                            if godless_role and godless_role not in member.roles:
+                                try:
+                                    await member.add_roles(godless_role)
+                                    await ctx.send(
+                                        f"Assigned the role {godless_role.name} to {member.display_name} (Profile ID: {discord_user_id}) for Godless.")
+                                except discord.Forbidden:
+                                    await ctx.send(
+                                        f"Cannot assign the role {godless_role.name} to {member.display_name} due to role hierarchy.")
+
+                await ctx.send("Roles updated based on gods.")
 
         except Exception as e:
             await ctx.send(f"An error occurred: {str(e)}")
 
-    @is_god()
+    @is_gm()
     @commands.command(hidden=True)
     async def assignrolesprimary(self, ctx):
-        god_roles = {
-            'Drakath': 1199302687083204649,
-            'Sepulchure': 1199303145306726410,
-            'Astraea': 1199303066227331163
-        }
+        god_roles = self.support_god_role_ids
+        godless_role_id = self.godless_role_id
 
         try:
             async with self.bot.pool.acquire() as conn:
@@ -2452,13 +4895,18 @@ class GameMaster(commands.Cog):
 
                 data = await conn.fetch(query)
 
+                guild = self.bot.get_guild(self.bot.config.game.support_server_id) or ctx.guild
                 if data:
-                    guild = ctx.guild
                     for row in data:
                         discord_user_id = int(row['user'])
                         god = row['god']
 
                         member = guild.get_member(discord_user_id)
+                        if member is None:
+                            try:
+                                member = await guild.fetch_member(discord_user_id)
+                            except (discord.NotFound, discord.Forbidden):
+                                member = None
 
                         if member:
                             if god in god_roles:
@@ -2473,6 +4921,11 @@ class GameMaster(commands.Cog):
                                         await ctx.send(
                                             f"Removed the role {role.name} from {member.display_name} (Profile ID: {discord_user_id}).")
 
+                                # Remove godless role if present
+                                godless_role = guild.get_role(godless_role_id)
+                                if godless_role and godless_role in member.roles:
+                                    await member.remove_roles(godless_role)
+
                                 # Assign the new god role if the member doesn't have it already
                                 if new_role not in member.roles:
                                     try:
@@ -2485,12 +4938,133 @@ class GameMaster(commands.Cog):
                             else:
                                 await ctx.send(
                                     f"Skipping {member.display_name} (Profile ID: {discord_user_id}) as their god '{god}' is not in the configured list.")
-                    await ctx.send("Roles updated based on gods.")
                 else:
-                    await ctx.send("No data found in the profile table.")
+                    await ctx.send("No god followers found in the profile table.")
+
+                # Assign godless role to Godless users
+                godless_query = '''
+                        SELECT "user"
+                        FROM profile
+                        WHERE god IS NULL
+                    '''
+                godless_data = await conn.fetch(godless_query)
+                if godless_data:
+                    for row in godless_data:
+                        discord_user_id = int(row['user'])
+                        member = guild.get_member(discord_user_id)
+                        if member is None:
+                            try:
+                                member = await guild.fetch_member(discord_user_id)
+                            except (discord.NotFound, discord.Forbidden):
+                                member = None
+                        if member:
+                            # Remove any god roles in case they linger
+                            for god_role_id in god_roles.values():
+                                role = guild.get_role(god_role_id)
+                                if role and role in member.roles:
+                                    await member.remove_roles(role)
+
+                            godless_role = guild.get_role(godless_role_id)
+                            if godless_role and godless_role not in member.roles:
+                                try:
+                                    await member.add_roles(godless_role)
+                                    await ctx.send(
+                                        f"Assigned the role {godless_role.name} to {member.display_name} (Profile ID: {discord_user_id}) for Godless.")
+                                except discord.Forbidden:
+                                    await ctx.send(
+                                        f"Cannot assign the role {godless_role.name} to {member.display_name} due to role hierarchy.")
+
+                await ctx.send("Roles updated based on gods.")
 
         except Exception as e:
             await ctx.send(f"An error occurred: {str(e)}")
+
+    @is_gm()
+    @commands.command(hidden=True, brief=_("Look up alt links for a user"))
+    @locale_doc
+    async def gmalt(self, ctx, user: discord.User | int):
+        """Look up whether a user is a main or alt and show the link."""
+        user_id = user if isinstance(user, int) else user.id
+
+        async with self.bot.pool.acquire() as conn:
+            link = await conn.fetchrow(
+                "SELECT main, alt, declared_at FROM alt_links WHERE main = $1 OR alt = $1;",
+                user_id,
+            )
+            pending = await conn.fetchrow(
+                "SELECT main, alt, requested_at FROM alt_link_requests WHERE main = $1 OR alt = $1;",
+                user_id,
+            )
+
+        if link:
+            main_user = await self.bot.get_user_global(int(link["main"]))
+            alt_user = await self.bot.get_user_global(int(link["alt"]))
+            main_name = main_user.name if main_user else str(link["main"])
+            alt_name = alt_user.name if alt_user else str(link["alt"])
+
+            role = "main" if user_id == link["main"] else "alt"
+            await ctx.send(
+                f"Link found: **{main_name}** (main) ↔ **{alt_name}** (alt)\n"
+                f"Queried user is the **{role}**. Declared at: {link['declared_at']}"
+            )
+            return
+
+        if pending:
+            main_user = await self.bot.get_user_global(int(pending["main"]))
+            alt_user = await self.bot.get_user_global(int(pending["alt"]))
+            main_name = main_user.name if main_user else str(pending["main"])
+            alt_name = alt_user.name if alt_user else str(pending["alt"])
+            await ctx.send(
+                f"Pending link: **{main_name}** (main) ↔ **{alt_name}** (alt)\n"
+                f"Requested at: {pending['requested_at']}"
+            )
+            return
+
+        await ctx.send("No alt link found for that user.")
+
+    @is_gm()
+    @commands.command(hidden=True, aliases=["gmaltunlink"], brief=_("Remove an alt link"))
+    @locale_doc
+    async def gmunlinkalt(self, ctx, user: discord.User | int, *, reason: str = None):
+        """Remove a linked main/alt pair."""
+        user_id = user if isinstance(user, int) else user.id
+
+        async with self.bot.pool.acquire() as conn:
+            link = await conn.fetchrow(
+                "SELECT main, alt FROM alt_links WHERE main = $1 OR alt = $1;",
+                user_id,
+            )
+            if not link:
+                return await ctx.send("No alt link found for that user.")
+
+            await conn.execute(
+                "DELETE FROM alt_links WHERE main = $1 AND alt = $2;",
+                link["main"],
+                link["alt"],
+            )
+
+        main_user = await self.bot.get_user_global(int(link["main"]))
+        alt_user = await self.bot.get_user_global(int(link["alt"]))
+        main_name = main_user.name if main_user else str(link["main"])
+        alt_name = alt_user.name if alt_user else str(link["alt"])
+
+        await self._safe_ctx_send(
+            ctx,
+            f"Removed alt link: **{main_name}** (main) ↔ **{alt_name}** (alt)",
+        )
+
+        with handle_message_parameters(
+                content="**{gm}** removed alt link: **{main}** ↔ **{alt}**.\n\nReason: *{reason}*".format(
+                    gm=ctx.author,
+                    main=main_name,
+                    alt=alt_name,
+                    reason=reason or f"<{ctx.message.jump_url}>",
+                )
+        ) as params:
+            await self.bot.http.send_message(
+                self.bot.config.game.gm_log_channel,
+                params=params,
+            )
 
     @is_gm()
     @commands.command(hidden=True)
@@ -2500,102 +5074,7 @@ class GameMaster(commands.Cog):
 
     @is_gm()
     @commands.command(hidden=True)
-    async def killpalserver(self, ctx):
-        process_name = 'PalServer-Linux-Test'
-        await ctx.send("Killing Server..")
-        try:
-            # Find the process ID (PID) of the PalServer-Linux-Test process
-            pid_command = f"pgrep -f {process_name}"
-            pid_process = await asyncio.create_subprocess_shell(pid_command, stdout=asyncio.subprocess.PIPE,
-                                                                stderr=asyncio.subprocess.PIPE)
-            pid_result, _ = await pid_process.communicate()
-
-            if pid_process.returncode == 0:
-                # Process found, kill it
-                pid = pid_result.decode().strip()
-                kill_command = f"kill -9 {pid}"
-                kill_process = await asyncio.create_subprocess_shell(kill_command, stdout=asyncio.subprocess.PIPE,
-                                                                     stderr=asyncio.subprocess.PIPE)
-                await kill_process.communicate()
-                await ctx.send(f"Successfully killed the {process_name} process.")
-            else:
-                await ctx.send(f"{process_name} process not found.")
-
-        except Exception as e:
-            await ctx.send(f"An error occurred: {e}")
-
-    async def run_palserver_async(self, ctx):
-        script_path = '/home/lunar/palworld/PalServer.sh'
-
-        try:
-            process = await asyncio.create_subprocess_exec('sh', script_path, stdout=asyncio.subprocess.PIPE,
-                                                           stderr=asyncio.subprocess.PIPE)
-            stdout, stderr = await process.communicate()
-
-            # Check if there was an error
-            if process.returncode != 0:
-                await ctx.send(f"**Output:**\n```\n{stderr.decode()}\n```")
-            else:
-                await ctx.send(f"**Output:**\n```\nServer Starting...\n```")
-
-        except Exception as e:
-            await ctx.send(f"An error occurred: {e}")
-
-    @is_gm()
-    @commands.command(hidden=True)
-    async def runpipeserver(self, ctx):
-        await ctx.send(f"**Output:** IP KVM Started...")
-        message = await ctx.send("Fetching Connection Data")
-        num = random.randint(1, 4)
-        for _ in range(num):
-            await asyncio.sleep(1)  # Add a delay of 1 second between each cycle
-            await message.edit(content="Connecting to pipeline server")
-            await asyncio.sleep(0.5)  # Add a short delay before adding a dot
-            await message.edit(content="Connecting to pipeline server.")
-            await asyncio.sleep(0.5)
-            await message.edit(content="Connecting to pipeline server..")
-            await asyncio.sleep(0.5)
-            await message.edit(content="Connecting to pipeline server...")
-
-        error_message = """
-        ```ERROR: CPU Fault Detected (Error Code: 00)
-
-        Remote connection to the server failed due to a CPU fault.
-
-        **Action Required:**
-        Please contact your system administrator for assistance in diagnosing and resolving the issue.
-
-        Error Code: 00```
-        """
-
-        await ctx.send(error_message)
-
-    @is_gm()
-    @commands.command(hidden=True)
-    async def runpalserver(self, ctx):
-        await ctx.send(f"**Output:** Server Sequence Started...")
-        message = await ctx.send("Finding Connection Data")
-
-        for _ in range(4):
-            await asyncio.sleep(1)  # Add a delay of 1 second between each cycle
-            await message.edit(content="Connecting to Remote Host")
-            await asyncio.sleep(0.5)  # Add a short delay before adding a dot
-            await message.edit(content="Connecting to Remote Host.")
-            await asyncio.sleep(0.5)
-            await message.edit(content="Connecting to Remote Host..")
-            await asyncio.sleep(0.5)
-            await message.edit(content="Connecting to Remote Host...")
-
-        await ctx.send("Server online!")
-
-        await self.run_palserver_async(ctx)
-
-    @is_gm()
-    @commands.command(hidden=True)
     async def runas(self, ctx, member_arg: str, *, command: str):
-        gm_id = 295173706496475136  # GM's user ID
-        og_author = ctx.author.mention
-        allowed_channels = [1140210749868871772, 1149193023259951154, 1140211789573935164]
 
         # Check if the command is used by GM and in the allowed channels
         try:
@@ -2606,7 +5085,7 @@ class GameMaster(commands.Cog):
             if command == str("evall"):
                 return
 
-            if member_arg == 295173706496475136:
+            if self.protected_user_id and str(member_arg) == str(self.protected_user_id):
                 await ctx.send("You can't do this.")
                 return
 
@@ -2790,7 +5269,7 @@ class GameMaster(commands.Cog):
     @is_gm()
     @commands.command(hidden=True)
     async def gmjail(self, ctx: Context, member: discord.Member):
-        if ctx.guild.id != 969741725931298857:
+        if not self.jail_guild_id or ctx.guild.id != self.jail_guild_id:
             return
         try:
             # Get the category by name
@@ -2826,14 +5305,14 @@ class GameMaster(commands.Cog):
     @is_gm()
     @commands.command()
     async def gmunjail(self, ctx: Context, member: discord.Member):
-        if ctx.guild.id != 969741725931298857:
+        if not self.jail_guild_id or ctx.guild.id != self.jail_guild_id:
             return
         try:
-            SPECIAL_USER_ID = 295173706496475136
+            SPECIAL_USER_ID = self.gmunjail_special_user_id
             special_permissions = None
 
             # Check if the user has a special ID
-            if member.id == SPECIAL_USER_ID:
+            if SPECIAL_USER_ID and member.id == SPECIAL_USER_ID:
                 special_permissions = discord.PermissionOverwrite(manage_channels=True, read_messages=True,
                                                                   send_messages=True, manage_roles=True)
 
@@ -2908,11 +5387,3094 @@ class GameMaster(commands.Cog):
             'UPDATE profile SET "badges"=$1 WHERE "user"=$2;', badges.to_db(), user.id
         )
 
-        await ctx.send("Done")
+
+    @commands.command(hidden=True, name="removegod")
+    @commands.is_owner()  # Only bot owner can remove gods
+    async def remove_god(self, ctx: Context, user: discord.Member):
+        """Remove a user as a god."""
+        try:
+            async with self.bot.pool.acquire() as conn:
+                result = await conn.execute(
+                    "DELETE FROM gods WHERE user_id = $1",
+                    user.id
+                )
+                
+                if result == "DELETE 0":
+                    await ctx.send(f"{user.mention} is not a god.")
+                    return
+                
+                # Remove Discord role
+                try:
+                    god_role = ctx.guild.get_role(self.god_admin_role_id) if self.god_admin_role_id else None
+                    if god_role and god_role in user.roles:
+                        await user.remove_roles(god_role)
+                except:
+                    pass  # Silently pass if role removal fails
+                
+                # Success embed
+                success_embed = discord.Embed(
+                    title="✅ God Access Revoked",
+                    description=f"**User:** {user.mention}\n**Status:** Access Revoked",
+                    color=0xff6b6b,
+                    timestamp=discord.utils.utcnow()
+                )
+                success_embed.set_footer(text=f"Revoked by {ctx.author}")
+                
+                await ctx.send(embed=success_embed)
+                
+        except Exception as e:
+            error_embed = discord.Embed(
+                title="❌ Error",
+                description=f"Failed to remove god: {str(e)}",
+                color=0xff0000
+            )
+            await ctx.send(embed=error_embed)
+
+
+    @commands.command(hidden=True, name="addgod")
+    @commands.is_owner()  # Only bot owner can add gods
+    async def add_god(self, ctx: Context, user: discord.Member):
+        """Add a user as a god."""
+        try:
+            async with self.bot.pool.acquire() as conn:
+                # Check if user is already a god
+                existing = await conn.fetchrow(
+                    "SELECT 1 FROM gods WHERE user_id = $1", 
+                    user.id
+                )
+                
+                if existing:
+                    await ctx.send(f"{user.mention} is already a god.")
+                    return
+                
+                # Create invitation embed and view
+                invite_embed = discord.Embed(
+                    title="🌟 God Invitation",
+                    description=f"{user.mention}, you have been invited to become a **God**.\n\n"
+                               f"**Invited by:** {ctx.author.mention}\n"
+                               f"**Role:** God\n\n"
+                               f"Please click a button below to accept or decline this invitation.",
+                    color=0xFFD700,  # Gold color
+                    timestamp=discord.utils.utcnow()
+                )
+                invite_embed.set_footer(text="This invitation will expire in 2 minutes")
+                
+                # Create the view with buttons
+                view = GodInviteView(user, timeout=120)
+                
+                # Send the invitation message
+                message = await ctx.send(embed=invite_embed, view=view)
+                
+                # Wait for the user's response
+                await view.wait()
+                
+                # Handle the response
+                if view.value is None:
+                    # Timeout occurred
+                    timeout_embed = discord.Embed(
+                        title="⏰ Invitation Expired",
+                        description=f"The God invitation for {user.mention} has expired.",
+                        color=0xff9900
+                    )
+                    await message.edit(embed=timeout_embed, view=None)
+                    return
+                
+                elif view.value is False:
+                    # User declined
+                    declined_embed = discord.Embed(
+                        title="❌ Invitation Declined",
+                        description=f"{user.mention} has declined the God invitation.",
+                        color=0xff0000
+                    )
+                    await message.edit(embed=declined_embed, view=None)
+                    return
+                
+                # User accepted - proceed with adding god
+                await conn.execute(
+                    "INSERT INTO gods (user_id, granted_by) VALUES ($1, $2)",
+                    user.id, ctx.author.id
+                )
+                
+                # Assign Discord role
+                try:
+                    god_role = ctx.guild.get_role(self.god_admin_role_id) if self.god_admin_role_id else None
+                    if god_role:
+                        await user.add_roles(god_role)
+                except:
+                    pass  # Silently pass if role assignment fails
+                
+                # Success embed
+                success_embed = discord.Embed(
+                    title="✅ God Access Granted",
+                    description=f"**User:** {user.mention}\n**Discord ID:** Saved (hashed)\n**Status:** Access Granted",
+                    color=0xFFD700,  # Gold color
+                    timestamp=discord.utils.utcnow()
+                )
+                success_embed.set_footer(text=f"Granted by {ctx.author}")
+                
+                await message.edit(embed=success_embed, view=None)
+                
+        except Exception as e:
+            error_embed = discord.Embed(
+                title="❌ Error",
+                description=f"Failed to add god: {str(e)}",
+                color=0xff0000
+            )
+            await ctx.send(embed=error_embed)
+
+
+    @is_gm()
+    @commands.command(hidden=True, brief=_("Replay a battle by ID"))
+    @locale_doc
+    async def gmreplaybattle(self, ctx, battle_id: str):
+        _("""Replay a battle using its unique battle ID.
+        
+        This command allows GMs to view the complete replay of any battle that occurred,
+        including all battle data, participants, logs, and any errors that may have occurred.
+        
+        **Usage**: `$gmreplaybattle <battle_id>`
+        **Example**: `$gmreplaybattle a1b2c3d4-e5f6-7890-abcd-ef1234567890`
+        """)
+        
+        # Import the Battle class to access the static method
+        from cogs.battles.core.battle import Battle
+        
+        try:
+            # Retrieve battle replay data
+            replay_data = await Battle.get_battle_replay(self.bot, battle_id)
+            
+            if not replay_data:
+                return await ctx.send(f"❌ **Battle Not Found**\n\nNo battle found with ID: `{battle_id}`\n\nMake sure the battle ID is correct and the battle was recorded after the replay system was implemented.")
+            
+            # Check if this battle has enhanced replay data
+            battle_data = replay_data['battle_data']
+            has_enhanced_replay = battle_data.get('has_enhanced_replay', False)
+            turn_states = battle_data.get('turn_states', [])
+            
+            if has_enhanced_replay and turn_states:
+                # Create live interactive replay
+                embed = await self.create_live_battle_replay_embed(replay_data, 0, 1)  # Start with 1 action
+                
+                # Create the interactive controller
+                view = BattleReplayController(ctx, replay_data, self)
+                
+                # Send the replay with controls
+                message = await ctx.send(embed=embed, view=view)
+                view.message = message  # Store message reference for updates
+                
+                await ctx.send(f"🎬 **Live Battle Replay Started!**\n\n"
+                              f"Use the controls above to navigate through the battle.\n"
+                              f"• **▶️ Play**: Auto-play the battle\n"
+                              f"• **⏸️ Pause**: Stop auto-play\n"
+                              f"• **⏪/⏩**: Step back/forward one turn\n"
+                              f"• **⏮️/⏭️**: Jump to start/end\n"
+                              f"• **Speed Selector**: Change playback speed\n\n"
+                              f"*This replay will timeout after 5 minutes of inactivity.*")
+            else:
+                # Fall back to static replay for older battles
+                embed = await self.create_battle_replay_embed(replay_data)
+                await ctx.send(embed=embed)
+                await ctx.send("ℹ️ *This battle was recorded before the live replay system was implemented. Showing static summary.*")
+            
+        except Exception as e:
+            await ctx.send(f"❌ **Error Retrieving Battle Replay**\n\nAn error occurred while trying to retrieve the battle replay:\n```\n{str(e)}\n```")
+    
+    @commands.command(brief=_("Save a battle to your personal slots"))
+    @locale_doc
+    async def savebattle(self, ctx, name: str, slot_number: int, battle_id: str):
+        _("""Save a battle to your personal battle slots.
+        
+        You can only save battles where you were a participant.
+        Each player has 10 slots (1-10) to save their favorite battles.
+        
+        **Usage**: `$savebattle <name> <slot_number> <battle_id>`
+        **Example**: `$savebattle "Epic Dragon Fight" 1 a1b2c3d4-e5f6-7890-abcd-ef1234567890`
+        """)
+        
+        # Validate slot number
+        if slot_number < 1 or slot_number > 10:
+            return await ctx.send("❌ **Invalid Slot Number**\n\nSlot number must be between 1 and 10.")
+        
+        # Import the Battle class to access the static method
+        from cogs.battles.core.battle import Battle
+        
+        try:
+            # Retrieve battle replay data
+            replay_data = await Battle.get_battle_replay(self.bot, battle_id)
+            
+            if not replay_data:
+                return await ctx.send(f"❌ **Battle Not Found**\n\nNo battle found with ID: `{battle_id}`\n\nMake sure the battle ID is correct and the battle was recorded after the replay system was implemented.")
+            
+            # Check if user is a participant in this battle
+            participants = replay_data.get('participants', [])
+            if ctx.author.id not in participants:
+                return await ctx.send("❌ **Not a Participant**\n\nYou can only save battles where you were a participant.\n\nIf you believe this is an error, contact a Game Master.")
+            
+            # Initialize saved battles table if it doesn't exist
+            async with self.bot.pool.acquire() as conn:
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS saved_battles (
+                        user_id BIGINT,
+                        slot_number INTEGER,
+                        battle_id TEXT,
+                        battle_name TEXT,
+                        saved_at TIMESTAMP DEFAULT NOW(),
+                        PRIMARY KEY (user_id, slot_number)
+                    )
+                """)
+                
+                # Check if slot is already occupied
+                existing = await conn.fetchrow(
+                    "SELECT battle_name FROM saved_battles WHERE user_id = $1 AND slot_number = $2",
+                    ctx.author.id, slot_number
+                )
+                
+                if existing:
+                    # Ask for confirmation to overwrite
+                    confirm_msg = await ctx.send(
+                        f"⚠️ **Slot Already Occupied**\n\n"
+                        f"Slot {slot_number} already contains: **{existing['battle_name']}**\n\n"
+                        f"Do you want to overwrite it with **{name}**?\n\n"
+                        f"React with ✅ to confirm or ❌ to cancel."
+                    )
+                    
+                    # Add reaction options
+                    await confirm_msg.add_reaction("✅")
+                    await confirm_msg.add_reaction("❌")
+                    
+                    def check(reaction, user):
+                        return user == ctx.author and reaction.message.id == confirm_msg.id and str(reaction.emoji) in ["✅", "❌"]
+                    
+                    try:
+                        reaction, user = await self.bot.wait_for('reaction_add', timeout=30.0, check=check)
+                        
+                        if str(reaction.emoji) == "❌":
+                            await confirm_msg.delete()
+                            return await ctx.send("❌ **Save Cancelled**\n\nBattle was not saved.")
+                        
+                    except asyncio.TimeoutError:
+                        await confirm_msg.delete()
+                        return await ctx.send("⏰ **Timeout**\n\nNo response received. Battle was not saved.")
+                
+                # Save the battle
+                await conn.execute(
+                    "INSERT INTO saved_battles (user_id, slot_number, battle_id, battle_name) VALUES ($1, $2, $3, $4) "
+                    "ON CONFLICT (user_id, slot_number) DO UPDATE SET battle_id = $3, battle_name = $4, saved_at = NOW()",
+                    ctx.author.id, slot_number, battle_id, name
+                )
+                
+                await ctx.send(f"✅ **Battle Saved Successfully!**\n\n"
+                              f"**Name**: {name}\n"
+                              f"**Slot**: {slot_number}\n"
+                              f"**Battle ID**: `{battle_id}`\n\n"
+                              f"Use `$replaybattle {slot_number}` to replay this battle!")
+                
+        except Exception as e:
+            await ctx.send(f"❌ **Error Saving Battle**\n\nAn error occurred while trying to save the battle:\n```\n{str(e)}\n```")
+    
+    @commands.command(brief=_("Replay a saved battle from your slots"))
+    @locale_doc
+    async def replaybattle(self, ctx, slot_number: int):
+        _("""Replay a battle from your saved battle slots.
+        
+        Each player has 10 slots (1-10) where they can save their favorite battles.
+        Use `$savebattle` to save battles first.
+        
+        **Usage**: `$replaybattle <slot_number>`
+        **Example**: `$replaybattle 1`
+        """)
+        
+        # Validate slot number
+        if slot_number < 1 or slot_number > 10:
+            return await ctx.send("❌ **Invalid Slot Number**\n\nSlot number must be between 1 and 10.")
+        
+        try:
+            # Get saved battle data
+            async with self.bot.pool.acquire() as conn:
+                saved_battle = await conn.fetchrow(
+                    "SELECT battle_id, battle_name FROM saved_battles WHERE user_id = $1 AND slot_number = $2",
+                    ctx.author.id, slot_number
+                )
+                
+                if not saved_battle:
+                    return await ctx.send(f"❌ **No Battle Found**\n\nNo battle saved in slot {slot_number}.\n\nUse `$savebattle` to save a battle first.")
+                
+                battle_id = saved_battle['battle_id']
+                battle_name = saved_battle['battle_name']
+            
+            # Import the Battle class to access the static method
+            from cogs.battles.core.battle import Battle
+            
+            # Retrieve battle replay data
+            replay_data = await Battle.get_battle_replay(self.bot, battle_id)
+            
+            if not replay_data:
+                return await ctx.send(f"❌ **Battle Not Found**\n\nThe saved battle with ID `{battle_id}` no longer exists in the database.\n\nThis might happen if the battle data was cleaned up.")
+            
+            # Check if this battle has enhanced replay data
+            battle_data = replay_data['battle_data']
+            has_enhanced_replay = battle_data.get('has_enhanced_replay', False)
+            turn_states = battle_data.get('turn_states', [])
+            
+            if has_enhanced_replay and turn_states:
+                # Create live interactive replay
+                embed = await self.create_live_battle_replay_embed(replay_data, 0, 1)  # Start with 1 action
+                
+                # Create the interactive controller
+                view = BattleReplayController(ctx, replay_data, self)
+                
+                # Send the replay with controls
+                message = await ctx.send(embed=embed, view=view)
+                view.message = message  # Store message reference for updates
+                
+                await ctx.send(f"🎬 **Saved Battle Replay Started!**\n\n"
+                              f"**Battle**: {battle_name}\n"
+                              f"**Slot**: {slot_number}\n\n"
+                              f"Use the controls above to navigate through the battle.\n"
+                              f"• **▶️ Play**: Auto-play the battle\n"
+                              f"• **⏸️ Pause**: Stop auto-play\n"
+                              f"• **⏪/⏩**: Step back/forward one turn\n"
+                              f"• **⏮️/⏭️**: Jump to start/end\n"
+                              f"• **Speed Selector**: Change playback speed\n\n"
+                              f"*This replay will timeout after 5 minutes of inactivity.*")
+            else:
+                # Fall back to static replay for older battles
+                embed = await self.create_battle_replay_embed(replay_data)
+                await ctx.send(embed=embed)
+                await ctx.send(f"ℹ️ *This battle was recorded before the live replay system was implemented. Showing static summary.*")
+            
+        except Exception as e:
+            await ctx.send(f"❌ **Error Retrieving Saved Battle**\n\nAn error occurred while trying to retrieve the saved battle:\n```\n{str(e)}\n```")
+    
+    @commands.command(brief=_("List your saved battles"))
+    @locale_doc
+    async def mysavedbattles(self, ctx):
+        _("""List all your saved battles.
+        
+        Shows all battles you have saved in your 10 slots.
+        
+        **Usage**: `$mysavedbattles`
+        """)
+        
+        try:
+            # Get saved battles data
+            async with self.bot.pool.acquire() as conn:
+                saved_battles = await conn.fetch(
+                    "SELECT slot_number, battle_name, saved_at FROM saved_battles WHERE user_id = $1 ORDER BY slot_number",
+                    ctx.author.id
+                )
+                
+                if not saved_battles:
+                    return await ctx.send("📭 **No Saved Battles**\n\nYou haven't saved any battles yet.\n\nUse `$savebattle <name> <slot> <battle_id>` to save a battle!")
+                
+                # Create embed with saved battles
+                embed = discord.Embed(
+                    title="🎬 Your Saved Battles",
+                    description=f"Showing {len(saved_battles)} saved battles for {ctx.author.display_name}",
+                    color=discord.Color.blue()
+                )
+                
+                for battle in saved_battles:
+                    slot_num = battle['slot_number']
+                    battle_name = battle['battle_name']
+                    saved_at = battle['saved_at'].strftime("%Y-%m-%d %H:%M")
+                    
+                    embed.add_field(
+                        name=f"Slot {slot_num}: {battle_name}",
+                        value=f"Saved: {saved_at}\nUse: `$replaybattle {slot_num}`",
+                        inline=False
+                    )
+                
+                embed.set_footer(text=f"Total saved battles: {len(saved_battles)}/10")
+                
+                await ctx.send(embed=embed)
+                
+        except Exception as e:
+            await ctx.send(f"❌ **Error Listing Saved Battles**\n\nAn error occurred while trying to list your saved battles:\n```\n{str(e)}\n```")
+    
+    @commands.command(brief=_("Delete a saved battle"))
+    @locale_doc
+    async def deletesavedbattle(self, ctx, slot_number: int):
+        _("""Delete a saved battle from your slots.
+        
+        This will permanently remove the battle from the specified slot.
+        
+        **Usage**: `$deletesavedbattle <slot_number>`
+        **Example**: `$deletesavedbattle 1`
+        """)
+        
+        # Validate slot number
+        if slot_number < 1 or slot_number > 10:
+            return await ctx.send("❌ **Invalid Slot Number**\n\nSlot number must be between 1 and 10.")
+        
+        try:
+            # Get saved battle data
+            async with self.bot.pool.acquire() as conn:
+                saved_battle = await conn.fetchrow(
+                    "SELECT battle_name FROM saved_battles WHERE user_id = $1 AND slot_number = $2",
+                    ctx.author.id, slot_number
+                )
+                
+                if not saved_battle:
+                    return await ctx.send(f"❌ **No Battle Found**\n\nNo battle saved in slot {slot_number}.")
+                
+                battle_name = saved_battle['battle_name']
+                
+                # Ask for confirmation
+                confirm_msg = await ctx.send(
+                    f"⚠️ **Confirm Deletion**\n\n"
+                    f"Are you sure you want to delete **{battle_name}** from slot {slot_number}?\n\n"
+                    f"This action cannot be undone.\n\n"
+                    f"React with ✅ to confirm or ❌ to cancel."
+                )
+                
+                # Add reaction options
+                await confirm_msg.add_reaction("✅")
+                await confirm_msg.add_reaction("❌")
+                
+                def check(reaction, user):
+                    return user == ctx.author and reaction.message.id == confirm_msg.id and str(reaction.emoji) in ["✅", "❌"]
+                
+                try:
+                    reaction, user = await self.bot.wait_for('reaction_add', timeout=30.0, check=check)
+                    
+                    if str(reaction.emoji) == "❌":
+                        await confirm_msg.delete()
+                        return await ctx.send("❌ **Deletion Cancelled**\n\nBattle was not deleted.")
+                    
+                except asyncio.TimeoutError:
+                    await confirm_msg.delete()
+                    return await ctx.send("⏰ **Timeout**\n\nNo response received. Battle was not deleted.")
+                
+                # Delete the battle
+                await conn.execute(
+                    "DELETE FROM saved_battles WHERE user_id = $1 AND slot_number = $2",
+                    ctx.author.id, slot_number
+                )
+                
+                await ctx.send(f"✅ **Battle Deleted Successfully!**\n\n"
+                              f"**{battle_name}** has been removed from slot {slot_number}.")
+                
+        except Exception as e:
+            await ctx.send(f"❌ **Error Deleting Saved Battle**\n\nAn error occurred while trying to delete the saved battle:\n```\n{str(e)}\n```")
+    
+
+    
+    async def create_live_battle_replay_embed(self, replay_data, current_turn=0, action_count=1):
+        """Create an embed for live battle replay at a specific turn"""
+        
+        # Check if this is an enhanced replay with turn states
+        battle_data = replay_data['battle_data']
+        has_enhanced_replay = battle_data.get('has_enhanced_replay', False)
+        
+        if not has_enhanced_replay or not battle_data.get('turn_states'):
+            # Fall back to static replay if no enhanced data
+            return await self.create_battle_replay_embed(replay_data)
+        
+        turn_states = battle_data['turn_states']
+        
+        # Use initial state if current_turn is 0, otherwise use the specified turn
+        if current_turn == 0 and battle_data.get('initial_state'):
+            current_state = battle_data['initial_state']
+        elif current_turn < len(turn_states):
+            current_state = turn_states[current_turn]
+        else:
+            current_state = turn_states[-1]  # Use last state if beyond range
+        
+        # Create embed based on current state
+        battle_info = current_state.get('battle_info', {})
+        battle_type = battle_info.get('battle_type', replay_data['battle_type'])
+        
+        # Get participants for title
+        participants = replay_data.get('participants', [])
+        participant_names = []
+        for user_id in participants[:2]:  # Show first 2 participants
+            try:
+                user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
+                participant_names.append(user.display_name)
+            except:
+                participant_names.append("Unknown")
+        
+        # Create title similar to battle format
+        if len(participant_names) >= 2:
+            battle_title = f"{battle_type.replace('Battle', '').strip()}: {participant_names[0]} vs {participant_names[1]}"
+        elif len(participant_names) == 1:
+            battle_title = f"{battle_type.replace('Battle', '').strip()}: {participant_names[0]}"
+        else:
+            battle_title = f"{battle_type} Replay"
+        
+        embed = discord.Embed(
+            title=f"🎬 {battle_title}",
+            color=self.bot.config.game.primary_colour,
+            timestamp=replay_data['created_at']
+        )
+        
+        # Add combatant information from current state
+        teams = current_state.get('teams', [])
+        
+        for team_idx, team in enumerate(teams):
+            # Use same team naming as actual battles
+            team_name = f"**[TEAM {chr(65 + team_idx)}]**"  # A, B, C, etc.
+            team_info = []
+            
+            for combatant in team.get('combatants', []):
+                # Get proper name - use pet_name for pets, display_name for players
+                is_pet = combatant.get('is_pet', False)
+                if is_pet and combatant.get('pet_name'):
+                    name = combatant.get('pet_name')
+                    name_suffix = " 🐾"  # Pet indicator
+                else:
+                    name = combatant.get('display_name', combatant.get('name', 'Unknown'))
+                    name_suffix = ""
+                
+                current_hp = combatant.get('current_hp', 0)
+                max_hp = combatant.get('max_hp', 1)
+                hp_percentage = combatant.get('hp_percentage', 0)
+                
+                # Create HP bar using the same style as battles
+                hp_bar_length = 20
+                filled_length = int(hp_bar_length * max(0, min(1, hp_percentage)))
+                empty_length = hp_bar_length - filled_length
+                hp_bar = "█" * filled_length + "░" * empty_length
+                
+                # Use stored element emoji from battle data
+                element_emoji = combatant.get('element_emoji', "❓")
+                
+                # Format like actual battle display
+                combatant_text = f"{name}{name_suffix} {element_emoji}\nHP: {current_hp:.1f}/{max_hp:.1f}\n{hp_bar}"
+                
+                # Add damage reflection if present
+                damage_reflection = combatant.get('damage_reflection', 0)
+                if damage_reflection > 0:
+                    reflection_percent = float(damage_reflection) * 100
+                    combatant_text += f"\nDamage Reflection: {reflection_percent:.1f}%"
+                
+                team_info.append(combatant_text)
+            
+            if team_info:
+                embed.add_field(
+                    name=team_name,
+                    value="\n\n".join(team_info),
+                    inline=False
+                )
+        
+        # Add battle log section with sliding window of actions
+        actions_to_show = []
+        
+        # Calculate which actions to show (sliding window)
+        if action_count == 1:
+            # Show current action only
+            action_message = current_state.get('action_message', 'Battle starting...')
+            action_number = current_state.get('action_number', 0)
+            actions_to_show.append(f"**Action #{action_number}**\n{action_message}")
+        else:
+            # Show multiple actions in sliding window
+            # Get the current turn's action first
+            current_action_number = current_state.get('action_number', 0)
+            
+            # Calculate start position for sliding window
+            start_turn = max(0, current_turn - action_count + 1)
+            end_turn = min(len(turn_states), current_turn + 1)
+            
+            # Collect actions for the window
+            for turn_idx in range(start_turn, end_turn):
+                if turn_idx < len(turn_states):
+                    turn_state = turn_states[turn_idx]
+                    action_msg = turn_state.get('action_message', 'Battle action...')
+                    action_num = turn_state.get('action_number', turn_idx)
+                    actions_to_show.append(f"**Action #{action_num}**\n{action_msg}")
+        
+        # Join actions with separator
+        battle_log_value = "\n\n".join(actions_to_show) if actions_to_show else "Battle starting..."
+        
+        embed.add_field(
+            name="Battle Log",
+            value=battle_log_value,
+            inline=False
+        )
+        
+        # Add replay controls info
+        progress_percentage = (current_turn + 1) / len(turn_states)
+        progress_bar = self.create_progress_bar(progress_percentage)
+        
+        embed.add_field(
+            name="🎬 Replay Controls",
+            value=f"{progress_bar} {progress_percentage:.1%}\nTurn {current_turn + 1}/{len(turn_states)} • Showing {action_count} action{'s' if action_count > 1 else ''}",
+            inline=False
+        )
+        
+        # Add footer with battle ID (like actual battles)
+        embed.set_footer(text=f"Battle ID: {replay_data['battle_id']}")
+        
+        return embed
+    
+    def create_replay_hp_bar(self, hp_percentage, length=15):
+        """Create a HP bar for replay display"""
+        filled_length = int(length * max(0, min(1, hp_percentage)))
+        empty_length = length - filled_length
+        
+        if hp_percentage > 0.6:
+            bar_char = "🟢"
+        elif hp_percentage > 0.3:
+            bar_char = "🟡"
+        else:
+            bar_char = "🔴"
+        
+        return bar_char * filled_length + "⚫" * empty_length
+    
+    def create_progress_bar(self, percentage, length=20):
+        """Create a progress bar for replay"""
+        filled_length = int(length * max(0, min(1, percentage)))
+        empty_length = length - filled_length
+        return "█" * filled_length + "░" * empty_length
+
+    async def create_battle_replay_embed(self, replay_data):
+        """Create an embed displaying battle replay information"""
+        
+        embed = discord.Embed(
+            title=f"🔍 Battle Replay: {replay_data['battle_type']}",
+            description=f"**Battle ID**: `{replay_data['battle_id']}`",
+            color=discord.Color.blue(),
+            timestamp=replay_data['created_at']
+        )
+        
+        # Add basic battle information
+        participants_text = ""
+        if replay_data['participants']:
+            try:
+                # Get user objects for participant names
+                participant_names = []
+                for user_id in replay_data['participants']:
+                    try:
+                        user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
+                        participant_names.append(f"{user.display_name} ({user_id})")
+                    except:
+                        participant_names.append(f"Unknown User ({user_id})")
+                participants_text = "\n".join(participant_names)
+            except:
+                participants_text = f"{len(replay_data['participants'])} participants"
+        else:
+            participants_text = "No participants recorded"
+        
+        embed.add_field(
+            name="👥 **Participants**",
+            value=participants_text,
+            inline=False
+        )
+        
+        # Add battle configuration
+        config = replay_data['battle_data'].get('config', {})
+        config_text = []
+        important_settings = ['allow_pets', 'status_effects', 'simple', 'cheat_death', 'element_effects']
+        for setting in important_settings:
+            if setting in config:
+                status = "✅" if config[setting] else "❌"
+                config_text.append(f"{status} {setting.replace('_', ' ').title()}")
+        
+        if config_text:
+            embed.add_field(
+                name="⚙️ **Battle Settings**",
+                value="\n".join(config_text),
+                inline=True
+            )
+        
+        # Add battle statistics
+        stats_text = []
+        battle_data = replay_data['battle_data']
+        
+        if battle_data.get('start_time'):
+            stats_text.append(f"📅 **Started**: {battle_data['start_time']}")
+        
+        if battle_data.get('finished'):
+            stats_text.append(f"🏁 **Status**: Finished")
+        else:
+            stats_text.append(f"⏸️ **Status**: In Progress/Interrupted")
+        
+        if battle_data.get('winner'):
+            stats_text.append(f"🏆 **Winner**: {battle_data['winner']}")
+        
+        stats_text.append(f"📊 **Total Actions**: {battle_data.get('action_number', 0)}")
+        
+        embed.add_field(
+            name="📈 **Battle Statistics**",
+            value="\n".join(stats_text),
+            inline=True
+        )
+        
+        # Add battle log (truncated if too long)
+        battle_log = replay_data['battle_log']
+        if battle_log:
+            log_text = []
+            for action_num, message in battle_log:
+                log_text.append(f"**Action {action_num}**: {message}")
+            
+            log_content = "\n\n".join(log_text)
+            
+            # Truncate if too long for Discord
+            if len(log_content) > 1000:
+                log_content = log_content[:900] + f"\n\n... *({len(battle_log) - len(log_text[:3])} more actions)*"
+            
+            embed.add_field(
+                name="📝 **Battle Log**",
+                value=log_content or "No battle log recorded",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="📝 **Battle Log**",
+                value="No battle log recorded",
+                inline=False
+            )
+        
+        # Add footer with additional info
+        embed.set_footer(text=f"Recorded at {replay_data['created_at'].strftime('%Y-%m-%d %H:%M:%S UTC')} • Use this replay for debugging")
+        
+        return embed
 
 
 
+
+    def _get_element_choices(self):
+        elements = [e for e in ElementExtension.element_to_emoji.keys() if e != "Unknown"]
+        return sorted(set(elements))
+
+    async def _gm_prompt(self, ctx, prompt, timeout=180, allow_blank=False):
+        await ctx.send(prompt)
+
+        def check(msg):
+            return msg.author == ctx.author and msg.channel == ctx.channel
+
+        try:
+            msg = await self.bot.wait_for("message", timeout=timeout, check=check)
+        except asyncio.TimeoutError:
+            await ctx.send("⏱️ Timed out waiting for a response.")
+            return None
+
+        content = msg.content.strip()
+        if not content and not allow_blank:
+            await ctx.send("❌ Empty response. Cancelled.")
+            return None
+        if content.lower() in ("cancel", "stop", "exit"):
+            await ctx.send("✅ Cancelled.")
+            return None
+        return content
+
+    async def _gm_confirm(self, ctx, prompt):
+        response = await self._gm_prompt(ctx, prompt)
+        if response is None:
+            return False
+        if response.strip().lower() in ("yes", "y"):
+            return True
+        await ctx.send("❌ Cancelled.")
+        return False
+
+    async def _gm_confirm_twice(self, ctx, prompt_one, prompt_two):
+        if not await self._gm_confirm(ctx, prompt_one):
+            return False
+        return await self._gm_confirm(ctx, prompt_two)
+
+    def _format_percent(self, value):
+        if value is None:
+            return "-"
+        try:
+            return f"{float(value) * 100:.2f}%"
+        except (TypeError, ValueError):
+            return str(value)
+
+    def _parse_percent(self, raw):
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        if not text:
+            return None
+        if text.endswith("%"):
+            text = text[:-1].strip()
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+        if value < 0 or value > 100:
+            return None
+        return value / 100.0
+
+    async def _send_menu_embed(self, ctx, title, lines, footer=None):
+        embed = discord.Embed(title=title, description="\n".join(lines), color=discord.Color.blurple())
+        if footer:
+            embed.set_footer(text=footer)
+        await ctx.send(embed=embed)
+
+    async def _fetch_dragon_abilities(self, ability_type: str):
+        async with self.bot.pool.acquire() as conn:
+            return await conn.fetch(
+                "SELECT name, description, dmg, effect, chance FROM ice_dragon_abilities WHERE ability_type = $1 ORDER BY name ASC",
+                ability_type,
+            )
+
+    async def _fetch_dragon_stages(self):
+        async with self.bot.pool.acquire() as conn:
+            return await conn.fetch(
+                "SELECT id, name, min_level, max_level, base_multiplier, enabled, element, move_names, passive_names "
+                "FROM ice_dragon_stages ORDER BY min_level ASC, max_level ASC, id ASC"
+            )
+
+    async def _fetch_dragon_drops(self):
+        async with self.bot.pool.acquire() as conn:
+            return await conn.fetch(
+                "SELECT id, name, item_type, min_stat, max_stat, base_chance, max_chance, is_global, dragon_stage_id, "
+                "element, min_level, max_level "
+                "FROM ice_dragon_drops ORDER BY id ASC"
+            )
+
+    async def _fetch_dragon_presets(self):
+        async with self.bot.pool.acquire() as conn:
+            return await conn.fetch(
+                "SELECT id, name, created_at FROM ice_dragon_presets ORDER BY id ASC"
+            )
+
+    async def _fetch_preset_stage_ids(self, preset_id: int):
+        async with self.bot.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT stage_id FROM ice_dragon_preset_stages WHERE preset_id = $1 ORDER BY stage_id ASC",
+                preset_id,
+            )
+        return [row["stage_id"] for row in rows]
+
+    async def _choose_abilities(self, ctx, ability_type: str, max_count: int | None = None):
+        abilities = await self._fetch_dragon_abilities(ability_type)
+        if not abilities:
+            return []
+
+        lines = []
+        for idx, row in enumerate(abilities, start=1):
+            desc = (row["description"] or "").strip()
+            if not desc:
+                desc = "No description."
+            effect = row.get("effect") or "Unknown"
+            dmg = row.get("dmg")
+            try:
+                dmg_num = float(dmg)
+                dmg_display = f"{int(dmg_num)}"
+            except (TypeError, ValueError):
+                dmg_display = str(dmg or "0")
+            chance_val = row.get("chance")
+            chance_display = "0%"
+            if chance_val is not None:
+                try:
+                    chance_num = float(chance_val)
+                    chance_display = f"{chance_num * 100:.0f}%" if 0 <= chance_num <= 1 else f"{chance_num:.0f}%"
+                except (TypeError, ValueError):
+                    chance_display = str(chance_val)
+            line = (
+                f"{idx}) {row['name']} — Effect: {effect}. Damage: {dmg_display}. "
+                f"Chance: {chance_display}. {desc}"
+            )
+            if len(line) > 200:
+                line = line[:197] + "..."
+            lines.append(line)
+            lines.append("")
+
+        await self._send_menu_embed(
+            ctx,
+            title=f"Select {ability_type.title()}s",
+            lines=lines,
+            footer="Reply with numbers (comma-separated). Example: 1,3"
+        )
+        raw = await self._gm_prompt(ctx, f"Select {ability_type}s by number:", allow_blank=True)
+        if raw is None:
+            return None
+        if raw.strip().lower() in ("", "none", "0"):
+            return []
+
+        selected = []
+        try:
+            for part in raw.split(","):
+                idx = int(part.strip())
+                if 1 <= idx <= len(abilities):
+                    selected.append(abilities[idx - 1]["name"])
+        except ValueError:
+            await ctx.send("❌ Invalid selection. Use numbers only.")
+            return None
+
+        if max_count is not None and len(selected) > max_count:
+            await ctx.send(f"❌ Too many selected (max {max_count}).")
+            return None
+
+        return list(dict.fromkeys(selected))
+
+    async def _choose_dragon_stages(self, ctx, allow_enabled=True):
+        stages = await self._fetch_dragon_stages()
+        if not stages:
+            await ctx.send("❌ No dragon stages available.")
+            return None
+
+        lines = []
+        for idx, row in enumerate(stages, start=1):
+            status = "✅" if row["enabled"] else "❌"
+            lines.append(f"{idx}) {row['name']} {status} (Lv {row['min_level']}-{row['max_level']})")
+
+        footer = "Reply with numbers (comma-separated)."
+        if allow_enabled:
+            footer += " Or type 'enabled' to use currently enabled stages."
+        await self._send_menu_embed(ctx, "Select Dragon Stages", lines, footer=footer)
+        raw = await self._gm_prompt(ctx, "Select stages by number:", allow_blank=True)
+        if raw is None:
+            return None
+        if raw.strip().lower() in ("", "none", "0"):
+            return []
+        if allow_enabled and raw.strip().lower() == "enabled":
+            return [row["id"] for row in stages if row["enabled"]]
+
+        selected = []
+        try:
+            for part in raw.split(","):
+                idx = int(part.strip())
+                if 1 <= idx <= len(stages):
+                    selected.append(stages[idx - 1]["id"])
+        except ValueError:
+            await ctx.send("❌ Invalid selection. Use numbers only.")
+            return None
+
+        return list(dict.fromkeys(selected))
+
+    @is_gm()
+    @commands.command(name="gmicedragonsettings", aliases=["gmicedragon", "gmids"])
+    async def gm_ice_dragon_settings(self, ctx):
+        """GM UI to manage Ice Dragon stages and drops."""
+
+        class IceDragonSettingsView(View):
+            def __init__(self, cog, ctx):
+                super().__init__(timeout=300)
+                self.cog = cog
+                self.ctx = ctx
+
+            async def _guard(self, interaction: discord.Interaction):
+                if interaction.user.id != self.ctx.author.id:
+                    await interaction.response.send_message("❌ This menu is not for you.", ephemeral=True)
+                    return False
+                return True
+
+            @discord.ui.button(label="Create Dragon", style=discord.ButtonStyle.green)
+            async def create_dragon(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if not await self._guard(interaction):
+                    return
+                await interaction.response.send_message("Starting dragon creation...", ephemeral=True)
+                await self.cog._gm_create_dragon(self.ctx)
+
+            @discord.ui.button(label="List Dragons", style=discord.ButtonStyle.blurple)
+            async def list_dragons(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if not await self._guard(interaction):
+                    return
+                await interaction.response.send_message("Listing dragons...", ephemeral=True)
+                await self.cog._gm_list_dragons(self.ctx)
+
+            @discord.ui.button(label="Edit Current List", style=discord.ButtonStyle.gray)
+            async def edit_dragons(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if not await self._guard(interaction):
+                    return
+                await interaction.response.send_message("Editing dragon list...", ephemeral=True)
+                await self.cog._gm_edit_dragons(self.ctx)
+
+            @discord.ui.button(label="Create Drops", style=discord.ButtonStyle.green)
+            async def create_drops(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if not await self._guard(interaction):
+                    return
+                await interaction.response.send_message("Starting drop creation...", ephemeral=True)
+                await self.cog._gm_create_drop(self.ctx)
+
+            @discord.ui.button(label="Edit Drops", style=discord.ButtonStyle.gray)
+            async def edit_drops(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if not await self._guard(interaction):
+                    return
+                await interaction.response.send_message("Editing drops...", ephemeral=True)
+                await self.cog._gm_edit_drops(self.ctx)
+
+            @discord.ui.button(label="Reset Dragons", style=discord.ButtonStyle.red)
+            async def reset_dragons(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if not await self._guard(interaction):
+                    return
+                await interaction.response.send_message("Resetting dragon stages...", ephemeral=True)
+                await self.cog._gm_reset_dragons(self.ctx)
+
+            @discord.ui.button(label="Reset Drops", style=discord.ButtonStyle.red)
+            async def reset_drops(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if not await self._guard(interaction):
+                    return
+                await interaction.response.send_message("Resetting dragon drops...", ephemeral=True)
+                await self.cog._gm_reset_drops(self.ctx)
+
+            @discord.ui.button(label="List Presets", style=discord.ButtonStyle.blurple)
+            async def list_presets(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if not await self._guard(interaction):
+                    return
+                await interaction.response.send_message("Listing presets...", ephemeral=True)
+                await self.cog._gm_list_presets(self.ctx)
+
+            @discord.ui.button(label="Create Preset", style=discord.ButtonStyle.green)
+            async def create_preset(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if not await self._guard(interaction):
+                    return
+                await interaction.response.send_message("Creating preset...", ephemeral=True)
+                await self.cog._gm_create_preset(self.ctx)
+
+            @discord.ui.button(label="Apply Preset", style=discord.ButtonStyle.gray)
+            async def apply_preset(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if not await self._guard(interaction):
+                    return
+                await interaction.response.send_message("Applying preset...", ephemeral=True)
+                await self.cog._gm_apply_preset(self.ctx)
+
+            @discord.ui.button(label="Delete Preset", style=discord.ButtonStyle.red)
+            async def delete_preset(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if not await self._guard(interaction):
+                    return
+                await interaction.response.send_message("Deleting preset...", ephemeral=True)
+                await self.cog._gm_delete_preset(self.ctx)
+
+        embed = discord.Embed(
+            title="GM Ice Dragon Settings",
+            description="Manage Ice Dragon stages, abilities, and weapon drops.",
+            color=discord.Color.blue(),
+        )
+        await ctx.send(embed=embed, view=IceDragonSettingsView(self, ctx))
+
+    async def _gm_list_dragons(self, ctx):
+        rows = await self._fetch_dragon_stages()
+        if not rows:
+            return await ctx.send("No dragon stages found.")
+        embed = discord.Embed(
+            title="Ice Dragon Stages",
+            description="Enabled stages are eligible to spawn for matching levels.",
+            color=discord.Color.blue(),
+        )
+        for row in rows:
+            moves = ", ".join(row["move_names"] or [])
+            passives = ", ".join(row["passive_names"] or [])
+            status = "✅ Enabled" if row["enabled"] else "❌ Disabled"
+            value = (
+                f"{status}\n"
+                f"Level Range: **{row['min_level']}–{row['max_level']}**\n"
+                f"Multiplier: **x{row['base_multiplier']}**\n"
+                f"Element: **{row['element']}**\n"
+                f"Moves: {moves or 'None'}\n"
+                f"Passives: {passives or 'None'}"
+            )
+            embed.add_field(name=row["name"], value=value, inline=False)
+        await ctx.send(embed=embed)
+
+    async def _gm_reset_dragons(self, ctx):
+        confirmed = await self._gm_confirm_twice(
+            ctx,
+            "⚠️ This will delete ALL ice dragon stages and abilities and restore defaults. Type YES to continue.",
+            "⚠️ Final confirmation. Type YES to reset dragon stages and abilities to defaults."
+        )
+        if not confirmed:
+            return
+
+        battles_cog = self.bot.get_cog("Battles")
+        if not battles_cog:
+            return await ctx.send("❌ Battles cog not found.")
+
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute("DELETE FROM ice_dragon_stages")
+            await conn.execute("DELETE FROM ice_dragon_abilities")
+
+        await battles_cog.initialize_tables()
+        await ctx.send("✅ Dragon stages and abilities reset to defaults.")
+
+    async def _gm_reset_drops(self, ctx):
+        confirmed = await self._gm_confirm_twice(
+            ctx,
+            "⚠️ This will delete ALL ice dragon drops and restore defaults. Type YES to continue.",
+            "⚠️ Final confirmation. Type YES to reset dragon drops to defaults."
+        )
+        if not confirmed:
+            return
+
+        battles_cog = self.bot.get_cog("Battles")
+        if not battles_cog:
+            return await ctx.send("❌ Battles cog not found.")
+
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute("DELETE FROM ice_dragon_drops")
+
+        await battles_cog.initialize_tables()
+        await ctx.send("✅ Dragon drops reset to defaults.")
+
+    async def _gm_list_presets(self, ctx):
+        presets = await self._fetch_dragon_presets()
+        if not presets:
+            return await ctx.send("No presets found.")
+
+        embed = discord.Embed(
+            title="Ice Dragon Presets",
+            description="Use preset ID or name to apply.",
+            color=discord.Color.blue(),
+        )
+        for preset in presets:
+            stage_ids = await self._fetch_preset_stage_ids(preset["id"])
+            embed.add_field(
+                name=f"{preset['name']} (ID {preset['id']})",
+                value=f"Stages: {len(stage_ids)}",
+                inline=False,
+            )
+        await ctx.send(embed=embed)
+
+    async def _gm_create_preset(self, ctx):
+        name = await self._gm_prompt(ctx, "Preset name?")
+        if not name:
+            return
+
+        stages = await self._choose_dragon_stages(ctx, allow_enabled=True)
+        if stages is None:
+            return
+        if not stages:
+            return await ctx.send("❌ Preset must include at least one stage.")
+
+        async with self.bot.pool.acquire() as conn:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM ice_dragon_presets WHERE LOWER(name) = LOWER($1)",
+                name,
+            )
+            if exists:
+                return await ctx.send("❌ A preset with that name already exists.")
+
+            preset_id = await conn.fetchval(
+                "INSERT INTO ice_dragon_presets (name) VALUES ($1) RETURNING id",
+                name,
+            )
+            await conn.executemany(
+                "INSERT INTO ice_dragon_preset_stages (preset_id, stage_id) VALUES ($1, $2) "
+                "ON CONFLICT (preset_id, stage_id) DO NOTHING",
+                [(preset_id, stage_id) for stage_id in stages],
+            )
+
+        await ctx.send(f"✅ Preset **{name}** created with {len(stages)} stages.")
+
+    async def _gm_apply_preset(self, ctx):
+        presets = await self._fetch_dragon_presets()
+        if not presets:
+            return await ctx.send("No presets found.")
+
+        lines = [f"{p['id']}) {p['name']}" for p in presets]
+        await self._send_menu_embed(ctx, "Available Presets", lines)
+        raw = await self._gm_prompt(ctx, "Enter preset ID or name to apply:")
+        if not raw:
+            return
+
+        preset = None
+        preset_id = None
+        if raw.strip().isdigit():
+            preset_id = int(raw.strip())
+            preset = next((p for p in presets if p["id"] == preset_id), None)
+        else:
+            preset = next((p for p in presets if p["name"].lower() == raw.strip().lower()), None)
+            if preset:
+                preset_id = preset["id"]
+
+        if not preset:
+            return await ctx.send("❌ Preset not found.")
+
+        confirmed = await self._gm_confirm_twice(
+            ctx,
+            f"⚠️ This will disable ALL dragon stages and enable preset **{preset['name']}**. Type YES to continue.",
+            "⚠️ Final confirmation. Type YES to apply this preset."
+        )
+        if not confirmed:
+            return
+
+        stage_ids = await self._fetch_preset_stage_ids(preset_id)
+        if not stage_ids:
+            return await ctx.send("❌ Preset has no stages.")
+
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute("UPDATE ice_dragon_stages SET enabled = FALSE")
+            await conn.executemany(
+                "UPDATE ice_dragon_stages SET enabled = TRUE WHERE id = $1",
+                [(stage_id,) for stage_id in stage_ids],
+            )
+
+        await ctx.send(f"✅ Preset **{preset['name']}** applied. Enabled {len(stage_ids)} stages.")
+
+    async def _gm_delete_preset(self, ctx):
+        presets = await self._fetch_dragon_presets()
+        if not presets:
+            return await ctx.send("No presets found.")
+
+        lines = [f"{p['id']}) {p['name']}" for p in presets]
+        await self._send_menu_embed(ctx, "Available Presets", lines)
+        raw = await self._gm_prompt(ctx, "Enter preset ID or name to delete:")
+        if not raw:
+            return
+
+        preset = None
+        preset_id = None
+        if raw.strip().isdigit():
+            preset_id = int(raw.strip())
+            preset = next((p for p in presets if p["id"] == preset_id), None)
+        else:
+            preset = next((p for p in presets if p["name"].lower() == raw.strip().lower()), None)
+            if preset:
+                preset_id = preset["id"]
+
+        if not preset:
+            return await ctx.send("❌ Preset not found.")
+
+        if not await self._gm_confirm(
+            ctx,
+            f"⚠️ Delete preset **{preset['name']}**? Type YES to confirm."
+        ):
+            return
+
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute("DELETE FROM ice_dragon_presets WHERE id = $1", preset_id)
+
+        await ctx.send(f"✅ Preset **{preset['name']}** deleted.")
+
+    async def _gm_create_dragon(self, ctx):
+        name = await self._gm_prompt(ctx, "Dragon name?")
+        if not name:
+            return
+        min_level_raw = await self._gm_prompt(ctx, "Min level?")
+        max_level_raw = await self._gm_prompt(ctx, "Max level?")
+        if not min_level_raw or not max_level_raw:
+            return
+        try:
+            min_level = int(min_level_raw)
+            max_level = int(max_level_raw)
+        except ValueError:
+            return await ctx.send("❌ Invalid number input.")
+
+        def _calc_base_stats(level: int):
+            level_multiplier = 1 + (0.1 * (level - 1))
+            hp = 3500 * level_multiplier
+            damage = 290 * level_multiplier
+            armor = 220 * level_multiplier
+            return hp, damage, armor
+
+        min_hp, min_damage, min_armor = _calc_base_stats(min_level)
+        max_hp, max_damage, max_armor = _calc_base_stats(max_level)
+        await ctx.send(
+            "Base stats before multiplier (multiplier affects HP only):\n"
+            f"Lv {min_level}: HP {min_hp:.1f}, DMG {min_damage:.1f}, ARM {min_armor:.1f}\n"
+            f"Lv {max_level}: HP {max_hp:.1f}, DMG {max_damage:.1f}, ARM {max_armor:.1f}"
+        )
+
+        mult_raw = await self._gm_prompt(ctx, "Base multiplier? (e.g. 1.5)")
+        if not mult_raw:
+            return
+        try:
+            base_multiplier = float(mult_raw)
+        except ValueError:
+            return await ctx.send("❌ Invalid number input.")
+
+        elements = self._get_element_choices()
+        elem_raw = await self._gm_prompt(
+            ctx,
+            f"Element? (default Water)\nAvailable: {', '.join(elements)}",
+            allow_blank=True,
+        )
+        element = "Water"
+        if elem_raw:
+            if elem_raw.capitalize() not in elements:
+                return await ctx.send("❌ Invalid element.")
+            element = elem_raw.capitalize()
+
+        moves = await self._choose_abilities(ctx, "move")
+        if moves is None or not moves:
+            return await ctx.send("❌ You must select at least one move.")
+
+        passives = await self._choose_abilities(ctx, "passive", max_count=5)
+        if passives is None:
+            return
+
+        enabled_raw = await self._gm_prompt(ctx, "Enable this stage? (yes/no, default yes)", allow_blank=True)
+        enabled = True
+        if enabled_raw:
+            enabled = enabled_raw.strip().lower() in ("yes", "y", "true", "1")
+
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO ice_dragon_stages (name, min_level, max_level, base_multiplier, enabled, element, move_names, passive_names) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                name,
+                min_level,
+                max_level,
+                base_multiplier,
+                enabled,
+                element,
+                moves,
+                passives,
+            )
+        await ctx.send(f"✅ Dragon stage **{name}** created.")
+
+    async def _gm_edit_dragons(self, ctx):
+        rows = await self._fetch_dragon_stages()
+        if not rows:
+            return await ctx.send("No dragon stages found.")
+        lines = [f"{idx}) {row['name']} (Lv {row['min_level']}-{row['max_level']})" for idx, row in enumerate(rows, start=1)]
+        await self._send_menu_embed(ctx, "Select a Dragon Stage to Edit", lines)
+        sel_raw = await self._gm_prompt(ctx, "Enter the number of the stage to edit:")
+        if not sel_raw:
+            return
+        try:
+            sel_idx = int(sel_raw) - 1
+            if sel_idx < 0 or sel_idx >= len(rows):
+                raise ValueError
+        except ValueError:
+            return await ctx.send("❌ Invalid selection.")
+
+        stage = dict(rows[sel_idx])
+        await self._send_menu_embed(
+            ctx,
+            f"Editing: {stage['name']}",
+            [
+                f"Status: {'Enabled' if stage['enabled'] else 'Disabled'}",
+                f"Level Range: {stage['min_level']}–{stage['max_level']}",
+                f"Multiplier: x{stage['base_multiplier']}",
+                f"Element: {stage['element']}",
+                f"Moves: {', '.join(stage['move_names'] or []) or 'None'}",
+                f"Passives: {', '.join(stage['passive_names'] or []) or 'None'}",
+            ],
+            footer="Type: name, level_range, multiplier, element, moves, passives, toggle, delete, done",
+        )
+        menu = (
+            "What do you want to edit?\n"
+            "Options: name, level_range, multiplier, element, moves, passives, toggle, delete, done"
+        )
+        while True:
+            choice = await self._gm_prompt(ctx, menu)
+            if not choice:
+                return
+            choice = choice.lower()
+            if choice == "done":
+                break
+            if choice == "delete":
+                if not await self._gm_confirm(ctx, f"⚠️ Delete stage **{stage['name']}**? Type YES to confirm."):
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute("DELETE FROM ice_dragon_stages WHERE id = $1", stage["id"])
+                await ctx.send("✅ Stage deleted.")
+                return
+            if choice == "toggle":
+                new_enabled = not stage["enabled"]
+                action = "enable" if new_enabled else "disable"
+                if not await ctx.confirm(f"Confirm: {action} **{stage['name']}**?"):
+                    await ctx.send("❌ Toggle cancelled.")
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_stages SET enabled = $1 WHERE id = $2",
+                        new_enabled, stage["id"]
+                    )
+                stage["enabled"] = new_enabled
+                await ctx.send(f"✅ Stage {'enabled' if new_enabled else 'disabled'}.")
+                continue
+            if choice == "name":
+                new_name = await self._gm_prompt(ctx, "New name?")
+                if not new_name:
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute("UPDATE ice_dragon_stages SET name = $1 WHERE id = $2", new_name, stage["id"])
+                stage["name"] = new_name
+            elif choice == "level_range":
+                min_raw = await self._gm_prompt(ctx, "New min level?")
+                max_raw = await self._gm_prompt(ctx, "New max level?")
+                if not min_raw or not max_raw:
+                    continue
+                try:
+                    min_level = int(min_raw)
+                    max_level = int(max_raw)
+                except ValueError:
+                    await ctx.send("❌ Invalid number.")
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_stages SET min_level = $1, max_level = $2 WHERE id = $3",
+                        min_level, max_level, stage["id"]
+                    )
+                stage["min_level"] = min_level
+                stage["max_level"] = max_level
+            elif choice == "multiplier":
+                mult_raw = await self._gm_prompt(ctx, "New base multiplier?")
+                if not mult_raw:
+                    continue
+                try:
+                    base_multiplier = float(mult_raw)
+                except ValueError:
+                    await ctx.send("❌ Invalid number.")
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_stages SET base_multiplier = $1 WHERE id = $2",
+                        base_multiplier, stage["id"]
+                    )
+                stage["base_multiplier"] = base_multiplier
+            elif choice == "element":
+                elements = self._get_element_choices()
+                elem_raw = await self._gm_prompt(ctx, f"Element?\nAvailable: {', '.join(elements)}")
+                if not elem_raw:
+                    continue
+                if elem_raw.capitalize() not in elements:
+                    await ctx.send("❌ Invalid element.")
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_stages SET element = $1 WHERE id = $2",
+                        elem_raw.capitalize(), stage["id"]
+                    )
+                stage["element"] = elem_raw.capitalize()
+            elif choice == "moves":
+                moves = await self._choose_abilities(ctx, "move")
+                if moves is None or not moves:
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_stages SET move_names = $1 WHERE id = $2",
+                        moves, stage["id"]
+                    )
+                stage["move_names"] = moves
+            elif choice == "passives":
+                passives = await self._choose_abilities(ctx, "passive", max_count=5)
+                if passives is None:
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_stages SET passive_names = $1 WHERE id = $2",
+                        passives, stage["id"]
+                    )
+                stage["passive_names"] = passives
+            else:
+                await ctx.send("❌ Unknown option.")
+        await ctx.send("✅ Stage updated.")
+
+    async def _gm_create_drop(self, ctx):
+        name = await self._gm_prompt(ctx, "Drop name?")
+        if not name:
+            return
+        item_type_raw = await self._gm_prompt(
+            ctx,
+            f"Item type? Options: {', '.join([i.value for i in ItemType])}"
+        )
+        if not item_type_raw:
+            return
+        item_type_raw = item_type_raw.strip().capitalize()
+        if item_type_raw not in [i.value for i in ItemType]:
+            return await ctx.send("❌ Invalid item type.")
+        min_stat_raw = await self._gm_prompt(ctx, "Min stat?")
+        max_stat_raw = await self._gm_prompt(ctx, "Max stat?")
+        base_chance_raw = await self._gm_prompt(ctx, "Base chance? (percent, e.g. 0.1 or 1.5%)")
+        max_chance_raw = await self._gm_prompt(ctx, "Max chance? (percent, e.g. 0.5 or 2%)")
+        if not min_stat_raw or not max_stat_raw or not base_chance_raw or not max_chance_raw:
+            return
+        try:
+            min_stat = int(min_stat_raw)
+            max_stat = int(max_stat_raw)
+            base_chance = self._parse_percent(base_chance_raw)
+            max_chance = self._parse_percent(max_chance_raw)
+        except ValueError:
+            return await ctx.send("❌ Invalid number input.")
+        if base_chance is None or max_chance is None:
+            return await ctx.send("❌ Invalid chance. Use a percent between 0 and 100.")
+        if base_chance > max_chance:
+            return await ctx.send("❌ Base chance cannot exceed max chance.")
+
+        elements = self._get_element_choices()
+        elem_raw = await self._gm_prompt(
+            ctx,
+            f"Element? (default Water)\nAvailable: {', '.join(elements)}",
+            allow_blank=True,
+        )
+        element = "Water"
+        if elem_raw:
+            if elem_raw.capitalize() not in elements:
+                return await ctx.send("❌ Invalid element.")
+            element = elem_raw.capitalize()
+
+        scope_raw = await self._gm_prompt(ctx, "Drop scope? (global/specific, default global)", allow_blank=True)
+        is_global = True
+        dragon_stage_id = None
+        if scope_raw and scope_raw.strip().lower() in ("specific", "stage", "dragon"):
+            stages = await self._fetch_dragon_stages()
+            if not stages:
+                return await ctx.send("❌ No dragon stages available to bind this drop.")
+            lines = [f"{idx}) {row['name']} (Lv {row['min_level']}-{row['max_level']})" for idx, row in enumerate(stages, start=1)]
+            sel_raw = await self._gm_prompt(ctx, "Select a stage for this drop:\n" + "\n".join(lines))
+            if not sel_raw:
+                return
+            try:
+                sel_idx = int(sel_raw) - 1
+                if sel_idx < 0 or sel_idx >= len(stages):
+                    raise ValueError
+            except ValueError:
+                return await ctx.send("❌ Invalid selection.")
+            is_global = False
+            dragon_stage_id = stages[sel_idx]["id"]
+
+        min_level_raw = await self._gm_prompt(ctx, "Min level filter? (blank for none)", allow_blank=True)
+        max_level_raw = await self._gm_prompt(ctx, "Max level filter? (blank for none)", allow_blank=True)
+        min_level = int(min_level_raw) if min_level_raw else None
+        max_level = int(max_level_raw) if max_level_raw else None
+
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO ice_dragon_drops (name, item_type, min_stat, max_stat, base_chance, max_chance, is_global, dragon_stage_id, element, min_level, max_level) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                name, item_type_raw, min_stat, max_stat, base_chance, max_chance, is_global, dragon_stage_id, element, min_level, max_level
+            )
+        await ctx.send(f"✅ Drop **{name}** created.")
+
+    async def _gm_edit_drops(self, ctx):
+        rows = await self._fetch_dragon_drops()
+        if not rows:
+            return await ctx.send("No drops found.")
+        lines = []
+        for idx, row in enumerate(rows, start=1):
+            item_type = ItemType.from_string(row["item_type"])
+            stat_label = "Defense" if item_type == ItemType.Shield else "Damage"
+            lines.append(
+                f"{idx}) {row['name']} ({row['item_type']}) - {stat_label}: {row['min_stat']}–{row['max_stat']}"
+            )
+        await self._send_menu_embed(ctx, "Select a Drop to Edit", lines)
+        sel_raw = await self._gm_prompt(ctx, "Enter the number of the drop to edit:")
+        if not sel_raw:
+            return
+        try:
+            sel_idx = int(sel_raw) - 1
+            if sel_idx < 0 or sel_idx >= len(rows):
+                raise ValueError
+        except ValueError:
+            return await ctx.send("❌ Invalid selection.")
+
+        drop = dict(rows[sel_idx])
+        scope_text = "Global" if drop["is_global"] else f"Stage ID {drop['dragon_stage_id']}"
+        await self._send_menu_embed(
+            ctx,
+            f"Editing Drop: {drop['name']}",
+            [
+                f"Type: {drop['item_type']}",
+                f"Stats: {drop['min_stat']}–{drop['max_stat']}",
+                f"Chance: {self._format_percent(drop['base_chance'])}–{self._format_percent(drop['max_chance'])}",
+                f"Element: {drop['element']}",
+                f"Scope: {scope_text}",
+                f"Level Filter: {drop['min_level'] or '-'} to {drop['max_level'] or '-'}",
+            ],
+            footer="Type: name, item_type, stats, chance, element, level_range, scope, delete, done",
+        )
+        menu = "Options: name, item_type, stats, chance, element, level_range, scope, delete, done"
+        while True:
+            choice = await self._gm_prompt(ctx, menu)
+            if not choice:
+                return
+            choice = choice.lower()
+            if choice == "done":
+                break
+            if choice == "delete":
+                if not await self._gm_confirm(ctx, f"⚠️ Delete drop **{drop['name']}**? Type YES to confirm."):
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute("DELETE FROM ice_dragon_drops WHERE id = $1", drop["id"])
+                await ctx.send("✅ Drop deleted.")
+                return
+            if choice == "name":
+                new_name = await self._gm_prompt(ctx, "New name?")
+                if not new_name:
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute("UPDATE ice_dragon_drops SET name = $1 WHERE id = $2", new_name, drop["id"])
+                drop["name"] = new_name
+            elif choice == "item_type":
+                item_type_raw = await self._gm_prompt(ctx, f"Item type? Options: {', '.join([i.value for i in ItemType])}")
+                if not item_type_raw:
+                    continue
+                item_type_raw = item_type_raw.strip().capitalize()
+                if item_type_raw not in [i.value for i in ItemType]:
+                    await ctx.send("❌ Invalid item type.")
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute("UPDATE ice_dragon_drops SET item_type = $1 WHERE id = $2", item_type_raw, drop["id"])
+                drop["item_type"] = item_type_raw
+            elif choice == "stats":
+                min_stat_raw = await self._gm_prompt(ctx, "Min stat?")
+                max_stat_raw = await self._gm_prompt(ctx, "Max stat?")
+                if not min_stat_raw or not max_stat_raw:
+                    continue
+                try:
+                    min_stat = int(min_stat_raw)
+                    max_stat = int(max_stat_raw)
+                except ValueError:
+                    await ctx.send("❌ Invalid number.")
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_drops SET min_stat = $1, max_stat = $2 WHERE id = $3",
+                        min_stat, max_stat, drop["id"]
+                    )
+                drop["min_stat"] = min_stat
+                drop["max_stat"] = max_stat
+            elif choice == "chance":
+                base_raw = await self._gm_prompt(ctx, "Base chance? (percent)")
+                max_raw = await self._gm_prompt(ctx, "Max chance? (percent)")
+                if not base_raw or not max_raw:
+                    continue
+                try:
+                    base_chance = self._parse_percent(base_raw)
+                    max_chance = self._parse_percent(max_raw)
+                except ValueError:
+                    await ctx.send("❌ Invalid number.")
+                    continue
+                if base_chance is None or max_chance is None:
+                    await ctx.send("❌ Invalid chance. Use a percent between 0 and 100.")
+                    continue
+                if base_chance > max_chance:
+                    await ctx.send("❌ Base chance cannot exceed max chance.")
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_drops SET base_chance = $1, max_chance = $2 WHERE id = $3",
+                        base_chance, max_chance, drop["id"]
+                    )
+                drop["base_chance"] = base_chance
+                drop["max_chance"] = max_chance
+            elif choice == "element":
+                elements = self._get_element_choices()
+                elem_raw = await self._gm_prompt(ctx, f"Element?\nAvailable: {', '.join(elements)}")
+                if not elem_raw:
+                    continue
+                if elem_raw.capitalize() not in elements:
+                    await ctx.send("❌ Invalid element.")
+                    continue
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_drops SET element = $1 WHERE id = $2",
+                        elem_raw.capitalize(), drop["id"]
+                    )
+                drop["element"] = elem_raw.capitalize()
+            elif choice == "level_range":
+                min_raw = await self._gm_prompt(ctx, "Min level filter? (blank for none)", allow_blank=True)
+                max_raw = await self._gm_prompt(ctx, "Max level filter? (blank for none)", allow_blank=True)
+                min_level = int(min_raw) if min_raw else None
+                max_level = int(max_raw) if max_raw else None
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE ice_dragon_drops SET min_level = $1, max_level = $2 WHERE id = $3",
+                        min_level, max_level, drop["id"]
+                    )
+                drop["min_level"] = min_level
+                drop["max_level"] = max_level
+            elif choice == "scope":
+                scope_raw = await self._gm_prompt(ctx, "Drop scope? (global/specific)")
+                if not scope_raw:
+                    continue
+                if scope_raw.strip().lower() in ("global", "all"):
+                    async with self.bot.pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE ice_dragon_drops SET is_global = TRUE, dragon_stage_id = NULL WHERE id = $1",
+                            drop["id"]
+                        )
+                    drop["is_global"] = True
+                    drop["dragon_stage_id"] = None
+                elif scope_raw.strip().lower() in ("specific", "stage", "dragon"):
+                    stages = await self._fetch_dragon_stages()
+                    if not stages:
+                        await ctx.send("❌ No dragon stages available.")
+                        continue
+                    lines = [f"{idx}) {row['name']} (Lv {row['min_level']}-{row['max_level']})" for idx, row in enumerate(stages, start=1)]
+                    sel_raw = await self._gm_prompt(ctx, "Select a stage for this drop:\n" + "\n".join(lines))
+                    if not sel_raw:
+                        continue
+                    try:
+                        sel_idx = int(sel_raw) - 1
+                        if sel_idx < 0 or sel_idx >= len(stages):
+                            raise ValueError
+                    except ValueError:
+                        await ctx.send("❌ Invalid selection.")
+                        continue
+                    stage_id = stages[sel_idx]["id"]
+                    async with self.bot.pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE ice_dragon_drops SET is_global = FALSE, dragon_stage_id = $1 WHERE id = $2",
+                            stage_id, drop["id"]
+                        )
+                    drop["is_global"] = False
+                    drop["dragon_stage_id"] = stage_id
+                else:
+                    await ctx.send("❌ Invalid scope.")
+            else:
+                await ctx.send("❌ Unknown option.")
+        await ctx.send("✅ Drop updated.")
+
+
+    async def cog_load(self):
+        await self._init_event_settings()
+        await self._init_april_fools_settings()
+        await self._init_birthday_assistant()
+        await self._init_pve_census()
+        greg_cog = self.bot.get_cog("Greg")
+        if greg_cog and hasattr(greg_cog, "_sync_finale_event_flag"):
+            await greg_cog._sync_finale_event_flag()
+
+    async def _init_event_settings(self):
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS event_settings (
+                    event_key TEXT PRIMARY KEY,
+                    enabled BOOLEAN NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            for key, default in self.EVENT_DEFAULTS.items():
+                await conn.execute(
+                    """
+                    INSERT INTO event_settings (event_key, enabled)
+                    VALUES ($1, $2)
+                    ON CONFLICT (event_key) DO NOTHING
+                    """,
+                    key,
+                    default,
+                )
+            rows = await conn.fetch("SELECT event_key, enabled FROM event_settings")
+
+        self.event_flags = {row["event_key"]: bool(row["enabled"]) for row in rows}
+        for key, default in self.EVENT_DEFAULTS.items():
+            self.event_flags.setdefault(key, default)
+        self.bot.event_flags = self.event_flags
+
+    async def _init_april_fools_settings(self):
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS april_fools_settings (
+                    flag_key TEXT PRIMARY KEY,
+                    enabled BOOLEAN NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            for key, default in self.APRIL_FOOLS_DEFAULTS.items():
+                await conn.execute(
+                    """
+                    INSERT INTO april_fools_settings (flag_key, enabled)
+                    VALUES ($1, $2)
+                    ON CONFLICT (flag_key) DO NOTHING
+                    """,
+                    key,
+                    default,
+                )
+            rows = await conn.fetch("SELECT flag_key, enabled FROM april_fools_settings")
+
+        self.april_fools_flags = {
+            row["flag_key"]: bool(row["enabled"]) for row in rows
+        }
+        for key, default in self.APRIL_FOOLS_DEFAULTS.items():
+            self.april_fools_flags.setdefault(key, default)
+        self.bot.april_fools_flags = self.april_fools_flags
+
+    async def _init_birthday_assistant(self):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS birthday_assistant_settings (
+                    id SMALLINT PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    ends_at TIMESTAMPTZ NOT NULL,
+                    updated_by BIGINT,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CHECK (id = 1)
+                )
+                """
+            )
+            row = await conn.fetchrow(
+                """
+                SELECT birthday.user_id, birthday.ends_at, profile.name
+                FROM birthday_assistant_settings AS birthday
+                LEFT JOIN profile ON profile."user" = birthday.user_id
+                WHERE birthday.id = 1
+                """
+            )
+            if row and (row["name"] is None or self._ensure_utc(row["ends_at"]) <= now):
+                await conn.execute("DELETE FROM birthday_assistant_settings WHERE id = 1")
+                row = None
+
+        if row:
+            self.bot.birthday_assistant_state = BirthdayAssistantState(
+                user_id=int(row["user_id"]),
+                character_name=str(row["name"]),
+                ends_at=self._ensure_utc(row["ends_at"]),
+            )
+        else:
+            self.bot.birthday_assistant_state = None
+
+    async def _set_birthday_assistant(
+        self,
+        *,
+        user_id: int,
+        character_name: str,
+        ends_at: datetime.datetime,
+        updated_by: int,
+    ) -> BirthdayAssistantState:
+        ends_at = self._ensure_utc(ends_at)
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO birthday_assistant_settings (id, user_id, ends_at, updated_by)
+                VALUES (1, $1, $2, $3)
+                ON CONFLICT (id)
+                DO UPDATE SET
+                    user_id = EXCLUDED.user_id,
+                    ends_at = EXCLUDED.ends_at,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = NOW()
+                """,
+                user_id,
+                ends_at,
+                updated_by,
+            )
+
+        state = BirthdayAssistantState(
+            user_id=user_id,
+            character_name=character_name,
+            ends_at=ends_at,
+        )
+        self.bot.birthday_assistant_state = state
+        return state
+
+    async def _disable_birthday_assistant(self) -> None:
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute("DELETE FROM birthday_assistant_settings WHERE id = 1")
+        self.bot.birthday_assistant_state = None
+
+    async def _init_pve_census(self):
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS gm_pve_census (
+                    id SMALLINT PRIMARY KEY,
+                    started_at TIMESTAMPTZ NULL,
+                    ends_at TIMESTAMPTZ NULL,
+                    successful_runs BIGINT NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            await conn.execute(
+                """
+                INSERT INTO gm_pve_census (id, started_at, ends_at, successful_runs)
+                VALUES (1, NULL, NULL, 0)
+                ON CONFLICT (id) DO NOTHING
+                """
+            )
+
+    def _format_duration(self, total_seconds: float) -> str:
+        total_seconds = max(0, int(total_seconds or 0))
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        parts = []
+        if hours:
+            parts.append(f"{hours}h")
+        if minutes or hours:
+            parts.append(f"{minutes}m")
+        parts.append(f"{seconds}s")
+        return " ".join(parts)
+
+    def _ensure_utc(self, value: datetime.datetime | None) -> datetime.datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=datetime.timezone.utc)
+        return value.astimezone(datetime.timezone.utc)
+
+    def _pve_census_status(self, row) -> str:
+        data = dict(row or {})
+        started_at = self._ensure_utc(data.get("started_at"))
+        ends_at = self._ensure_utc(data.get("ends_at"))
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+        if not started_at or not ends_at:
+            return "inactive"
+        if now < started_at:
+            return "pending"
+        if now < ends_at:
+            return "active"
+        return "expired"
+
+    async def _get_pve_census(self):
+        async with self.bot.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT started_at, ends_at, successful_runs
+                FROM gm_pve_census
+                WHERE id = 1
+                """
+            )
+
+        return row or {"started_at": None, "ends_at": None, "successful_runs": 0}
+
+    async def _start_pve_census(self):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        ends_at = now + datetime.timedelta(hours=24)
+        async with self.bot.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE gm_pve_census
+                SET started_at = $1,
+                    ends_at = $2,
+                    successful_runs = 0,
+                    updated_at = NOW()
+                WHERE id = 1
+                RETURNING started_at, ends_at, successful_runs
+                """,
+                now,
+                ends_at,
+            )
+
+        return row
+
+    async def _clear_pve_census(self):
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE gm_pve_census
+                SET started_at = NULL,
+                    ends_at = NULL,
+                    successful_runs = 0,
+                    updated_at = NOW()
+                WHERE id = 1
+                """
+            )
+
+    async def _increment_pve_census(self):
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE gm_pve_census
+                SET successful_runs = successful_runs + 1,
+                    updated_at = NOW()
+                WHERE id = 1
+                  AND started_at IS NOT NULL
+                  AND ends_at IS NOT NULL
+                  AND started_at <= NOW()
+                  AND ends_at > NOW()
+                """
+            )
+
+    def _build_pve_census_embed(self, row) -> discord.Embed:
+        data = dict(row or {})
+        started_at = self._ensure_utc(data.get("started_at"))
+        ends_at = self._ensure_utc(data.get("ends_at"))
+        successful_runs = int(data.get("successful_runs") or 0)
+        status = self._pve_census_status(data)
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+        elapsed_seconds = 0
+        if started_at and ends_at:
+            if status == "active":
+                elapsed_seconds = int((now - started_at).total_seconds())
+            elif status == "expired":
+                elapsed_seconds = int((ends_at - started_at).total_seconds())
+
+        avg_per_hour = 0.0
+        if elapsed_seconds > 0:
+            avg_per_hour = successful_runs / max(elapsed_seconds / 3600, 1 / 3600)
+
+        embed = discord.Embed(title="PvE Census", color=0x8A2E12)
+        embed.add_field(name="Status", value=status, inline=True)
+        embed.add_field(name="Successful PvEs", value=f"{successful_runs:,}", inline=True)
+        embed.add_field(name="Average Pace", value=f"{avg_per_hour:.1f}/hour", inline=True)
+
+        if started_at and ends_at:
+            embed.add_field(
+                name="Started",
+                value=(
+                    f"{discord.utils.format_dt(started_at, style='F')}\n"
+                    f"{discord.utils.format_dt(started_at, style='R')}"
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="Ends",
+                value=(
+                    f"{discord.utils.format_dt(ends_at, style='F')}\n"
+                    f"{discord.utils.format_dt(ends_at, style='R')}"
+                ),
+                inline=False,
+            )
+            if status == "active":
+                embed.add_field(
+                    name="Time Remaining",
+                    value=self._format_duration((ends_at - now).total_seconds()),
+                    inline=True,
+                )
+            else:
+                embed.add_field(
+                    name="Window Length",
+                    value=self._format_duration((ends_at - started_at).total_seconds()),
+                    inline=True,
+                )
+            embed.add_field(
+                name="Elapsed",
+                value=self._format_duration(elapsed_seconds),
+                inline=True,
+            )
+        else:
+            embed.description = (
+                "No PvE census is active. Use `$gmpve start` to begin a fresh 24-hour tracking window."
+            )
+
+        embed.set_footer(text="$gmpve start | $gmpve status | $gmpve clear")
+        return embed
+
+    def _normalize_event_key(self, raw: str | None) -> str | None:
+        if not raw:
+            return None
+        return self.EVENT_ALIASES.get(raw.strip().lower())
+
+    def _parse_bool(self, raw: str | None) -> bool | None:
+        if raw is None:
+            return None
+        value = raw.strip().lower()
+        if value in ("on", "true", "enable", "enabled", "1", "yes", "y"):
+            return True
+        if value in ("off", "false", "disable", "disabled", "0", "no", "n"):
+            return False
+        return None
+
+    def get_event_enabled(self, event_key: str) -> bool:
+        if not self.event_flags:
+            return self.EVENT_DEFAULTS.get(event_key, False)
+        return bool(self.event_flags.get(event_key, self.EVENT_DEFAULTS.get(event_key, False)))
+
+    def _normalize_april_fools_flag_key(self, raw: str | None) -> str | None:
+        if not raw:
+            return None
+        return self.APRIL_FOOLS_ALIASES.get(raw.strip().lower())
+
+    def get_april_fools_flag_enabled(self, flag_key: str) -> bool:
+        if not self.april_fools_flags:
+            return self.APRIL_FOOLS_DEFAULTS.get(flag_key, False)
+        return bool(
+            self.april_fools_flags.get(
+                flag_key,
+                self.APRIL_FOOLS_DEFAULTS.get(flag_key, False),
+            )
+        )
+
+    async def set_event_enabled(self, event_key: str, enabled: bool) -> None:
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO event_settings (event_key, enabled)
+                VALUES ($1, $2)
+                ON CONFLICT (event_key)
+                DO UPDATE SET enabled = $2, updated_at = NOW()
+                """,
+                event_key,
+                enabled,
+            )
+
+        self.event_flags[event_key] = enabled
+        self.bot.event_flags = self.event_flags
+
+        lny_cog = self.bot.get_cog("LunarNewYear")
+        if lny_cog and hasattr(lny_cog, "enabled"):
+            lny_cog.enabled = enabled if event_key == "lunar_new_year" else lny_cog.enabled
+
+    async def set_april_fools_flag_enabled(self, flag_key: str, enabled: bool) -> None:
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO april_fools_settings (flag_key, enabled)
+                VALUES ($1, $2)
+                ON CONFLICT (flag_key)
+                DO UPDATE SET enabled = $2, updated_at = NOW()
+                """,
+                flag_key,
+                enabled,
+            )
+
+        self.april_fools_flags[flag_key] = enabled
+        self.bot.april_fools_flags = self.april_fools_flags
+
+        if flag_key == APRIL_FOOLS_GREG_FLAG:
+            greg_cog = self.bot.get_cog("Greg")
+            if greg_cog and hasattr(greg_cog, "_sync_finale_event_flag"):
+                await greg_cog._sync_finale_event_flag()
+
+    def _event_status_lines(self) -> list[str]:
+        lines = []
+        for key, name in self.EVENT_DISPLAY_NAMES.items():
+            status = "enabled" if self.get_event_enabled(key) else "disabled"
+            lines.append(f"{name}: {status}")
+        return lines
+
+    def _april_fools_status_lines(self) -> list[str]:
+        lines = []
+        for key, name in self.APRIL_FOOLS_DISPLAY_NAMES.items():
+            status = "enabled" if self.get_april_fools_flag_enabled(key) else "disabled"
+            lines.append(f"{name}: {status}")
+        return lines
+
+    @is_gm()
+    @commands.command(
+        name="gmbirthday",
+        hidden=True,
+        brief=_("Temporarily add a GM character as a PvE battle assistant"),
+    )
+    async def gmbirthday(
+        self,
+        ctx,
+        target: str | None = None,
+        duration: str | None = None,
+    ):
+        """Enable with `$gmbirthday <user id> <duration>` or disable with `$gmbirthday off`."""
+        if target is None:
+            state = get_active_birthday_assistant(self.bot)
+            if state is None:
+                return await ctx.send(
+                    "Birthday assistance is **disabled**.\n"
+                    "Use `$gmbirthday <user id> <duration>`, for example `$gmbirthday 123456789 24h`."
+                )
+            return await ctx.send(
+                f"Birthday assistance is **enabled** for <@{state.user_id}> "
+                f"(**{state.character_name} 🎂**) until "
+                f"{discord.utils.format_dt(state.ends_at, style='F')} "
+                f"({discord.utils.format_dt(state.ends_at, style='R')}).\n"
+                "Active modes: Battle Tower and Ice Dragon Challenge."
+            )
+
+        if target.strip().lower() in {"off", "disable", "disabled", "stop", "clear"}:
+            await self._disable_birthday_assistant()
+            return await ctx.send("Birthday assistance is now **disabled**.")
+
+        if duration is None:
+            return await ctx.send(
+                "Provide a duration, for example `$gmbirthday 123456789 24h`."
+            )
+
+        user_token = target.strip()
+        if user_token.startswith("<@") and user_token.endswith(">"):
+            user_token = user_token[2:-1].lstrip("!")
+        if not user_token.isdigit():
+            return await ctx.send("Target must be a Discord user ID or mention.")
+        user_id = int(user_token)
+
+        try:
+            parsed_duration = parse_birthday_duration(duration)
+        except ValueError as exc:
+            return await ctx.send(str(exc))
+
+        profile = await self.bot.pool.fetchrow(
+            'SELECT name FROM profile WHERE "user" = $1;',
+            user_id,
+        )
+        if not profile:
+            return await ctx.send("That user does not have a Fable character.")
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        state = await self._set_birthday_assistant(
+            user_id=user_id,
+            character_name=str(profile["name"]),
+            ends_at=now + parsed_duration,
+            updated_by=ctx.author.id,
+        )
+        await ctx.send(
+            f"<@{state.user_id}> (**{state.character_name} 🎂**) will now assist player teams "
+            "in **Battle Tower** and **Ice Dragon Challenge** until "
+            f"{discord.utils.format_dt(state.ends_at, style='F')} "
+            f"({discord.utils.format_dt(state.ends_at, style='R')}).\n"
+            "Their live character stats, equipped weapons/elements, raid stats, classes, "
+            "specializations, and level-100 Ascension Mantle are cloned for each new battle; "
+            "their pet is not included."
+        )
+
+    @is_gm()
+    @commands.group(name="gmevent", aliases=["gmevents"], invoke_without_command=True)
+    async def gmevent(self, ctx, event: str | None = None, enabled: str | None = None):
+        if event is None:
+            lines = self._event_status_lines()
+            return await ctx.send("Event status:\n" + "\n".join(lines))
+
+        event_key = self._normalize_event_key(event)
+        if not event_key:
+            available = ", ".join(sorted(self.EVENT_DISPLAY_NAMES.values()))
+            return await ctx.send(f"Unknown event. Available: {available}")
+
+        parsed = self._parse_bool(enabled)
+        if parsed is None:
+            parsed = not self.get_event_enabled(event_key)
+
+        await self.set_event_enabled(event_key, parsed)
+        status = "enabled" if parsed else "disabled"
+        await ctx.send(f"{self.EVENT_DISPLAY_NAMES[event_key]} event is now **{status}**.")
+
+    @gmevent.command(name="list", aliases=["status"])
+    async def gmevent_list(self, ctx):
+        lines = self._event_status_lines()
+        await ctx.send("Event status:\n" + "\n".join(lines))
+
+    @is_gm()
+    @commands.group(
+        name="gmapril",
+        aliases=["gmfools", "gmaprilfools"],
+        invoke_without_command=True,
+    )
+    async def gmapril(self, ctx, flag: str | None = None, enabled: str | None = None):
+        if flag is None:
+            lines = self._april_fools_status_lines()
+            return await ctx.send("April Fools status:\n" + "\n".join(lines))
+
+        flag_key = self._normalize_april_fools_flag_key(flag)
+        if not flag_key:
+            available = ", ".join(sorted(self.APRIL_FOOLS_DISPLAY_NAMES.values()))
+            return await ctx.send(f"Unknown April Fools flag. Available: {available}")
+
+        parsed = self._parse_bool(enabled)
+        if parsed is None:
+            parsed = not self.get_april_fools_flag_enabled(flag_key)
+
+        await self.set_april_fools_flag_enabled(flag_key, parsed)
+        status = "enabled" if parsed else "disabled"
+        await ctx.send(f"{self.APRIL_FOOLS_DISPLAY_NAMES[flag_key]} is now **{status}**.")
+
+    @gmapril.command(name="status", aliases=["list"])
+    async def gmapril_status(self, ctx):
+        lines = self._april_fools_status_lines()
+        await ctx.send("April Fools status:\n" + "\n".join(lines))
+
+    @commands.Cog.listener()
+    async def on_PVE_completion(
+        self,
+        ctx,
+        success,
+        monster_name=None,
+        element=None,
+        levelchoice=None,
+        battle_id=None,
+    ):
+        if not success or levelchoice is None:
+            return
+        await self._increment_pve_census()
+
+    @is_gm()
+    @commands.group(
+        name="gmpve",
+        aliases=["pvecensus", "pvewatch", "pvestats"],
+        invoke_without_command=True,
+        hidden=True,
+    )
+    async def gmpve(self, ctx):
+        row = await self._get_pve_census()
+        await ctx.send(embed=self._build_pve_census_embed(row))
+
+    @is_gm()
+    @gmpve.command(name="status", aliases=["check", "view"], hidden=True)
+    async def gmpve_status(self, ctx):
+        row = await self._get_pve_census()
+        await ctx.send(embed=self._build_pve_census_embed(row))
+
+    @is_gm()
+    @gmpve.command(name="start", aliases=["begin", "reset"], hidden=True)
+    async def gmpve_start(self, ctx):
+        row = await self._start_pve_census()
+        embed = self._build_pve_census_embed(row)
+        embed.description = (
+            "The 24-hour PvE census has started. Every successful full PvE clear will be counted from now on."
+        )
+        await ctx.send(embed=embed)
+
+    @is_gm()
+    @gmpve.command(name="clear", aliases=["stop", "end"], hidden=True)
+    async def gmpve_clear(self, ctx):
+        await self._clear_pve_census()
+        await ctx.send("The PvE census has been cleared.")
+
+    @gmevent.command(name="resetshops", aliases=["resetshop"])
+    async def gmevent_resetshops(self, ctx, event: str | None = "all"):
+        if event is None or event.strip().lower() == "all":
+            targets = list(self.EVENT_SHOP_DEFAULTS.keys())
+        else:
+            event_key = self._normalize_event_key(event)
+            if not event_key or event_key not in self.EVENT_SHOP_DEFAULTS:
+                available = ", ".join(
+                    self.EVENT_DISPLAY_NAMES[key]
+                    for key in self.EVENT_SHOP_DEFAULTS.keys()
+                )
+                return await ctx.send(
+                    f"Unknown event or no shop quantities. Available: {available}"
+                )
+            targets = [event_key]
+
+        async with self.bot.pool.acquire() as conn:
+            for key in targets:
+                defaults = self.EVENT_SHOP_DEFAULTS[key]
+                set_clause = ", ".join(f"{col} = {val}" for col, val in defaults.items())
+                await conn.execute(f"UPDATE profile SET {set_clause};")
+
+        names = ", ".join(self.EVENT_DISPLAY_NAMES[key] for key in targets)
+        await ctx.send(f"Shop quantities reset for: {names}.")
+
+
+class GMTalismanIdsModal(Modal, title="Set Talisman Target IDs"):
+    def __init__(self, panel_view):
+        super().__init__()
+        self.panel_view = panel_view
+        default_value = (
+            ", ".join(str(user_id) for user_id in panel_view.target_user_ids[:50])
+            if panel_view.target_user_ids
+            else ""
+        )
+        self.ids_input = TextInput(
+            label="Discord IDs or mentions",
+            placeholder="123456789, 987654321 or @User",
+            default=default_value,
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=1800,
+        )
+        self.add_item(self.ids_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.panel_view.author.id:
+            return await interaction.response.send_message(
+                "❌ This talisman panel is not for you.",
+                ephemeral=True,
+            )
+
+        try:
+            parsed_ids = await self.panel_view.gm_cog._parse_user_ids_from_text(
+                self.ids_input.value
+            )
+        except ValueError as exc:
+            return await interaction.response.send_message(
+                f"❌ {exc}",
+                ephemeral=True,
+            )
+
+        if not parsed_ids:
+            return await interaction.response.send_message(
+                "❌ No valid user IDs provided.",
+                ephemeral=True,
+            )
+
+        valid_ids, missing_ids = await self.panel_view.gm_cog._filter_character_user_ids(
+            parsed_ids
+        )
+        self.panel_view.target_user_ids = valid_ids
+        self.panel_view.target_missing_ids = missing_ids
+        await interaction.response.defer(ephemeral=True)
+        await self.panel_view.refresh_message()
+
+        response = f"Stored **{len(valid_ids)}** valid target(s)."
+        if missing_ids:
+            preview = ", ".join(str(user_id) for user_id in missing_ids[:15])
+            response += f"\nSkipped IDs without characters: {preview}"
+            if len(missing_ids) > 15:
+                response += f" ... and {len(missing_ids) - 15} more."
+        await interaction.followup.send(response, ephemeral=True)
+
+
+class GMTalismanTargetScopeSelect(discord.ui.Select):
+    def __init__(self, panel_view):
+        self.panel_view = panel_view
+        options = [
+            discord.SelectOption(
+                label="Everyone with Characters",
+                value="everyone",
+                description="Grant to every user who has a character.",
+                emoji="🌍",
+                default=panel_view.target_mode == "everyone",
+            ),
+            discord.SelectOption(
+                label="Specific Discord IDs",
+                value="specific_ids",
+                description="Grant to a pasted list of IDs or mentions.",
+                emoji="🎯",
+                default=panel_view.target_mode == "specific_ids",
+            ),
+        ]
+        super().__init__(
+            placeholder="Choose who receives the talismans",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.panel_view.target_mode = self.values[0]
+        await interaction.response.defer()
+        await self.panel_view.refresh_message()
+
+
+class GMTalismanAmountSelect(discord.ui.Select):
+    AMOUNT_CHOICES = [1, 2, 3, 4, 5, 10, 25, 50, 100]
+
+    def __init__(self, panel_view):
+        self.panel_view = panel_view
+        options = [
+            discord.SelectOption(
+                label=f"{amount}",
+                value=str(amount),
+                description=f"Grant {amount} talisman(s) per selected roll.",
+                default=panel_view.amount == amount,
+            )
+            for amount in self.AMOUNT_CHOICES
+        ]
+        super().__init__(
+            placeholder="Choose the amount to grant",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.panel_view.amount = int(self.values[0])
+        await interaction.response.defer()
+        await self.panel_view.refresh_message()
+
+
+class GMTalismanRoleModeSelect(discord.ui.Select):
+    def __init__(self, panel_view):
+        self.panel_view = panel_view
+        options = [
+            discord.SelectOption(
+                label="Random Talismans",
+                value="random",
+                description="Each target gets random talismans.",
+                emoji="🎲",
+                default=panel_view.role_mode == "random",
+            ),
+            discord.SelectOption(
+                label="All Basic Roles",
+                value="all",
+                description="Each target gets every basic-role talisman.",
+                emoji="🪬",
+                default=panel_view.role_mode == "all",
+            ),
+            discord.SelectOption(
+                label="Pick Specific Roles",
+                value="specific",
+                description="Choose exactly which basic-role talismans to grant.",
+                emoji="📋",
+                default=panel_view.role_mode == "specific",
+            ),
+        ]
+        super().__init__(
+            placeholder="Choose which talismans to grant",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.panel_view.role_mode = self.values[0]
+        self.panel_view.role_page = 0
+        await interaction.response.defer()
+        await self.panel_view.refresh_message()
+
+
+class GMTalismanRoleMultiSelect(discord.ui.Select):
+    def __init__(self, panel_view):
+        self.panel_view = panel_view
+        page_roles = panel_view.current_page_roles()
+        selected_on_page = set(page_roles) & panel_view.selected_roles
+        options = [
+            discord.SelectOption(
+                label=panel_view.gm_cog._newwerewolf_role_display_name(role),
+                value=role.name.casefold(),
+                default=role in selected_on_page,
+            )
+            for role in page_roles
+        ]
+        super().__init__(
+            placeholder=(
+                f"Choose roles on page {panel_view.role_page + 1}/"
+                f"{panel_view.total_role_pages()}"
+            ),
+            min_values=0,
+            max_values=max(1, len(options)),
+            options=options,
+            row=3,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        current_page_roles = set(self.panel_view.current_page_roles())
+        self.panel_view.selected_roles.difference_update(current_page_roles)
+        chosen_values = set(self.values)
+        for role in current_page_roles:
+            if role.name.casefold() in chosen_values:
+                self.panel_view.selected_roles.add(role)
+        await interaction.response.defer()
+        await self.panel_view.refresh_message()
+
+
+class GMTalismanGrantView(discord.ui.View):
+    ROLE_PAGE_SIZE = 25
+
+    def __init__(self, *, ctx, gm_cog):
+        super().__init__(timeout=900)
+        self.ctx = ctx
+        self.gm_cog = gm_cog
+        self.author = ctx.author
+        self.amount = 3
+        self.target_mode = "everyone"
+        self.target_user_ids: list[int] = []
+        self.target_missing_ids: list[int] = []
+        self.role_mode = "random"
+        self.selected_roles: set[NewWerewolfRole] = set()
+        self.role_page = 0
+        self.message: discord.Message | None = None
+        self.last_result: str | None = None
+        self._refresh_items()
+
+    def ordered_all_roles(self) -> list[NewWerewolfRole]:
+        return sorted(
+            self.gm_cog._all_talisman_roles(),
+            key=lambda role: self.gm_cog._newwerewolf_role_display_name(role).lower(),
+        )
+
+    def ordered_selected_roles(self) -> list[NewWerewolfRole]:
+        selected = self.selected_roles
+        return [role for role in self.ordered_all_roles() if role in selected]
+
+    def total_role_pages(self) -> int:
+        return max(
+            1,
+            (len(self.ordered_all_roles()) + self.ROLE_PAGE_SIZE - 1)
+            // self.ROLE_PAGE_SIZE,
+        )
+
+    def current_page_roles(self) -> list[NewWerewolfRole]:
+        all_roles = self.ordered_all_roles()
+        max_page_index = max(0, self.total_role_pages() - 1)
+        self.role_page = max(0, min(self.role_page, max_page_index))
+        start = self.role_page * self.ROLE_PAGE_SIZE
+        end = start + self.ROLE_PAGE_SIZE
+        return all_roles[start:end]
+
+    def _selected_role_preview(self, limit: int = 12) -> str:
+        selected = self.ordered_selected_roles()
+        if not selected:
+            return "None selected yet."
+        names = [
+            self.gm_cog._newwerewolf_role_display_name(role)
+            for role in selected[:limit]
+        ]
+        if len(selected) > limit:
+            names.append(f"... and {len(selected) - limit} more")
+        return ", ".join(names)
+
+    def _target_summary(self) -> str:
+        if self.target_mode == "everyone":
+            return "Everyone with a character"
+        if not self.target_user_ids and not self.target_missing_ids:
+            return "Specific IDs not set yet"
+        summary = f"{len(self.target_user_ids)} valid target(s)"
+        if self.target_missing_ids:
+            summary += f", {len(self.target_missing_ids)} skipped"
+        return summary
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="NewWerewolf Talisman Grant Panel",
+            colour=self.ctx.bot.config.game.primary_colour,
+            description=(
+                "Use the dropdowns and buttons below to grant talismans without"
+                " typing the full command syntax."
+            ),
+        ).set_author(
+            name=str(self.author),
+            icon_url=self.author.display_avatar.url,
+        )
+        embed.add_field(name="Targets", value=self._target_summary(), inline=False)
+        embed.add_field(name="Amount", value=str(self.amount), inline=True)
+
+        mode_labels = {
+            "random": "Random talismans",
+            "all": "All basic-role talismans",
+            "specific": "Specific basic-role talismans",
+        }
+        embed.add_field(
+            name="Grant Mode",
+            value=mode_labels.get(self.role_mode, self.role_mode),
+            inline=True,
+        )
+
+        if self.role_mode == "specific":
+            embed.add_field(
+                name=f"Selected Roles ({len(self.selected_roles)})",
+                value=self._selected_role_preview(),
+                inline=False,
+            )
+            embed.add_field(
+                name="Role Pages",
+                value=f"Page {self.role_page + 1}/{self.total_role_pages()}",
+                inline=False,
+            )
+
+        if self.target_mode == "specific_ids" and self.target_missing_ids:
+            preview = ", ".join(str(user_id) for user_id in self.target_missing_ids[:12])
+            if len(self.target_missing_ids) > 12:
+                preview += f" ... and {len(self.target_missing_ids) - 12} more."
+            embed.add_field(
+                name="Skipped IDs",
+                value=preview,
+                inline=False,
+            )
+
+        if self.last_result:
+            embed.add_field(name="Last Grant", value=self.last_result, inline=False)
+
+        embed.set_footer(
+            text=(
+                "Only the command invoker can use this panel. Specific-role mode"
+                " pages through the full basic-role talisman list."
+            )
+        )
+        return embed
+
+    def _refresh_items(self) -> None:
+        self.clear_items()
+        self.add_item(GMTalismanTargetScopeSelect(self))
+        self.add_item(GMTalismanAmountSelect(self))
+        self.add_item(GMTalismanRoleModeSelect(self))
+
+        if self.role_mode == "specific":
+            self.add_item(GMTalismanRoleMultiSelect(self))
+
+        if self.target_mode == "specific_ids":
+            ids_label = (
+                f"Set IDs ({len(self.target_user_ids)} valid)"
+                if self.target_user_ids
+                else "Set IDs"
+            )
+            ids_button = discord.ui.Button(
+                label=ids_label,
+                style=discord.ButtonStyle.secondary,
+                emoji="🆔",
+                row=4,
+            )
+            ids_button.callback = self.open_ids_modal
+            self.add_item(ids_button)
+
+        if self.role_mode == "specific":
+            prev_button = discord.ui.Button(
+                label="Prev Roles",
+                style=discord.ButtonStyle.secondary,
+                emoji="⬅️",
+                row=4,
+                disabled=self.role_page <= 0,
+            )
+            prev_button.callback = self.previous_role_page
+            self.add_item(prev_button)
+
+            next_button = discord.ui.Button(
+                label="Next Roles",
+                style=discord.ButtonStyle.secondary,
+                emoji="➡️",
+                row=4,
+                disabled=self.role_page >= self.total_role_pages() - 1,
+            )
+            next_button.callback = self.next_role_page
+            self.add_item(next_button)
+
+        grant_button = discord.ui.Button(
+            label="Grant Talismans",
+            style=discord.ButtonStyle.success,
+            emoji="✅",
+            row=4,
+        )
+        grant_button.callback = self.grant_talismans
+        self.add_item(grant_button)
+
+        close_button = discord.ui.Button(
+            label="Close",
+            style=discord.ButtonStyle.danger,
+            emoji="❌",
+            row=4,
+        )
+        close_button.callback = self.close_panel
+        self.add_item(close_button)
+
+    async def refresh_message(self) -> None:
+        self._refresh_items()
+        if self.message:
+            await self.message.edit(embed=self.build_embed(), view=self)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message(
+                "❌ Only the command user can control this panel.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def open_ids_modal(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(GMTalismanIdsModal(self))
+
+    async def previous_role_page(self, interaction: discord.Interaction):
+        self.role_page = max(0, self.role_page - 1)
+        await interaction.response.defer()
+        await self.refresh_message()
+
+    async def next_role_page(self, interaction: discord.Interaction):
+        self.role_page = min(self.total_role_pages() - 1, self.role_page + 1)
+        await interaction.response.defer()
+        await self.refresh_message()
+
+    async def grant_talismans(self, interaction: discord.Interaction):
+        if not await self.gm_cog._ensure_newwerewolf_talisman_tables():
+            return await interaction.response.send_message(
+                "❌ NewWerewolf talisman inventory is unavailable right now.",
+                ephemeral=True,
+            )
+
+        if self.target_mode == "everyone":
+            target_user_ids = await self.gm_cog._fetch_character_user_ids()
+            missing_ids: list[int] = []
+            source_label = "everyone"
+        else:
+            if not self.target_user_ids:
+                return await interaction.response.send_message(
+                    "❌ Set at least one valid Discord ID first.",
+                    ephemeral=True,
+                )
+            target_user_ids, missing_ids = await self.gm_cog._filter_character_user_ids(
+                self.target_user_ids
+            )
+            self.target_user_ids = target_user_ids
+            self.target_missing_ids = missing_ids
+            source_label = "specific_ids"
+
+        if not target_user_ids:
+            return await interaction.response.send_message(
+                "❌ No valid character users are selected.",
+                ephemeral=True,
+            )
+
+        specific_roles: list[NewWerewolfRole] | None = None
+        if self.role_mode == "all":
+            specific_roles = self.ordered_all_roles()
+            mode_label = "all basic roles"
+        elif self.role_mode == "specific":
+            specific_roles = self.ordered_selected_roles()
+            if not specific_roles:
+                return await interaction.response.send_message(
+                    "❌ Select at least one talisman role first.",
+                    ephemeral=True,
+                )
+            mode_label = f"specific ({len(specific_roles)} roles)"
+        else:
+            mode_label = "random"
+
+        await interaction.response.defer(ephemeral=True)
+        aggregate_counts = await self.gm_cog._grant_talismans_to_users(
+            target_user_ids,
+            amount=self.amount,
+            specific_roles=specific_roles,
+        )
+        breakdown = self.gm_cog._format_talisman_breakdown(aggregate_counts)
+        self.last_result = (
+            f"Targets: {len(target_user_ids)} | Amount: {self.amount} | Scope:"
+            f" {source_label}\n{breakdown}"
+        )
+        await self.refresh_message()
+
+        await self.gm_cog._log_talisman_grant(
+            self.ctx,
+            source="gmtalismanpanel",
+            target_count=len(target_user_ids),
+            amount=self.amount,
+            mode=mode_label,
+            breakdown=breakdown,
+            missing_ids=missing_ids if self.target_mode == "specific_ids" else None,
+        )
+
+        response = (
+            f"Granted talismans to **{len(target_user_ids)}** target(s).\n"
+            f"Breakdown: {breakdown}"
+        )
+        if missing_ids:
+            response += f"\nSkipped IDs without characters: {len(missing_ids)}"
+        await interaction.followup.send(response, ephemeral=True)
+
+    async def close_panel(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        if self.message:
+            await self.message.delete()
+        self.stop()
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
+class GMInviteView(discord.ui.View):
+    def __init__(self, target_user: discord.Member, timeout: int = 120):
+        super().__init__(timeout=timeout)
+        self.target_user = target_user
+        self.value = None  # Will be True (accepted) or False (declined)
+        
+    @discord.ui.button(label="Accept GM Role", style=discord.ButtonStyle.green, emoji="✅")
+    async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.target_user.id:
+            await interaction.response.send_message("❌ This invitation is not for you.", ephemeral=True)
+            return
+        
+        self.value = True
+        await interaction.response.send_message("✅ You have accepted the Game Master role!", ephemeral=True)
+        self.stop()
+    
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.red, emoji="❌")
+    async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.target_user.id:
+            await interaction.response.send_message("❌ This invitation is not for you.", ephemeral=True)
+            return
+        
+        self.value = False
+        await interaction.response.send_message("❌ You have declined the Game Master role.", ephemeral=True)
+        self.stop()
+
+    async def on_timeout(self):
+        # Disable all buttons when the view times out
+        for item in self.children:
+            item.disabled = True
+
+
+class GodInviteView(discord.ui.View):
+    def __init__(self, target_user: discord.Member, timeout: int = 120):
+        super().__init__(timeout=timeout)
+        self.target_user = target_user
+        self.value = None  # Will be True (accepted) or False (declined)
+        
+    @discord.ui.button(label="Accept God Role", style=discord.ButtonStyle.green, emoji="🌟")
+    async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.target_user.id:
+            await interaction.response.send_message("❌ This invitation is not for you.", ephemeral=True)
+            return
+        
+        self.value = True
+        await interaction.response.send_message("🌟 You have accepted the God role!", ephemeral=True)
+        self.stop()
+    
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.red, emoji="❌")
+    async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.target_user.id:
+            await interaction.response.send_message("❌ This invitation is not for you.", ephemeral=True)
+            return
+        
+        self.value = False
+        await interaction.response.send_message("❌ You have declined the God role.", ephemeral=True)
+        self.stop()
+
+    async def on_timeout(self):
+        # Disable all buttons when the view times out
+        for item in self.children:
+            item.disabled = True
+
+
+
+
+
+class BattleReplayController(discord.ui.View):
+    """Interactive controller for live battle replays"""
+    
+    def __init__(self, ctx, replay_data, gm_cog):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.ctx = ctx
+        self.replay_data = replay_data
+        self.gm_cog = gm_cog
+        self.current_turn = 0
+        self.is_playing = False
+        self.play_speed = 2.0  # seconds between turns
+        self.action_count = 1  # number of actions to display (1-4)
+        self.max_turns = len(replay_data['battle_data'].get('turn_states', []))
+        
+        # Update button states
+        self.update_button_states()
+    
+    def update_button_states(self):
+        """Update button enabled/disabled states based on current position"""
+        # Disable rewind if at start
+        self.rewind_button.disabled = (self.current_turn <= 0)
+        # Disable fast forward if at end
+        self.fast_forward_button.disabled = (self.current_turn >= self.max_turns - 1)
+        # Update play/pause button
+        self.play_pause_button.emoji = "⏸️" if self.is_playing else "▶️"
+        self.play_pause_button.label = "Pause" if self.is_playing else "Play"
+    
+    @discord.ui.button(emoji="⏪", label="Rewind", style=discord.ButtonStyle.secondary, row=0)
+    async def rewind_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message("❌ Only the command user can control the replay.", ephemeral=True)
+        
+        self.is_playing = False
+        self.current_turn = max(0, self.current_turn - 1)
+        self.update_button_states()
+        
+        embed = await self.gm_cog.create_live_battle_replay_embed(self.replay_data, self.current_turn, self.action_count)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(emoji="▶️", label="Play", style=discord.ButtonStyle.primary, row=0)
+    async def play_pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message("❌ Only the command user can control the replay.", ephemeral=True)
+        
+        self.is_playing = not self.is_playing
+        self.update_button_states()
+        
+        if self.is_playing:
+            # Start auto-playing
+            await interaction.response.edit_message(view=self)
+            await self.auto_play()
+        else:
+            await interaction.response.edit_message(view=self)
+    
+    @discord.ui.button(emoji="⏩", label="Fast Forward", style=discord.ButtonStyle.secondary, row=0)
+    async def fast_forward_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message("❌ Only the command user can control the replay.", ephemeral=True)
+        
+        self.is_playing = False
+        self.current_turn = min(self.max_turns - 1, self.current_turn + 1)
+        self.update_button_states()
+        
+        embed = await self.gm_cog.create_live_battle_replay_embed(self.replay_data, self.current_turn, self.action_count)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(emoji="⏮️", label="Start", style=discord.ButtonStyle.secondary, row=1)
+    async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message("❌ Only the command user can control the replay.", ephemeral=True)
+        
+        self.is_playing = False
+        self.current_turn = 0
+        self.update_button_states()
+        
+        embed = await self.gm_cog.create_live_battle_replay_embed(self.replay_data, self.current_turn, self.action_count)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(emoji="⏭️", label="End", style=discord.ButtonStyle.secondary, row=1)
+    async def end_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message("❌ Only the command user can control the replay.", ephemeral=True)
+        
+        self.is_playing = False
+        self.current_turn = self.max_turns - 1
+        self.update_button_states()
+        
+        embed = await self.gm_cog.create_live_battle_replay_embed(self.replay_data, self.current_turn, self.action_count)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.select(
+        placeholder="⚡ Choose playback speed...",
+        options=[
+            discord.SelectOption(label="🐌 Slow (4s per turn)", value="4.0", emoji="🐌"),
+            discord.SelectOption(label="🚶 Normal (2s per turn)", value="2.0", emoji="🚶", default=True),
+            discord.SelectOption(label="🏃 Fast (1s per turn)", value="1.0", emoji="🏃"),
+            discord.SelectOption(label="⚡ Lightning (0.5s per turn)", value="0.5", emoji="⚡"),
+        ],
+        row=2
+    )
+    async def speed_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message("❌ Only the command user can control the replay.", ephemeral=True)
+        
+        self.play_speed = float(select.values[0])
+        speed_name = {
+            "4.0": "🐌 Slow",
+            "2.0": "🚶 Normal", 
+            "1.0": "🏃 Fast",
+            "0.5": "⚡ Lightning"
+        }.get(select.values[0], "Normal")
+        
+        await interaction.response.send_message(f"⚡ **Speed changed to {speed_name}**", ephemeral=True)
+    
+    @discord.ui.select(
+        placeholder="📜 Choose number of actions to display...",
+        options=[
+            discord.SelectOption(label="1 Action", value="1", emoji="1️⃣", default=True),
+            discord.SelectOption(label="2 Actions", value="2", emoji="2️⃣"),
+            discord.SelectOption(label="3 Actions", value="3", emoji="3️⃣"),
+            discord.SelectOption(label="4 Actions", value="4", emoji="4️⃣"),
+        ],
+        row=3
+    )
+    async def action_count_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message("❌ Only the command user can control the replay.", ephemeral=True)
+        
+        self.action_count = int(select.values[0])
+        action_text = f"{self.action_count} Action{'s' if self.action_count > 1 else ''}"
+        
+        # Update the embed with new action count
+        embed = await self.gm_cog.create_live_battle_replay_embed(self.replay_data, self.current_turn, self.action_count)
+        await interaction.response.edit_message(embed=embed, view=self)
+        
+        # Also send confirmation message
+        await interaction.followup.send(f"📜 **Now displaying {action_text}**", ephemeral=True)
+    
+    async def auto_play(self):
+        """Auto-play the replay with the current speed"""
+        while self.is_playing and self.current_turn < self.max_turns - 1:
+            await asyncio.sleep(self.play_speed)
+            
+            if not self.is_playing:  # Check if stopped during sleep
+                break
+                
+            self.current_turn += 1
+            self.update_button_states()
+            
+            try:
+                embed = await self.gm_cog.create_live_battle_replay_embed(self.replay_data, self.current_turn, self.action_count)
+                
+                # Get the original message and edit it
+                if hasattr(self, 'message') and self.message:
+                    await self.message.edit(embed=embed, view=self)
+            except discord.NotFound:
+                # Message was deleted
+                self.is_playing = False
+                break
+            except Exception as e:
+                print(f"Error during auto-play: {e}")
+                self.is_playing = False
+                break
+        
+        # Auto-play finished
+        if self.is_playing:
+            self.is_playing = False
+            self.update_button_states()
+            try:
+                if hasattr(self, 'message') and self.message:
+                    await self.message.edit(view=self)
+            except:
+                pass
+    
+    async def on_timeout(self):
+        """Handle view timeout"""
+        self.is_playing = False
+        
+        # Disable all buttons
+        for item in self.children:
+            item.disabled = True
+        
+        try:
+            if hasattr(self, 'message') and self.message:
+                await self.message.edit(view=self)
+        except:
+            pass
 
 
 async def setup(bot):
     await bot.add_cog(GameMaster(bot))
+

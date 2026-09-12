@@ -1,0 +1,146 @@
+"""Utilities for loading battle modules in isolation for unit tests."""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+import types
+from pathlib import Path
+from typing import Tuple, Type
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _ensure_namespace(module_name: str, path: Path) -> None:
+    if module_name in sys.modules:
+        return
+    module = types.ModuleType(module_name)
+    module.__path__ = [str(path)]  # type: ignore[attr-defined]
+    sys.modules[module_name] = module
+
+
+def _load_module(module_name: str, file_path: Path):
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+    spec = importlib.util.spec_from_file_location(module_name, str(file_path))
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not create module spec for {module_name} ({file_path})")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_pet_runtime_types() -> Tuple[Type[object], Type[object]]:
+    """
+    Return `(Combatant, PetExtension)` from battle runtime modules without importing
+    `cogs.battles.__init__`.
+    """
+    _ensure_namespace("cogs", ROOT / "cogs")
+    _ensure_namespace("cogs.battles", ROOT / "cogs" / "battles")
+    _ensure_namespace("cogs.battles.core", ROOT / "cogs" / "battles" / "core")
+    _ensure_namespace("cogs.battles.extensions", ROOT / "cogs" / "battles" / "extensions")
+
+    combatant_mod = _load_module(
+        "cogs.battles.core.combatant",
+        ROOT / "cogs" / "battles" / "core" / "combatant.py",
+    )
+    pets_mod = _load_module(
+        "cogs.battles.extensions.pets",
+        ROOT / "cogs" / "battles" / "extensions" / "pets.py",
+    )
+    return combatant_mod.Combatant, pets_mod.PetExtension
+
+
+def load_battle_runtime_type() -> Type[object]:
+    """Return `Battle` from the core battle runtime module."""
+    _ensure_namespace("cogs", ROOT / "cogs")
+    _ensure_namespace("cogs.battles", ROOT / "cogs" / "battles")
+    _ensure_namespace("cogs.battles.core", ROOT / "cogs" / "battles" / "core")
+
+    battle_mod = _load_module(
+        "cogs.battles.core.battle",
+        ROOT / "cogs" / "battles" / "core" / "battle.py",
+    )
+    return battle_mod.Battle
+
+
+def load_tower_runtime_types() -> Tuple[Type[object], Type[object], Type[object]]:
+    """Return `(TowerBattle, Team, Combatant)` from the battle runtime modules."""
+    _ensure_namespace("cogs", ROOT / "cogs")
+    _ensure_namespace("cogs.battles", ROOT / "cogs" / "battles")
+    _ensure_namespace("cogs.battles.core", ROOT / "cogs" / "battles" / "core")
+    _ensure_namespace("cogs.battles.extensions", ROOT / "cogs" / "battles" / "extensions")
+    _ensure_namespace("cogs.battles.types", ROOT / "cogs" / "battles" / "types")
+
+    combatant_mod = _load_module(
+        "cogs.battles.core.combatant",
+        ROOT / "cogs" / "battles" / "core" / "combatant.py",
+    )
+    team_mod = _load_module(
+        "cogs.battles.core.team",
+        ROOT / "cogs" / "battles" / "core" / "team.py",
+    )
+    _load_module(
+        "cogs.battles.core.battle",
+        ROOT / "cogs" / "battles" / "core" / "battle.py",
+    )
+    tower_mod = _load_module(
+        "cogs.battles.types.tower",
+        ROOT / "cogs" / "battles" / "types" / "tower.py",
+    )
+    return tower_mod.TowerBattle, team_mod.Team, combatant_mod.Combatant
+
+
+def load_gauntlet_runtime_types() -> Tuple[Type[object], Type[object], Type[object]]:
+    """Return `(GauntletBattle, Team, Combatant)` from the battle runtime modules."""
+    _ensure_namespace("cogs", ROOT / "cogs")
+    _ensure_namespace("cogs.battles", ROOT / "cogs" / "battles")
+    _ensure_namespace("cogs.battles.core", ROOT / "cogs" / "battles" / "core")
+    _ensure_namespace("cogs.battles.extensions", ROOT / "cogs" / "battles" / "extensions")
+    _ensure_namespace("cogs.battles.types", ROOT / "cogs" / "battles" / "types")
+
+    combatant_mod = _load_module(
+        "cogs.battles.core.combatant",
+        ROOT / "cogs" / "battles" / "core" / "combatant.py",
+    )
+    team_mod = _load_module(
+        "cogs.battles.core.team",
+        ROOT / "cogs" / "battles" / "core" / "team.py",
+    )
+    _load_module(
+        "cogs.battles.core.battle",
+        ROOT / "cogs" / "battles" / "core" / "battle.py",
+    )
+    _load_module(
+        "cogs.battles.types.team_battle",
+        ROOT / "cogs" / "battles" / "types" / "team_battle.py",
+    )
+    gauntlet_mod = _load_module(
+        "cogs.battles.types.gauntlet",
+        ROOT / "cogs" / "battles" / "types" / "gauntlet.py",
+    )
+    return gauntlet_mod.GauntletBattle, team_mod.Team, combatant_mod.Combatant
+
+
+def load_city_war_runtime_type() -> Type[object]:
+    """Return `CityWarBattle` from the battle runtime modules."""
+    _ensure_namespace("cogs", ROOT / "cogs")
+    _ensure_namespace("cogs.battles", ROOT / "cogs" / "battles")
+    _ensure_namespace("cogs.battles.core", ROOT / "cogs" / "battles" / "core")
+    _ensure_namespace("cogs.battles.types", ROOT / "cogs" / "battles" / "types")
+
+    _load_module(
+        "cogs.battles.core.battle",
+        ROOT / "cogs" / "battles" / "core" / "battle.py",
+    )
+    _load_module(
+        "cogs.battles.types.raid",
+        ROOT / "cogs" / "battles" / "types" / "raid.py",
+    )
+    city_war_mod = _load_module(
+        "cogs.battles.types.city_war",
+        ROOT / "cogs" / "battles" / "types" / "city_war.py",
+    )
+    return city_war_mod.CityWarBattle

@@ -66,17 +66,20 @@ class Errorhandler(commands.Cog):
         self.bot = bot
         bot.on_command_error = self._on_command_error
         sentry_url = self.bot.config.statistics.sentry_url
-        self.SENTRY_SUPPORT = SENTRY_AVAILABLE and sentry_url is not None
+        self.SENTRY_SUPPORT = SENTRY_AVAILABLE and bool(sentry_url)
         if self.SENTRY_SUPPORT:
-            sentry_sdk.init(sentry_url, before_send=before_send)
+            try:
+                sentry_sdk.init(sentry_url, before_send=before_send)
+            except Exception:
+                # Invalid DSN or misconfig; disable Sentry rather than failing the cog load.
+                self.SENTRY_SUPPORT = False
 
     async def _on_command_error(
         self, ctx: Context, error: Exception, bypass: bool = False
     ) -> None:
-        if (
-            hasattr(ctx.command, "on_error")
-            or (ctx.command and hasattr(ctx.cog, f"_{ctx.command.cog_name}__error"))
-            and not bypass
+        if not bypass and (
+            (ctx.command and ctx.command.has_error_handler())
+            or (ctx.cog and hasattr(ctx.cog, f"_{ctx.command.cog_name}__error"))
         ):
             # Do nothing if the command/cog has its own error handler
             return
@@ -128,7 +131,7 @@ class Errorhandler(commands.Cog):
                 await ctx.send(
                     _(
                         "You did not enter a valid crate rarity. Possible ones are:"
-                        " common (c), uncommon (u), rare (r), magic (m), legendary (l), mystery (myst), fortune (f) and divine (d)."
+                        " common (c), uncommon (u), rare (r), magic (m), legendary (l), mystery (myst), fortune (f), divine (d) and materials (mats)."
                     )
                 )
             elif isinstance(error, InvalidCoinSide):
@@ -252,11 +255,18 @@ class Errorhandler(commands.Cog):
                         idx = classes.index(name)
                         break
                 classes[idx] = "No Class"
-                await self.bot.pool.execute(
-                    'UPDATE profile SET "class"=$1 WHERE "user"=$2;',
-                    classes,
-                    ctx.author.id,
-                )
+                ranger_names = {evolve.class_name() for evolve in get_class_evolves(Ranger)}
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        'UPDATE profile SET "class"=$1 WHERE "user"=$2;',
+                        classes,
+                        ctx.author.id,
+                    )
+                    if not any(class_name in ranger_names for class_name in classes):
+                        await conn.execute(
+                            "UPDATE pet_daycares SET is_open = FALSE WHERE owner_user_id = $1;",
+                            ctx.author.id,
+                        )
             elif isinstance(error, utils.checks.PetDied):
                 await ctx.send(
                     _(
@@ -334,11 +344,20 @@ class Errorhandler(commands.Cog):
                 # TimeoutError: A Discord operation timed out. All others should be handled by us
                 return
             elif isinstance(error.original, AsyncpgDataError):
+                detail = str(error.original).strip() or type(error.original).__name__
+                if len(detail) > 1200:
+                    detail = f"{detail[:1197]}..."
+                self.bot.logger.exception(
+                    "AsyncpgDataError in %s: %s",
+                    ctx.command.qualified_name,
+                    detail,
+                    exc_info=error.original,
+                )
                 return await ctx.send(
                     _(
-                        "An argument or value you entered was far too high for me to"
-                        " handle properly!"
-                    )
+                        "A database value error occurred while running"
+                        " **{command}**:\n```{detail}```"
+                    ).format(command=ctx.command.qualified_name, detail=detail)
                 )
             elif isinstance(error.original, LookupError):
                 tb = "\n".join(traceback.format_tb(error.original.__traceback__))

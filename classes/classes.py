@@ -1,7 +1,6 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,8 +15,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-
 from __future__ import annotations
 
 from enum import Enum
@@ -45,6 +42,15 @@ class GameClass(Enum):
     def class_grade(self) -> int:
         return self.value + 1
 
+
+class Tank(GameClass):
+    Protector = 0
+    Guardian = 1
+    Bulwark = 2
+    Defender = 3
+    Vanguard = 4
+    Fortress = 5
+    Titan = 6
 
 class Warrior(GameClass):
     Grunt = 0
@@ -97,6 +103,7 @@ class Paragon(GameClass):
     Paragon = 6
 
 
+
 class Paladin(GameClass):
     Squire = 0
     FootKnight = 1
@@ -147,6 +154,26 @@ class Reaper(GameClass):
     GrimReaper = 6
 
 
+class Bard(GameClass):
+    Busker = 0
+    Minstrel = 1
+    Skald = 2
+    Troubadour = 3
+    Songweaver = 4
+    Virtuoso = 5
+    Maestro = 6
+
+
+class Beastmaster(GameClass):
+    Wrangler = 0
+    BeastKin = 1
+    Packmate = 2
+    Wildcaller = 3
+    Alphabond = 4
+    Feralheart = 5
+    Beastlord = 6
+
+
 def get_class_evolves(class_: type[GameClass]) -> list[GameClass]:
     return list(class_.__members__.values())
 
@@ -162,7 +189,10 @@ ALL_CLASSES = {
                   + list(Ritualist.__members__.values())
                   + list(Paladin.__members__.values())
                   + list(Reaper.__members__.values())
+                  + list(Bard.__members__.values())
+                  + list(Beastmaster.__members__.values())
                   + list(SantasHelper.__members__.values())
+                  + list(Tank.__members__.values())
 }
 
 ALL_CLASSES_TYPES = {
@@ -175,7 +205,10 @@ ALL_CLASSES_TYPES = {
     "Warrior": Warrior,
     "Paladin": Paladin,
     "Reaper": Reaper,
+    "Bard": Bard,
+    "Beastmaster": Beastmaster,
     "SantasHelper": SantasHelper,
+    "Tank": Tank,
 }
 
 

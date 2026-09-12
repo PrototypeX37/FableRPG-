@@ -6,6 +6,10 @@ import discord
 import datetime
 
 from ..core.battle import Battle
+from classes.warrior import (
+    warrior_average_damage_multiplier,
+    warrior_average_reduction_pct,
+)
 
 class PvPBattle(Battle):
     """Player vs Player battle implementation"""
@@ -15,6 +19,11 @@ class PvPBattle(Battle):
         
         # Load all battle settings first before anything else
         settings_cog = self.ctx.bot.get_cog("BattleSettings")
+        hp_bar_style = kwargs.get(
+            "hp_bar_style",
+            "colorful" if kwargs.get("emoji_hp_bars", False) else "normal",
+        )
+        normalized_hp_bar_style = self.normalize_hp_bar_style(hp_bar_style)
         if settings_cog:
             # Ensure all settings are loaded, with defaults if not found
             self.config = {
@@ -24,6 +33,8 @@ class PvPBattle(Battle):
                 "element_effects": settings_cog.get_setting("pvp", "element_effects", default=True),
                 "luck_effects": settings_cog.get_setting("pvp", "luck_effects", default=True),
                 "reflection_damage": settings_cog.get_setting("pvp", "reflection_damage", default=True),
+                "hp_bar_style": normalized_hp_bar_style,
+                "emoji_hp_bars": normalized_hp_bar_style != self.HP_BAR_STYLE_NORMAL,
                 "fireball_chance": settings_cog.get_setting("pvp", "fireball_chance", default=0.3),
                 "cheat_death": settings_cog.get_setting("pvp", "cheat_death", default=True),
                 "tripping": settings_cog.get_setting("pvp", "tripping", default=True),
@@ -39,6 +50,8 @@ class PvPBattle(Battle):
                 "element_effects": True,
                 "luck_effects": True,
                 "reflection_damage": True,
+                "hp_bar_style": normalized_hp_bar_style,
+                "emoji_hp_bars": normalized_hp_bar_style != self.HP_BAR_STYLE_NORMAL,
                 "fireball_chance": 0.3,
                 "cheat_death": True,
                 "tripping": True,
@@ -54,13 +67,35 @@ class PvPBattle(Battle):
         self.simple = self.config["simple"]
         if self.simple:
             # Simple battle uses classic battle math
-            self.player1_stats = sum(kwargs.get("player1_stats", [0, 0])) + random.randint(1, 7)
-            self.player2_stats = sum(kwargs.get("player2_stats", [0, 0])) + random.randint(1, 7)
+            self.player1_stats = self._simple_stat_total(
+                self.player1,
+                kwargs.get("player1_stats", [0, 0]),
+            ) + random.randint(1, 7)
+            self.player2_stats = self._simple_stat_total(
+                self.player2,
+                kwargs.get("player2_stats", [0, 0]),
+            ) + random.randint(1, 7)
+
+    def _simple_stat_total(self, combatant, stats):
+        """Represent turn-based Warrior pressure in classic one-roll PvP."""
+        values = list(stats or [0, 0])
+        damage = Decimal(str(values[0] if values else 0))
+        armor = Decimal(str(values[1] if len(values) > 1 else 0))
+        if self.config.get("class_buffs", True):
+            grade = int(getattr(combatant, "warrior_evolution", 0) or 0)
+            effects = getattr(combatant, "spec_effects", None) or {}
+            damage *= warrior_average_damage_multiplier(grade, effects)
+            reduction = warrior_average_reduction_pct(effects)
+            armor *= Decimal("1") + reduction / Decimal("100")
+        return damage + armor
     
     async def start_battle(self):
         """Start the battle"""
         self.started = True
         self.start_time = datetime.datetime.utcnow()
+        
+        # Save initial battle data to database for replay
+        await self.save_battle_to_database()
         
         # For simple battles, we just need to calculate stats once
         if self.simple:
@@ -72,7 +107,7 @@ class PvPBattle(Battle):
         
         # Create and send initial embed
         embed = await self.create_battle_embed()
-        self.battle_message = await self.ctx.send(embed=embed)
+        self.battle_message = await self.publish_battle_message(embed=embed)
         
         return True
     
@@ -98,7 +133,7 @@ class PvPBattle(Battle):
         for player in [self.player1, self.player2]:
             current_hp = max(0, float(player.hp))
             max_hp = float(player.max_hp)
-            hp_bar = self.create_hp_bar(current_hp, max_hp)
+            hp_bar = self.create_hp_bar(current_hp, max_hp, combatant=player)
             
             # Get element emoji if available
             element_emoji = "❌"
@@ -113,8 +148,11 @@ class PvPBattle(Battle):
             embed.add_field(name=field_name, value=field_value, inline=False)
         
         # Add battle log
-        log_text = "\n\n".join([f"**Action #{i}**\n{msg}" for i, msg in self.log])
-        embed.add_field(name="Battle Log", value=log_text or "Battle starting...", inline=False)
+        log_text = self.format_battle_log_field()
+        embed.add_field(name="Battle Log", value=log_text, inline=False)
+        
+        # Add battle ID to footer for GM replay functionality
+        embed.set_footer(text=f"Battle ID: {self.battle_id}")
         
         return embed
     
@@ -124,10 +162,7 @@ class PvPBattle(Battle):
             return  # No display updates for simple battles
             
         embed = await self.create_battle_embed()
-        if self.battle_message:
-            await self.battle_message.edit(embed=embed)
-        else:
-            self.battle_message = await self.ctx.send(embed=embed)
+        await self.publish_battle_message(embed=embed)
     
     async def end_battle(self):
         """End the battle and determine rewards"""
@@ -147,20 +182,30 @@ class PvPBattle(Battle):
             
             # Update database with win and money transfer
             async with self.ctx.bot.pool.acquire() as conn:
+                # Award PvP wins regardless of money
                 await conn.execute(
-                    'UPDATE profile SET "pvpwins"="pvpwins"+1, "money"="money"+$1 WHERE'
-                    ' "user"=$2;',
-                    self.money * 2,
+                    'UPDATE profile SET "pvpwins"="pvpwins"+1 WHERE "user"=$1;',
                     winner.id,
                 )
-                await self.ctx.bot.log_transaction(
-                    self.ctx,
-                    from_=loser.id,
-                    to=winner.id,
-                    subject="Battle Bet",
-                    data={"Gold": self.money},
-                    conn=conn,
-                )
+                
+                # Handle money rewards if there's money involved
+                if self.money > 0:
+                    await conn.execute(
+                        'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                        self.money * 2,
+                        winner.id,
+                    )
+                    await self.ctx.bot.log_transaction(
+                        self.ctx,
+                        from_=loser.id,
+                        to=winner.id,
+                        subject="Battle Bet",
+                        data={"Gold": self.money},
+                        conn=conn,
+                    )
+            
+            # Save final battle state to database for replay
+            await self.save_battle_to_database()
             
             return (winner, loser)
         
@@ -180,6 +225,8 @@ class PvPBattle(Battle):
                     self.player1.user.id,
                     self.player2.user.id
                 )
+            # Save final battle state to database for replay
+            await self.save_battle_to_database()
             return None
         else:
             # Determine winner based on remaining HP percentage
@@ -200,20 +247,30 @@ class PvPBattle(Battle):
         
         # Update database with win and money transfer
         async with self.ctx.bot.pool.acquire() as conn:
+            # Award PvP wins regardless of money
             await conn.execute(
-                'UPDATE profile SET "pvpwins"="pvpwins"+1, "money"="money"+$1 WHERE'
-                ' "user"=$2;',
-                self.money * 2,
+                'UPDATE profile SET "pvpwins"="pvpwins"+1 WHERE "user"=$1;',
                 winner.id,
             )
-            await self.ctx.bot.log_transaction(
-                self.ctx,
-                from_=loser.id,
-                to=winner.id,
-                subject="Battle Bet",
-                data={"Gold": self.money},
-                conn=conn,
-            )
+            
+            # Handle money rewards if there's money involved
+            if self.money > 0:
+                await conn.execute(
+                    'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                    self.money * 2,
+                    winner.id,
+                )
+                await self.ctx.bot.log_transaction(
+                    self.ctx,
+                    from_=loser.id,
+                    to=winner.id,
+                    subject="Battle Bet",
+                    data={"Gold": self.money},
+                    conn=conn,
+                )
+        
+        # Save final battle state to database for replay
+        await self.save_battle_to_database()
         
         return (winner, loser)
     

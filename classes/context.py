@@ -1,7 +1,6 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,8 +15,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-
 from __future__ import annotations
 
 import asyncio
@@ -70,13 +67,30 @@ class Confirmation(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if self.allowed_user.id == interaction.user.id:
             return True
-        else:
-            asyncio.create_task(
-                interaction.response.send_message(
-                    _("This command was not initiated by you."), ephemeral=True
+
+        # Allow linked main/alt to confirm on each other's behalf.
+        try:
+            async with self.ctx.bot.pool.acquire() as conn:
+                linked = await conn.fetchval(
+                    """
+                    SELECT 1
+                    FROM alt_links
+                    WHERE (main = $1 AND alt = $2) OR (main = $2 AND alt = $1)
+                    """,
+                    self.allowed_user.id,
+                    interaction.user.id,
                 )
+            if linked:
+                return True
+        except Exception:
+            pass
+
+        asyncio.create_task(
+            interaction.response.send_message(
+                _("This command was not initiated by you."), ephemeral=True
             )
-            return False
+        )
+        return False
 
     async def on_timeout(self) -> None:
         self.cleanup()
@@ -118,7 +132,7 @@ class Context(commands.Context):
     async def confirm(
         self,
         message: str,
-        timeout: int = 20,
+        timeout: int = 60,
         user: discord.User | discord.Member | None = None,
     ) -> bool:
         future: asyncio.Future[bool] = asyncio.Future()

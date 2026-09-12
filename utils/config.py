@@ -1,7 +1,6 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,8 +15,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-
 from typing import Any
 
 import tomli
@@ -54,29 +51,57 @@ class DonatorRole:
         self.tier = data.get("tier", "basic")
 
 
+class KofiDonatorRole:
+    __slots__ = {"guild_id", "id", "name", "tier"}
+
+    def __init__(self, data: dict[str, Any]):
+        self.guild_id = data.get("guild_id", None)
+        self.id = data.get("id", 0)
+        self.name = data.get("name", None)
+        self.tier = data.get("tier", "basic")
+
+
 class ExternalSection:
     __slots__ = {
         "patreon_token",
         "imgur_token",
         "openai",
+        "pixelcut_key",
         "okapi_token",
         "traviapi",
         "base_url",
         "okapi_url",
         "proxy_url",
+        "r2_account_id",
+        "r2_endpoint_url",
+        "r2_access_key_id",
+        "r2_secret_access_key",
+        "r2_bucket",
+        "r2_public_base_url",
         "donator_roles",
+        "kofi_donator_roles",
     }
 
     def __init__(self, data: dict[str, Any]) -> None:
         self.patreon_token = data.get("patreon_token", None)
         self.imgur_token = data.get("imgur_token", None)
         self.openai = data.get("openai", None)
+        self.pixelcut_key = data.get("pixelcut_key", None)
         self.okapi_token = data.get("okapi_token", None)
         self.traviapi = data.get("traviapi", None)
         self.base_url = data.get("base_url", "https://idlerpg.xyz")
         self.okapi_url = data.get("okapi_url", "http://localhost:3000")
         self.proxy_url = data.get("proxy_url", None)
+        self.r2_account_id = data.get("r2_account_id", None)
+        self.r2_endpoint_url = data.get("r2_endpoint_url", None)
+        self.r2_access_key_id = data.get("r2_access_key_id", None)
+        self.r2_secret_access_key = data.get("r2_secret_access_key", None)
+        self.r2_bucket = data.get("r2_bucket", None)
+        self.r2_public_base_url = data.get("r2_public_base_url", None)
         self.donator_roles = [DonatorRole(i) for i in data.get("donator_roles", [])]
+        self.kofi_donator_roles = [
+            KofiDonatorRole(i) for i in data.get("kofi_donator_roles", [])
+        ]
 
 
 class DatabaseSection:
@@ -94,7 +119,7 @@ class DatabaseSection:
 
     def __init__(self, data: dict[str, Any]) -> None:
         self.postgres_name = data.get("postgres_name", "idlerpg")
-        self.postgres_user = data.get("postgres_user", "")
+        self.postgres_user = data.get("postgres_user", "lunar")
         self.postgres_port = data.get("postgres_port", 5432)
         self.postgres_host = data.get("postgres_host", "127.0.0.1")
         self.postgres_password = data.get("postgres_password", "")
@@ -104,6 +129,22 @@ class DatabaseSection:
         self.redis_shard_announce_channel = data.get(
             "redis_shard_announce_channel", "guild_channel"
         )
+
+class Second_DatabaseSection:
+    __slots__ = {
+        "postgres_name",
+        "postgres_user",
+        "postgres_port",
+        "postgres_host",
+        "postgres_password",
+    }
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.postgres_name = data.get("postgres_name", "OG-IdleRPG")
+        self.postgres_user = data.get("postgres_user", "lunar")
+        self.postgres_port = data.get("postgres_port", 5432)
+        self.postgres_host = data.get("postgres_host", "127.0.0.1")
+        self.postgres_password = data.get("postgres_password", "")
 
 
 class StatisticsSection:
@@ -132,6 +173,8 @@ class GameSection:
         "support_server_id",
         "raid_channel",
         "gm_log_channel",
+        "gm_log_createmonster_channel",
+        "gm_log_weapon_channel",
         "helpme_channel",
         "official_tournament_channel_id",
         "bot_event_channel",
@@ -146,6 +189,8 @@ class GameSection:
         self.support_server_id = data.get("support_server_id", None)
         self.raid_channel = data.get("raid_channel", None)
         self.gm_log_channel = data.get("gm_log_channel", None)
+        self.gm_log_createmonster_channel = data.get("gm_log_createmonster_channel", None)
+        self.gm_log_weapon_channel = data.get("gm_log_weapon_channel", None)
         self.helpme_channel = data.get("helpme_channel", None)
         self.official_tournament_channel_id = data.get(
             "official_tournament_channel_id", None
@@ -165,6 +210,24 @@ class MusicSection:
         self.nodes = data.get("nodes", [])
 
 
+class IdsSection:
+    __slots__ = {"_data"}
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = data if isinstance(data, dict) else {}
+
+    def get_section(self, name: str, default: dict[str, Any] | None = None) -> dict[str, Any]:
+        if default is None:
+            default = {}
+        value = self._data.get(name, default)
+        return value if isinstance(value, dict) else default
+
+    def __getattr__(self, name: str) -> dict[str, Any]:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return self.get_section(name, {})
+
+
 class ConfigLoader:
     """ConfigLoader provides methods for loading and reading values from a .toml file."""
 
@@ -174,12 +237,14 @@ class ConfigLoader:
         "bot",
         "external",
         "database",
+        "second_database",
         "statistics",
         "launcher",
         "game",
         "cities",
         "music",
         "gods",
+        "ids",
     }
 
     def __init__(self, path: str) -> None:
@@ -200,9 +265,11 @@ class ConfigLoader:
         self.bot = BotSection(self.values["bot"])
         self.external = ExternalSection(self.values.get("external", {}))
         self.database = DatabaseSection(self.values.get("database", {}))
+        self.second_database = Second_DatabaseSection(self.values.get("second_database", {}))
         self.statistics = StatisticsSection(self.values.get("statistics", {}))
         self.launcher = LauncherSection(self.values.get("launcher", {}))
         self.game = GameSection(self.values.get("game", {}))
         self.cities = self.values.get("cities", [])
         self.music = MusicSection(self.values.get("music", {}))
         self.gods = self.values.get("gods", [])
+        self.ids = IdsSection(self.values.get("ids", {}))

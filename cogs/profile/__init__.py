@@ -17,7 +17,12 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 import asyncio
+import math
 import re
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Optional
+import json
+from pathlib import Path
 
 import discord
 import io
@@ -27,24 +32,2738 @@ from aiohttp import ContentTypeError
 from discord import Embed
 from discord.ext import commands
 
+from classes.ascension import ASCENSION_TABLE_NAME, get_ascension_mantle
 from classes.badges import Badge
 from classes.bot import Bot
 from classes.classes import from_string as class_from_string
 from classes.context import Context
 from classes.converters import IntFromTo, MemberWithCharacter, UserWithCharacter
+from classes.endgame import apply_item_progression_bonus, soulbound_level_from_xp
 from classes.items import ALL_ITEM_TYPES, ItemType
 from cogs.adventure import ADVENTURE_NAMES
 from cogs.help import chunks
 from cogs.shard_communication import user_on_cooldown as user_cooldown
-from utils import checks, colors
+from cogs.profilecustomization import ProfileCustomization
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
+from utils import checks, colors, random
+from utils.april_fools import get_pet_display_name, mask_pet_record_for_display
 from utils import misc as rpgtools
 from utils.checks import is_gm
 from utils.i18n import _, locale_doc
 
+JURY_COSMETIC_TITLE = "Favored by the Seven"
+
+# Class icons okapi has compiled in. It indexes CLASSES[icon] directly and is
+# built with panic = "abort", so an unknown icon kills the whole service for
+# everyone. Bard and Beastmaster have no cast asset upstream -> send "none".
+OKAPI_CLASS_ICONS = frozenset(
+    {
+        "mage",
+        "paladin",
+        "paragon",
+        "raider",
+        "ranger",
+        "reaper",
+        "ritualist",
+        "santashelper",
+        "support",
+        "tank",
+        "thief",
+        "warrior",
+    }
+)
+
+
+def okapi_class_icons(classes) -> list[str]:
+    """Clamp class icons to what okapi can render, padded to the 2 it indexes."""
+    icons = [
+        c.get_class_line_name().lower() if c else "none" for c in (classes or [])
+    ]
+    icons = [icon if icon in OKAPI_CLASS_ICONS else "none" for icon in icons]
+    return (icons + ["none", "none"])[:2]
+
+
+
+import discord
+from discord.ext import commands
+
+
+class ArmoryFilterModal(discord.ui.Modal, title="Filter Armory"):
+    item_type = discord.ui.TextInput(
+        label="Item type",
+        default="All",
+        placeholder="All, 1h, 2h, Sword, Shield...",
+        max_length=30,
+    )
+    lowest = discord.ui.TextInput(label="Minimum total stat", default="0", max_length=4)
+    highest = discord.ui.TextInput(label="Maximum total stat", default="201", max_length=4)
+
+    def __init__(self, armory_view: "ArmoryPaginatorView"):
+        super().__init__()
+        self.armory_view = armory_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            low = int(str(self.lowest.value))
+            high = int(str(self.highest.value))
+        except ValueError:
+            return await interaction.response.send_message("Stat limits must be whole numbers.", ephemeral=True)
+        if low < 0 or high < low or high > 201:
+            return await interaction.response.send_message(
+                "Use a range between 0 and 201, with maximum at least minimum.", ephemeral=True
+            )
+        command = self.armory_view.ctx.bot.get_command("armory")
+        await interaction.response.defer()
+        await self.armory_view.ctx.invoke(
+            command,
+            itemtype=str(self.item_type.value).strip() or "All",
+            lowest=low,
+            highest=high,
+        )
+
+
+class ArmoryMarketModal(discord.ui.Modal, title="List Item on Market"):
+    price = discord.ui.TextInput(label="Listing price", placeholder="1 to 100000000", max_length=9)
+
+    def __init__(self, armory_view: "ArmoryPaginatorView", item_id: int):
+        super().__init__()
+        self.armory_view = armory_view
+        self.item_id = item_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            price = int(str(self.price.value))
+        except ValueError:
+            return await interaction.response.send_message("Price must be a whole number.", ephemeral=True)
+        if price < 1 or price > 100_000_000:
+            return await interaction.response.send_message("Price must be from 1 to 100,000,000.", ephemeral=True)
+        command = self.armory_view.ctx.bot.get_command("sell")
+        await interaction.response.defer()
+        await self.armory_view.ctx.invoke(command, itemid=self.item_id, price=price)
+
+
+class ArmoryItemSelect(discord.ui.Select):
+    def __init__(self, armory_view: "ArmoryPaginatorView"):
+        items = armory_view.pages[armory_view.current_page]
+        options = []
+        for item in items:
+            status = []
+            if item.get("equipped"):
+                status.append("Equipped")
+            if item.get("locked"):
+                status.append("Locked")
+            stat = float(item.get("damage", 0) or 0) + float(item.get("armor", 0) or 0)
+            options.append(
+                discord.SelectOption(
+                    label=f"{item['name']} (ID {item['id']})"[:100],
+                    value=str(item["id"]),
+                    description=f"{item.get('type', 'Item')} • Stat {stat:g}" + (f" • {', '.join(status)}" if status else ""),
+                    default=int(item["id"]) == armory_view.selected_item_id,
+                )
+            )
+        super().__init__(placeholder="Select an item for actions", options=options, row=2)
+        self.armory_view = armory_view
+
+    async def callback(self, interaction):
+        self.armory_view.selected_item_id = int(self.values[0])
+        self.armory_view.sync_dynamic_components()
+        await interaction.response.edit_message(
+            embed=self.armory_view.embeds[self.armory_view.current_page],
+            view=self.armory_view,
+        )
+
+
+class ArmoryActionSelect(discord.ui.Select):
+    def __init__(self, armory_view: "ArmoryPaginatorView"):
+        item = armory_view.selected_item()
+        equipped = bool(item and item.get("equipped"))
+        locked = bool(item and item.get("locked"))
+        options = [
+            discord.SelectOption(label="Unequip" if equipped else "Equip", value="unequip" if equipped else "equip", emoji="⚔️"),
+            discord.SelectOption(label="Unlock" if locked else "Lock", value="unlock" if locked else "lock", emoji="🔒"),
+            discord.SelectOption(label="Compare with Equipped", value="compare", emoji="📊"),
+            discord.SelectOption(
+                label="Sell to Merchant",
+                value="merchant",
+                emoji="💰",
+                description="Requires confirmation before the item is destroyed",
+            ),
+            discord.SelectOption(label="List on Player Market", value="market", emoji="🏷️"),
+        ]
+        super().__init__(
+            placeholder="Choose an action for the selected item",
+            options=options,
+            disabled=item is None,
+            row=3,
+        )
+        self.armory_view = armory_view
+
+    async def callback(self, interaction):
+        view = self.armory_view
+        item = view.selected_item()
+        if item is None:
+            return await interaction.response.send_message("Select an item first.", ephemeral=True)
+        action = self.values[0]
+        item_id = int(item["id"])
+        if action == "market":
+            return await interaction.response.send_modal(ArmoryMarketModal(view, item_id))
+        if action == "compare":
+            async with view.ctx.bot.pool.acquire() as conn:
+                equipped = await conn.fetchrow(
+                    """
+                    SELECT ai.*, i.equipped, i.locked
+                    FROM allitems ai JOIN inventory i ON i.item=ai.id
+                    WHERE ai.owner=$1 AND i.equipped=TRUE AND ai.id<>$2
+                    ORDER BY (ai.damage+ai.armor) DESC LIMIT 1;
+                    """,
+                    view.ctx.author.id,
+                    item_id,
+                )
+            selected_stat = float(item.get("damage", 0) or 0) + float(item.get("armor", 0) or 0)
+            embed = discord.Embed(title=f"Compare: {item['name']}", color=discord.Color.blurple())
+            embed.add_field(
+                name="Selected",
+                value=f"Damage {item.get('damage', 0)}\nArmor {item.get('armor', 0)}\nTotal {selected_stat:g}",
+            )
+            if equipped:
+                equipped_stat = float(equipped.get("damage", 0) or 0) + float(equipped.get("armor", 0) or 0)
+                embed.add_field(
+                    name=f"Equipped: {equipped['name']}",
+                    value=f"Damage {equipped.get('damage', 0)}\nArmor {equipped.get('armor', 0)}\nTotal {equipped_stat:g}\nDifference {selected_stat - equipped_stat:+g}",
+                )
+            else:
+                embed.add_field(name="Equipped", value="No other equipped item was found.")
+            return await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        command_name = {
+            "equip": "equip",
+            "unequip": "unequip",
+            "lock": "weaponlock",
+            "unlock": "weaponunlock",
+            "merchant": "merchant",
+        }[action]
+        command = view.ctx.bot.get_command(command_name)
+        await interaction.response.defer()
+        if action == "merchant":
+            ok, message = await view.invoke_command(command, item_id)
+        else:
+            ok, message = await view.invoke_command(command, itemid=item_id)
+        if not ok:
+            await interaction.followup.send(message, ephemeral=True)
+
+
+class ArmorySortSelect(discord.ui.Select):
+    def __init__(self, armory_view: "ArmoryPaginatorView"):
+        options = [
+            discord.SelectOption(label="Strongest First", value="strength", default=armory_view.sort_mode == "strength"),
+            discord.SelectOption(label="Highest Value", value="value", default=armory_view.sort_mode == "value"),
+            discord.SelectOption(label="Name", value="name", default=armory_view.sort_mode == "name"),
+            discord.SelectOption(label="Newest ID", value="newest", default=armory_view.sort_mode == "newest"),
+        ]
+        super().__init__(placeholder="Sort armory", options=options, row=4)
+        self.armory_view = armory_view
+
+    async def callback(self, interaction):
+        self.armory_view.apply_sort(self.values[0])
+        self.armory_view.sync_dynamic_components()
+        await interaction.response.edit_message(
+            embed=self.armory_view.embeds[self.armory_view.current_page],
+            view=self.armory_view,
+        )
+
+
+class ArmoryPaginatorView(discord.ui.View):
+    def __init__(
+        self,
+        ctx: commands.Context,
+        cog,
+        pages: list[list[dict]],
+        embeds: list[discord.Embed],
+        timeout: float = 180.0
+    ):
+        super().__init__(timeout=timeout)
+        self.ctx = ctx
+        self.cog = cog
+        self.pages = pages  # Each element is a list of items for that page
+        self.embeds = embeds
+        self.current_page = 0
+        self.selected_item_id = int(pages[0][0]["id"]) if pages and pages[0] else None
+        self.sort_mode = "strength"
+        self.message = None
+        self.sync_dynamic_components()
+
+    def selected_item(self):
+        for item in self.pages[self.current_page]:
+            if int(item["id"]) == self.selected_item_id:
+                return item
+        return None
+
+    def sync_dynamic_components(self):
+        for child in list(self.children):
+            if isinstance(child, (ArmoryItemSelect, ArmoryActionSelect, ArmorySortSelect)):
+                self.remove_item(child)
+        if self.pages and self.pages[self.current_page]:
+            if self.selected_item() is None:
+                self.selected_item_id = int(self.pages[self.current_page][0]["id"])
+            self.add_item(ArmoryItemSelect(self))
+            self.add_item(ArmoryActionSelect(self))
+            self.add_item(ArmorySortSelect(self))
+
+    def apply_sort(self, mode):
+        items = [item for page in self.pages for item in page]
+        self.sort_mode = mode
+        if mode == "value":
+            items.sort(key=lambda item: (-int(item.get("value", 0) or 0), -int(item["id"])))
+        elif mode == "name":
+            items.sort(key=lambda item: (str(item.get("name", "")).lower(), -int(item["id"])))
+        elif mode == "newest":
+            items.sort(key=lambda item: -int(item["id"]))
+        else:
+            items.sort(key=lambda item: (-(float(item.get("damage", 0) or 0) + float(item.get("armor", 0) or 0)), -int(item["id"])))
+        self.pages = list(chunks(items, 5))
+        self.embeds = [self.cog.invembed(self.ctx, page, index, len(self.pages) - 1) for index, page in enumerate(self.pages)]
+        self.current_page = 0
+        self.selected_item_id = int(self.pages[0][0]["id"]) if self.pages and self.pages[0] else None
+
+    def _is_allowed_user(self, user_id: int) -> bool:
+        allowed_user_ids = {int(self.ctx.author.id)}
+        alt_invoker_id = getattr(self.ctx, "alt_invoker_id", None)
+        if alt_invoker_id is not None:
+            allowed_user_ids.add(int(alt_invoker_id))
+        return int(user_id) in allowed_user_ids
+
+    async def invoke_command(self, command, *args, **kwargs):
+        previous = self.ctx.command
+        self.ctx.command = command
+        try:
+            try:
+                allowed = await command.can_run(self.ctx)
+            except commands.CommandOnCooldown as exc:
+                return False, f"That action is ready again in {max(1, int(exc.retry_after))} second(s)."
+            except commands.CheckFailure as exc:
+                return False, str(exc).strip() or "You cannot use that action right now."
+            if not allowed:
+                return False, "You cannot use that action right now."
+            await command.callback(command.cog, self.ctx, *args, **kwargs)
+            return True, "Action completed in this channel."
+        except Exception as exc:
+            return False, f"Action failed: {exc}"
+        finally:
+            self.ctx.command = previous
+
+    async def start(self):
+        """Send the initial embed and attach this view to it."""
+        self.message = await self.ctx.send(embed=self.embeds[self.current_page], view=self)
+
+    @discord.ui.button(label="First", style=discord.ButtonStyle.blurple)
+    async def go_first(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Jump to the first page."""
+        if not self._is_allowed_user(interaction.user.id):
+            await interaction.response.send_message("Only the command author can use this button.", ephemeral=True)
+            return
+        self.current_page = 0
+        self.selected_item_id = int(self.pages[0][0]["id"])
+        self.sync_dynamic_components()
+        await interaction.response.edit_message(
+            embed=self.embeds[self.current_page], view=self
+        )
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.blurple)
+    async def go_previous(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Go back one page."""
+        if not self._is_allowed_user(interaction.user.id):
+            await interaction.response.send_message("Only the command author can use this button.", ephemeral=True)
+            return
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.selected_item_id = int(self.pages[self.current_page][0]["id"])
+            self.sync_dynamic_components()
+            await interaction.response.edit_message(
+                embed=self.embeds[self.current_page], view=self
+            )
+        else:
+            # Optionally tell the user they're on the first page
+            await interaction.response.send_message(
+                "Already on the first page.", ephemeral=True
+            )
+
+    @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger)
+    async def stop_pages(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Stop the paginator (removes all buttons)."""
+        if not self._is_allowed_user(interaction.user.id):
+            await interaction.response.send_message("Only the command author can use this button.", ephemeral=True)
+            return
+        await interaction.response.defer()  # Acknowledge the button press
+        await interaction.delete_original_response()
+        self.stop()  # Stop listening to button presses
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.blurple)
+    async def go_next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Advance forward one page."""
+        if not self._is_allowed_user(interaction.user.id):
+            await interaction.response.send_message("Only the command author can use this button.", ephemeral=True)
+            return
+        if self.current_page < len(self.embeds) - 1:
+            self.current_page += 1
+            self.selected_item_id = int(self.pages[self.current_page][0]["id"])
+            self.sync_dynamic_components()
+            await interaction.response.edit_message(
+                embed=self.embeds[self.current_page], view=self
+            )
+        else:
+            await interaction.response.send_message(
+                "Already on the last page.", ephemeral=True
+            )
+
+    @discord.ui.button(label="Last", style=discord.ButtonStyle.blurple)
+    async def go_last(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Jump to the last page."""
+        if not self._is_allowed_user(interaction.user.id):
+            await interaction.response.send_message("Only the command author can use this button.", ephemeral=True)
+            return
+        self.current_page = len(self.embeds) - 1
+        self.selected_item_id = int(self.pages[self.current_page][0]["id"])
+        self.sync_dynamic_components()
+        await interaction.response.edit_message(
+            embed=self.embeds[self.current_page], view=self
+        )
+
+    @discord.ui.button(label="Copy IDs", style=discord.ButtonStyle.green)
+    async def copy_ids(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """
+        Collect the item IDs from the current page and send them to the channel.
+        """
+        if not self._is_allowed_user(interaction.user.id):
+            await interaction.response.send_message("Only the command author can use this button.", ephemeral=True)
+            return
+        current_items = self.pages[self.current_page]  # raw DB rows for this page
+        # Extract IDs and join them with commas
+        item_ids = [str(item["id"]) for item in current_items]
+        joined_ids = ", ".join(item_ids)
+
+        await interaction.response.send_message(joined_ids, ephemeral=True)
+
+    @discord.ui.button(label="Filters", style=discord.ButtonStyle.secondary, row=1)
+    async def filters_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ArmoryFilterModal(self))
+
+    @discord.ui.button(label="Inventory", style=discord.ButtonStyle.secondary, row=1)
+    async def inventory_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await self.ctx.invoke(self.ctx.bot.get_command("inventory"))
+
+    @discord.ui.button(label="Loadouts", style=discord.ButtonStyle.secondary, row=1)
+    async def loadouts_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await self.ctx.invoke(self.ctx.bot.get_command("preset"))
+
+
+class InventoryCategorySelect(discord.ui.Select):
+    def __init__(self, inventory_view: "InventoryCategoryView"):
+        self.inventory_view = inventory_view
+        options = [
+            discord.SelectOption(
+                label=category["label"][:100],
+                value=category["key"],
+                description=category["description"][:100],
+                default=category["key"] == inventory_view.selected_key,
+            )
+            for category in inventory_view.categories[:25]
+        ]
+        super().__init__(
+            placeholder="Choose an inventory category",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+            disabled=len(options) <= 1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.inventory_view.selected_key = self.values[0]
+        self.inventory_view.detail_mode = False
+        self.inventory_view.selected_entry_key = None
+        self.inventory_view.item_page = 0
+        self.inventory_view.sync_controls()
+        await interaction.response.edit_message(
+            embed=self.inventory_view.build_embed(),
+            view=self.inventory_view,
+        )
+
+
+class InventoryEntrySelect(discord.ui.Select):
+    def __init__(self, inventory_view: "InventoryCategoryView"):
+        self.inventory_view = inventory_view
+        entries = inventory_view.visible_entries()
+        options = [
+            discord.SelectOption(
+                label=entry["select_label"][:100],
+                value=entry["entry_key"],
+                description=str(entry.get("select_description") or "")[:100],
+                default=entry["entry_key"] == inventory_view.selected_entry_key,
+            )
+            for entry in entries[:25]
+        ]
+        super().__init__(
+            placeholder="Inspect a specific item",
+            min_values=1,
+            max_values=1,
+            options=options or [
+                discord.SelectOption(
+                    label="No items on this page",
+                    value="__none__",
+                    description="Switch category or page.",
+                    default=True,
+                )
+            ],
+            row=1,
+            disabled=not entries,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "__none__":
+            return await interaction.response.defer()
+        self.inventory_view.selected_entry_key = self.values[0]
+        self.inventory_view.detail_mode = True
+        self.inventory_view.sync_controls()
+        await interaction.response.edit_message(
+            embed=self.inventory_view.build_embed(),
+            view=self.inventory_view,
+        )
+
+
+class InventoryTargetConsumeModal(discord.ui.Modal):
+    def __init__(self, inventory_view: "InventoryCategoryView", entry: dict):
+        super().__init__(title=f"Use {entry['name']}"[:45])
+        self.inventory_view = inventory_view
+        self.entry = entry
+        target_kind = "weapon" if entry["consume_key"] == "weapelement" else "pet"
+        self.target_input = discord.ui.TextInput(
+            label=f"{target_kind.title()} ID",
+            placeholder=f"Enter the {target_kind} ID",
+            max_length=20,
+        )
+        self.add_item(self.target_input)
+        self.element_input = None
+        if entry["consume_key"] in {"petelement", "weapelement"}:
+            self.element_input = discord.ui.TextInput(
+                label="New element",
+                placeholder="Example: fire",
+                max_length=30,
+            )
+            self.add_item(self.element_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        target = str(self.target_input.value).strip()
+        if not target.isdigit():
+            return await interaction.response.send_message("The target ID must be a number.", ephemeral=True)
+        extra = str(self.element_input.value).strip() if self.element_input else None
+        await interaction.response.defer(ephemeral=True)
+        ok, message = await self.inventory_view.cog._invoke_consume_from_inventory(
+            self.inventory_view.ctx,
+            str(self.entry["consume_key"]),
+            target,
+            extra,
+        )
+        await self.inventory_view.reload_categories()
+        self.inventory_view._restore_selected_entry(self.entry["entry_key"])
+        self.inventory_view.sync_controls()
+        if interaction.message:
+            await interaction.message.edit(
+                embed=self.inventory_view.build_embed(),
+                view=self.inventory_view,
+            )
+        if message:
+            await interaction.followup.send(message, ephemeral=True)
+
+
+class InventoryCategoryView(discord.ui.View):
+    def __init__(self, ctx: commands.Context, cog: "Profile", categories: list[dict], timeout: float = 180.0):
+        super().__init__(timeout=timeout)
+        self.ctx = ctx
+        self.cog = cog
+        self.categories = categories
+        self.selected_key = categories[0]["key"] if categories else None
+        self.selected_entry_key: str | None = None
+        self.detail_mode = False
+        self.item_page = 0
+        self.sync_controls()
+
+    def _is_allowed_user(self, user_id: int) -> bool:
+        allowed_user_ids = {int(self.ctx.author.id)}
+        alt_invoker_id = getattr(self.ctx, "alt_invoker_id", None)
+        if alt_invoker_id is not None:
+            allowed_user_ids.add(int(alt_invoker_id))
+        return int(user_id) in allowed_user_ids
+
+    def sync_controls(self):
+        self.clear_items()
+        if self.categories:
+            self.add_item(InventoryCategorySelect(self))
+        category = self.selected_category()
+        if category and category.get("entries"):
+            self.add_item(InventoryEntrySelect(self))
+
+        entries = category.get("entries", []) if category else []
+        if len(entries) > 25:
+            prev_page = discord.ui.Button(
+                label="Prev Items",
+                style=discord.ButtonStyle.secondary,
+                row=2,
+                disabled=self.item_page == 0,
+            )
+            prev_page.callback = self.prev_item_page
+            self.add_item(prev_page)
+
+            next_page = discord.ui.Button(
+                label="Next Items",
+                style=discord.ButtonStyle.secondary,
+                row=2,
+                disabled=((self.item_page + 1) * 25) >= len(entries),
+            )
+            next_page.callback = self.next_item_page
+            self.add_item(next_page)
+
+        back_button = discord.ui.Button(
+            label="Back",
+            style=discord.ButtonStyle.secondary,
+            row=3,
+            disabled=not self.detail_mode,
+        )
+        back_button.callback = self.back_to_list
+        self.add_item(back_button)
+
+        selected_entry = self.selected_entry()
+        if self.detail_mode and selected_entry and selected_entry["kind"] == "amulet":
+            equip_button = discord.ui.Button(
+                label="Unequip" if selected_entry.get("equipped") else "Equip",
+                style=(
+                    discord.ButtonStyle.secondary
+                    if selected_entry.get("equipped")
+                    else discord.ButtonStyle.green
+                ),
+                row=3,
+            )
+            equip_button.callback = (
+                self.unequip_selected_amulet
+                if selected_entry.get("equipped")
+                else self.equip_selected_amulet
+            )
+            self.add_item(equip_button)
+            recycle_button = discord.ui.Button(
+                label="Recycle",
+                style=discord.ButtonStyle.danger,
+                row=3,
+                disabled=not bool(selected_entry.get("recycle_enabled")),
+            )
+            recycle_button.callback = self.recycle_selected_amulet
+            self.add_item(recycle_button)
+        elif self.detail_mode and selected_entry and selected_entry["kind"] == "potion":
+            consume_button = discord.ui.Button(
+                label="Consume",
+                style=discord.ButtonStyle.green,
+                row=3,
+                disabled=not bool(selected_entry.get("button_enabled")),
+            )
+            consume_button.callback = self.consume_selected_potion
+            self.add_item(consume_button)
+
+        refresh_button = discord.ui.Button(
+            label="Refresh",
+            style=discord.ButtonStyle.secondary,
+            row=3,
+        )
+        refresh_button.callback = self.refresh_inventory
+        self.add_item(refresh_button)
+
+        armory_button = discord.ui.Button(label="Armory", style=discord.ButtonStyle.primary, row=4)
+        armory_button.callback = self.open_armory
+        self.add_item(armory_button)
+        loadouts_button = discord.ui.Button(label="Loadouts", style=discord.ButtonStyle.primary, row=4)
+        loadouts_button.callback = self.open_loadouts
+        self.add_item(loadouts_button)
+        close_button = discord.ui.Button(label="Close", style=discord.ButtonStyle.danger, row=4)
+        close_button.callback = self.close_inventory
+        self.add_item(close_button)
+
+    def selected_category(self) -> dict | None:
+        for category in self.categories:
+            if category["key"] == self.selected_key:
+                return category
+        return self.categories[0] if self.categories else None
+
+    def visible_entries(self) -> list[dict]:
+        category = self.selected_category()
+        if not category:
+            return []
+        start = self.item_page * 25
+        end = start + 25
+        return list(category.get("entries", []))[start:end]
+
+    def selected_entry(self) -> dict | None:
+        category = self.selected_category()
+        if not category:
+            return None
+        for entry in category.get("entries", []):
+            if entry["entry_key"] == self.selected_entry_key:
+                return entry
+        return None
+
+    async def reload_categories(self):
+        self.categories = await self.cog._fetch_inventory_categories(self.ctx.author.id)
+        category_keys = {category["key"] for category in self.categories}
+        if self.selected_key not in category_keys:
+            self.selected_key = self.categories[0]["key"] if self.categories else None
+            self.item_page = 0
+            self.detail_mode = False
+            self.selected_entry_key = None
+        category = self.selected_category()
+        category_entries = category.get("entries", []) if category else []
+        max_page = max(0, (len(category_entries) - 1) // 25) if category_entries else 0
+        if self.item_page > max_page:
+            self.item_page = max_page
+        if self.selected_entry_key and not any(entry["entry_key"] == self.selected_entry_key for entry in category_entries):
+            self.selected_entry_key = None
+            self.detail_mode = False
+
+    def build_embed(self) -> discord.Embed:
+        category = self.selected_category()
+        if self.detail_mode:
+            entry = self.selected_entry()
+            if entry is not None:
+                return self.build_detail_embed(category, entry)
+        return self.build_list_embed(category)
+
+    def build_list_embed(self, category: dict | None) -> discord.Embed:
+        embed = discord.Embed(
+            title=_("{user}'s Inventory").format(user=self.ctx.author.display_name),
+            colour=discord.Colour.blurple(),
+            description=(
+                "Weapons have moved to `$armory` with aliases `$ar` and `$arm`.\n"
+                "Choose a category, then inspect a specific item from the dropdown."
+            ),
+        )
+
+        if not category:
+            embed.add_field(name="Inventory", value="Your inventory is empty.", inline=False)
+            return embed
+
+        embed.add_field(
+            name="Category",
+            value=f"**{category['label']}**\n{category['description']}",
+            inline=False,
+        )
+        summary_chunks = category.get("summary_chunks", [])
+        if not summary_chunks:
+            embed.add_field(
+                name=category["label"],
+                value="No items in this category.",
+                inline=False,
+            )
+        else:
+            for index, chunk in enumerate(summary_chunks, start=1):
+                suffix = "" if len(summary_chunks) == 1 else f" ({index})"
+                embed.add_field(
+                    name=f"{category['label']}{suffix}",
+                    value=chunk,
+                    inline=False,
+                )
+        entry_count = len(category.get("entries", []))
+        if entry_count:
+            embed.add_field(
+                name="Inspect",
+                value="Use the item dropdown below to open a detailed item view.",
+                inline=False,
+            )
+        if entry_count:
+            page_total = max(1, math.ceil(entry_count / 25))
+            embed.set_footer(
+                text=(
+                    f"Category {self.categories.index(category) + 1}/{len(self.categories)}"
+                    f" • Items page {self.item_page + 1}/{page_total}"
+                )
+            )
+        else:
+            embed.set_footer(
+                text=f"Category {self.categories.index(category) + 1}/{len(self.categories)}"
+            )
+        return embed
+
+    def build_detail_embed(self, category: dict, entry: dict) -> discord.Embed:
+        if entry["kind"] == "amulet":
+            status = "Equipped" if entry.get("equipped") else "Stored"
+            embed = discord.Embed(
+                title=entry["name"],
+                description=f"{status} • ID `{entry['amulet_id']}`",
+                colour=discord.Colour.gold(),
+            )
+            embed.add_field(name="Tier", value=str(entry["tier"]), inline=True)
+            embed.add_field(name="Type", value=str(entry["amulet_type"]).upper(), inline=True)
+            embed.add_field(name="Value", value=f"${int(entry['value']):,}", inline=True)
+            embed.add_field(
+                name="Stats",
+                value=(
+                    f"❤️ HP +{int(entry['hp'])}\n"
+                    f"⚔️ ATK +{int(entry['attack'])}\n"
+                    f"🛡️ DEF +{int(entry['defense'])}"
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="Recycle Refund",
+                value=entry.get("refund_preview") or "This amulet cannot be recycled right now.",
+                inline=False,
+            )
+            embed.add_field(
+                name="Recycle Cooldown",
+                value="`3 minutes` between recycles.",
+                inline=False,
+            )
+            embed.set_footer(text="Use Equip or Recycle, or Back to return to inventory.")
+            return embed
+
+        if entry["kind"] == "potion":
+            embed = discord.Embed(
+                title=entry["name"],
+                description=entry["description"],
+                colour=discord.Colour.purple(),
+            )
+            embed.add_field(name="You Have", value=f"x{int(entry['quantity'])}", inline=True)
+            embed.add_field(name="Consume Command", value=f"`$consume {entry['usage_command']}`", inline=True)
+            embed.add_field(
+                name="Action",
+                value=entry.get("action_text") or "Use Consume to activate this item.",
+                inline=False,
+            )
+            if entry.get("button_note"):
+                embed.add_field(name="Consume Button", value=entry["button_note"], inline=False)
+            embed.set_footer(text="Use Consume or Back to return to inventory.")
+            return embed
+
+        if entry["kind"] == "key_item":
+            quantity_text = f"x{int(entry['quantity'])}"
+            embed = discord.Embed(
+                title=entry["name"],
+                description=entry["description"],
+                colour=discord.Colour.dark_teal(),
+            )
+            embed.add_field(name="Quantity", value=quantity_text, inline=True)
+            embed.add_field(name="Type", value="Key Item", inline=True)
+            embed.add_field(name="Quest", value=entry.get("quest_name") or "Unknown", inline=True)
+            embed.add_field(
+                name="Restrictions",
+                value="Cannot be traded, sold, discarded, or consumed outside quest turn-in.",
+                inline=False,
+            )
+            embed.set_footer(text="Use Back to return to inventory.")
+            return embed
+
+        embed = discord.Embed(
+            title=entry.get("name", category["label"]),
+            description=entry.get("description", "No additional details."),
+            colour=discord.Colour.blurple(),
+        )
+        embed.set_footer(text="Use Back to return to inventory.")
+        return embed
+
+    async def prev_item_page(self, interaction: discord.Interaction):
+        if self.item_page > 0:
+            self.item_page -= 1
+        self.detail_mode = False
+        self.selected_entry_key = None
+        self.sync_controls()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def next_item_page(self, interaction: discord.Interaction):
+        category = self.selected_category()
+        total_entries = len(category.get("entries", [])) if category else 0
+        if ((self.item_page + 1) * 25) < total_entries:
+            self.item_page += 1
+        self.detail_mode = False
+        self.selected_entry_key = None
+        self.sync_controls()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def back_to_list(self, interaction: discord.Interaction):
+        self.detail_mode = False
+        self.sync_controls()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def refresh_inventory(self, interaction: discord.Interaction):
+        await self.reload_categories()
+        self.sync_controls()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    def _restore_selected_entry(self, entry_key: str | None):
+        if not entry_key:
+            self.detail_mode = False
+            self.selected_entry_key = None
+            return
+        category = self.selected_category()
+        if category and any(entry["entry_key"] == entry_key for entry in category.get("entries", [])):
+            self.detail_mode = True
+            self.selected_entry_key = entry_key
+        else:
+            self.detail_mode = False
+            self.selected_entry_key = None
+
+    async def equip_selected_amulet(self, interaction: discord.Interaction):
+        entry = self.selected_entry()
+        if not entry or entry["kind"] != "amulet":
+            return await interaction.response.send_message("Select an amulet first.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        message = await self.cog._equip_inventory_amulet(self.ctx.author.id, int(entry["amulet_id"]))
+        await self.reload_categories()
+        self._restore_selected_entry(entry["entry_key"])
+        self.sync_controls()
+        if hasattr(interaction, "message") and interaction.message:
+            await interaction.message.edit(embed=self.build_embed(), view=self)
+        await interaction.followup.send(message, ephemeral=True)
+
+    async def unequip_selected_amulet(self, interaction: discord.Interaction):
+        entry = self.selected_entry()
+        if not entry or entry["kind"] != "amulet":
+            return await interaction.response.send_message("Select an amulet first.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        message = await self.cog._unequip_inventory_amulet(
+            self.ctx.author.id,
+            int(entry["amulet_id"]),
+        )
+        await self.reload_categories()
+        self._restore_selected_entry(entry["entry_key"])
+        self.sync_controls()
+        if interaction.message:
+            await interaction.message.edit(embed=self.build_embed(), view=self)
+        await interaction.followup.send(message, ephemeral=True)
+
+    async def recycle_selected_amulet(self, interaction: discord.Interaction):
+        entry = self.selected_entry()
+        if not entry or entry["kind"] != "amulet":
+            return await interaction.response.send_message("Select an amulet first.", ephemeral=True)
+        if not entry.get("recycle_enabled"):
+            return await interaction.response.send_message(
+                "This amulet cannot be recycled right now.",
+                ephemeral=True,
+            )
+        await interaction.response.defer(ephemeral=True)
+        success, message = await self.cog._recycle_inventory_amulet(
+            self.ctx.author.id,
+            int(entry["amulet_id"]),
+        )
+        await self.reload_categories()
+        self._restore_selected_entry(entry["entry_key"])
+        self.sync_controls()
+        if hasattr(interaction, "message") and interaction.message:
+            await interaction.message.edit(embed=self.build_embed(), view=self)
+        await interaction.followup.send(message, ephemeral=True)
+
+    async def consume_selected_potion(self, interaction: discord.Interaction):
+        entry = self.selected_entry()
+        if not entry or entry["kind"] != "potion":
+            return await interaction.response.send_message("Select a potion first.", ephemeral=True)
+        if not entry.get("button_enabled"):
+            return await interaction.response.send_message(entry.get("button_note") or "This potion cannot be consumed from here.", ephemeral=True)
+        if entry.get("requires_target"):
+            return await interaction.response.send_modal(InventoryTargetConsumeModal(self, entry))
+        await interaction.response.defer(ephemeral=True)
+        ok, message = await self.cog._invoke_consume_from_inventory(self.ctx, str(entry["consume_key"]))
+        await self.reload_categories()
+        self._restore_selected_entry(entry["entry_key"])
+        self.sync_controls()
+        if hasattr(interaction, "message") and interaction.message:
+            await interaction.message.edit(embed=self.build_embed(), view=self)
+        if message:
+            await interaction.followup.send(message, ephemeral=True)
+
+    async def open_armory(self, interaction: discord.Interaction):
+        command = self.ctx.bot.get_command("armory")
+        if command is None:
+            return await interaction.response.send_message("The armory is unavailable.", ephemeral=True)
+        await interaction.response.defer()
+        await self.ctx.invoke(command)
+
+    async def open_loadouts(self, interaction: discord.Interaction):
+        command = self.ctx.bot.get_command("preset")
+        if command is None:
+            return await interaction.response.send_message("Loadouts are unavailable.", ephemeral=True)
+        await interaction.response.defer()
+        await self.ctx.invoke(command)
+
+    async def close_inventory(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(view=None)
+        self.stop()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not self._is_allowed_user(interaction.user.id):
+            await interaction.response.send_message(
+                "This inventory view is not for you.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+
+class PlayerSettingsView(discord.ui.View):
+    """One place for the user preferences that were previously separate commands."""
+
+    def __init__(self, ctx, profile_cog, *, profile_old, hp_bar_style, pve_splices, pve_default):
+        super().__init__(timeout=300)
+        self.ctx = ctx
+        self.profile_cog = profile_cog
+        self.author_id = int(ctx.author.id)
+        self.profile_old = bool(profile_old)
+        self.hp_bar_style = str(hp_bar_style or "normal")
+        self.pve_splices = bool(pve_splices)
+        self.pve_default = pve_default
+        self.message = None
+        self.sync_buttons()
+
+    @classmethod
+    async def create(cls, ctx, profile_cog):
+        battles = ctx.bot.get_cog("Battles")
+        async with ctx.bot.pool.acquire() as conn:
+            profile_old = await conn.fetchval(
+                'SELECT profilestyle FROM profile WHERE "user"=$1;', ctx.author.id
+            )
+        if battles:
+            hp_bar_style = await battles._get_user_hp_bar_style(ctx.author.id)
+            pve_splices = await battles._get_user_pve_splice_toggle(ctx.author.id)
+            default_id = await battles._get_user_pve_default_location_id(ctx.author.id)
+            default_location = battles._get_pve_location_by_id(default_id) if default_id else None
+            pve_default = default_location["name"] if default_location else None
+        else:
+            hp_bar_style = "normal"
+            pve_splices = False
+            pve_default = None
+        return cls(
+            ctx,
+            profile_cog,
+            profile_old=profile_old,
+            hp_bar_style=hp_bar_style,
+            pve_splices=pve_splices,
+            pve_default=pve_default,
+        )
+
+    def sync_buttons(self):
+        self.profile_style_button.label = "Profile: Old" if self.profile_old else "Profile: New"
+        self.battle_bars_button.label = f"HP Bars: {self.hp_bar_style.replace('_', ' ').title()}"
+        self.pve_splices_button.label = f"PvE Splices: {'On' if self.pve_splices else 'Off'}"
+
+    def build_embed(self, notice: str | None = None):
+        description = "Change your account preferences below. Changes save immediately."
+        if notice:
+            description = f"✅ {notice}\n\n{description}"
+        embed = discord.Embed(
+            title="⚙️ Player Settings",
+            description=description,
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(
+            name="Profile",
+            value=(
+                f"Display style: **{'Old' if self.profile_old else 'New'}**\n"
+                "Use **Profile Layout** for element positioning."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Battles & PvE",
+            value=(
+                f"HP bars: **{self.hp_bar_style.replace('_', ' ').title()}**\n"
+                f"Splice monsters: **{'On' if self.pve_splices else 'Off'}**\n"
+                f"Default location: **{self.pve_default or 'None'}**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Game Menus",
+            value="Open roulette settings or the PvE location picker from this panel.",
+            inline=False,
+        )
+        embed.set_footer(text="Existing profilepref, battlebars, pvesplice, and pvedefault commands still work.")
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("This settings panel is not yours.", ephemeral=True)
+            return False
+        return True
+
+    async def refresh_message(self, interaction, notice=None):
+        self.sync_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(notice), view=self)
+
+    @discord.ui.button(label="Profile: New", style=discord.ButtonStyle.primary, row=0)
+    async def profile_style_button(self, interaction, button):
+        self.profile_old = not self.profile_old
+        await self.ctx.bot.pool.execute(
+            'UPDATE profile SET profilestyle=$1 WHERE "user"=$2;',
+            self.profile_old,
+            self.author_id,
+        )
+        await self.refresh_message(interaction, "Profile display style updated.")
+
+    @discord.ui.button(label="HP Bars", style=discord.ButtonStyle.primary, row=0)
+    async def battle_bars_button(self, interaction, button):
+        battles = self.ctx.bot.get_cog("Battles")
+        if not battles:
+            return await interaction.response.send_message("Battle settings are unavailable.", ephemeral=True)
+        cycle = ["normal", "colorful", "team"]
+        index = cycle.index(self.hp_bar_style) if self.hp_bar_style in cycle else 0
+        self.hp_bar_style = cycle[(index + 1) % len(cycle)]
+        await battles._set_user_hp_bar_style(self.author_id, self.hp_bar_style)
+        await self.refresh_message(interaction, "Battle HP-bar style updated.")
+
+    @discord.ui.button(label="PvE Splices", style=discord.ButtonStyle.primary, row=0)
+    async def pve_splices_button(self, interaction, button):
+        battles = self.ctx.bot.get_cog("Battles")
+        if not battles:
+            return await interaction.response.send_message("PvE settings are unavailable.", ephemeral=True)
+        self.pve_splices = not self.pve_splices
+        await battles._set_user_pve_splice_toggle(self.author_id, self.pve_splices)
+        await self.refresh_message(interaction, "PvE splice pool preference updated.")
+
+    @discord.ui.button(label="Choose PvE Default", style=discord.ButtonStyle.secondary, row=1)
+    async def pve_default_button(self, interaction, button):
+        battles = self.ctx.bot.get_cog("Battles")
+        command = self.ctx.bot.get_command("pvedefault")
+        if not battles or not command:
+            return await interaction.response.send_message("PvE location settings are unavailable.", ephemeral=True)
+        await interaction.response.defer()
+        await self.ctx.invoke(command)
+
+    @discord.ui.button(label="Roulette Settings", style=discord.ButtonStyle.secondary, row=1)
+    async def roulette_button(self, interaction, button):
+        command = self.ctx.bot.get_command("rrsettings")
+        if not command:
+            return await interaction.response.send_message("Roulette settings are unavailable.", ephemeral=True)
+        await interaction.response.defer()
+        await self.ctx.invoke(command)
+
+    @discord.ui.button(label="Profile Layout", style=discord.ButtonStyle.secondary, row=1)
+    async def profile_layout_button(self, interaction, button):
+        command = self.ctx.bot.get_command("profilecustom")
+        if not command:
+            return await interaction.response.send_message("Profile customization is unavailable.", ephemeral=True)
+        await interaction.response.defer()
+        await self.ctx.invoke(command)
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger, row=2)
+    async def close_button(self, interaction, button):
+        await interaction.response.edit_message(view=None)
+        self.stop()
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except (discord.NotFound, discord.HTTPException):
+                pass
+
+
+class StatPointConfirmView(discord.ui.View):
+    def __init__(self, parent: "StatPointsView", stat_key: str, amount: int):
+        super().__init__(timeout=60)
+        self.parent = parent
+        self.stat_key = stat_key
+        self.amount = amount
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.parent.author_id:
+            await interaction.response.send_message("This allocation is not yours.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm Allocation", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction, button):
+        ok, message, snapshot = await self.parent.cog._allocate_stat_points(
+            self.parent.author_id,
+            self.stat_key,
+            self.amount,
+        )
+        if ok and snapshot:
+            self.parent.snapshot = snapshot
+            if self.parent.message:
+                await self.parent.message.edit(embed=self.parent.build_embed(), view=self.parent)
+        await interaction.response.edit_message(content=message, embed=None, view=None)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        await interaction.response.edit_message(content="Allocation cancelled.", embed=None, view=None)
+        self.stop()
+
+
+class StatPointAllocationModal(discord.ui.Modal):
+    def __init__(self, parent: "StatPointsView", stat_key: str):
+        super().__init__(title=f"Allocate {stat_key.title()} Points")
+        self.parent = parent
+        self.stat_key = stat_key
+        self.amount = discord.ui.TextInput(
+            label=f"Amount (available: {parent.snapshot['statpoints']})",
+            default="1",
+            max_length=8,
+        )
+        self.add_item(self.amount)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            amount = int(str(self.amount.value))
+        except ValueError:
+            return await interaction.response.send_message("Amount must be a whole number.", ephemeral=True)
+        available = int(self.parent.snapshot["statpoints"])
+        if amount <= 0 or amount > available:
+            return await interaction.response.send_message(
+                f"Choose an amount from 1 to {available}.", ephemeral=True
+            )
+        column = {"attack": "statatk", "defense": "statdef", "health": "stathp"}[self.stat_key]
+        current = int(self.parent.snapshot[column])
+        embed = discord.Embed(
+            title="Confirm Stat Allocation",
+            description=f"Allocate **{amount}** point(s) to **{self.stat_key.title()}**?",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(name="Before", value=f"{self.stat_key.title()}: {current}\nUnused: {available}")
+        embed.add_field(name="After", value=f"{self.stat_key.title()}: {current + amount}\nUnused: {available - amount}")
+        await interaction.response.send_message(
+            embed=embed,
+            view=StatPointConfirmView(self.parent, self.stat_key, amount),
+            ephemeral=True,
+        )
+
+
+class StatPointsView(discord.ui.View):
+    def __init__(self, cog: "Profile", ctx, snapshot):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.ctx = ctx
+        self.author_id = int(ctx.author.id)
+        self.snapshot = dict(snapshot)
+        self.message = None
+
+    def build_embed(self):
+        embed = discord.Embed(
+            title="📊 Stat Point Allocation",
+            description=f"You have **{int(self.snapshot['statpoints'])}** unused stat point(s).",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(name="Attack", value=str(int(self.snapshot["statatk"])), inline=True)
+        embed.add_field(name="Defense", value=str(int(self.snapshot["statdef"])), inline=True)
+        embed.add_field(name="Health", value=str(int(self.snapshot["stathp"])), inline=True)
+        embed.add_field(
+            name="Per Point",
+            value="Attack: **+0.1** • Defense: **+0.1** • Health: **+50**",
+            inline=False,
+        )
+        embed.set_footer(text="Choose a stat, enter an amount, then review the before/after preview.")
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("This stat panel is not yours.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Allocate Attack", style=discord.ButtonStyle.danger)
+    async def attack(self, interaction, button):
+        await interaction.response.send_modal(StatPointAllocationModal(self, "attack"))
+
+    @discord.ui.button(label="Allocate Defense", style=discord.ButtonStyle.primary)
+    async def defense(self, interaction, button):
+        await interaction.response.send_modal(StatPointAllocationModal(self, "defense"))
+
+    @discord.ui.button(label="Allocate Health", style=discord.ButtonStyle.success)
+    async def health(self, interaction, button):
+        await interaction.response.send_modal(StatPointAllocationModal(self, "health"))
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary)
+    async def close(self, interaction, button):
+        await interaction.response.edit_message(view=None)
+        self.stop()
+
+
+class PresetSelect(discord.ui.Select):
+    def __init__(self, manager: "PresetManagerView"):
+        options = [
+            discord.SelectOption(
+                label=str(row["preset_id"])[:100],
+                value=str(row["preset_id"]),
+                description=manager.describe_row(row)[:100],
+                default=str(row["preset_id"]) == manager.selected_id,
+            )
+            for row in manager.rows[:25]
+        ]
+        super().__init__(
+            placeholder="Choose a saved loadout",
+            options=options or [discord.SelectOption(label="No loadouts saved", value="__none__")],
+            disabled=not options,
+            row=0,
+        )
+        self.manager = manager
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "__none__":
+            return await interaction.response.defer()
+        self.manager.selected_id = self.values[0]
+        self.manager.rebuild_components()
+        await interaction.response.edit_message(embed=self.manager.build_embed(), view=self.manager)
+
+
+class PresetNameModal(discord.ui.Modal):
+    def __init__(self, manager: "PresetManagerView", *, action: str, mode: str = "items"):
+        title = "Rename Loadout" if action == "rename" else "Save Current Loadout"
+        super().__init__(title=title)
+        self.manager = manager
+        self.action = action
+        self.mode = mode
+        self.name_input = discord.ui.TextInput(
+            label="Loadout name",
+            default=manager.selected_id if action == "rename" and manager.selected_id else None,
+            placeholder="Example: raid_build",
+            min_length=1,
+            max_length=30,
+        )
+        self.add_item(self.name_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        name = str(self.name_input.value).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+            return await interaction.response.send_message(
+                "Use only letters, numbers, `_`, or `-` in loadout names.",
+                ephemeral=True,
+            )
+        await interaction.response.defer()
+        if self.action == "rename":
+            old_name = self.manager.selected_id
+            if not old_name:
+                return await interaction.followup.send("Select a loadout first.", ephemeral=True)
+            async with self.manager.cog.bot.pool.acquire() as conn:
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM presets WHERE user_id=$1 AND preset_id=$2;",
+                    self.manager.author_id,
+                    name,
+                )
+                if exists and name != old_name:
+                    return await interaction.followup.send("A loadout with that name already exists.", ephemeral=True)
+                await conn.execute(
+                    "UPDATE presets SET preset_id=$1 WHERE user_id=$2 AND preset_id=$3;",
+                    name,
+                    self.manager.author_id,
+                    old_name,
+                )
+            self.manager.selected_id = name
+            await interaction.followup.send(f"Renamed **{old_name}** to **{name}**.", ephemeral=True)
+        else:
+            await self.manager.ctx.invoke(
+                self.manager.cog.preset_create,
+                preset_id=name,
+                mode=self.mode,
+            )
+            self.manager.selected_id = name
+        await self.manager.reload()
+        self.manager.rebuild_components()
+        if interaction.message:
+            await interaction.message.edit(embed=self.manager.build_embed(), view=self.manager)
+
+
+class PresetDeleteConfirmView(discord.ui.View):
+    def __init__(self, manager: "PresetManagerView", preset_id: str):
+        super().__init__(timeout=45)
+        self.manager = manager
+        self.preset_id = preset_id
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.manager.author_id:
+            await interaction.response.send_message("This confirmation is not yours.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Delete Loadout", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        await interaction.response.defer()
+        await self.manager.ctx.invoke(self.manager.cog.preset_delete, preset_id=self.preset_id)
+        if self.manager.selected_id == self.preset_id:
+            self.manager.selected_id = None
+        await self.manager.reload()
+        self.manager.rebuild_components()
+        if self.manager.message:
+            await self.manager.message.edit(embed=self.manager.build_embed(), view=self.manager)
+        await interaction.edit_original_response(content=f"Deleted **{self.preset_id}**.", view=None)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        await interaction.response.edit_message(content="Deletion cancelled.", view=None)
+        self.stop()
+
+
+class PresetManagerView(discord.ui.View):
+    def __init__(self, cog: "Profile", ctx, rows):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.ctx = ctx
+        self.author_id = int(ctx.author.id)
+        self.rows = list(rows)
+        self.selected_id = str(self.rows[0]["preset_id"]) if self.rows else None
+        self.message = None
+        self.rebuild_components()
+
+    @classmethod
+    async def create(cls, cog, ctx):
+        async with cog.bot.pool.acquire() as conn:
+            await cog.sanitize_presets_for_user(ctx.author.id, conn=conn)
+            rows = await conn.fetch(
+                "SELECT preset_id, item_ids FROM presets WHERE user_id=$1 ORDER BY preset_id;",
+                ctx.author.id,
+            )
+        return cls(cog, ctx, rows)
+
+    async def reload(self):
+        async with self.cog.bot.pool.acquire() as conn:
+            await self.cog.sanitize_presets_for_user(self.author_id, conn=conn)
+            self.rows = list(await conn.fetch(
+                "SELECT preset_id, item_ids FROM presets WHERE user_id=$1 ORDER BY preset_id;",
+                self.author_id,
+            ))
+        ids = {str(row["preset_id"]) for row in self.rows}
+        if self.selected_id not in ids:
+            self.selected_id = str(self.rows[0]["preset_id"]) if self.rows else None
+
+    def selected_row(self):
+        return next((row for row in self.rows if str(row["preset_id"]) == self.selected_id), None)
+
+    def describe_row(self, row):
+        item_ids, has_amulet, amulet_id = self.cog._split_preset_saved_ids(row["item_ids"] or [])
+        amulet = "no amulet state"
+        if has_amulet:
+            amulet = f"amulet {amulet_id}" if amulet_id else "amulet unequipped"
+        return f"{len(item_ids)} gear item(s) • {amulet}"
+
+    def build_embed(self):
+        embed = discord.Embed(
+            title="🧰 Loadout Manager",
+            description="Save and apply up to five gear loadouts without typing item IDs.",
+            color=discord.Color.blurple(),
+        )
+        if not self.rows:
+            embed.add_field(name="No Loadouts", value="Use **Save Gear** or **Save Gear + Amulet** below.", inline=False)
+        else:
+            lines = []
+            for row in self.rows:
+                marker = "▶" if str(row["preset_id"]) == self.selected_id else "•"
+                lines.append(f"{marker} **{row['preset_id']}** — {self.describe_row(row)}")
+            embed.add_field(name=f"Saved ({len(self.rows)}/5)", value="\n".join(lines), inline=False)
+        selected = self.selected_row()
+        if selected:
+            item_ids, has_amulet, amulet_id = self.cog._split_preset_saved_ids(selected["item_ids"] or [])
+            embed.add_field(
+                name=f"Selected: {selected['preset_id']}",
+                value=(
+                    f"Gear IDs: {', '.join(map(str, item_ids)) if item_ids else 'none'}\n"
+                    f"Amulet: {amulet_id if has_amulet and amulet_id else ('unequipped' if has_amulet else 'not saved')}"
+                )[:1024],
+                inline=False,
+            )
+        embed.set_footer(text="Applying Gear + Amulet only changes amulet state if that state was saved.")
+        return embed
+
+    def rebuild_components(self):
+        self.clear_items()
+        self.add_item(PresetSelect(self))
+        has_selected = self.selected_row() is not None
+        for label, style, callback, disabled, row in [
+            ("Apply Gear", discord.ButtonStyle.success, self.apply_items, not has_selected, 1),
+            ("Apply Gear + Amulet", discord.ButtonStyle.success, self.apply_all, not has_selected, 1),
+            ("Save Gear", discord.ButtonStyle.primary, self.save_items, False, 2),
+            ("Save Gear + Amulet", discord.ButtonStyle.primary, self.save_all, False, 2),
+            ("Rename", discord.ButtonStyle.secondary, self.rename, not has_selected, 2),
+            ("Delete", discord.ButtonStyle.danger, self.delete, not has_selected, 2),
+            ("Refresh", discord.ButtonStyle.secondary, self.refresh, False, 3),
+            ("Close", discord.ButtonStyle.secondary, self.close, False, 3),
+        ]:
+            button = discord.ui.Button(label=label, style=style, disabled=disabled, row=row)
+            button.callback = callback
+            self.add_item(button)
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("This loadout manager is not yours.", ephemeral=True)
+            return False
+        return True
+
+    async def _apply(self, interaction, mode):
+        if not self.selected_id:
+            return await interaction.response.send_message("Select a loadout first.", ephemeral=True)
+        await interaction.response.defer()
+        await self.ctx.invoke(self.cog.preset_use, preset_id=self.selected_id, mode=mode)
+        await self.reload()
+        self.rebuild_components()
+        if interaction.message:
+            await interaction.message.edit(embed=self.build_embed(), view=self)
+
+    async def apply_items(self, interaction):
+        await self._apply(interaction, "items")
+
+    async def apply_all(self, interaction):
+        await self._apply(interaction, "all")
+
+    async def save_items(self, interaction):
+        await interaction.response.send_modal(PresetNameModal(self, action="save", mode="items"))
+
+    async def save_all(self, interaction):
+        await interaction.response.send_modal(PresetNameModal(self, action="save", mode="all"))
+
+    async def rename(self, interaction):
+        await interaction.response.send_modal(PresetNameModal(self, action="rename"))
+
+    async def delete(self, interaction):
+        await interaction.response.send_message(
+            f"Delete loadout **{self.selected_id}**?",
+            view=PresetDeleteConfirmView(self, self.selected_id),
+            ephemeral=True,
+        )
+
+    async def refresh(self, interaction):
+        await self.reload()
+        self.rebuild_components()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def close(self, interaction):
+        await interaction.response.edit_message(view=None)
+        self.stop()
+
 
 class Profile(commands.Cog):
+    _PRESET_AMULET_MARKER_OFFSET = 1_000_000_000
+    _VETERAN_BADGE_IDS_PATH = Path("assets") / "data" / "veteran_badge_ids.txt"
+    _AUTO_DEVELOPER_BADGE_IDS = frozenset(
+        {
+            295173706496475136,
+        }
+    )
+    GOD_SHARD_ALIGNMENT_EMOJIS = {
+        "Chaos": "<:ChaosShard:1472140674215444521>",
+        "Evil": "<:EvilShard:1472140682759110716>",
+        "Good": "<:GoodShard:1472140691667816479>",
+    }
+
     def __init__(self, bot: Bot) -> None:
         self.bot = bot
+        self._profile_font_cache = {}
+        self._veteran_badge_ids = self._load_veteran_badge_ids()
+
+    async def cog_load(self):
+        await self._ensure_profile_xp_bigint()
+
+    async def _ensure_profile_xp_bigint(self) -> None:
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                """
+                ALTER TABLE IF EXISTS profile
+                ALTER COLUMN "xp" TYPE BIGINT
+                USING "xp"::BIGINT
+                """
+            )
+
+    @staticmethod
+    def _safe_int(value, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _safe_float(value, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _decimal_or_zero(value) -> Decimal:
+        try:
+            return Decimal(str(value or 0))
+        except Exception:
+            return Decimal("0")
+
+    @classmethod
+    def _format_stat_value(cls, value) -> str:
+        number = cls._decimal_or_zero(value)
+        if number == number.to_integral_value():
+            return f"{int(number):,}"
+        rounded = number.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+        return f"{float(rounded):,.1f}"
+
+    @classmethod
+    def _rounded_stat_int(cls, value) -> int:
+        return int(
+            cls._decimal_or_zero(value).quantize(
+                Decimal("1"),
+                rounding=ROUND_HALF_UP,
+            )
+        )
+
+    @classmethod
+    def _effective_item_damage(cls, item) -> Decimal:
+        if not item:
+            return Decimal("0")
+        return cls._decimal_or_zero(item.get("effective_damage", item.get("damage", 0)))
+
+    @classmethod
+    def _effective_item_armor(cls, item) -> Decimal:
+        if not item:
+            return Decimal("0")
+        return cls._decimal_or_zero(item.get("effective_armor", item.get("armor", 0)))
+
+    @classmethod
+    def _effective_item_primary_stat(cls, item) -> Decimal:
+        damage = cls._effective_item_damage(item)
+        armor = cls._effective_item_armor(item)
+        return damage if damage > 0 else armor
+
+    def _profile_item_tuple(self, item):
+        if not item:
+            return None
+        return (
+            item.get("type"),
+            item.get("name"),
+            self._format_stat_value(self._effective_item_primary_stat(item)),
+        )
+
+    async def _apply_item_progression_to_items(
+        self,
+        user_id: int,
+        items,
+        *,
+        conn=None,
+    ) -> list[dict]:
+        item_rows = [dict(item) for item in (items or [])]
+        item_ids = [
+            int(item["id"])
+            for item in item_rows
+            if item.get("id") is not None
+        ]
+        if not item_ids:
+            return item_rows
+
+        local = conn is None
+        if local:
+            conn = await self.bot.pool.acquire()
+        try:
+            star_map: dict[int, int] = {}
+            soulbound_item_id: int | None = None
+            soulbound_level = 0
+
+            star_table_exists = await conn.fetchval(
+                "SELECT to_regclass('public.starforged_items') IS NOT NULL;"
+            )
+            if star_table_exists:
+                star_rows = await conn.fetch(
+                    """
+                    SELECT item_id, stars
+                    FROM starforged_items
+                    WHERE item_id = ANY($1)
+                    """,
+                    item_ids,
+                )
+                star_map = {
+                    int(row["item_id"]): int(row["stars"] or 0)
+                    for row in star_rows
+                }
+
+            soulbound_table_exists = await conn.fetchval(
+                "SELECT to_regclass('public.soulbound') IS NOT NULL;"
+            )
+            if soulbound_table_exists:
+                soulbound_row = await conn.fetchrow(
+                    """
+                    SELECT item_id, xp
+                    FROM soulbound
+                    WHERE user_id = $1 AND item_id = ANY($2)
+                    """,
+                    int(user_id),
+                    item_ids,
+                )
+                if soulbound_row:
+                    soulbound_item_id = int(soulbound_row["item_id"])
+                    soulbound_level = soulbound_level_from_xp(soulbound_row["xp"])
+
+            for item in item_rows:
+                item_id = int(item.get("id") or 0)
+                item_soulbound_level = (
+                    soulbound_level if item_id == soulbound_item_id else 0
+                )
+                effective_damage, effective_armor, bonus_pct = apply_item_progression_bonus(
+                    item.get("damage", 0),
+                    item.get("armor", 0),
+                    stars=star_map.get(item_id, 0),
+                    soulbound_level=item_soulbound_level,
+                )
+                item["base_damage"] = item.get("damage", 0)
+                item["base_armor"] = item.get("armor", 0)
+                item["effective_damage"] = effective_damage
+                item["effective_armor"] = effective_armor
+                item["progression_bonus_pct"] = bonus_pct
+                item["starforge_stars"] = star_map.get(item_id, 0)
+                item["soulbound_level"] = item_soulbound_level
+            return item_rows
+        except Exception:
+            return item_rows
+        finally:
+            if local:
+                await self.bot.pool.release(conn)
+
+    @staticmethod
+    def _compact_number(value: int) -> str:
+        number = int(value)
+        units = (
+            (1_000_000_000_000, "T"),
+            (1_000_000_000, "B"),
+            (1_000_000, "M"),
+            (1_000, "K"),
+        )
+        for amount, suffix in units:
+            if abs(number) >= amount:
+                compact = number / amount
+                if compact >= 100:
+                    return f"{compact:.0f}{suffix}"
+                if compact >= 10:
+                    return f"{compact:.1f}{suffix}"
+                return f"{compact:.2f}{suffix}"
+        return f"{number:,}"
+
+    @staticmethod
+    def _badge_from_db_value(raw_badges) -> Badge:
+        if raw_badges is None:
+            return Badge(0)
+        try:
+            return Badge.from_db(raw_badges)
+        except Exception:
+            return Badge(0)
+
+    def _load_veteran_badge_ids(self) -> frozenset[int]:
+        path = self._VETERAN_BADGE_IDS_PATH
+        if not path.exists():
+            return frozenset()
+
+        loaded_ids: set[int] = set()
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                for raw_line in f:
+                    line = raw_line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line.isdigit():
+                        loaded_ids.add(int(line))
+        except OSError:
+            return frozenset()
+
+        return frozenset(loaded_ids)
+
+    async def _sync_auto_profile_badges(
+        self,
+        *,
+        user_id: int,
+        badges_raw,
+        profile_xp=None,
+        conn,
+    ) -> Badge:
+        current_badges = self._badge_from_db_value(badges_raw)
+        managed_badges = Badge.GAME_MASTER | Badge.GOD | Badge.FAVORED_BY_THE_SEVEN
+
+        dynamic_badges = Badge(0)
+        xp_value = self._safe_int(profile_xp, 0)
+        if profile_xp is None:
+            xp_value = self._safe_int(
+                await conn.fetchval(
+                    'SELECT "xp" FROM profile WHERE "user" = $1;',
+                    user_id,
+                ),
+                0,
+            )
+        gm_exists = await conn.fetchval(
+            "SELECT 1 FROM game_masters WHERE user_id = $1;",
+            user_id,
+        )
+        if gm_exists:
+            dynamic_badges |= Badge.GAME_MASTER
+        # Mirror utils.checks.is_god(): only actual god accounts in `gods` table.
+        god_exists = await conn.fetchval(
+            "SELECT 1 FROM gods WHERE user_id = $1;",
+            user_id,
+        )
+        if god_exists:
+            dynamic_badges |= Badge.GOD
+        if user_id in self._veteran_badge_ids:
+            dynamic_badges |= Badge.VETERAN
+        if user_id in self._AUTO_DEVELOPER_BADGE_IDS:
+            dynamic_badges |= Badge.DEVELOPER
+        jury_title_unlocked = await conn.fetchval(
+            "SELECT shop_title_unlocked FROM jurytower WHERE id = $1;",
+            user_id,
+        )
+        if jury_title_unlocked:
+            dynamic_badges |= Badge.FAVORED_BY_THE_SEVEN
+        if rpgtools.xptolevel(xp_value) >= 100:
+            dynamic_badges |= Badge.ETERNAL_SOVEREIGN
+
+        synced_badges = (current_badges & ~managed_badges) | dynamic_badges
+        if synced_badges != current_badges:
+            await conn.execute(
+                'UPDATE profile SET "badges" = $1 WHERE "user" = $2;',
+                synced_badges.to_db(),
+                user_id,
+            )
+        return synced_badges
+
+    def _profile_font(self, size: int) -> ImageFont.FreeTypeFont:
+        if size in self._profile_font_cache:
+            return self._profile_font_cache[size]
+
+        font_path_candidates = (
+            Path("EightBitDragon-anqx.ttf"),
+            Path("assets") / "EightBitDragon-anqx.ttf",
+        )
+        for font_path in font_path_candidates:
+            if font_path.exists():
+                try:
+                    font = ImageFont.truetype(str(font_path), size=size)
+                    self._profile_font_cache[size] = font
+                    return font
+                except OSError:
+                    continue
+
+        font = ImageFont.load_default()
+        self._profile_font_cache[size] = font
+        return font
+
+    def _find_class_icon(self, icon_name: str) -> Optional[Path]:
+        base = Path("assets") / "classes"
+        if not icon_name:
+            return None
+        for ext in (".png", ".webp", ".jpg", ".jpeg"):
+            candidate = base / f"{icon_name}{ext}"
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _find_element_icon(self, element_name: str) -> Optional[Path]:
+        base = Path("assets") / "elements"
+        if not element_name:
+            return None
+
+        raw = str(element_name).strip()
+        if not raw:
+            return None
+
+        normalized = raw.lower()
+        aliases = {
+            "lightning": "electric",
+            "electricity": "electric",
+            "nature": "earth",
+        }
+        normalized = aliases.get(normalized, normalized)
+
+        preferred_stem = {
+            "wind": "Wind",
+            "electric": "Electric",
+            "light": "Light",
+            "dark": "Dark",
+            "corrupted": "Corrupted",
+            "earth": "Earth",
+            "water": "Water",
+            "fire": "Fire",
+        }.get(normalized, raw.capitalize())
+
+        direct_candidate = base / f"{preferred_stem}.png"
+        if direct_candidate.exists():
+            return direct_candidate
+
+        if not base.exists():
+            return None
+
+        # Fallback to case-insensitive stem matching.
+        for candidate in base.iterdir():
+            if candidate.is_file() and candidate.suffix.lower() in {
+                ".png",
+                ".webp",
+                ".jpg",
+                ".jpeg",
+            }:
+                if candidate.stem.lower() == normalized:
+                    return candidate
+        return None
+
+    async def _resolve_profile_target_user(self, ctx: Context, raw_target: Optional[str]):
+        target = str(ctx.author.id) if not raw_target else raw_target.split()[0]
+        id_pattern = re.compile(r"^\d{17,19}$")
+        mention_pattern = re.compile(r"<@!?(\d{17,19})>")
+
+        try:
+            mention_match = mention_pattern.match(target)
+            if mention_match:
+                return await self.bot.fetch_user(int(mention_match.group(1)))
+
+            if id_pattern.match(target):
+                return await self.bot.fetch_user(int(target))
+
+            async with self.bot.pool.acquire() as conn:
+                user_id = await conn.fetchval(
+                    'SELECT "user" FROM profile WHERE discordtag = $1',
+                    target,
+                )
+            if user_id:
+                return await self.bot.fetch_user(int(user_id))
+        except Exception:
+            return None
+
+        return None
+
+    async def _fetch_avatar_image(self, user: discord.User, size: int = 512) -> Image.Image:
+        asset = user.display_avatar
+        avatar_url = asset.url
+        try:
+            avatar_url = asset.replace(size=size, format="png").url
+        except Exception:
+            try:
+                avatar_url = asset.with_size(size).with_format("png").url
+            except Exception:
+                avatar_url = asset.url
+
+        try:
+            async with self.bot.trusted_session.get(avatar_url) as resp:
+                data = await resp.read()
+                if resp.status == 200:
+                    image = Image.open(BytesIO(data)).convert("RGBA")
+                    return image
+        except Exception:
+            pass
+
+        return Image.new("RGBA", (size, size), (44, 52, 68, 255))
+
+    async def _build_profile_rpg_card(
+        self,
+        user: discord.User,
+        profile,
+        items,
+        rank_money,
+        rank_xp,
+        guild_name: Optional[str],
+        mission,
+        pet_name: str,
+        marriage_name: Optional[str],
+        pet_data=None,
+        raid_attack: Optional[float] = None,
+        raid_defense: Optional[float] = None,
+        total_health: Optional[float] = None,
+        amulet_data=None,
+    ) -> BytesIO:
+        width, height = 1660, 940
+        canvas = Image.new("RGBA", (width, height), (58, 38, 22, 255))
+        draw = ImageDraw.Draw(canvas)
+        resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+        colors = {
+            "panel": (74, 49, 30, 220),
+            "panel_inner": (103, 72, 45, 180),
+            "border": (198, 156, 90, 255),
+            "border_dim": (132, 98, 54, 235),
+            "text": (247, 231, 196, 255),
+            "muted": (214, 186, 140, 255),
+            "bar_bg": (65, 48, 34, 255),
+        }
+
+        for y in range(height):
+            t = y / max(1, height - 1)
+            r = int(44 + (150 - 44) * t)
+            g = int(30 + (111 - 30) * t)
+            b = int(18 + (72 - 18) * t)
+            draw.line([(0, y), (width, y)], fill=(r, g, b, 255))
+
+        if hasattr(Image, "effect_noise"):
+            try:
+                noise = Image.effect_noise((width, height), 14).convert("L")
+                tex = ImageOps.colorize(noise, (46, 31, 20), (170, 132, 86)).convert("RGBA")
+                tex.putalpha(42)
+                canvas.alpha_composite(tex)
+            except Exception:
+                pass
+
+        for path in (
+            Path("assets") / "other" / "dragon.webp",
+            Path("assets") / "other" / "dragon.jpg",
+            Path("assets") / "other" / "dragon.jpeg",
+        ):
+            if path.exists():
+                try:
+                    dragon = Image.open(path).convert("RGBA")
+                    dragon = ImageOps.fit(dragon, (1060, 680), method=resample)
+                    dragon = ImageOps.grayscale(dragon).convert("RGBA")
+                    tint = Image.new("RGBA", dragon.size, (210, 166, 100, 255))
+                    dragon = Image.blend(dragon, tint, 0.58)
+                    dragon.putalpha(dragon.split()[3].point(lambda p: int(p * 0.18)))
+                    canvas.alpha_composite(dragon, (480, 150))
+                    break
+                except Exception:
+                    continue
+
+        draw.rounded_rectangle((24, 24, width - 24, height - 24), radius=34, fill=(39, 24, 14, 242), outline=colors["border"], width=4)
+        draw.rounded_rectangle((40, 40, width - 40, height - 40), radius=30, outline=colors["border_dim"], width=2)
+
+        title_font = self._profile_font(44)
+        subtitle_font = self._profile_font(24)
+        heading_font = self._profile_font(31)
+        label_font = self._profile_font(24)
+        value_font = self._profile_font(25)
+        tiny_font = self._profile_font(20)
+        micro_font = self._profile_font(19)
+
+        def tw(text, font):
+            box = draw.textbbox((0, 0), str(text), font=font)
+            return max(0, box[2] - box[0])
+
+        def clip(text, font, max_w):
+            txt = str(text or "")
+            if max_w <= 0 or tw(txt, font) <= max_w:
+                return txt
+            while txt and tw(f"{txt}...", font) > max_w:
+                txt = txt[:-1]
+            return f"{txt}..." if txt else "..."
+
+        def panel(rect, title):
+            x1, y1, x2, y2 = rect
+            draw.rounded_rectangle(rect, radius=24, fill=colors["panel"], outline=colors["border_dim"], width=3)
+            draw.rounded_rectangle((x1 + 4, y1 + 4, x2 - 4, y2 - 4), radius=20, outline=colors["panel_inner"], width=1)
+            title_text = clip(title, heading_font, max(64, (x2 - x1) - 36))
+            draw.text((x1 + 18, y1 + 14), title_text, font=heading_font, fill=colors["border"])
+            draw.line((x1 + 18, y1 + 56, x2 - 18, y1 + 56), fill=colors["border_dim"], width=2)
+
+        left_rect = (56, 66, 390, 884)
+        header_rect = (412, 66, 1268, 450)
+        ledger_rect = (412, 470, 850, 884)
+        gear_rect = (868, 470, 1268, 884)
+        pet_rect = (1286, 66, width - 56, 884)
+        panel(left_rect, "Hero Sigil")
+        panel(header_rect, "Dragonforged Chronicle")
+        panel(ledger_rect, "Adventurer Ledger")
+        panel(gear_rect, "Armory and Quests")
+        panel(pet_rect, "Pet Status")
+
+        xp_value = self._safe_int(profile.get("xp"), 0)
+        level = int(rpgtools.xptolevel(xp_value))
+        floor = rpgtools.levels.get(level, 0)
+        ceil = rpgtools.levels.get(min(level + 1, rpgtools.MAX_LEVEL), floor)
+        xp_progress = (
+            1.0
+            if level >= rpgtools.MAX_LEVEL or ceil <= floor
+            else max(0.0, min(1.0, (xp_value - floor) / (ceil - floor)))
+        )
+        luck_raw = float(profile.get("luck") or 0.3)
+        luck_percent = 20.0 if luck_raw <= 0.3 else ((luck_raw - 0.3) / 1.2) * 80 + 20
+        luck_percent = round(max(0.0, min(100.0, luck_percent)), 2)
+        damage_total = sum(self._effective_item_damage(i) for i in items)
+        armor_total = sum(self._effective_item_armor(i) for i in items)
+        raid_attack_value = max(0, int(round(self._safe_float(raid_attack, float(damage_total)))))
+        raid_defense_value = max(0, int(round(self._safe_float(raid_defense, float(armor_total)))))
+        total_health_value = max(
+            0,
+            int(
+                round(
+                    self._safe_float(
+                        total_health,
+                        self._safe_float(profile.get("health"), 0.0),
+                    )
+                )
+            ),
+        )
+        pvp_wins = self._safe_int(profile.get("pvpwins"), 0)
+        money = self._safe_int(profile.get("money"), 0)
+        # Power uses full raid-facing combat values. Attack/defense already include
+        # equipped amulet bonuses from get_raidstats(), and total health includes HP
+        # stat + level scaling + equipped amulet HP.
+        attack_power = raid_attack_value
+        defense_power = raid_defense_value
+        health_power = total_health_value
+        progression_power = int(luck_percent * 2) + level * 12 + pvp_wins * 2
+        power = max(1, attack_power + defense_power + health_power + progression_power)
+        rarity = "Mythic" if level >= 90 else "Legendary" if level >= 70 else "Epic" if level >= 50 else "Rare" if level >= 30 else "Adventurer"
+
+        card_name = str(profile.get("name") or user.display_name)
+        race_name = str(profile.get("race") or "Unknown")
+        class_list = profile.get("class") or []
+        if not isinstance(class_list, list):
+            class_list = [str(class_list)]
+        # A declared specialization replaces the class name at final evolution
+        spec_cog = self.bot.get_cog("Specializations")
+        if spec_cog:
+            class_list = await spec_cog.get_spec_display_classes(user.id, class_list)
+        classes = " / ".join([str(c) for c in class_list if c]) or "No Class"
+        god_name = str(profile.get("god") or "No God")
+        ascension = get_ascension_mantle(profile.get("ascension_mantle"))
+        ascension_enabled = bool(profile.get("ascension_enabled", True))
+        if ascension:
+            ascension_title = f"{ascension.title} ({'Active' if ascension_enabled else 'Dormant'})"
+        else:
+            ascension_title = "Unclaimed"
+        jury_title = str(profile.get("jury_title") or "").strip()
+
+        avatar = await self._fetch_avatar_image(user, size=512)
+        avatar = ImageOps.fit(avatar, (212, 212), method=resample)
+        mask = Image.new("L", (212, 212), 0)
+        ImageDraw.Draw(mask).ellipse((0, 0, 211, 211), fill=255)
+        ring = Image.new("RGBA", (238, 238), (0, 0, 0, 0))
+        rd = ImageDraw.Draw(ring)
+        rd.ellipse((0, 0, 237, 237), fill=(255, 241, 209, 12), outline=colors["border"], width=6)
+        rd.ellipse((13, 13, 224, 224), outline=colors["border_dim"], width=2)
+        canvas.alpha_composite(ring, (102, 146))
+        canvas.paste(avatar, (115, 159), mask)
+
+        draw.text((80, 404), clip(f"Level {level}  {rarity}", value_font, 286), font=value_font, fill=colors["border"])
+        draw.text((80, 436), clip(race_name, tiny_font, 286), font=tiny_font, fill=colors["muted"])
+        badge_value = self._badge_from_db_value(profile.get("badges"))
+        if badge_value:
+            badge_lines = badge_value.to_profile_display_items(limit=6)
+        else:
+            badge_lines = ["No badges yet"]
+        draw.text((80, 506), "Relics and Badges", font=label_font, fill=colors["border"])
+        draw.multiline_text(
+            (80, 542),
+            "\n".join(badge_lines),
+            font=tiny_font,
+            fill=colors["muted"],
+            spacing=6,
+        )
+        draw.text((80, 748), "Ascension", font=label_font, fill=colors["border"])
+        draw.text((80, 784), clip(ascension_title, tiny_font, 286), font=tiny_font, fill=colors["muted"])
+
+        draw.text((80, 852), f"ID {user.id}", font=tiny_font, fill=colors["muted"])
+
+        right_hand, left_hand = None, None
+        any_count = sum(1 for i in items if i.get("hand") == "any")
+        if len(items) == 2 and any_count == 1 and items[0].get("hand") == "any":
+            items = [items[1], items[0]]
+        for i in items:
+            h = i.get("hand")
+            if h == "both":
+                right_hand = left_hand = i
+            elif h == "left":
+                left_hand = i
+            elif h == "right":
+                right_hand = i
+            elif h == "any":
+                if not right_hand:
+                    right_hand = i
+                else:
+                    left_hand = i
+
+        icon_size, icon_gap = 74, 10
+        display_right = right_hand or left_hand
+        display_left = left_hand if right_hand else None
+        element_slots = [display_right, display_left]
+        equipped_elements = []
+        for weapon_item in element_slots:
+            if not weapon_item:
+                continue
+            raw = str(weapon_item.get("element") or "").strip().lower()
+            if raw:
+                equipped_elements.append(raw)
+        one_unique_element = len(set(equipped_elements)) == 1 and bool(equipped_elements)
+        icon_count = len(element_slots)
+        icon_start = header_rect[2] - 22 - (icon_size * icon_count + icon_gap * (icon_count - 1))
+        name_x = header_rect[0] + 22
+        name_max = max(80, icon_start - name_x - 20)
+        draw.text((name_x, 150), clip(card_name, title_font, name_max), font=title_font, fill=colors["text"])
+        draw.text((name_x, 208), clip(f"{race_name} | {classes}", subtitle_font, name_max), font=subtitle_font, fill=colors["muted"])
+        stars = max(1, min(5, math.ceil(level / 20)))
+        ribbon = clip(f"{rarity} Tier {'*' * stars}", label_font, 420)
+        rw = tw(ribbon, label_font) + 34
+        draw.rounded_rectangle((name_x, 250, name_x + rw, 294), radius=16, fill=(164, 120, 64, 245), outline=colors["border"], width=2)
+        draw.text((name_x + 16, 260), ribbon, font=label_font, fill=colors["text"])
+        draw.text((name_x, 310), clip(f"Power {power:,}", value_font, 390), font=value_font, fill=colors["border"])
+        draw.text((844, 310), clip(f"Luck Blessing {luck_percent:.2f}%", value_font, 390), font=value_font, fill=colors["muted"])
+
+        for idx, weapon_item in enumerate(element_slots):
+            raw_element = str(weapon_item.get("element") if weapon_item else "").strip()
+            if raw_element:
+                element_key = raw_element.lower()
+                element_name = "Nature" if element_key == "earth" else element_key.capitalize()
+            else:
+                element_name = "Unknown"
+            x = icon_start + idx * (icon_size + icon_gap)
+            slot = (x, 146, x + icon_size, 146 + icon_size)
+            draw.rounded_rectangle(slot, radius=14, fill=(70, 48, 28, 220), outline=colors["border_dim"], width=2)
+            if one_unique_element and idx == 1:
+                pad = 18
+                x1, y1 = x + pad, 146 + pad
+                x2, y2 = x + icon_size - pad, 146 + icon_size - pad
+                # Draw a crisp outlined X so the placeholder is consistent across fonts.
+                draw.line((x1, y1, x2, y2), fill=(72, 16, 16, 255), width=10)
+                draw.line((x2, y1, x1, y2), fill=(72, 16, 16, 255), width=10)
+                draw.line((x1, y1, x2, y2), fill=(214, 42, 42, 255), width=6)
+                draw.line((x2, y1, x1, y2), fill=(214, 42, 42, 255), width=6)
+                continue
+            icon_path = self._find_element_icon(element_name)
+            if icon_path:
+                try:
+                    icon = Image.open(icon_path).convert("RGBA")
+                    icon = ImageOps.fit(icon, (icon_size - 12, icon_size - 12), method=resample)
+                    canvas.paste(icon, (x + 6, 152), icon)
+                except Exception:
+                    draw.text((x + 25, 170), (element_name[:1] or "?").upper(), font=heading_font, fill=colors["text"])
+            else:
+                draw.text((x + 25, 170), (element_name[:1] or "?").upper(), font=heading_font, fill=colors["text"])
+
+        def stat_bar(x, y, w, label, value, ratio, color):
+            v = clip(value, tiny_font, 120)
+            draw.text((x, y), clip(label, label_font, w - 120), font=label_font, fill=colors["muted"])
+            draw.text((x + w - tw(v, tiny_font), y + 3), v, font=tiny_font, fill=colors["text"])
+            by = y + 28
+            draw.rounded_rectangle((x, by, x + w, by + 16), radius=8, fill=colors["bar_bg"], outline=colors["border_dim"], width=1)
+            fw = int(max(0.0, min(1.0, ratio)) * (w - 2))
+            if fw > 0:
+                draw.rounded_rectangle((x + 1, by + 1, x + 1 + fw, by + 15), radius=7, fill=color)
+
+        stat_bar(434, 340, 390, "Level", f"{level}", level / 100.0, (178, 133, 70, 255))
+        stat_bar(844, 340, 390, "Attack", f"{raid_attack_value:,}", min(1.0, raid_attack_value / 5000.0), (171, 84, 64, 255))
+        stat_bar(434, 394, 390, "Health", f"{total_health_value:,}", min(1.0, total_health_value / 20000.0), (112, 151, 93, 255))
+        stat_bar(844, 394, 390, "Defense", f"{raid_defense_value:,}", min(1.0, raid_defense_value / 5000.0), (88, 118, 164, 255))
+
+        amulet_text = "None"
+        if amulet_data:
+            amulet_tier = self._safe_int(amulet_data.get("tier"), 0)
+            raw_amulet_type = str(amulet_data.get("type") or "").strip().lower()
+            amulet_type_map = {
+                "health": "HP",
+                "defense": "Def",
+                "attack": "Attack",
+                "balanced": "Balanced",
+            }
+            amulet_type_label = amulet_type_map.get(raw_amulet_type, raw_amulet_type.capitalize() or "Unknown")
+            amulet_text = f"Tier {amulet_tier} {amulet_type_label}"
+
+        ledger = [
+            ("Money", f"${self._compact_number(money)}"),
+            ("Guild", guild_name or "None"),
+            ("God", god_name),
+            ("Raid ATK", f"{raid_attack_value:,}"),
+            ("Raid DEF", f"{raid_defense_value:,}"),
+            ("Amulet", amulet_text),
+            ("Health", f"{total_health_value:,}"),
+            ("PvP Wins", f"{pvp_wins:,}"),
+            ("Pet", pet_name or "None"),
+            ("Marriage", marriage_name or "None"),
+        ]
+        max_value = ledger_rect[2] - ledger_rect[0] - 224
+        y = 546
+        for k, v in ledger:
+            draw.text((ledger_rect[0] + 18, y), f"{k}:", font=label_font, fill=colors["muted"])
+            draw.text((ledger_rect[0] + 210, y), clip(v, value_font, max_value), font=value_font, fill=colors["text"])
+            y += 33
+
+        px1, py1, px2, py2 = pet_rect
+        pet_w = px2 - px1 - 28
+
+        async def fetch_remote_image(url: str) -> Optional[Image.Image]:
+            if not url:
+                return None
+            try:
+                async with self.bot.trusted_session.get(url) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.read()
+                return Image.open(BytesIO(data)).convert("RGBA")
+            except Exception:
+                return None
+
+        def trust_tier(value: int) -> tuple[str, int]:
+            if value >= 81:
+                return "Devoted", 10
+            if value >= 61:
+                return "Loyal", 8
+            if value >= 41:
+                return "Trusting", 5
+            if value >= 21:
+                return "Cautious", 0
+            return "Distrustful", -10
+
+        def pet_bar(y_pos: int, label: str, value: int, color: tuple[int, int, int, int]) -> int:
+            clamped = max(0, min(100, int(value)))
+            draw.text(
+                (px1 + 14, y_pos),
+                clip(f"{label} {clamped}%", micro_font, pet_w),
+                font=micro_font,
+                fill=colors["muted"],
+            )
+            bar_y = y_pos + 22
+            draw.rounded_rectangle(
+                (px1 + 14, bar_y, px2 - 14, bar_y + 14),
+                radius=6,
+                fill=colors["bar_bg"],
+                outline=colors["border_dim"],
+                width=1,
+            )
+            fill_w = int(((px2 - px1 - 30) * clamped) / 100)
+            if fill_w > 0:
+                draw.rounded_rectangle(
+                    (px1 + 15, bar_y + 1, px1 + 15 + fill_w, bar_y + 13),
+                    radius=5,
+                    fill=color,
+                )
+            return bar_y + 18
+
+        def pet_combat_bar(
+            y_pos: int,
+            label: str,
+            value: int,
+            cap: int,
+            color: tuple[int, int, int, int],
+        ) -> int:
+            safe_cap = max(1, cap)
+            clamped = max(0, int(value))
+            draw.text(
+                (px1 + 20, y_pos),
+                clip(f"{label} {clamped:,}", micro_font, pet_w - 12),
+                font=micro_font,
+                fill=colors["muted"],
+            )
+            bar_y = y_pos + 22
+            draw.rounded_rectangle(
+                (px1 + 20, bar_y, px2 - 20, bar_y + 16),
+                radius=6,
+                fill=colors["bar_bg"],
+                outline=colors["border_dim"],
+                width=1,
+            )
+            fill_w = int(((px2 - px1 - 42) * min(1.0, clamped / safe_cap)))
+            if fill_w > 0:
+                draw.rounded_rectangle(
+                    (px1 + 21, bar_y + 1, px1 + 21 + fill_w, bar_y + 15),
+                    radius=5,
+                    fill=color,
+                )
+            return bar_y + 16
+
+        portrait_size = min(max(210, pet_w - 24), 320)
+        portrait_x = px1 + ((px2 - px1) - portrait_size) // 2
+        portrait_y = py1 + 78
+        draw.rounded_rectangle(
+            (portrait_x - 10, portrait_y - 10, portrait_x + portrait_size + 10, portrait_y + portrait_size + 10),
+            radius=18,
+            fill=(63, 41, 25, 235),
+            outline=colors["border_dim"],
+            width=2,
+        )
+
+        if pet_data:
+            pet_display_name = str(
+                pet_data.get("name") or pet_data.get("default_name") or pet_name or "Unknown"
+            )
+            pet_level = max(1, min(100, self._safe_int(pet_data.get("level"), 1)))
+            pet_stage = str(pet_data.get("growth_stage") or "Unknown").capitalize()
+            pet_element_key = str(pet_data.get("element") or "").strip().lower()
+            pet_element = "Nature" if pet_element_key == "earth" else (pet_element_key.capitalize() if pet_element_key else "Unknown")
+            pet_happiness = max(0, min(100, self._safe_int(pet_data.get("happiness"), 0)))
+            pet_hunger = max(0, min(100, self._safe_int(pet_data.get("hunger"), 0)))
+            pet_trust = max(0, min(100, self._safe_int(pet_data.get("trust_level"), 0)))
+            pet_hp_base = self._safe_float(pet_data.get("hp"), 0.0)
+            pet_attack_base = self._safe_float(pet_data.get("attack"), 0.0)
+            pet_defense_base = self._safe_float(pet_data.get("defense"), 0.0)
+            pet_iv = self._safe_int(pet_data.get("IV"), 0)
+            trust_name, trust_bonus = trust_tier(pet_trust)
+            level_multiplier = 1 + (pet_level * 0.01)
+            trust_multiplier = 1 + (trust_bonus / 100.0)
+            pet_hp = max(0, int(round(pet_hp_base * level_multiplier * trust_multiplier)))
+            pet_attack = max(0, int(round(pet_attack_base * level_multiplier * trust_multiplier)))
+            pet_defense = max(0, int(round(pet_defense_base * level_multiplier * trust_multiplier)))
+
+            pet_img = await fetch_remote_image(str(pet_data.get("url") or ""))
+            if pet_img:
+                pet_img = ImageOps.fit(pet_img, (portrait_size, portrait_size), method=resample)
+                rounded_mask = Image.new("L", (portrait_size, portrait_size), 0)
+                ImageDraw.Draw(rounded_mask).rounded_rectangle(
+                    (0, 0, portrait_size - 1, portrait_size - 1), radius=14, fill=255
+                )
+                src_alpha = pet_img.split()[3]
+                combined_alpha = ImageChops.multiply(src_alpha, rounded_mask)
+                pet_img.putalpha(combined_alpha)
+                canvas.paste(pet_img, (portrait_x, portrait_y), pet_img)
+            else:
+                draw.rounded_rectangle(
+                    (portrait_x, portrait_y, portrait_x + portrait_size, portrait_y + portrait_size),
+                    radius=14,
+                    fill=(82, 59, 38, 240),
+                    outline=colors["border_dim"],
+                    width=1,
+                )
+                draw.text(
+                    (portrait_x + 24, portrait_y + portrait_size // 2 - 16),
+                    "No Pet Image",
+                    font=tiny_font,
+                    fill=colors["muted"],
+                )
+
+            y_cursor = portrait_y + portrait_size + 20
+            draw.text(
+                (px1 + 14, y_cursor),
+                clip(pet_display_name, tiny_font, pet_w),
+                font=tiny_font,
+                fill=colors["text"],
+            )
+            y_cursor += 34
+            draw.text(
+                (px1 + 14, y_cursor),
+                clip(f"Lv {pet_level} | {pet_element}", micro_font, pet_w),
+                font=micro_font,
+                fill=colors["muted"],
+            )
+            y_cursor += 26
+            draw.text(
+                (px1 + 14, y_cursor),
+                clip(f"Stage: {pet_stage}", micro_font, pet_w),
+                font=micro_font,
+                fill=colors["muted"],
+            )
+            y_cursor += 26
+            draw.text(
+                (px1 + 14, y_cursor),
+                clip(f"Bond: {trust_name} ({trust_bonus:+d}%)", micro_font, pet_w),
+                font=micro_font,
+                fill=colors["muted"],
+            )
+            y_cursor += 32
+
+            y_cursor = pet_bar(y_cursor, "Happy", pet_happiness, (112, 151, 93, 255))
+            y_cursor = pet_bar(y_cursor, "Hunger", pet_hunger, (171, 84, 64, 255))
+            y_cursor = pet_bar(y_cursor, "Trust", pet_trust, (88, 118, 164, 255))
+
+            combat_top = max(y_cursor + 12, py2 - 248)
+            draw.rounded_rectangle(
+                (px1 + 12, combat_top, px2 - 12, py2 - 18),
+                radius=14,
+                fill=(76, 53, 32, 220),
+                outline=colors["border_dim"],
+                width=2,
+            )
+            draw.text(
+                (px1 + 20, combat_top + 10),
+                clip(f"Combat Readout | IV {pet_iv}%", micro_font, pet_w - 10),
+                font=micro_font,
+                fill=colors["border"],
+            )
+            combat_y = combat_top + 40
+            combat_y = pet_combat_bar(combat_y, "HP", pet_hp, 30000, (112, 151, 93, 255))
+            combat_y = pet_combat_bar(combat_y + 4, "ATK", pet_attack, 6000, (171, 84, 64, 255))
+            pet_combat_bar(combat_y + 4, "DEF", pet_defense, 6000, (88, 118, 164, 255))
+        else:
+            draw.rounded_rectangle(
+                (portrait_x, portrait_y, portrait_x + portrait_size, portrait_y + portrait_size),
+                radius=14,
+                fill=(82, 59, 38, 240),
+                outline=colors["border_dim"],
+                width=1,
+            )
+            draw.text(
+                (portrait_x + 24, portrait_y + portrait_size // 2 - 16),
+                "No Pet Equipped",
+                font=tiny_font,
+                fill=colors["muted"],
+            )
+            draw.text(
+                (px1 + 14, portrait_y + portrait_size + 24),
+                "Use $pets equip",
+                font=micro_font,
+                fill=colors["muted"],
+            )
+
+        def item_type_name(item) -> str:
+            if not item:
+                return ""
+            return str(item.get("type") or item.get("type_") or "").strip().title()
+
+        def combo_stance(right_item, left_item) -> str:
+            r_type = item_type_name(right_item)
+            l_type = item_type_name(left_item)
+            types = [t for t in (r_type, l_type) if t]
+
+            if not types:
+                return "Traveler's Poise"
+
+            if len(types) == 2 and r_type == l_type:
+                twin_map = {
+                    "Bow": "Eagle Volley",
+                    "Scythe": "Reaper's Arc",
+                    "Mace": "Titan Maul",
+                    "Shield": "Twin Aegis",
+                    "Sword": "Twinblade Dance",
+                    "Dagger": "Twin Fang",
+                    "Knife": "Twin Fang",
+                    "Wand": "Twin Sigils",
+                    "Axe": "Blood Reavers",
+                    "Hammer": "Stonebreak Pair",
+                    "Spear": "Dual Pike Drill",
+                }
+                return twin_map.get(r_type, f"Twin {r_type} Form")
+
+            # One shield + one weapon
+            if "Shield" in types and any(t != "Shield" for t in types):
+                weapon = next((t for t in types if t != "Shield"), "")
+                shield_map = {
+                    "Sword": "Guardian Knight",
+                    "Axe": "Bulwark Reaver",
+                    "Hammer": "Citadel Breaker",
+                    "Wand": "Arcane Bastion",
+                    "Spear": "Phalanx Pike",
+                    "Dagger": "Viper Bulwark",
+                    "Knife": "Viper Bulwark",
+                    "Bow": "Aegis Archer",
+                    "Scythe": "Gravewarden",
+                    "Mace": "Sanctified Bastion",
+                }
+                return shield_map.get(weapon, "Aegis Stance")
+
+            # Dual wield non-shields
+            if len(types) == 2 and all(t != "Shield" for t in types):
+                pair = tuple(sorted(types))
+                dual_map = {
+                    ("Dagger", "Knife"): "Shadow Fang",
+                    ("Axe", "Hammer"): "Ravager Pair",
+                    ("Dagger", "Sword"): "Duelist's Dance",
+                    ("Knife", "Sword"): "Duelist's Dance",
+                    ("Dagger", "Wand"): "Spellblade Tempo",
+                    ("Knife", "Wand"): "Spellblade Tempo",
+                    ("Spear", "Sword"): "Dragoon Cross",
+                }
+                return dual_map.get(pair, "Twinblade Tempo")
+
+            # Single weapon
+            single = types[0]
+            single_map = {
+                "Bow": "Ranger's Focus",
+                "Wand": "Arcanist Focus",
+                "Spear": "Lancer Reach",
+                "Dagger": "Assassin Veil",
+                "Knife": "Assassin Veil",
+                "Sword": "Duelist Guard",
+                "Axe": "Berserker Rush",
+                "Hammer": "Warden Crush",
+                "Scythe": "Reaper's Poise",
+                "Mace": "Crusader Weight",
+                "Shield": "Fortress Stance",
+            }
+            return single_map.get(single, "Balanced Form")
+
+        stance = combo_stance(right_hand, left_hand)
+        draw.text(
+            (gear_rect[0] + 20, 548),
+            clip(f"Battle Stance: {stance}", tiny_font, gear_rect[2] - gear_rect[0] - 40),
+            font=tiny_font,
+            fill=colors["muted"],
+        )
+
+        gear_x = gear_rect[0] + 16
+        gear_w = gear_rect[2] - gear_rect[0] - 32
+
+        def item_block(x, y, width_px, title, item):
+            draw.rounded_rectangle((x, y, x + width_px, y + 108), radius=14, fill=(76, 53, 32, 220), outline=colors["border_dim"], width=2)
+            draw.text((x + 14, y + 10), title, font=label_font, fill=colors["border"])
+            if item:
+                name = clip(str(item.get("name", "Unknown")), value_font, max(120, width_px - 28))
+                kind = clip(str(item.get("type", "Unknown")), tiny_font, max(80, width_px - 170))
+                power_val = self._format_stat_value(self._effective_item_primary_stat(item))
+                draw.text((x + 14, y + 44), name, font=value_font, fill=colors["text"])
+                draw.text((x + 14, y + 76), f"{kind} | Power {power_val}", font=tiny_font, fill=colors["muted"])
+            else:
+                draw.text((x + 14, y + 52), "None Equipped", font=value_font, fill=colors["muted"])
+
+        item_block(gear_x, 580, gear_w, "Right Hand", right_hand)
+        item_block(gear_x, 708, gear_w, "Left Hand", left_hand)
+
+        mission_text = "No active mission"
+        if mission:
+            mission_name = ADVENTURE_NAMES.get(mission[0], str(mission[0]))
+            mission_text = mission_name
+        draw.rounded_rectangle((gear_x, 830, gear_x + gear_w, 876), radius=12, fill=(76, 53, 32, 230), outline=colors["border_dim"], width=2)
+        draw.text((gear_x + 16, 842), "Quest:", font=label_font, fill=colors["border"])
+        draw.text((gear_x + 118, 844), clip(mission_text, tiny_font, max(80, gear_w - 132)), font=tiny_font, fill=colors["text"])
+
+        footer = "Fable Reborn - Dragon Chronicle"
+        draw.text((width - 12 - tw(footer, tiny_font), height - 22), footer, font=tiny_font, fill=colors["muted"])
+
+        output = BytesIO()
+        canvas.convert("RGB").save(output, format="PNG", optimize=True)
+        output.seek(0)
+        return output
+
+    @classmethod
+    def _preset_amulet_none_marker(cls) -> int:
+        return -cls._PRESET_AMULET_MARKER_OFFSET
+
+    @classmethod
+    def _preset_amulet_id_to_marker(cls, amulet_id: int) -> int:
+        return -(cls._PRESET_AMULET_MARKER_OFFSET + amulet_id)
+
+    @classmethod
+    def _is_preset_amulet_marker(cls, value: int) -> bool:
+        return value <= cls._preset_amulet_none_marker()
+
+    @classmethod
+    def _preset_marker_to_amulet_id(cls, marker: int) -> Optional[int]:
+        if marker == cls._preset_amulet_none_marker():
+            return None
+        if marker < cls._preset_amulet_none_marker():
+            amulet_id = -marker - cls._PRESET_AMULET_MARKER_OFFSET
+            if amulet_id > 0:
+                return amulet_id
+        return None
+
+    @staticmethod
+    def _preset_amulet_mode_enabled(mode: str) -> Optional[bool]:
+        normalized = (mode or "items").strip().lower()
+        if normalized in {"items", "item", "gear", "weapon", "weapons"}:
+            return False
+        if normalized in {"all", "amulet", "amulets", "full"}:
+            return True
+        return None
+
+    def _split_preset_saved_ids(
+        self, raw_ids: list[int] | tuple[int, ...] | None
+    ) -> tuple[list[int], bool, Optional[int]]:
+        item_ids: list[int] = []
+        preset_has_amulet_state = False
+        preset_amulet_id: Optional[int] = None
+
+        for raw_id in raw_ids or []:
+            if self._is_preset_amulet_marker(raw_id):
+                preset_has_amulet_state = True
+                parsed_amulet_id = self._preset_marker_to_amulet_id(raw_id)
+                if parsed_amulet_id is not None:
+                    preset_amulet_id = parsed_amulet_id
+                continue
+            item_ids.append(raw_id)
+
+        return item_ids, preset_has_amulet_state, preset_amulet_id
+
+    async def sanitize_presets_for_user(
+        self,
+        user_id: int,
+        *,
+        preset_id: str | None = None,
+        conn=None,
+    ) -> dict[str, list[str]]:
+        local = conn is None
+        if local:
+            conn = await self.bot.pool.acquire()
+        try:
+            if preset_id is None:
+                rows = await conn.fetch(
+                    """
+                    SELECT preset_id, item_ids
+                    FROM presets
+                    WHERE user_id = $1
+                    ORDER BY preset_id;
+                    """,
+                    user_id,
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT preset_id, item_ids
+                    FROM presets
+                    WHERE user_id = $1 AND preset_id = $2;
+                    """,
+                    user_id,
+                    preset_id,
+                )
+            if not rows:
+                return {"updated": [], "deleted": []}
+
+            gear_ids: list[int] = []
+            amulet_ids: list[int] = []
+            for row in rows:
+                row_item_ids, _, row_amulet_id = self._split_preset_saved_ids(
+                    row["item_ids"]
+                )
+                gear_ids.extend(row_item_ids)
+                if row_amulet_id is not None:
+                    amulet_ids.append(row_amulet_id)
+
+            valid_gear_ids = set()
+            if gear_ids:
+                valid_gear_rows = await conn.fetch(
+                    """
+                    SELECT id
+                    FROM allitems
+                    WHERE owner = $1 AND id = ANY($2::bigint[]);
+                    """,
+                    user_id,
+                    list(dict.fromkeys(gear_ids)),
+                )
+                valid_gear_ids = {int(row["id"]) for row in valid_gear_rows}
+
+            valid_amulet_ids = set()
+            if amulet_ids:
+                valid_amulet_rows = await conn.fetch(
+                    """
+                    SELECT id
+                    FROM amulets
+                    WHERE user_id = $1 AND id = ANY($2::bigint[]);
+                    """,
+                    user_id,
+                    list(dict.fromkeys(amulet_ids)),
+                )
+                valid_amulet_ids = {int(row["id"]) for row in valid_amulet_rows}
+
+            result = {"updated": [], "deleted": []}
+            for row in rows:
+                original_ids = list(row["item_ids"] or [])
+                cleaned_ids: list[int] = []
+                changed = False
+
+                for raw_id in original_ids:
+                    if self._is_preset_amulet_marker(raw_id):
+                        amulet_marker_id = self._preset_marker_to_amulet_id(raw_id)
+                        if amulet_marker_id is None or amulet_marker_id in valid_amulet_ids:
+                            cleaned_ids.append(raw_id)
+                        else:
+                            changed = True
+                        continue
+
+                    if raw_id in valid_gear_ids:
+                        cleaned_ids.append(raw_id)
+                    else:
+                        changed = True
+
+                if not changed:
+                    continue
+
+                if cleaned_ids:
+                    await conn.execute(
+                        """
+                        UPDATE presets
+                        SET item_ids = $1
+                        WHERE user_id = $2 AND preset_id = $3;
+                        """,
+                        cleaned_ids,
+                        user_id,
+                        row["preset_id"],
+                    )
+                    result["updated"].append(str(row["preset_id"]))
+                else:
+                    await conn.execute(
+                        """
+                        DELETE FROM presets
+                        WHERE user_id = $1 AND preset_id = $2;
+                        """,
+                        user_id,
+                        row["preset_id"],
+                    )
+                    result["deleted"].append(str(row["preset_id"]))
+
+            return result
+        finally:
+            if local:
+                await self.bot.pool.release(conn)
 
     @checks.has_no_char()
     @user_cooldown(3600)
@@ -54,7 +2773,7 @@ class Profile(commands.Cog):
         _(
             """`[name]` - The name to give your character; will be interactive if not given
 
-            Create a new character and start playing IdleRPG.
+            Create a new character and start playing FableRPG.
 
             (This command has a cooldown of 1 hour.)"""
         )
@@ -72,7 +2791,7 @@ class Profile(commands.Cog):
                     "2) No abusing or benefiting from bugs or exploits\n"
                     "3) Be friendly and kind to other players\n"
                     "4) Trading in-game content for anything outside of the game is prohibited\n\n"
-                    "IdleRPG is a global bot, your characters are valid everywhere"
+                    "FableRPG is a global bot, your characters are valid everywhere"
                 ),
                 color=0x00FF00  # You can customize the color of the embed here
             )
@@ -278,7 +2997,7 @@ class Profile(commands.Cog):
             import traceback
             error_message = f"Error occurred: {e}\n"
             error_message += traceback.format_exc()
-            await ctx.send(error_message)
+            await ctx.send("That item could not be used right now. Please try again shortly.")
             print(error_message)
 
     @is_gm()
@@ -297,8 +3016,18 @@ class Profile(commands.Cog):
             await ctx.send(f"Your ID `{user_id}` does not exist in the second database.")
 
 
+    @checks.has_char()
+    @commands.command(name="playersettings", aliases=["preferences", "prefs"])
+    async def player_settings_command(self, ctx):
+        """Open a central panel for profile, battle, PvE, and minigame preferences."""
+        view = await PlayerSettingsView.create(ctx, self)
+        view.message = await ctx.send(embed=view.build_embed(), view=view)
+
     @commands.command(name="profilepref")
-    async def profilepref_command(self, ctx, preference: int):
+    async def profilepref_command(self, ctx, preference: Optional[int] = None):
+        if preference is None:
+            command = self.bot.get_command("playersettings")
+            return await ctx.invoke(command)
         if preference == 1:
             new_profilestyle = False
             new_profilestyleText = "the new format"
@@ -341,13 +3070,18 @@ class Profile(commands.Cog):
             elif id_pattern.match(person):
                 person = await self.bot.fetch_user(int(person))
             else:
+                # Try to fetch by discordtag from our database
                 async with self.bot.pool.acquire() as conn:
                     query = 'SELECT "user" FROM profile WHERE discordtag = $1'
                     user_id = await conn.fetchval(query, person)
                 person = await self.bot.fetch_user(int(user_id))
 
             targetid = person.id
-            discordtag = person.display_name
+            discordtag = "none"
+            try:
+                discordtag = person.display_name
+            except Exception as e:
+                pass
 
             async with self.bot.pool.acquire() as conn:
                 # Fetch the profilestyle column for the given user by either discordtag or userid
@@ -376,7 +3110,18 @@ class Profile(commands.Cog):
                         )
 
                     items = await self.bot.get_equipped_items_for(targetid, conn=conn)
+                    items = await self._apply_item_progression_to_items(
+                        targetid,
+                        items,
+                        conn=conn,
+                    )
                     mission = await self.bot.get_adventure(targetid)
+                    synced_badges = await self._sync_auto_profile_badges(
+                        user_id=targetid,
+                        badges_raw=profile["badges"],
+                        profile_xp=profile["xp"],
+                        conn=conn,
+                    )
 
                 right_hand = None
                 left_hand = None
@@ -388,22 +3133,22 @@ class Profile(commands.Cog):
                 for i in items:
                     stat = f"{int(i['damage'] + i['armor'])}"
                     if i["hand"] == "both":
-                        right_hand = (i["type"], i["name"], stat)
+                        right_hand = left_hand = i
                     elif i["hand"] == "left":
-                        left_hand = (i["type"], i["name"], stat)
+                        left_hand = i
                     elif i["hand"] == "right":
-                        right_hand = (i["type"], i["name"], stat)
+                        right_hand = i
                     elif i["hand"] == "any":
                         if right_hand is None:
-                            right_hand = (i["type"], i["name"], stat)
+                            right_hand = i
                         else:
-                            left_hand = (i["type"], i["name"], stat)
+                            left_hand = i
 
                 color = profile["colour"]
                 color = [color["red"], color["green"], color["blue"], color["alpha"]]
                 embed_color = discord.Colour.from_rgb(color[0], color[1], color[2])
                 classes = [class_from_string(c) for c in profile["class"]]
-                icons = [c.get_class_line_name().lower() if c else "none" for c in classes]
+                icons = okapi_class_icons(classes)
 
                 guild_rank = None if not profile["guild"] else profile["guildrank"]
 
@@ -420,132 +3165,93 @@ class Profile(commands.Cog):
                     adventure_name = None
                     adventure_time = None
 
-                badge_val = Badge.from_db(profile["badges"])
-                if badge_val:
-                    badges = badge_val.to_items_lowercase()
-                else:
-                    badges = []
+                async with self.bot.pool.acquire() as conn:
+                # Get custom positions for this user  
+                    custom_positions_json = await conn.fetchval(
+                        'SELECT custom_positions FROM profile WHERE "user" = $1',
+                        targetid
+                    )
 
-                if targetid == 295173706496475131:
-
-                    async with self.bot.trusted_session.post(
-                            f"{self.bot.config.external.okapi_url}/api/genprofile",
-                            json={
-                                "name": profile["name"],
-                                "color": color,
-                                "image": profile["background"],
-                                "race": profile["race"],
-                                "classes": profile["class"],
-                                "profession": "Novice Planter",
-                                "class_icons": icons,
-                                "left_hand_item": left_hand,
-                                "right_hand_item": right_hand,
-                                "level": f"{rpgtools.xptolevel(profile['xp'])}",
-                                "guild_rank": guild_rank,
-                                "guild_name": profile["guild_name"],
-                                "money": f"{profile['money']}",
-                                "pvp_wins": f"{profile['pvpwins']}",
-                                "marriage": marriage,
-                                "god": profile["god"] or _("No God"),
-                                "adventure_name": adventure_name,
-                                "adventure_time": adventure_time,
-                                "badges": badges,
-                            },
-                            headers={"Authorization": self.bot.config.external.okapi_token},
-                    ) as req:
-                        if req.status == 200:
-
-                            img = await req.text()
+                
+                # Parse JSON string to dict before passing to get_positions_for_user
+                custom_positions = json.loads(custom_positions_json) if custom_positions_json else None
+                positions = ProfileCustomization.get_positions_for_user(custom_positions)
+                scales = ProfileCustomization.get_scales_for_user(custom_positions)
 
 
+                # A declared specialization replaces the class name at final evolution
+                display_classes = profile["class"]
+                spec_cog = self.bot.get_cog("Specializations")
+                if spec_cog:
+                    display_classes = await spec_cog.get_spec_display_classes(
+                        targetid, profile["class"]
+                    )
 
-                        else:
-                            # Error, means try reading the response JSON error
-                            try:
-                                error_json = await req.json()
-                                async with self.bot.pool.acquire() as conn:
-                                    # Update the background column in the profile table for the target user
-                                    update_query = 'UPDATE profile SET background = 0 WHERE "user" = $1'
-                                    await conn.execute(update_query, targetid)
+                # CASCADE: Prepare and debug the dictionary for Okapi JSON payload
+                payload_for_okapi = {
+                    "name": profile['name'],
+                    "color": color,
+                    "image": profile["background"],
+                    "race": profile['race'],
+                    "classes": display_classes,        # spec names at final evolution
+                    "profession": "None",
+                    "class_icons": icons,           # From user's snippet
+                    "left_hand_item": self._profile_item_tuple(left_hand),
+                    "right_hand_item": self._profile_item_tuple(right_hand),
+                    "level": f"{rpgtools.xptolevel(profile['xp'])}",
+                    "guild_rank": guild_rank,
+                    "guild_name": profile["guild_name"], # From user's snippet
+                    "money": f"{profile['money']}",
+                    "pvp_wins": f"{profile['pvpwins']}", # From user's snippet
+                    "marriage": marriage,               # From user's snippet
+                    "god": profile["god"] or _("No God"),
+                    "adventure_name": adventure_name,   # From user's snippet
+                    "adventure_time": adventure_time,
+                    "badges": [],
+                    "positions": positions,
+                    "scales": scales,
+                }
+                
 
-                                return await ctx.send(
-                                    _(
-                                        "There was an error processing your image. Reason: {reason} ({detail}). (Due to this, the profile image has been reset)"
-                                    ).format(
-                                        reason=error_json["reason"], detail=error_json["detail"]
-                                    )
+
+                async with self.bot.trusted_session.post(
+                        f"{self.bot.config.external.okapi_url}/api/genprofile",
+                        json=payload_for_okapi,
+                        headers={"Authorization": self.bot.config.external.okapi_token},
+                ) as req:
+                    if req.status == 200:
+
+                        img = await req.text()
+
+
+
+                    else:
+                        # Error, means try reading the response JSON error
+                        try:
+                            error_json = await req.json()
+                            async with self.bot.pool.acquire() as conn:
+                                # Update the background column in the profile table for the target user
+                                update_query = 'UPDATE profile SET background = 0 WHERE "user" = $1'
+                                await conn.execute(update_query, targetid)
+
+                            return await ctx.send(
+                                _(
+                                    "There was an error processing your image. Reason: {reason} ({detail}). (Due to this, the profile image has been reset)"
+                                ).format(
+                                    reason=error_json["reason"], detail=error_json["detail"]
                                 )
-                            except ContentTypeError:
-                                return await ctx.send(
-                                    _("Unexpected internal error when generating image.")
-                                )
-                            except Exception:
-                                return await ctx.send(_("Unexpected error when generating image."))
+                            )
+                        except ContentTypeError:
+                            return await ctx.send(
+                                _("Unexpected internal error when generating image.")
+                            )
+                        except Exception:
+                            return await ctx.send(_("Unexpected error when generating image."))
 
-                        async with self.bot.trusted_session.get(img) as resp:
-                            bytebuffer = await resp.read()
-                            if resp.status != 200:
-                                return await ctx.send("Error failed to fetch image")
-
-                else:
-                    async with self.bot.trusted_session.post(
-                            f"{self.bot.config.external.okapi_url}/api/genprofile",
-                            json={
-                                "name": profile["name"],
-                                "color": color,
-                                "image": profile["background"],
-                                "race": profile["race"],
-                                "classes": profile["class"],
-                                "profession": "None",
-                                "class_icons": icons,
-                                "left_hand_item": left_hand,
-                                "right_hand_item": right_hand,
-                                "level": f"{rpgtools.xptolevel(profile['xp'])}",
-                                "guild_rank": guild_rank,
-                                "guild_name": profile["guild_name"],
-                                "money": f"{profile['money']}",
-                                "pvp_wins": f"{profile['pvpwins']}",
-                                "marriage": marriage,
-                                "god": profile["god"] or _("No God"),
-                                "adventure_name": adventure_name,
-                                "adventure_time": adventure_time,
-                                "badges": badges,
-                            },
-                            headers={"Authorization": self.bot.config.external.okapi_token},
-                    ) as req:
-                        if req.status == 200:
-
-                            img = await req.text()
-
-
-
-                        else:
-                            # Error, means try reading the response JSON error
-                            try:
-                                error_json = await req.json()
-                                async with self.bot.pool.acquire() as conn:
-                                    # Update the background column in the profile table for the target user
-                                    update_query = 'UPDATE profile SET background = 0 WHERE "user" = $1'
-                                    await conn.execute(update_query, targetid)
-
-                                return await ctx.send(
-                                    _(
-                                        "There was an error processing your image. Reason: {reason} ({detail}). (Due to this, the profile image has been reset)"
-                                    ).format(
-                                        reason=error_json["reason"], detail=error_json["detail"]
-                                    )
-                                )
-                            except ContentTypeError:
-                                return await ctx.send(
-                                    _("Unexpected internal error when generating image.")
-                                )
-                            except Exception:
-                                return await ctx.send(_("Unexpected error when generating image."))
-
-                        async with self.bot.trusted_session.get(img) as resp:
-                            bytebuffer = await resp.read()
-                            if resp.status != 200:
-                                return await ctx.send("Error failed to fetch image")
+                    async with self.bot.trusted_session.get(img) as resp:
+                        bytebuffer = await resp.read()
+                        if resp.status != 200:
+                            return await ctx.send("Error failed to fetch image")
 
                 await ctx.send(
                     _("Your Profile:"),
@@ -562,7 +3268,8 @@ class Profile(commands.Cog):
                         JOIN guild g ON p.guild = g.ID
                         WHERE p.user = $1
                     """
-                    guild_name = await conn.fetchval(query, targetid)
+                    db_guild_name = await conn.fetchval(query, targetid)
+                    guild_name = str(db_guild_name) if db_guild_name is not None else None
 
                 ret = await self.bot.pool.fetch(
                     "SELECT ai.*, i.equipped FROM profile p JOIN allitems ai ON"
@@ -574,6 +3281,7 @@ class Profile(commands.Cog):
                     0,
                     160,
                 )
+                ret = await self._apply_item_progression_to_items(targetid, ret)
 
                 # Assuming you have 'name', 'damage', 'armor', and 'type' columns in 'allitems' table
                 equipped_items = [row for row in ret if row['equipped']]
@@ -598,13 +3306,30 @@ class Profile(commands.Cog):
                         )
 
                     items = await self.bot.get_equipped_items_for(targetid, conn=conn)
+                    items = await self._apply_item_progression_to_items(
+                        targetid,
+                        items,
+                        conn=conn,
+                    )
                     mission = await self.bot.get_adventure(targetid)
+                    await self._sync_auto_profile_badges(
+                        user_id=targetid,
+                        badges_raw=profile["badges"],
+                        profile_xp=profile["xp"],
+                        conn=conn,
+                    )
 
                 # Apply race bonuses
                 race = profile["race"].lower()  # Assuming the race is stored in lowercase in the database
 
-                damage_total = item1["damage"] + item2["damage"]
-                armor_total = item1["armor"] + item2["armor"]
+                damage_total = (
+                    self._effective_item_damage(item1)
+                    + self._effective_item_damage(item2)
+                )
+                armor_total = (
+                    self._effective_item_armor(item1)
+                    + self._effective_item_armor(item2)
+                )
                 item1_name = item1["name"]
                 item2_name = item2["name"]
                 item1_type = item1["type"]
@@ -622,8 +3347,11 @@ class Profile(commands.Cog):
                     "reaper": {"Scythe": 10},
                     "paladin": {"Hammer": 5},
                     "thief": {"Knife": 5, "Dagger": 5},
-                    "paragon": {"Spear": 5}
+                    "paragon": {"Spear": 5},
+                    "tank": {"shield": 10}
                 }
+
+
 
                 # Initialize bonus
                 class_bonus = 0
@@ -634,6 +3362,26 @@ class Profile(commands.Cog):
                     for item in [item1_type, item2_type]:
                         item_bonus = class_info.get(item, 0)
                         class_bonus += item_bonus
+
+                query_class = 'SELECT "class" FROM profile WHERE "user" = $1;'
+
+                specified_words_values = {
+                    "Novice": 1,
+                    "Proficient": 2,
+                    "Artisan": 3,
+                    "Master": 4,
+                    "Champion": 5,
+                    "Vindicator": 6,
+                    "Paragon": 7,
+                }
+                # Query data for ctx.author.id
+                result_author = await self.bot.pool.fetch(query_class, ctx.author.id)
+                if result_author:
+                    author_classes = result_author[0]["class"]  # Assume it's a list of classes
+                    for class_name in author_classes:
+                        if class_name in specified_words_values:
+                            class_bonus += specified_words_values[class_name]
+
 
                 # Apply the class bonus to the damage total
                 damage_total += class_bonus
@@ -664,6 +3412,7 @@ class Profile(commands.Cog):
                 right_hand = None
                 left_hand = None
 
+
                 async with self.bot.pool.acquire() as conn:
                     # Check if the user exists in the battletower table
                     level_query = "SELECT level FROM battletower WHERE id = $1"
@@ -679,16 +3428,16 @@ class Profile(commands.Cog):
                 for i in items:
                     stat = f"{int(i['damage'] + i['armor'])}"
                     if i["hand"] == "both":
-                        right_hand = (i["type"], i["name"], stat)
+                        right_hand = left_hand = i
                     elif i["hand"] == "left":
-                        left_hand = (i["type"], i["name"], stat)
+                        left_hand = i
                     elif i["hand"] == "right":
-                        right_hand = (i["type"], i["name"], stat)
+                        right_hand = i
                     elif i["hand"] == "any":
                         if right_hand is None:
-                            right_hand = (i["type"], i["name"], stat)
+                            right_hand = i
                         else:
-                            left_hand = (i["type"], i["name"], stat)
+                            left_hand = i
 
                 color = profile["colour"]
                 color = [color["red"], color["green"], color["blue"], color["alpha"]]
@@ -709,24 +3458,30 @@ class Profile(commands.Cog):
                     adventure_name = None
                     adventure_time = None
 
-                badge_val = Badge.from_db(profile["badges"])
-                if badge_val:
-                    badges = badge_val.to_items_lowercase()
-                else:
-                    badges = []
+                # Prepare class names and icon names as lists of strings
+                processed_classes = []
+                if profile['class']:
+                    for c_raw in profile['class']:
+                        cls_obj = class_from_string(c_raw) # Assumes class_from_string exists and works
+                        if cls_obj:
+                            processed_classes.append(cls_obj)
+                
+                classes_str_list = [c.get_class_line_name() for c in processed_classes if c] if processed_classes else []
+                class_icons_list = [c.get_class_line_name().lower() for c in processed_classes if c] if processed_classes else [] # Assuming icon is lowercase class name
+
 
 
                 async with self.bot.trusted_session.post(
-                        f"ttp://127.0.0.1:3010/api/genprofile",
+                        f"http://127.0.0.1:3010/api/genprofile",
                         json={
                             "name": profile['name'],
                             "color": color,
                             "image": profile["background"],
                             "race": profile['race'],
-                            "classes": profile['class'],
+                            "classes": classes_str_list,
                             "profession": "None",
-                            "damage": f"{damage_total}",
-                            "defense": f"{armor_total}",
+                            "damage": self._format_stat_value(damage_total),
+                            "defense": self._format_stat_value(armor_total),
                             "swordName": f"{item1_name}",
                             "shieldName": f"{item2_name}",
                             "level": f"{rpgtools.xptolevel(profile['xp'])}",
@@ -734,11 +3489,11 @@ class Profile(commands.Cog):
                             "guild": guild_name,
                             "money": profile['money'],
                             "pvpWins": f"{profile['pvpwins']}",
-                            "marriage": marriage or _("None"),
+                            "marriage": marriage if marriage else _("None"),
                             "god": profile["god"] or _("No God"),
                             "adventure": adventure_name or _("No Mission"),
                             "adventure_time": adventure_time,
-                            "icons": icons,
+                            "icons": class_icons_list,
                             "BT": f"{level}"
 
                         },
@@ -748,81 +3503,352 @@ class Profile(commands.Cog):
                     # await ctx.send(f"{profile['class']}")
                     await ctx.send(file=discord.File(fp=img, filename="Profile.png"))
         except Exception as e:
-            await ctx.send(e)
-    @user_cooldown(86400)
-    @commands.command(aliases=["drink"], brief=_("View someone's profile"))
-    @locale_doc
-    async def consume(self, ctx, *, potion):
-        _(
-            """`[person]` - The person whose profile to view; defaults to oneself
+            import traceback
+            error_message = f"Error occurred: {e}\n"
+            error_message += traceback.format_exc()
+            await ctx.send(f"An error occurred during the game. {e}")
+            print(error_message)  # Log for debugging
 
-            View someone's profile. This will send an image.
-            For an explanation what all the fields mean, see [this picture](https://wiki.idlerpg.xyz/images/3/35/Profile_explained.png)"""
-        )
+    @user_cooldown(300)
+    @commands.command(aliases=["drink"], brief=_("Consume a potion or candy"))
+    @locale_doc
+    async def consume(self, ctx, item_type: str, target_arg: str = None, *, extra: str = None):
+        """
+        Consume either a reset potion, candy, or premium consumable.
+        Valid types: reset, candy, highcandy, petage <pet_id>, petspeed <pet_id>, petxp <pet_id>, petmindwipe, petelement <pet_id> <element>, weapelement <weapon_id> <element>
+        """
         try:
-            potion = potion.lower()
+            item_type = item_type.lower()
+            target_value = str(target_arg).strip() if target_arg is not None else None
+
+            def parse_single_numeric_target():
+                if not target_value:
+                    return None
+                return int(target_value) if target_value.isdigit() else None
 
             async with self.bot.pool.acquire() as conn:
-                reset_query = """
-                SELECT resetpotion
-                FROM profile
-                WHERE "user" = $1;
-                """
-                resetpotion = await conn.fetchval(reset_query, ctx.author.id)
+                profile_query = """
+                        SELECT resetpotion, levelcandy, highqualitylevelcandy, xp
+                        FROM profile
+                        WHERE "user" = $1;
+                        """
+                profile = await conn.fetchrow(profile_query, ctx.author.id)
 
-            if not resetpotion:
-                await ctx.send("Error: Unable to retrieve reset potion count.")
+            if not profile:
+                await ctx.send("Error: Unable to retrieve profile data.")
                 await self.bot.reset_cooldown(ctx)
                 return
 
-            if resetpotion < 1:
-                await ctx.send("You don't have enough reset potions.")
-                await self.bot.reset_cooldown(ctx)
-                return
+            if item_type == "reset":
+                if profile['resetpotion'] < 1:
+                    await ctx.send("You don't have enough reset potions.")
+                    await self.bot.reset_cooldown(ctx)
+                    return
 
-            if potion == "reset":
                 if not await ctx.confirm(
                         _(
-                            f"You are about to consume a `{potion} potion`. Proceed?"
+                            f"You are about to consume a `{item_type} potion`. Proceed?"
                         ).format(
-                            potion=potion
+                            item_type=item_type
                         )
                 ):
-                    await ctx.send(_("Class selection cancelled."))
+                    await ctx.send(_("Potion consumption cancelled."))
                     return await self.bot.reset_cooldown(ctx)
 
                 async with self.bot.pool.acquire() as conn:
                     query = """
-                    SELECT statpoints, statatk, statdef, stathp, resetpotion
-                    FROM profile
-                    WHERE "user" = $1
-                    FOR UPDATE;
-                    """
-
+                            SELECT statpoints, statatk, statdef, stathp, resetpotion
+                            FROM profile
+                            WHERE "user" = $1
+                            FOR UPDATE;
+                            """
                     profile = await conn.fetchrow(query, ctx.author.id)
 
                 if not profile:
                     return await ctx.send("Profile not found.")
 
                 total_stats = profile["statpoints"] + profile["statatk"] + profile["statdef"] + profile["stathp"]
-                async with self.bot.pool.acquire() as conn:
-                    # Update the profile
-                    update_query = """
-                    UPDATE profile
-                    SET statatk = 0, statdef = 0, stathp = 0, statpoints = $1, resetpotion = $2
-                    WHERE "user" = $3;
-                    """
 
-                    await conn.execute(update_query, total_stats, profile["resetpotion"] - 1, ctx.author.id)
+                async with self.bot.pool.acquire() as conn:
+                    update_query = """
+                            UPDATE profile
+                            SET statatk = 0, statdef = 0, stathp = 0, statpoints = $1, resetpotion = resetpotion - 1
+                            WHERE "user" = $2;
+                            """
+                    await conn.execute(update_query, total_stats, ctx.author.id)
 
                 await ctx.send(
-                    "Stats updated successfully. As you drink the reset potion, a wave of dizziness washes over you, making the world spin for a moment. You feel disoriented but also strangely invigorated, as if your very being has been refreshed.")
+                    "Stats updated successfully. As you drink the reset potion, a wave of dizziness "
+                    "washes over you, making the world spin for a moment. You feel disoriented but also strangely invigorated, "
+                    "as if your very being has been refreshed."
+                )
 
-            else:
-                await ctx.send("Unknown Potion Type")
-                await self.bot.reset_cooldown(ctx)
+            elif item_type == "candy":
+                if profile['levelcandy'] < 1:
+                    await ctx.send("You don't have enough level candy.")
+                    await self.bot.reset_cooldown(ctx)
+                    return
+
+                if not await ctx.confirm(_(f"You are about to consume a level candy. Proceed?")):
+                    await self.bot.reset_cooldown(ctx)
+                    return await ctx.send(_("Candy consumption cancelled."))
+
+                current_level = rpgtools.xptolevel(profile['xp'])
+                current_xp = profile['xp']
+                max_level = max(rpgtools.levels)
+                if current_level >= max_level:
+                    await ctx.send(f"You are already at max level ({max_level}).")
+                    await self.bot.reset_cooldown(ctx)
+                    return
+
+                async with self.bot.pool.acquire() as conn:
+                    # Consume the candy
+                    await conn.execute(
+                        'UPDATE profile SET levelcandy = levelcandy - 1 WHERE "user" = $1;',
+                        ctx.author.id
+                    )
+
+                    xp = int(rpgtools.xptonextlevel(current_xp))
+
+                    # Regular candy always gives one level
+                    await conn.execute(
+                        'UPDATE profile SET "xp" = "xp" + $1 WHERE "user" = $2;',
+                        xp,
+                        ctx.author.id
+                    )
+                    await self.bot.log_xp_watch_event(
+                        ctx=ctx,
+                        user_id=ctx.author.id,
+                        delta=int(xp),
+                        source="profile.consume.level_candy",
+                        details={"item": "levelcandy"},
+                        before_xp=current_xp,
+                        after_xp=current_xp + xp,
+                        conn=conn,
+                    )
+                    await self.bot.process_levelup(ctx, current_level + 1, current_level)
+
+                await ctx.send(
+                    f"You gained one level! As you eat the level candy, you feel a surge of energy course through your body, "
+                    f"making you stronger and more experienced."
+                )
+
+            elif item_type == "highcandy":
+                if profile['highqualitylevelcandy'] < 1:
+                    await ctx.send("You don't have enough high quality level candy.")
+                    await self.bot.reset_cooldown(ctx)
+                    return
+
+                if not await ctx.confirm(_(f"You are about to consume a high quality level candy. Proceed?")):
+                    await self.bot.reset_cooldown(ctx)
+                    return await ctx.send(_("Candy consumption cancelled."))
+
+                current_level = rpgtools.xptolevel(profile['xp'])
+                current_xp = profile['xp']
+                max_level = max(rpgtools.levels)
+                if current_level >= max_level:
+                    await ctx.send(f"You are already at max level ({max_level}).")
+                    await self.bot.reset_cooldown(ctx)
+                    return
+
+                async with self.bot.pool.acquire() as conn:
+                    # Consume the candy
+                    await conn.execute(
+                        'UPDATE profile SET highqualitylevelcandy = highqualitylevelcandy - 1 WHERE "user" = $1;',
+                        ctx.author.id
+                    )
+
+                    # First level up
+                    xp = int(rpgtools.xptonextlevel(current_xp))
+                    await conn.execute(
+                        'UPDATE profile SET "xp" = "xp" + $1 WHERE "user" = $2;',
+                        xp,
+                        ctx.author.id
+                    )
+                    await self.bot.log_xp_watch_event(
+                        ctx=ctx,
+                        user_id=ctx.author.id,
+                        delta=int(xp),
+                        source="profile.consume.highquality_level_candy",
+                        details={"item": "highqualitylevelcandy", "step": 1},
+                        before_xp=current_xp,
+                        after_xp=current_xp + xp,
+                        conn=conn,
+                    )
+                    await self.bot.process_levelup(ctx, current_level + 1, current_level)
+
+                    # Second level up
+                    new_xp = await conn.fetchval('SELECT xp FROM profile WHERE "user" = $1;', ctx.author.id)
+                    newxp = int(rpgtools.xptonextlevel(new_xp))
+                    await conn.execute(
+                        'UPDATE profile SET "xp" = "xp" + $1 WHERE "user" = $2;',
+                        newxp,
+                        ctx.author.id
+                    )
+                    await self.bot.log_xp_watch_event(
+                        ctx=ctx,
+                        user_id=ctx.author.id,
+                        delta=int(newxp),
+                        source="profile.consume.highquality_level_candy",
+                        details={"item": "highqualitylevelcandy", "step": 2},
+                        before_xp=new_xp,
+                        after_xp=new_xp + newxp,
+                        conn=conn,
+                    )
+                    await self.bot.process_levelup(ctx, current_level + 2, current_level + 1)
+
+                await ctx.send(
+                    f"You gained two levels! As you eat the high quality level candy, you feel an intense surge of energy course through your body, "
+                    f"making you much stronger and more experienced."
+                )
+
+            elif item_type in ["petage", "pet age potion"]:
+                # Handle pet age potion consumption
+                target_id = parse_single_numeric_target()
+                if target_id is None:
+                    await ctx.send("Please provide a pet ID: `$consume petage <pet_id>` or `$consume \"pet age potion\" <pet_id>`")
+                    await self.bot.reset_cooldown(ctx)
+                    return
+                
+                premium_cog = self.bot.get_cog("PremiumShop")
+                if not premium_cog:
+                    await ctx.send("Premium shop cog not found.")
+                    await self.bot.reset_cooldown(ctx)
+                    return
+                
+                success, message = await premium_cog.consume_pet_age_potion(ctx, target_id)
+                if success:
+                    await ctx.send(message)
+                else:
+                    await ctx.send(f"Error: {message}")
+                    await self.bot.reset_cooldown(ctx)
+                return
+                
+            elif item_type in ["petspeed", "pet speed growth potion"]:
+                # Handle pet speed growth potion consumption
+                target_id = parse_single_numeric_target()
+                if target_id is None:
+                    await ctx.send("Please provide a pet ID: `$consume petspeed <pet_id>` or `$consume \"pet speed growth potion\" <pet_id>`")
+                    await self.bot.reset_cooldown(ctx)
+                    return
+                
+                premium_cog = self.bot.get_cog("PremiumShop")
+                if not premium_cog:
+                    await ctx.send("Premium shop cog not found.")
+                    await self.bot.reset_cooldown(ctx)
+                    return
+                
+                success, message = await premium_cog.consume_pet_speed_growth_potion(ctx, target_id)
+                if success:
+                    await ctx.send(message)
+                else:
+                    await ctx.send(f"Error: {message}")
+                    await self.bot.reset_cooldown(ctx)
+                return
+                
+            elif item_type in ["petxp", "pet xp potion"]:
+                # Handle pet XP potion consumption
+                target_id = parse_single_numeric_target()
+                if target_id is None:
+                    await ctx.send("Please provide a pet ID: `$consume petxp <pet_id>` or `$consume \"pet xp potion\" <pet_id>`")
+                    await self.bot.reset_cooldown(ctx)
+                    return
+                
+                premium_cog = self.bot.get_cog("PremiumShop")
+                if not premium_cog:
+                    await ctx.send("Premium shop cog not found.")
+                    await self.bot.reset_cooldown(ctx)
+                    return
+                
+                success, message = await premium_cog.consume_pet_xp_potion(ctx, target_id)
+                if success:
+                    await ctx.send(message)
+                else:
+                    await ctx.send(f"Error: {message}")
+                    await self.bot.reset_cooldown(ctx)
                 return
 
+            elif item_type in ["petmindwipe", "pet mind wipe", "mindwipe"]:
+                premium_cog = self.bot.get_cog("PremiumShop")
+                if not premium_cog:
+                    await ctx.send("Premium shop cog not found.")
+                    await self.bot.reset_cooldown(ctx)
+                    return
+
+                success, message = await premium_cog.consume_pet_mind_wipe(ctx)
+                if not success:
+                    await ctx.send(f"Error: {message}")
+                    await self.bot.reset_cooldown(ctx)
+                return
+
+            elif item_type in ["petelement", "pet element scroll", "pet element change", "petelementscroll"]:
+                target_id = parse_single_numeric_target()
+                if target_id is None or not extra:
+                    await ctx.send(
+                        "Please provide a pet ID and new element: "
+                        "`$consume petelement <pet_id> <element>` or "
+                        "`$consume \"pet element scroll\" <pet_id> <element>`"
+                    )
+                    await self.bot.reset_cooldown(ctx)
+                    return
+
+                premium_cog = self.bot.get_cog("PremiumShop")
+                if not premium_cog:
+                    await ctx.send("Premium shop cog not found.")
+                    await self.bot.reset_cooldown(ctx)
+                    return
+
+                success, message = await premium_cog.consume_pet_element_scroll(
+                    ctx,
+                    target_id,
+                    extra.strip(),
+                )
+                if success:
+                    await ctx.send(message)
+                else:
+                    await ctx.send(f"Error: {message}")
+                    await self.bot.reset_cooldown(ctx)
+                return
+
+            elif item_type in ["weapelement", "weapon element scroll", "elementscroll"]:
+                # Handle weapon element scroll consumption
+                target_id = parse_single_numeric_target()
+                if target_id is None or not extra:
+                    await ctx.send(
+                        "Please provide a weapon ID and element: "
+                        "`$consume weapelement <weapon_id> <element>` or "
+                        "`$consume \"weapon element scroll\" <weapon_id> <element>`"
+                    )
+                    await self.bot.reset_cooldown(ctx)
+                    return
+
+                premium_cog = self.bot.get_cog("PremiumShop")
+                if not premium_cog:
+                    await ctx.send("Premium shop cog not found.")
+                    await self.bot.reset_cooldown(ctx)
+                    return
+
+                success, message = await premium_cog.consume_weapon_element_scroll(
+                    ctx,
+                    target_id,
+                    extra.strip(),
+                )
+                if success:
+                    await ctx.send(message)
+                else:
+                    await ctx.send(f"Error: {message}")
+                    await self.bot.reset_cooldown(ctx)
+                return
+                
+            else:
+                await ctx.send(
+                    "Unknown item type. Valid types are: reset, candy, highcandy, "
+                    "petage <pet_id>, petspeed <pet_id>, petxp <pet_id>, "
+                    "petmindwipe, petelement <pet_id> <element>, "
+                    "weapelement <weapon_id> <element>"
+                )
+                await self.bot.reset_cooldown(ctx)
+                return
 
         except Exception as e:
             import traceback
@@ -836,156 +3862,309 @@ class Profile(commands.Cog):
     )
     @locale_doc
     async def profile2(self, ctx, *, target: str = None):
-        _(
-            """`[target]` - The person whose profile to view
+        """
+        [target] - The person whose profile to view
 
-            View someone's profile. This will send an embed rather than an image and is usually faster."""
-        )
+        View someone's profile. This will send an embed rather than an image and is usually faster.
+        """
+        # Resolve the target user by mention, user ID, or discordtag.
         try:
-            if target:
+            # If no target is provided, default to the command author.
+            if not target:
+                target = str(ctx.author.id)
+            else:
+                # Only take the first space-separated part
                 target = target.split()[0]
 
-            if target is None:
-                target = str(ctx.author.id)
+            id_pattern = re.compile(r"^\d{17,19}$")
+            mention_pattern = re.compile(r"<@!?(\d{17,19})>")
+            user = None
 
-            id_pattern = re.compile(r'^\d{17,19}$')
-            mention_pattern = re.compile(r'<@!?(\d{17,19})>')
-            match = mention_pattern.match(target)
-
-            if match:
-                target = int(match.group(1))
-                target = await self.bot.fetch_user(int(target))
-
+            # Check for a proper mention
+            mention_match = mention_pattern.match(target)
+            if mention_match:
+                user_id = int(mention_match.group(1))
+                user = await self.bot.fetch_user(user_id)
+            # Check for a valid numeric ID
             elif id_pattern.match(target):
-                target = await self.bot.fetch_user(int(target))
+                user = await self.bot.fetch_user(int(target))
             else:
+                # Try to fetch by discordtag from our database
                 async with self.bot.pool.acquire() as conn:
                     query = 'SELECT "user" FROM profile WHERE discordtag = $1'
                     user_id = await conn.fetchval(query, target)
-                target = await self.bot.fetch_user(int(user_id))
+                if user_id:
+                    user = await self.bot.fetch_user(int(user_id))
+                else:
+                    raise ValueError("User not found")
 
-            targetid = target.id
-            discordtag = target.display_name
+            target_user = user
+            display_tag = target_user.display_name
         except Exception as e:
-            await ctx.send("Unknown User")
+            await ctx.send(_("Unknown User"))
             return
 
-        #000000000000000000000000000000000000000000000000000000000000000000000
-        target = target or ctx.author
-        rank_money, rank_xp = await self.bot.get_ranks_for(target)
+        # Get extra data (ranks, equipment, profile, etc.)
+        rank_money, rank_xp = await self.bot.get_ranks_for(target_user)
+        items = await self.bot.get_equipped_items_for(target_user)
+        items = await self._apply_item_progression_to_items(target_user.id, items)
 
-        items = await self.bot.get_equipped_items_for(target)
         async with self.bot.pool.acquire() as conn:
             p_data = await conn.fetchrow(
                 '''
-                        SELECT * FROM profile 
-                        WHERE "user" = $1 OR discordtag = $2
-                    ''', target.id, discordtag
+                SELECT * FROM profile 
+                WHERE "user" = $1 OR discordtag = $2
+                ''',
+                target_user.id,
+                display_tag,
             )
             if not p_data:
                 return await ctx.send(
-                    _("**{target}** does not have a character.").format(target=target)
+                    _("**{target}** does not have a character.").format(target=target_user)
                 )
-            mission = await self.bot.get_adventure(target)
-            guild = await conn.fetchval(
-                'SELECT name FROM guild WHERE "id"=$1;', p_data["guild"]
+            ascension_record = await conn.fetchrow(
+                f'SELECT mantle, enabled FROM {ASCENSION_TABLE_NAME} WHERE user_id = $1;',
+                target_user.id,
             )
+            jury_title_unlocked = await conn.fetchval(
+                'SELECT shop_title_unlocked FROM jurytower WHERE id = $1;',
+                target_user.id,
+            )
+            mission = await self.bot.get_adventure(target_user)
+            guild = await conn.fetchval('SELECT name FROM guild WHERE "id"=$1;', p_data["guild"])
+            pet = await conn.fetchval(
+                'SELECT default_name FROM monster_pets WHERE "user_id"=$1 AND equipped = true;',
+                target_user.id,
+            ) or "None"
+        if pet != "None":
+            pet = get_pet_display_name(self.bot, pet)
+        ascension = get_ascension_mantle(None if ascension_record is None else ascension_record["mantle"])
+        ascension_enabled = True if ascension_record is None else bool(ascension_record["enabled"])
+        if ascension:
+            ascension_title = f"{ascension.title} ({'Active' if ascension_enabled else 'Dormant'})"
+        else:
+            ascension_title = "Unclaimed"
+        jury_title = JURY_COSMETIC_TITLE if jury_title_unlocked else None
+        court_title_line = f"**Court Title:** {jury_title}\n" if jury_title else ""
+
+        # Get color from profile data (use default color if not available)
         try:
-            colour = p_data["colour"]
-            colour = discord.Colour.from_rgb(
-                colour["red"], colour["green"], colour["blue"]
-            )
-        except ValueError:
-            colour = 0x000000
+            col_data = p_data.get("colour")
+            colour = discord.Colour.from_rgb(col_data["red"], col_data["green"], col_data["blue"])
+        except (KeyError, ValueError, TypeError):
+            colour = discord.Colour.default()
+
+        # Prepare mission time-left text if mission data exists.
+        timeleft = "N/A"
         if mission:
+            # mission[1] is a timedelta/duration, and mission[2] is a finished flag
             timeleft = str(mission[1]).split(".")[0] if not mission[2] else "Finished"
 
-        right_hand = None
-        left_hand = None
-
-        any_count = sum(1 for i in items if i["hand"] == "any")
-        if len(items) == 2 and any_count == 1 and items[0]["hand"] == "any":
+        # Determine equipped items for each hand.
+        right_hand, left_hand = None, None
+        # A quick adjustment if only one "any" exists in a pair of items.
+        any_count = sum(1 for item in items if item.get("hand") == "any")
+        if len(items) == 2 and any_count == 1 and items[0].get("hand") == "any":
             items = [items[1], items[0]]
 
-        for i in items:
-            if i["hand"] == "both":
-                right_hand, left_hand = i, i
-            elif i["hand"] == "left":
-                left_hand = i
-            elif i["hand"] == "right":
-                right_hand = i
-            elif i["hand"] == "any":
-                if right_hand is None:
-                    right_hand = i
+        for item in items:
+            hand = item.get("hand")
+            if hand == "both":
+                right_hand = left_hand = item
+            elif hand == "left":
+                left_hand = item
+            elif hand == "right":
+                right_hand = item
+            elif hand == "any":
+                if not right_hand:
+                    right_hand = item
                 else:
-                    left_hand = i
+                    left_hand = item
 
-        try:
-            if "marriage" in p_data:
-                discord_id = p_data["marriage"]
-                user = await self.bot.fetch_user(discord_id)
+        # Check marriage information.
+        marriage_display = "None"
+        if p_data.get("marriage"):
+            try:
+                marriage_user = await self.bot.fetch_user(p_data["marriage"])
+                marriage_display = marriage_user.display_name if marriage_user else "None"
+            except discord.errors.NotFound:
+                marriage_display = "None"
+            except Exception:
+                marriage_display = "None"
 
-                if user:
-                    display_name = user.display_name
-                else:
-                    display_name = "none"
-            else:
-                display_name = "none"
-        except discord.errors.NotFound:
-            display_name = "none"
-        except Exception as e:
-            display_name = "none"
-            await ctx.send(f"An error occurred: {e}")
-
-        right_hand = (
-            f"{right_hand['name']} - {right_hand['damage'] + right_hand['armor']}"
+        # Build equipment strings.
+        right_hand_str = (
+            f"{right_hand['name']} - {self._format_stat_value(self._effective_item_primary_stat(right_hand))}"
             if right_hand
             else _("None Equipped")
         )
-        left_hand = (
-            f"{left_hand['name']} - {left_hand['damage'] + left_hand['armor']}"
+        left_hand_str = (
+            f"{left_hand['name']} - {self._format_stat_value(self._effective_item_primary_stat(left_hand))}"
             if left_hand
             else _("None Equipped")
         )
         level = rpgtools.xptolevel(p_data["xp"])
-        em = discord.Embed(colour=colour, title=f"{target}: {p_data['name']}")
-        em.set_thumbnail(url=target.display_avatar.url)
-        em.add_field(
-            name=_("General"),
-            value=_(
-                """\
-**Money**: `${money}`
-**Level**: `{level}`
-**Marriage:** `{marriage}`
-**Class**: `{class_}`
-**Race**: `{race}`
-**PvP Wins**: `{pvp}`
-**Guild**: `{guild}`"""
-            ).format(
-                money=p_data["money"],
-                level=level,
-                marriage=display_name,
-                class_="/".join(p_data["class"]),
-                race=p_data["race"],
-                pvp=p_data["pvpwins"],
-                guild=guild,
-            ),
+
+        # Create the embed and add well-organized fields.
+        embed = discord.Embed(
+            colour=colour, title=f"{target_user.display_name}'s Profile", description=f"Character: {p_data['name']}"
         )
-        em.add_field(
-            name=_("Ranks"),
-            value=_("**Richest**: `{rank_money}`\n**XP**: `{rank_xp}`").format(
-                rank_money=rank_money, rank_xp=rank_xp
-            ),
+        embed.set_thumbnail(url=target_user.display_avatar.url)
+
+        # A declared specialization replaces the class name at final evolution
+        class_display = p_data.get("class", [])
+        spec_cog = self.bot.get_cog("Specializations")
+        if spec_cog:
+            class_display = await spec_cog.get_spec_display_classes(
+                target_user.id, class_display
+            )
+
+        # General Information field.
+        general_info = (
+            f"**Money:** ${p_data['money']}\n"
+            f"**Level:** {level}\n"
+            f"**Pet:** {pet}\n"
+            f"**Marriage:** {marriage_display}\n"
+            f"**Class:** {' / '.join(class_display) or 'N/A'}\n"
+            f"**Ascension:** {ascension_title}\n"
+            f"{court_title_line}"
+            f"**Race:** {p_data['race']}\n"
+            f"**PvP Wins:** {p_data['pvpwins']}\n"
+            f"**Guild:** {guild or 'None'}"
         )
-        em.add_field(
-            name=_("Equipment"),
-            value=_("Right Hand: {right_hand}\nLeft Hand: {left_hand}").format(
-                right_hand=right_hand, left_hand=left_hand
-            ),
-        )
+        embed.add_field(name=_("General"), value=general_info, inline=False)
+
+        # Ranks as an inline field.
+        ranks_info = f"**Richest:** {rank_money}\n**XP:** {rank_xp}"
+        embed.add_field(name=_("Ranks"), value=ranks_info, inline=True)
+
+        # Equipment field as another inline field.
+        equipment_info = f"**Right Hand:** {right_hand_str}\n**Left Hand:** {left_hand_str}"
+        embed.add_field(name=_("Equipment"), value=equipment_info, inline=True)
+
+        # Mission field if available.
         if mission:
-            em.add_field(name=_("Mission"), value=f"{mission[0]} - {timeleft}")
-        await ctx.send(embed=em)
+            embed.add_field(name=_("Mission"), value=f"{mission[0]} - {timeleft}", inline=False)
+
+        # Optionally, include a footer.
+        embed.set_footer(text=f"User ID: {target_user.id}")
+
+        await ctx.send(embed=embed)
+
+    @commands.command(
+        name="profilerpg",
+        aliases=["prpg", "rpgprofile"],
+        brief=_("View someone's profile as an RPG stat card"),
+    )
+    @locale_doc
+    async def profilerpg(self, ctx, *, target: str = None):
+        _(
+            """`[target]` - The person whose profile card to view
+
+            Render a high-detail RPG profile card with avatar, progression, combat stats, gear, ranks, and quest info."""
+        )
+
+        user = await self._resolve_profile_target_user(ctx, target)
+        if not user:
+            return await ctx.send(_("Unknown User"))
+
+        rank_money, rank_xp = await self.bot.get_ranks_for(user)
+        items = await self.bot.get_equipped_items_for(user)
+        items = await self._apply_item_progression_to_items(user.id, items)
+
+        async with self.bot.pool.acquire() as conn:
+            profile_data = await conn.fetchrow(
+                'SELECT * FROM profile WHERE "user" = $1 OR discordtag = $2',
+                user.id,
+                user.display_name,
+            )
+            if not profile_data:
+                return await ctx.send(
+                    _("**{target}** does not have a character.").format(target=user)
+                )
+
+            synced_badges = await self._sync_auto_profile_badges(
+                user_id=user.id,
+                badges_raw=profile_data["badges"],
+                profile_xp=profile_data["xp"],
+                conn=conn,
+            )
+            profile_data = dict(profile_data)
+            profile_data["badges"] = synced_badges.to_db()
+            ascension_record = await conn.fetchrow(
+                f'SELECT mantle, enabled FROM {ASCENSION_TABLE_NAME} WHERE user_id = $1;',
+                user.id,
+            )
+            profile_data["ascension_mantle"] = None if ascension_record is None else ascension_record["mantle"]
+            profile_data["ascension_enabled"] = True if ascension_record is None else bool(ascension_record["enabled"])
+            jury_title_unlocked = await conn.fetchval(
+                'SELECT shop_title_unlocked FROM jurytower WHERE id = $1;',
+                user.id,
+            )
+            profile_data["jury_title"] = JURY_COSMETIC_TITLE if jury_title_unlocked else ""
+
+            mission = await self.bot.get_adventure(user)
+            guild_name = await conn.fetchval(
+                'SELECT name FROM guild WHERE "id" = $1;',
+                profile_data["guild"],
+            )
+            raid_attack, raid_defense = await self.bot.get_raidstats(user, conn=conn)
+            amulet_data = await conn.fetchrow(
+                'SELECT * FROM amulets WHERE "user_id" = $1 AND equipped = true ORDER BY id DESC LIMIT 1;',
+                user.id,
+            )
+            pet_data = await conn.fetchrow(
+                'SELECT * FROM monster_pets WHERE "user_id" = $1 AND equipped = true;',
+                user.id,
+            )
+            pet_data = dict(pet_data) if pet_data else None
+            pet_data = mask_pet_record_for_display(self.bot, pet_data)
+            pet_name = (
+                get_pet_display_name(
+                    self.bot,
+                    pet_data.get("name") or pet_data.get("default_name") or "None",
+                )
+                if pet_data
+                else "None"
+            )
+            level = int(rpgtools.xptolevel(self._safe_int(profile_data.get("xp"), 0)))
+            base_hp = self._safe_float(profile_data.get("health"), 0.0)
+            stat_hp = self._safe_float(profile_data.get("stathp"), 0.0) * 50.0
+            level_hp = 200.0 + (level * 15.0)
+            amulet_hp = self._safe_float(amulet_data.get("hp"), 0.0) if amulet_data else 0.0
+            total_health = base_hp + stat_hp + level_hp + amulet_hp
+
+        marriage_name = None
+        if profile_data.get("marriage"):
+            marriage_name = await rpgtools.lookup(
+                self.bot,
+                profile_data["marriage"],
+                return_none=True,
+            )
+
+        image_buffer = await self._build_profile_rpg_card(
+            user=user,
+            profile=profile_data,
+            items=items,
+            rank_money=rank_money,
+            rank_xp=rank_xp,
+            guild_name=guild_name,
+            mission=mission,
+            pet_name=pet_name,
+            marriage_name=marriage_name,
+            pet_data=pet_data,
+            raid_attack=raid_attack,
+            raid_defense=raid_defense,
+            total_health=total_health,
+            amulet_data=amulet_data,
+        )
+        await ctx.send(
+            _("Your RPG Profile Card:"),
+            file=discord.File(
+                fp=image_buffer,
+                filename=f"profile_rpg_{user.id}.png",
+            ),
+        )
 
     @checks.has_char()
     @commands.command(brief=_("Show your current luck"))
@@ -1061,151 +4240,7 @@ class Profile(commands.Cog):
             )
         )
 
-    @is_gm()
-    @commands.command()
-    async def gmp2(self, ctx, min_xp: int, max_xp: int):
-        try:
-            async with self.bot.pool.acquire() as conn:
-                user_records = await conn.fetch(
-                    'SELECT * FROM profile WHERE xp BETWEEN $1 AND $2;', min_xp, max_xp
-                )
 
-            for user_record in user_records:
-                if user_record['user'] == 1136590782183264308:
-                    await ctx.send(f"Skipping processing for user: {user_record['user']} (Fable Bot)")
-                    continue
-
-                # Show information about the user being processed
-                await ctx.send(f"Processing profile for user: {user_record['user']} XP: {user_record['xp']}")
-
-                target = self.bot.get_user(user_record["user"])
-
-                if target is None:
-                    try:
-                        # Attempt to fetch the user
-                        target = await self.bot.fetch_user(user_record["user"])
-                    except discord.NotFound:
-                        # If fetch fails, user not found
-                        await ctx.send(
-                            f"User with ID {user_record['user']} not found. Proceed with a manual check for this user.")
-                        continue
-                rank_money, rank_xp = await self.bot.get_ranks_for(target)
-
-                items = await self.bot.get_equipped_items_for(target)
-                async with self.bot.pool.acquire() as conn:
-                    p_data = await conn.fetchrow(
-                        'SELECT * FROM profile WHERE "user"=$1;', target.id
-                    )
-                    if not p_data:
-                        return await ctx.send(
-                            _("**{target}** does not have a character.").format(target=target)
-                        )
-                    mission = await self.bot.get_adventure(target)
-                    guild = await conn.fetchval(
-                        'SELECT name FROM guild WHERE "id"=$1;', p_data["guild"]
-                    )
-                try:
-                    colour = p_data["colour"]
-                    colour = discord.Colour.from_rgb(
-                        colour["red"], colour["green"], colour["blue"]
-                    )
-                except ValueError:
-                    colour = 0x000000
-                if mission:
-                    timeleft = str(mission[1]).split(".")[0] if not mission[2] else "Finished"
-
-                right_hand = None
-                left_hand = None
-
-                any_count = sum(1 for i in items if i["hand"] == "any")
-                if len(items) == 2 and any_count == 1 and items[0]["hand"] == "any":
-                    items = [items[1], items[0]]
-
-                for i in items:
-                    if i["hand"] == "both":
-                        right_hand, left_hand = i, i
-                    elif i["hand"] == "left":
-                        left_hand = i
-                    elif i["hand"] == "right":
-                        right_hand = i
-                    elif i["hand"] == "any":
-                        if right_hand is None:
-                            right_hand = i
-                        else:
-                            left_hand = i
-
-                try:
-                    if "marriage" in p_data:
-                        discord_id = p_data["marriage"]
-                        user = await self.bot.fetch_user(discord_id)
-
-                        if user:
-                            display_name = user.display_name
-                        else:
-                            display_name = "none"
-                    else:
-                        display_name = "none"
-                except discord.errors.NotFound:
-                    display_name = "none"
-                except Exception as e:
-                    display_name = "none"
-                    await ctx.send(f"An error occurred: {e}")
-
-                right_hand = (
-                    f"{right_hand['name']} - {right_hand['damage'] + right_hand['armor']}"
-                    if right_hand
-                    else _("None Equipped")
-                )
-                left_hand = (
-                    f"{left_hand['name']} - {left_hand['damage'] + left_hand['armor']}"
-                    if left_hand
-                    else _("None Equipped")
-                )
-                level = rpgtools.xptolevel(p_data["xp"])
-                em = discord.Embed(colour=colour, title=f"{target}: {p_data['name']}")
-                em.set_thumbnail(url=target.display_avatar.url)
-                em.add_field(
-                    name=_("General"),
-                    value=_(
-                        """\
-        **Money**: `${money}`
-        **Level**: `{level}`
-        **Marriage:** `{marriage}`
-        **Class**: `{class_}`
-        **Race**: `{race}`
-        **PvP Wins**: `{pvp}`
-        **Guild**: `{guild}`"""
-                    ).format(
-                        money=p_data["money"],
-                        level=level,
-                        marriage=display_name,
-                        class_="/".join(p_data["class"]),
-                        race=p_data["race"],
-                        pvp=p_data["pvpwins"],
-                        guild=guild,
-                    ),
-                )
-                em.add_field(
-                    name=_("Ranks"),
-                    value=_("**Richest**: `{rank_money}`\n**XP**: `{rank_xp}`").format(
-                        rank_money=rank_money, rank_xp=rank_xp
-                    ),
-                )
-                em.add_field(
-                    name=_("Equipment"),
-                    value=_("Right Hand: {right_hand}\nLeft Hand: {left_hand}").format(
-                        right_hand=right_hand, left_hand=left_hand
-                    ),
-                )
-                if mission:
-                    em.add_field(name=_("Mission"), value=f"{mission[0]} - {timeleft}")
-                await ctx.send(embed=em)
-                await asyncio.sleep(2)
-
-            await ctx.send("Profiles processing complete.")
-
-        except Exception as e:
-            await ctx.send(f"An error occurred: {e}")
 
     @checks.has_char()
     @commands.command(brief=_("Show a player's current XP"))
@@ -1261,11 +4296,27 @@ class Profile(commands.Cog):
             # Check if the weapon is locked and add "(locked)" if true
             locked_status = " (locked)" if weapon.get('locked', False) else ""
 
-            statstr = (
-                _("Damage: `{damage}`").format(damage=weapon["damage"])
-                if weapon["type"] != "Shield"
-                else _("Armor: `{armor}`").format(armor=weapon["armor"])
+            progression_bonus = self._decimal_or_zero(
+                weapon.get("progression_bonus_pct")
             )
+            progression_text = (
+                f" (+{float(progression_bonus * 100):.1f}% progression)"
+                if progression_bonus > 0
+                else ""
+            )
+            statstr = (
+                _("Damage: `{damage}`").format(
+                    damage=self._format_stat_value(
+                        self._effective_item_damage(weapon)
+                    )
+                )
+                if weapon["type"] != "Shield"
+                else _("Armor: `{armor}`").format(
+                    armor=self._format_stat_value(
+                        self._effective_item_armor(weapon)
+                    )
+                )
+            ) + progression_text
             signature = (
                 _("\nSignature: *{signature}*").format(signature=y)
                 if (y := weapon["signature"])
@@ -1296,78 +4347,609 @@ class Profile(commands.Cog):
         )
         return result
 
-    def invembedd(self, ctx, reset_potions_chunk, current_page, max_page):
-        result = discord.Embed(
-            title=_("{user}'s Inventory").format(user=ctx.author.display_name),
-            colour=discord.Colour.blurple(),
+    def _inventory_chunk_lines(self, lines: list[str], *, limit: int = 950) -> list[str]:
+        if not lines:
+            return []
+        chunks_out = []
+        chunk = []
+        current_length = 0
+        for line in lines:
+            addition = len(line) + (2 if chunk else 0)
+            if chunk and current_length + addition > limit:
+                chunks_out.append("\n\n".join(chunk))
+                chunk = [line]
+                current_length = len(line)
+            else:
+                chunk.append(line)
+                current_length += addition
+        if chunk:
+            chunks_out.append("\n\n".join(chunk))
+        return chunks_out
+
+    def _get_amulet_recycle_refund(self, amulet_type_key: str, tier: int) -> dict[str, int]:
+        amulet_cog = self.bot.get_cog("AmuletCrafting")
+        if amulet_cog is None:
+            return {}
+        recipe = (
+            getattr(amulet_cog, "AMULET_RECIPES", {})
+            .get(str(amulet_type_key).lower(), {})
+            .get(int(tier), {})
         )
-        for reset_potion in reset_potions_chunk:
-            result.add_field(
-                name="<:Resetpotion2:1245040954382090270> - Reset Potion",
-                value=f"Quantity: {reset_potion}",
-                inline=False
-            )
-        result.set_footer(
-            text=_("Page {page} of {maxpages}").format(
-                page=current_page + 1, maxpages=max_page + 1
-            )
+        if not recipe:
+            return {}
+        refund = {}
+        for resource, amount in recipe.items():
+            amount = int(amount or 0)
+            if amount <= 0:
+                continue
+            refund[resource] = max(1, int(amount * 0.7))
+        return refund
+
+    def _format_amulet_recycle_refund(self, refund: dict[str, int]) -> str:
+        if not refund:
+            return "No recycle refund is available."
+        return "\n".join(
+            f"{amount}x {resource.replace('_', ' ').title()}"
+            for resource, amount in refund.items()
         )
-        return result
+
+    def _build_inventory_categories(
+        self,
+        amulets,
+        profile_row,
+        premium_consumables,
+        god_shards,
+        key_items,
+    ) -> list[dict]:
+        categories = []
+        profile_data = dict(profile_row) if profile_row else {}
+
+        amulet_lines = []
+        amulet_entries = []
+        for raw_amulet in amulets:
+            amulet = dict(raw_amulet)
+            amulet_type_key = str(amulet.get("type") or "unknown").lower()
+            amulet_type = amulet_type_key.title()
+            tier = int(amulet.get("tier") or 0)
+            amulet_id = int(amulet["id"])
+            equipped = bool(amulet.get("equipped"))
+            status = "Equipped" if equipped else "Stored"
+            amulet_name = f"Tier {tier} {amulet_type} Amulet"
+            refund = self._get_amulet_recycle_refund(amulet_type_key, tier)
+            amulet_lines.append(
+                f"**{amulet_name}** (ID: {amulet_id}) [{status}]\n"
+                f"HP +{int(amulet.get('hp') or 0)} | DEF +{int(amulet.get('defense') or 0)} | "
+                f"ATK +{int(amulet.get('attack') or 0)} | ${int(amulet.get('value') or 0):,}"
+            )
+            amulet_entries.append(
+                {
+                    "kind": "amulet",
+                    "entry_key": f"amulet:{amulet_id}",
+                    "select_label": f"{amulet_name} #{amulet_id}",
+                    "select_description": f"{status} • HP +{int(amulet.get('hp') or 0)} • ATK +{int(amulet.get('attack') or 0)}",
+                    "name": amulet_name,
+                    "amulet_id": amulet_id,
+                    "amulet_type_key": amulet_type_key,
+                    "amulet_type": amulet_type,
+                    "tier": tier,
+                    "hp": int(amulet.get("hp") or 0),
+                    "attack": int(amulet.get("attack") or 0),
+                    "defense": int(amulet.get("defense") or 0),
+                    "value": int(amulet.get("value") or 0),
+                    "equipped": equipped,
+                    "recycle_enabled": bool(refund),
+                    "refund_preview": self._format_amulet_recycle_refund(refund),
+                }
+            )
+        if amulet_entries:
+            categories.append(
+                {
+                    "key": "amulets",
+                    "label": "Amulets",
+                    "description": "Amulets you own, including equipped and stored pieces.",
+                    "summary_chunks": self._inventory_chunk_lines(amulet_lines),
+                    "entries": amulet_entries,
+                }
+            )
+
+        premium_quantities = {
+            str(row["consumable_type"]): int(row["quantity"] or 0)
+            for row in premium_consumables
+        }
+        potion_definitions = (
+            {
+                "entry_key": "potion:reset",
+                "name": "Reset Potion",
+                "quantity": int(profile_data.get("resetpotion") or 0),
+                "description": "Returns all allocated stat points to your unspent pool.",
+                "summary": "Refunds allocated stat points after confirmation.",
+                "consume_key": "reset",
+                "usage_command": "reset",
+                "button_enabled": True,
+                "action_text": "Drink it to refund your stat build after a confirmation prompt.",
+                "button_note": "",
+            },
+            {
+                "entry_key": "potion:candy",
+                "name": "Level Candy",
+                "quantity": int(profile_data.get("levelcandy") or 0),
+                "description": "A sweet that instantly grants one level.",
+                "summary": "Grants one level after confirmation.",
+                "consume_key": "candy",
+                "usage_command": "candy",
+                "button_enabled": True,
+                "action_text": "Consumes after confirmation and grants one level.",
+                "button_note": "",
+            },
+            {
+                "entry_key": "potion:highcandy",
+                "name": "Super Level Candy",
+                "quantity": int(profile_data.get("highqualitylevelcandy") or 0),
+                "description": "A stronger candy that grants two levels.",
+                "summary": "Grants two levels after confirmation.",
+                "consume_key": "highcandy",
+                "usage_command": "highcandy",
+                "button_enabled": True,
+                "action_text": "Consumes after confirmation and grants two levels.",
+                "button_note": "",
+            },
+            {
+                "entry_key": "potion:pet_age_potion",
+                "name": "Pet Age Potion",
+                "quantity": premium_quantities.get("pet_age_potion", 0),
+                "description": "Instantly ages one pet.",
+                "summary": "Requires a pet target.",
+                "consume_key": "petage",
+                "usage_command": "petage <pet_id>",
+                "button_enabled": False,
+                "action_text": "This potion needs a pet target before it can be used.",
+                "button_note": "Use `$consume petage <pet_id>`.",
+            },
+            {
+                "entry_key": "potion:pet_speed_growth_potion",
+                "name": "Pet Speed Growth Potion",
+                "quantity": premium_quantities.get("pet_speed_growth_potion", 0),
+                "description": "Doubles one pet's growth speed.",
+                "summary": "Requires a pet target.",
+                "consume_key": "petspeed",
+                "usage_command": "petspeed <pet_id>",
+                "button_enabled": False,
+                "action_text": "This potion needs a pet target before it can be used.",
+                "button_note": "Use `$consume petspeed <pet_id>`.",
+            },
+            {
+                "entry_key": "potion:pet_xp_potion",
+                "name": "Pet XP Potion",
+                "quantity": premium_quantities.get("pet_xp_potion", 0),
+                "description": "Gives one pet a permanent x2 pet-care XP bonus.",
+                "summary": "Requires a pet target.",
+                "consume_key": "petxp",
+                "usage_command": "petxp <pet_id>",
+                "button_enabled": False,
+                "action_text": "This potion needs a pet target before it can be used.",
+                "button_note": "Use `$consume petxp <pet_id>`.",
+            },
+            {
+                "entry_key": "potion:pet_mind_wipe",
+                "name": "Pet Mind Wipe",
+                "quantity": premium_quantities.get("pet_mind_wipe", 0),
+                "description": "Resets learned pet skills.",
+                "summary": "Starts the pet skill reset flow.",
+                "consume_key": "petmindwipe",
+                "usage_command": "petmindwipe",
+                "button_enabled": True,
+                "action_text": "Starts the pet skill reset flow in this channel.",
+                "button_note": "",
+            },
+            {
+                "entry_key": "potion:pet_element_scroll",
+                "name": "Pet Element Scroll",
+                "quantity": premium_quantities.get("pet_element_scroll", 0),
+                "description": "Changes a pet's element.",
+                "summary": "Requires a pet target and element.",
+                "consume_key": "petelement",
+                "usage_command": "petelement <pet_id> <element>",
+                "button_enabled": False,
+                "action_text": "This scroll needs a pet target and a new element.",
+                "button_note": "Use `$consume petelement <pet_id> <element>`.",
+            },
+            {
+                "entry_key": "potion:weapon_element_scroll",
+                "name": "Weapon Element Scroll",
+                "quantity": premium_quantities.get("weapon_element_scroll", 0),
+                "description": "Changes a weapon's element.",
+                "summary": "Requires a weapon target and element.",
+                "consume_key": "weapelement",
+                "usage_command": "weapelement <weapon_id> <element>",
+                "button_enabled": False,
+                "action_text": "This scroll needs a weapon target and a new element.",
+                "button_note": "Use `$consume weapelement <weapon_id> <element>`.",
+            },
+            {
+                "entry_key": "potion:splice_final_potion",
+                "name": "Splice Final Potion",
+                "quantity": premium_quantities.get("splice_final_potion", 0),
+                "description": "Improves a splice result's odds of ending as a [FINAL].",
+                "summary": "Used during splice flows.",
+                "consume_key": "splicefinal",
+                "usage_command": "splicefinal",
+                "button_enabled": False,
+                "action_text": "This item is tied to splice flows rather than a direct consume action.",
+                "button_note": "Direct inventory consume is not wired for this item yet.",
+            },
+        )
+
+        potion_lines = []
+        potion_entries = []
+        for definition in potion_definitions:
+            quantity = int(definition["quantity"] or 0)
+            if quantity < 1:
+                continue
+            potion_lines.append(
+                f"**{definition['name']}** x{quantity}\n{definition['summary']}"
+            )
+            potion_entries.append(
+                {
+                    "kind": "potion",
+                    "entry_key": definition["entry_key"],
+                    "select_label": f"{definition['name']} x{quantity}",
+                    "select_description": definition["summary"],
+                    "name": definition["name"],
+                    "description": definition["description"],
+                    "quantity": quantity,
+                    "consume_key": definition["consume_key"],
+                    "usage_command": definition["usage_command"],
+                    "button_enabled": (
+                        definition["button_enabled"]
+                        or definition["consume_key"]
+                        in {"petage", "petspeed", "petxp", "petelement", "weapelement"}
+                    ),
+                    "requires_target": definition["consume_key"]
+                    in {"petage", "petspeed", "petxp", "petelement", "weapelement"},
+                    "action_text": definition["action_text"],
+                    "button_note": definition["button_note"],
+                }
+            )
+        if potion_entries:
+            categories.append(
+                {
+                    "key": "potions",
+                    "label": "Potions",
+                    "description": "Consumables, scrolls, and other utility items.",
+                    "summary_chunks": self._inventory_chunk_lines(potion_lines),
+                    "entries": potion_entries,
+                }
+            )
+
+        key_item_lines = []
+        key_item_entries = []
+        for raw_item in key_items:
+            item = dict(raw_item)
+            quantity = int(item.get("quantity") or 0)
+            quantity_text = f" x{quantity}" if quantity > 1 else ""
+            key_item_lines.append(
+                f"**{item['name']}{quantity_text}**\n"
+                f"Quest: **{item['quest_name']}**"
+            )
+            key_item_entries.append(
+                {
+                    "kind": "key_item",
+                    "entry_key": f"key_item:{item['key']}",
+                    "select_label": f"{item['name']} x{quantity}",
+                    "select_description": f"{item['quest_name']} • quest item",
+                    "name": item["name"],
+                    "description": item["description"],
+                    "quantity": quantity,
+                    "quest_key": item["quest_key"],
+                    "quest_name": item["quest_name"],
+                }
+            )
+        if key_item_entries:
+            categories.append(
+                {
+                    "key": "key_items",
+                    "label": "Key Items",
+                    "description": "Quest-bound items kept until a quest turn-in consumes them.",
+                    "summary_chunks": self._inventory_chunk_lines(key_item_lines),
+                    "entries": key_item_entries,
+                }
+            )
+
+        shard_lines = []
+        if god_shards:
+            grouped_shards = {}
+            for raw_shard in god_shards:
+                shard = dict(raw_shard)
+                god_name = shard.get("god_name", "Unknown")
+                grouped_shards.setdefault(god_name, []).append(shard)
+            for god_name in sorted(grouped_shards.keys()):
+                shards_for_god = sorted(
+                    grouped_shards[god_name],
+                    key=lambda s: s.get("shard_number", 0),
+                )
+                alignment = shards_for_god[0].get("alignment", "Unknown")
+                shard_lines.append(
+                    f"**{god_name} ({alignment})** [{len(shards_for_god)}/6]\n"
+                    + "\n".join(
+                        f"Shard {row['shard_number']}: {row['shard_name']}"
+                        for row in shards_for_god
+                    )
+                )
+        if shard_lines:
+            categories.append(
+                {
+                    "key": "divine_shards",
+                    "label": "Divine Shards",
+                    "description": "Your collected PvE god shards and current set progress.",
+                    "summary_chunks": self._inventory_chunk_lines(shard_lines),
+                    "entries": [],
+                }
+            )
+
+        return categories
+
+    async def _fetch_inventory_categories(self, user_id: int, *, conn=None) -> list[dict]:
+        local = conn is None
+        if local:
+            conn = await self.bot.pool.acquire()
+        try:
+            profile_row = await conn.fetchrow(
+                """
+                SELECT resetpotion, levelcandy, highqualitylevelcandy
+                FROM profile
+                WHERE "user" = $1;
+                """,
+                user_id,
+            )
+            if not profile_row:
+                return []
+
+            amulets = await conn.fetch(
+                """
+                SELECT *
+                FROM amulets
+                WHERE user_id = $1
+                ORDER BY equipped DESC, tier DESC, id ASC;
+                """,
+                user_id,
+            )
+            premium_consumables = await conn.fetch(
+                """
+                SELECT consumable_type, quantity
+                FROM user_consumables
+                WHERE user_id = $1 AND quantity > 0
+                ORDER BY consumable_type ASC;
+                """,
+                user_id,
+            )
+            try:
+                god_shards = await conn.fetch(
+                    """
+                    SELECT god_name, alignment, shard_number, shard_name, obtained_at
+                    FROM god_pve_shards
+                    WHERE user_id = $1
+                    ORDER BY god_name ASC, shard_number ASC
+                    """,
+                    user_id,
+                )
+            except Exception:
+                god_shards = []
+
+            quests_cog = self.bot.get_cog("Quests")
+            if quests_cog is not None:
+                key_items = await quests_cog.get_key_items_for_display(
+                    user_id,
+                    conn=conn,
+                )
+            else:
+                key_items = []
+
+            return self._build_inventory_categories(
+                amulets,
+                profile_row,
+                premium_consumables,
+                god_shards,
+                key_items,
+            )
+        finally:
+            if local:
+                await self.bot.pool.release(conn)
+
+    async def _equip_inventory_amulet(self, user_id: int, amulet_id: int) -> str:
+        async with self.bot.pool.acquire() as conn:
+            amulet = await conn.fetchrow(
+                """
+                SELECT *
+                FROM amulets
+                WHERE id = $1 AND user_id = $2;
+                """,
+                amulet_id,
+                user_id,
+            )
+            if not amulet:
+                return "You don't own this amulet."
+            if amulet["equipped"]:
+                return "This amulet is already equipped."
+
+            existing_equipped = await conn.fetchrow(
+                """
+                SELECT *
+                FROM amulets
+                WHERE user_id = $1 AND equipped = true;
+                """,
+                user_id,
+            )
+
+            message_parts = []
+            if existing_equipped:
+                await conn.execute(
+                    'UPDATE amulets SET equipped = false WHERE id = $1;',
+                    existing_equipped["id"],
+                )
+                message_parts.append(
+                    f"Unequipped your Tier {int(existing_equipped['tier'])} {str(existing_equipped['type']).upper()} amulet."
+                )
+
+            await conn.execute(
+                'UPDATE amulets SET equipped = true WHERE id = $1;',
+                amulet_id,
+            )
+            message_parts.append(
+                f"Successfully equipped your Tier {int(amulet['tier'])} {str(amulet['type']).upper()} amulet."
+            )
+            return " ".join(message_parts)
+
+    async def _unequip_inventory_amulet(self, user_id: int, amulet_id: int) -> str:
+        async with self.bot.pool.acquire() as conn:
+            amulet = await conn.fetchrow(
+                "SELECT * FROM amulets WHERE id=$1 AND user_id=$2;",
+                amulet_id,
+                user_id,
+            )
+            if not amulet:
+                return "You don't own this amulet."
+            if not amulet["equipped"]:
+                return "This amulet is already stored."
+            await conn.execute(
+                "UPDATE amulets SET equipped=FALSE WHERE id=$1 AND user_id=$2;",
+                amulet_id,
+                user_id,
+            )
+        return f"Unequipped your Tier {int(amulet['tier'])} {str(amulet['type']).upper()} amulet."
+
+    async def _recycle_inventory_amulet(self, user_id: int, amulet_id: int) -> tuple[bool, str]:
+        cooldown_key = "inventory_amulet_recycle"
+        cooldown_ttl = await self.bot.redis.execute_command(
+            "TTL",
+            f"cd:{user_id}:{cooldown_key}",
+        )
+        if cooldown_ttl != -2 and int(cooldown_ttl) > 0:
+            return False, f"You can recycle another amulet in {int(cooldown_ttl)} seconds."
+
+        async with self.bot.pool.acquire() as conn:
+            async with conn.transaction():
+                amulet = await conn.fetchrow(
+                    """
+                    SELECT *
+                    FROM amulets
+                    WHERE id = $1 AND user_id = $2
+                    FOR UPDATE;
+                    """,
+                    amulet_id,
+                    user_id,
+                )
+                if not amulet:
+                    return False, "You don't own this amulet."
+
+                refund = self._get_amulet_recycle_refund(
+                    str(amulet["type"] or "").lower(),
+                    int(amulet["tier"] or 0),
+                )
+                if not refund:
+                    return False, "This amulet does not have a recycle recipe."
+
+                for resource, amount in refund.items():
+                    current_amount = await conn.fetchval(
+                        """
+                        SELECT amount
+                        FROM crafting_resources
+                        WHERE user_id = $1 AND resource_type = $2
+                        FOR UPDATE;
+                        """,
+                        user_id,
+                        resource,
+                    )
+                    if current_amount is None:
+                        await conn.execute(
+                            """
+                            INSERT INTO crafting_resources (user_id, resource_type, amount)
+                            VALUES ($1, $2, $3);
+                            """,
+                            user_id,
+                            resource,
+                            amount,
+                        )
+                    else:
+                        await conn.execute(
+                            """
+                            UPDATE crafting_resources
+                            SET amount = amount + $1
+                            WHERE user_id = $2 AND resource_type = $3;
+                            """,
+                            amount,
+                            user_id,
+                            resource,
+                        )
+
+                await conn.execute(
+                    'DELETE FROM amulets WHERE id = $1 AND user_id = $2;',
+                    amulet_id,
+                    user_id,
+                )
+                await self.sanitize_presets_for_user(user_id, conn=conn)
+
+        await self.bot.set_cooldown(user_id, 180, identifier=cooldown_key)
+        refund_text = ", ".join(
+            f"{amount}x {resource.replace('_', ' ').title()}"
+            for resource, amount in refund.items()
+        )
+        return (
+            True,
+            f"Recycled your Tier {int(amulet['tier'])} {str(amulet['type']).upper()} amulet and refunded {refund_text}.",
+        )
+
+    async def _invoke_consume_from_inventory(
+        self,
+        ctx,
+        consume_key: str,
+        target: str | None = None,
+        extra: str | None = None,
+    ) -> tuple[bool, str | None]:
+        consume_command = self.bot.get_command("consume")
+        if consume_command is None:
+            return False, "The consume command is unavailable right now."
+
+        original_command = ctx.command
+        try:
+            ctx.command = consume_command
+            try:
+                allowed = await consume_command.can_run(ctx)
+            except commands.CommandOnCooldown as exc:
+                return False, f"`$consume` is on cooldown for {int(math.ceil(exc.retry_after))} more seconds."
+            except commands.CheckFailure as exc:
+                message = str(exc).strip() or "You cannot use that potion right now."
+                return False, message
+
+            if not allowed:
+                return False, "You cannot use that potion right now."
+
+            await consume_command.callback(self, ctx, consume_key, target, extra=extra)
+        finally:
+            ctx.command = original_command
+
+        if consume_key in {"reset", "candy", "highcandy"}:
+            return True, "Use the confirmation prompt in this channel to finish consuming it."
+        if consume_key == "petmindwipe":
+            return True, "Pet Mind Wipe flow started in this channel."
+        return True, "Potion action invoked in this channel."
 
     @checks.has_char()
     @commands.command(aliases=["i", "inv"], brief=_("Show your gear items"))
     @locale_doc
-    async def inventory(
-            self,
-            ctx,
-    ):
+    async def inventory(self, ctx):
         try:
-            await ctx.send(
-                "weapons has moved to `$armory` with aliases `$ar` and `$arm` to make room for a future update.")
-
-            await ctx.send(
-                "Related commands `$consume <type>`")
-            #<:resetpotion: 1245034461960081409>
-
-            _(
-                """`[itemtype]` - The type of item to show; defaults to all items
-                `[lowest]` - The lower boundary of items to show; defaults to 0
-                `[highest]` - The upper boundary of items to show; defaults to 101
-    
-                Show your gear items. Items that are in the market will not be shown.
-    
-                Gear items can be equipped, sold and given away, or upgraded and merged to make them stronger.
-                You can gain gear items by completing adventures, opening crates, or having your pet hunt for them, if you are a ranger.
-    
-                To sell unused items for their value, use `{prefix}merch`. To put them up on the global player market, use `{prefix}sell`."""
-            )
-            itemtype = 'All'
-
-            if itemtype == "All":
-                async with self.bot.pool.acquire() as conn:
-                    ret = await conn.fetch(
-                        'SELECT * FROM profile WHERE "user" = $1;',
-                        ctx.author.id,
-                    )
-
-            if not ret or ret[0]['resetpotion'] == 0:
+            categories = await self._fetch_inventory_categories(ctx.author.id)
+            if not categories:
                 return await ctx.send(_("Your inventory is empty."))
 
-            reset_potions = [item['resetpotion'] for item in ret]
-            chunks_size = 5
-            reset_potions_chunks = [reset_potions[i:i + chunks_size] for i in range(0, len(reset_potions), chunks_size)]
-            max_page = len(reset_potions_chunks) - 1
-            embeds = [
-                self.invembedd(ctx, chunk, idx, max_page)
-                for idx, chunk in enumerate(reset_potions_chunks)
-            ]
+            view = InventoryCategoryView(ctx, self, categories)
+            await ctx.send(embed=view.build_embed(), view=view)
 
-            await self.bot.paginator.Paginator(extras=embeds).paginate(ctx)
         except Exception as e:
             import traceback
             error_message = f"Error occurred: {e}\n"
             error_message += traceback.format_exc()
-            await ctx.send(error_message)
+            await ctx.send("Inventory could not be loaded right now. Please try again shortly.")
             print(error_message)
 
     def lootembed(self, ctx, ret, currentpage, maxpage):
@@ -1388,7 +4970,32 @@ class Profile(commands.Cog):
 
         return result
 
-    from discord import Embed
+    async def _allocate_stat_points(self, user_id: int, stat_key: str, amount: int):
+        columns = {"attack": "statatk", "defense": "statdef", "health": "stathp"}
+        column = columns.get(stat_key)
+        if column is None or amount <= 0:
+            return False, "Invalid stat allocation.", None
+        async with self.bot.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    'SELECT statpoints, statatk, statdef, stathp FROM profile WHERE "user"=$1 FOR UPDATE;',
+                    user_id,
+                )
+                if not row:
+                    return False, "Character data could not be found.", None
+                if int(row["statpoints"]) < amount:
+                    return False, "You no longer have enough unused stat points.", dict(row)
+                snapshot = await conn.fetchrow(
+                    f'UPDATE profile SET statpoints=statpoints-$1, "{column}"="{column}"+$1 '
+                    'WHERE "user"=$2 RETURNING statpoints, statatk, statdef, stathp;',
+                    amount,
+                    user_id,
+                )
+        return (
+            True,
+            f"Allocated {amount} point(s) to {stat_key.title()}. You have {int(snapshot['statpoints'])} remaining.",
+            dict(snapshot),
+        )
 
     @checks.has_char()
     @commands.command(aliases=["sp"], brief=_("Show your gear items"))
@@ -1407,25 +5014,8 @@ class Profile(commands.Cog):
         def_ = player_data["statdef"]
         hp = player_data["stathp"]
 
-        # Creating a clean and structured embed
-        embed = Embed(title="Stat Points", description="Overview of your stat points and how to redeem them.",
-                      color=0x3498db)
-        embed.add_field(name="Your Stat Points", value=f"You currently have **{points}** unused stat points.",
-                        inline=False)
-        embed.add_field(name="How to Redeem", value="Redeem your stat points using the commands below:", inline=False)
-        embed.add_field(name="Commands",
-                        value="`$spr <type> <amount>` or `$statpointredeem <type> <amount>`\n- Types: `health/hp`, `defense/def`, `attack/atk`\n- Example: `$spr atk 5`",
-                        inline=False)
-        embed.add_field(name="Bonuses",
-                        value="Raider bonuses:\n- **Attack**: `+0.1`\n- **Defense**: `+0.1`\n- **Health**: `+50`",
-                        inline=False)
-        embed.add_field(name="Stat Allocation",
-                        value=f"**Attack**: {atk}\n**Defense**: {def_}\n**Health**: {hp}",
-                        inline=False)
-        embed.set_footer(text="Ensure you have sufficient stat points before redeeming.")
-
-        # Send the embed
-        await ctx.send(embed=embed)
+        view = StatPointsView(self, ctx, player_data)
+        view.message = await ctx.send(embed=view.build_embed(), view=view)
 
     @checks.has_char()
     @user_cooldown(120)
@@ -1442,6 +5032,11 @@ class Profile(commands.Cog):
             "health": "stathp",
             "hp": "stathp",
         }
+
+        if amount <= 0:
+            await ctx.send(_("Amount must be greater than 0."))
+            await self.bot.reset_cooldown(ctx)
+            return
 
         if type not in valid_types:
             await ctx.send(
@@ -1506,6 +5101,7 @@ class Profile(commands.Cog):
                 _("Make sure that the `highest` value is greater than `lowest`.")
             )
 
+        # Validate itemtype
         if itemtype != "2h":
             if itemtype != "1h":
                 itemtype = itemtype.title()
@@ -1517,13 +5113,16 @@ class Profile(commands.Cog):
                             " `{all_types}`"
                         ).format(all_types=", ".join([t.name for t in ALL_ITEM_TYPES]))
                     )
+
+        # Perform the database query
         if itemtype == "All":
             ret = await self.bot.pool.fetch(
-                "SELECT ai.*, i.equipped, i.locked FROM profile p JOIN allitems ai ON"
-                " (p.user=ai.owner) JOIN inventory i ON (ai.id=i.item) WHERE"
-                ' p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3) OR'
-                ' i."equipped") ORDER BY i."equipped" DESC, i.locked DESC, ai."damage"+ai."armor"'
-                " DESC;",
+                "SELECT ai.*, i.equipped, i.locked "
+                "FROM profile p "
+                "JOIN allitems ai ON (p.user=ai.owner) "
+                "JOIN inventory i ON (ai.id=i.item) "
+                'WHERE p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3) OR i."equipped") '
+                'ORDER BY i."equipped" DESC, i.locked DESC, ai."damage"+ai."armor" DESC;',
                 ctx.author.id,
                 lowest,
                 highest,
@@ -1531,11 +5130,13 @@ class Profile(commands.Cog):
         elif itemtype == "2h":
             twohand = "both"
             ret = await self.bot.pool.fetch(
-                "SELECT ai.*, i.equipped, i.locked FROM profile p JOIN allitems ai ON"
-                " (p.user=ai.owner) JOIN inventory i ON (ai.id=i.item) WHERE"
-                ' p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3 AND'
-                ' ai."hand"=$4)  OR i."equipped") ORDER BY i."equipped" DESC, i.locked DESC,'
-                ' ai."damage"+ai."armor" DESC;',
+                "SELECT ai.*, i.equipped, i.locked "
+                "FROM profile p "
+                "JOIN allitems ai ON (p.user=ai.owner) "
+                "JOIN inventory i ON (ai.id=i.item) "
+                'WHERE p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3 AND ai."hand"=$4) '
+                'OR i."equipped") '
+                'ORDER BY i."equipped" DESC, i.locked DESC, ai."damage"+ai."armor" DESC;',
                 ctx.author.id,
                 lowest,
                 highest,
@@ -1544,37 +5145,52 @@ class Profile(commands.Cog):
         elif itemtype == "1h":
             twohand = "both"
             ret = await self.bot.pool.fetch(
-                "SELECT ai.*, i.equipped, i.locked FROM profile p JOIN allitems ai ON"
-                " (p.user=ai.owner) JOIN inventory i ON (ai.id=i.item) WHERE"
-                ' p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3 AND'
-                ' ai."hand"!=$4)  OR i."equipped") ORDER BY i."equipped" DESC, i.locked DESC,'
-                ' ai."damage"+ai."armor" DESC;',
+                "SELECT ai.*, i.equipped, i.locked "
+                "FROM profile p "
+                "JOIN allitems ai ON (p.user=ai.owner) "
+                "JOIN inventory i ON (ai.id=i.item) "
+                'WHERE p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3 AND ai."hand"!=$4) '
+                'OR i."equipped") '
+                'ORDER BY i."equipped" DESC, i.locked DESC, ai."damage"+ai."armor" DESC;',
                 ctx.author.id,
                 lowest,
                 highest,
                 twohand,
             )
         else:
+            # itemtype is some valid custom type
             ret = await self.bot.pool.fetch(
-                "SELECT ai.*, i.equipped, i.locked FROM profile p JOIN allitems ai ON"
-                " (p.user=ai.owner) JOIN inventory i ON (ai.id=i.item) WHERE"
-                ' p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3 AND'
-                ' ai."type"=$4)  OR i."equipped") ORDER BY i."equipped" DESC, i.locked DESC,'
-                ' ai."damage"+ai."armor" DESC;',
+                "SELECT ai.*, i.equipped, i.locked "
+                "FROM profile p "
+                "JOIN allitems ai ON (p.user=ai.owner) "
+                "JOIN inventory i ON (ai.id=i.item) "
+                'WHERE p."user"=$1 AND ((ai."damage"+ai."armor" BETWEEN $2 AND $3 AND ai."type"=$4) '
+                'OR i."equipped") '
+                'ORDER BY i."equipped" DESC, i.locked DESC, ai."damage"+ai."armor" DESC;',
                 ctx.author.id,
                 lowest,
                 highest,
                 itemtype,
             )
+
         if not ret:
             return await ctx.send(_("Your inventory is empty."))
+
+        ret = await self._apply_item_progression_to_items(ctx.author.id, ret)
+
+        # Split all items into pages of 5
         allitems = list(chunks(ret, 5))
         maxpage = len(allitems) - 1
-        embeds = [
-            self.invembed(ctx, chunk, idx, maxpage)
-            for idx, chunk in enumerate(allitems)
-        ]
-        await self.bot.paginator.Paginator(extras=embeds).paginate(ctx)
+
+        # Build an embed for each chunk
+        embeds = []
+        for idx, chunk in enumerate(allitems):
+            page_embed = self.invembed(ctx, chunk, idx, maxpage)
+            embeds.append(page_embed)
+
+        # Pass both raw item pages AND the embeds to our custom paginator
+        view = ArmoryPaginatorView(ctx=ctx, cog=self, pages=allitems, embeds=embeds)
+        await view.start()
 
     def lootembed(self, ctx, ret, currentpage, maxpage):
         result = discord.Embed(
@@ -1586,13 +5202,14 @@ class Profile(commands.Cog):
 
             result.add_field(
                 name=f"{item['name']}",  # Including element in the name of the item
-                value=_("ID: `{id}` Value is **{value}**").format(
+                value=_("ID: {id} Value is **{value}**").format(
                     id=item["id"], value=item["value"]
                 ),
                 inline=False,
             )
 
         return result
+
 
     @checks.has_char()
     @commands.command(aliases=["loot"], brief=_("Show your loot items"))
@@ -1832,6 +5449,395 @@ class Profile(commands.Cog):
                 _("Successfully equipped item `{itemid}`.").format(itemid=itemid)
             )
 
+    @commands.group(name="preset", invoke_without_command=True)
+    async def preset_cmd(self, ctx):
+        """
+        Base command group for preset operations.
+        Usage:
+          $preset create <preset_name> [items|all]
+          $preset use <preset_name> [items|all]
+          $preset list
+          $preset delete <preset_name>
+        """
+        view = await PresetManagerView.create(self, ctx)
+        view.message = await ctx.send(embed=view.build_embed(), view=view)
+
+    @preset_cmd.command(name="create")
+    async def preset_create(self, ctx, preset_id: str, mode: str = "items"):
+        """
+        Creates or overwrites a preset using your currently equipped items.
+        Optional mode:
+          - items (default): only equipment from inventory
+          - all: equipment + current amulet state
+        Enforces a maximum of 5 total presets per user.
+        Usage:
+            $preset create raid_loadout
+            $preset create raid_loadout all
+        """
+        include_amulet = self._preset_amulet_mode_enabled(mode)
+        if include_amulet is None:
+            return await ctx.send(
+                "Invalid mode. Use `items` (default) or `all`."
+            )
+
+        async with self.bot.pool.acquire() as conn:
+            # 1) Grab currently equipped items
+            rows = await conn.fetch(
+                """
+                SELECT i.item
+                  FROM profile p
+                  JOIN allitems ai ON (p.user = ai.owner)
+                  JOIN inventory i ON (ai.id = i.item)
+                 WHERE i.equipped = TRUE
+                   AND p.user = $1
+                """,
+                ctx.author.id
+            )
+
+            item_ids = [r["item"] for r in rows]
+
+            equipped_amulet_id = None
+            if include_amulet:
+                equipped_amulet_id = await conn.fetchval(
+                    """
+                    SELECT id
+                      FROM amulets
+                     WHERE user_id = $1
+                       AND equipped = TRUE;
+                    """,
+                    ctx.author.id,
+                )
+
+            if not item_ids and not include_amulet:
+                return await ctx.send("You have no currently equipped items to save.")
+            if not item_ids and include_amulet and equipped_amulet_id is None:
+                return await ctx.send(
+                    "You have no currently equipped items or amulet to save."
+                )
+
+            if include_amulet:
+                if equipped_amulet_id is None:
+                    item_ids.append(self._preset_amulet_none_marker())
+                else:
+                    item_ids.append(
+                        self._preset_amulet_id_to_marker(equipped_amulet_id)
+                    )
+
+            # 2) Check how many presets the user currently has
+            preset_count = await conn.fetchval(
+                """
+                SELECT COUNT(*) 
+                  FROM presets
+                 WHERE user_id = $1
+                """,
+                ctx.author.id
+            )
+
+            # 3) See if this preset already exists (overwrite scenario)
+            existing_preset = await conn.fetchrow(
+                """
+                SELECT preset_id
+                  FROM presets
+                 WHERE user_id = $1
+                   AND preset_id = $2
+                """,
+                ctx.author.id,
+                preset_id
+            )
+
+            # If user is at max (5) and we are not overwriting an existing preset, block
+            if preset_count >= 5 and not existing_preset:
+                return await ctx.send(
+                    "You already have 5 presets. Please delete one first or use the same name to overwrite."
+                )
+
+            # 4) Insert or update the preset in the DB
+            await conn.execute(
+                """
+                INSERT INTO presets (user_id, preset_id, item_ids)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (user_id, preset_id)
+                DO UPDATE SET item_ids = EXCLUDED.item_ids;
+                """,
+                ctx.author.id,
+                preset_id,
+                item_ids
+            )
+
+        saved_item_ids = [i for i in item_ids if not self._is_preset_amulet_marker(i)]
+        saved_items_text = ", ".join(map(str, saved_item_ids)) if saved_item_ids else "(none)"
+
+        if include_amulet:
+            amulet_text = str(equipped_amulet_id) if equipped_amulet_id is not None else "none"
+            await ctx.send(
+                f"Preset **{preset_id}** saved with item IDs: {saved_items_text} | amulet: {amulet_text}"
+            )
+        else:
+            await ctx.send(
+                f"Preset **{preset_id}** saved with these equipped item IDs: {saved_items_text}"
+            )
+
+    @preset_cmd.command(name="use")
+    async def preset_use(self, ctx, preset_id: str, mode: str = "items"):
+        """
+        Equips all items saved in the specified preset.
+        Optional mode:
+          - items (default): only equipment from inventory
+          - all: equipment + amulet state (if preset has it)
+        Usage: $preset use sword_shield
+        Usage: $preset use sword_shield all
+        """
+        apply_amulet = self._preset_amulet_mode_enabled(mode)
+        if apply_amulet is None:
+            return await ctx.send("Invalid mode. Use `items` (default) or `all`.")
+
+        # 1) Fetch preset
+        async with self.bot.pool.acquire() as conn:
+            sanitize_result = await self.sanitize_presets_for_user(
+                ctx.author.id,
+                preset_id=preset_id,
+                conn=conn,
+            )
+            # Get the preset
+            record = await conn.fetchrow(
+                """
+                SELECT item_ids
+                  FROM presets
+                 WHERE user_id = $1
+                   AND preset_id = $2
+                """,
+                ctx.author.id,
+                preset_id
+            )
+            if not record:
+                if preset_id in sanitize_result["deleted"]:
+                    return await ctx.send(
+                        f"Preset **{preset_id}** was removed because it no longer had any valid saved items."
+                    )
+                return await ctx.send(f"You have no preset **{preset_id}** defined.")
+
+            raw_ids = record["item_ids"] or []
+            item_ids, preset_has_amulet_state, preset_amulet_id = (
+                self._split_preset_saved_ids(raw_ids)
+            )
+
+            if not item_ids and not preset_has_amulet_state:
+                return await ctx.send(f"Preset **{preset_id}** has no items stored.")
+            if not item_ids and preset_has_amulet_state and not apply_amulet:
+                return await ctx.send(
+                    f"Preset **{preset_id}** has no gear items. Use `all` mode to apply the amulet state."
+                )
+
+            # 2) Get currently equipped items to unequip them later
+            equipped = []
+            if item_ids:
+                equipped = await conn.fetch(
+                    """
+                    SELECT ai.id, ai.type
+                      FROM allitems ai
+                      JOIN inventory i ON (ai.id = i.item)
+                     WHERE i.equipped IS TRUE
+                       AND ai.owner = $1;
+                    """,
+                    ctx.author.id
+                )
+
+            # 3) Check ownership of new items
+            owned_items = {}
+            if item_ids:
+                owned_rows = await conn.fetch(
+                    """
+                    SELECT i.item, ai.type
+                      FROM inventory i
+                      JOIN allitems ai ON (i.item = ai.id)
+                     WHERE ai.owner = $1
+                       AND i.item = ANY($2::bigint[]);
+                    """,
+                    ctx.author.id,
+                    item_ids
+                )
+                owned_items = {r["item"]: r["type"] for r in owned_rows}
+                missing = set(item_ids) - set(owned_items.keys())
+                if missing:
+                    return await ctx.send(
+                        f"You no longer own these item(s): {', '.join(map(str, missing))}"
+                    )
+
+            preset_amulet = None
+            if apply_amulet and preset_has_amulet_state and preset_amulet_id is not None:
+                preset_amulet = await conn.fetchrow(
+                    """
+                    SELECT id, type, tier
+                      FROM amulets
+                     WHERE id = $1
+                       AND user_id = $2;
+                    """,
+                    preset_amulet_id,
+                    ctx.author.id,
+                )
+                if not preset_amulet:
+                    return await ctx.send(
+                        f"You no longer own saved amulet `{preset_amulet_id}` for preset **{preset_id}**."
+                    )
+
+            # 4) Begin transaction
+            async with conn.transaction():
+                # 5) Unequip currently equipped items
+                if item_ids:
+                    for item in equipped:
+                        await conn.execute(
+                            """
+                            UPDATE inventory
+                               SET equipped = FALSE
+                             WHERE item = $1;
+                            """,
+                            item["id"]
+                        )
+
+                # 6) Equip new items
+                if item_ids:
+                    for item_id in item_ids:
+                        item_type = owned_items[item_id]
+                        # First ensure no other item of same type is equipped
+                        await conn.execute(
+                            """
+                            UPDATE inventory
+                               SET equipped = FALSE
+                             WHERE item IN (
+                                 SELECT i.item
+                                   FROM inventory i
+                                   JOIN allitems ai ON (i.item = ai.id)
+                                  WHERE ai.owner = $1
+                                    AND ai.type = $2
+                                    AND i.equipped = TRUE
+                             );
+                            """,
+                            ctx.author.id,
+                            item_type
+                        )
+                        # Then equip the new item
+                        await conn.execute(
+                            """
+                            UPDATE inventory
+                               SET equipped = TRUE
+                             WHERE item = $1;
+                            """,
+                            item_id
+                        )
+
+                if apply_amulet and preset_has_amulet_state:
+                    await conn.execute(
+                        """
+                        UPDATE amulets
+                           SET equipped = FALSE
+                         WHERE user_id = $1
+                           AND equipped = TRUE;
+                        """,
+                        ctx.author.id,
+                    )
+                    if preset_amulet_id is not None:
+                        await conn.execute(
+                            """
+                            UPDATE amulets
+                               SET equipped = TRUE
+                             WHERE id = $1
+                               AND user_id = $2;
+                            """,
+                            preset_amulet_id,
+                            ctx.author.id,
+                        )
+
+        # 7) Send success message with item details
+        item_details = []
+        for item_id in item_ids:
+            item = await self.bot.pool.fetchrow(
+                "SELECT name, type FROM allitems WHERE id = $1", item_id
+            )
+            if item:
+                item_details.append(f"- {item['name']} ({item['type']})")
+
+        if apply_amulet and preset_has_amulet_state:
+            if preset_amulet_id is None:
+                item_details.append("- Amulet: none (unequipped)")
+            elif preset_amulet:
+                item_details.append(
+                    f"- Amulet: Tier {preset_amulet['tier']} {preset_amulet['type'].upper()} (ID {preset_amulet['id']})"
+                )
+        elif apply_amulet and not preset_has_amulet_state:
+            item_details.append("- Amulet: unchanged (not stored in this preset)")
+        elif not apply_amulet and preset_has_amulet_state:
+            item_details.append("- Amulet state is saved in this preset (use `all` mode to apply)")
+
+        if not item_details:
+            item_details.append("- Nothing changed.")
+
+        await ctx.send(
+            f"✅ **Equipped preset {preset_id}:**\n" + "\n".join(item_details)[:1900]
+        )
+
+    @preset_cmd.command(name="list")
+    async def preset_list(self, ctx):
+        """
+        Lists all of your saved presets.
+        Usage: $preset list
+        """
+        async with self.bot.pool.acquire() as conn:
+            await self.sanitize_presets_for_user(ctx.author.id, conn=conn)
+            rows = await conn.fetch(
+                """
+                SELECT preset_id, item_ids
+                  FROM presets
+                 WHERE user_id = $1
+                 ORDER BY preset_id
+                """,
+                ctx.author.id
+            )
+
+        if not rows:
+            return await ctx.send("You have no presets saved.")
+
+        lines = []
+        for r in rows:
+            pid = r["preset_id"]
+            raw_items = r["item_ids"] or []
+            item_ids, preset_has_amulet_state, preset_amulet_id = (
+                self._split_preset_saved_ids(raw_items)
+            )
+
+            items_str = ", ".join(map(str, item_ids)) if item_ids else "(none)"
+            if not preset_has_amulet_state:
+                amulet_str = "not saved"
+            elif preset_amulet_id is None:
+                amulet_str = "none"
+            else:
+                amulet_str = str(preset_amulet_id)
+
+            lines.append(f"**Preset {pid}:** items={items_str} | amulet={amulet_str}")
+
+        await ctx.send("\n".join(lines))
+
+    @preset_cmd.command(name="delete", aliases=["remove"])
+    async def preset_delete(self, ctx, preset_id: str):
+        """
+        Deletes a preset from your list.
+        Usage: $preset delete sword_shield
+        """
+        async with self.bot.pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                DELETE FROM presets
+                      WHERE user_id = $1
+                        AND preset_id = $2
+                """,
+                ctx.author.id,
+                preset_id
+            )
+
+        if "DELETE 0" in result:
+            return await ctx.send(f"No preset **{preset_id}** existed.")
+        else:
+            await ctx.send(f"Preset **{preset_id}** has been deleted.")
+
     @checks.has_char()
     @commands.command(brief=_("Unequip an item"))
     @locale_doc
@@ -1934,13 +5940,15 @@ class Profile(commands.Cog):
             )
             await conn.execute('DELETE FROM inventory WHERE "item"=$1;', seconditemid)
             await conn.execute('DELETE FROM allitems WHERE "id"=$1;', seconditemid)
+            await self.sanitize_presets_for_user(ctx.author.id, conn=conn)
         await ctx.send(
             _(
                 "The {stat} of your **{item}** is now **{newstat}**. The other item was"
                 " destroyed."
-            ).format(stat=stat, item=item["name"], newstat=main + 1)
+            ).format(
+                stat=stat, item=item["name"], newstat=main + 1
+            )
         )
-
     @checks.has_char()
     @user_cooldown(3600)
     @commands.command(aliases=["upgrade"], brief=_("Upgrade an item"))
@@ -1987,7 +5995,9 @@ class Profile(commands.Cog):
                 _(
                     "Are you sure you want to upgrade this item: {item}? It will cost"
                     " **${pricetopay}**."
-                ).format(item=item["name"], pricetopay=pricetopay)
+                ).format(
+                    item=item["name"], pricetopay=pricetopay
+                )
         ):
             return await ctx.send(_("Weapon upgrade cancelled."))
         if not await checks.has_money(self.bot, ctx.author.id, pricetopay):
@@ -1996,7 +6006,9 @@ class Profile(commands.Cog):
                 _(
                     "You are too poor to upgrade this item. The upgrade costs"
                     " **${pricetopay}**, but you only have **${money}**."
-                ).format(pricetopay=pricetopay, money=ctx.character_data["money"])
+                ).format(
+                    pricetopay=pricetopay, money=ctx.character_data["money"]
+                )
             )
         async with self.bot.pool.acquire() as conn:
             await conn.execute(
@@ -2052,8 +6064,6 @@ class Profile(commands.Cog):
         if money < 1:
             return await ctx.send("The supplied number must be greater than 0.")
 
-        if ctx.author.id == 823030177025753100 and other.id == 295173706496475136:
-            return await ctx.send(_("Nice try bish!"))
         if other == ctx.author:
             return await ctx.send(_("No cheating!"))
         elif other == ctx.me:
@@ -2091,6 +6101,14 @@ class Profile(commands.Cog):
                 other=other.mention, othermoney=othermoney, authormoney=authormoney
             )
         )
+        ai_cog = self.bot.get_cog("AIPlayer")
+        if ai_cog is not None:
+            ai_cog.start_gift_received(
+                recipient_id=other.id,
+                sender=ctx.author,
+                gift={"kind": "money", "amount": int(money)},
+                public_channel=ctx.channel,
+            )
 
     @checks.has_char()
     @commands.command(brief=_("Rename your character"))
@@ -2186,6 +6204,7 @@ class Profile(commands.Cog):
         except Exception as e:
             await ctx.send(e)
 
+
     @checks.has_char()
     @commands.command(aliases=["color"], brief=_("Update your profile color"))
     @locale_doc
@@ -2259,6 +6278,78 @@ class Profile(commands.Cog):
             )
 
         await ctx.send(_("Successfully updated your badges."))
+
+    @commands.command(brief=_("Opt out of API data visibility"))
+    @locale_doc
+    async def optoutapi(self, ctx):
+        _(
+            """Opt out of API data visibility.
+            
+            This will hide your user ID in API responses by replacing it with 0.
+            Your profile will also return "404 Not Found" when accessed directly via API.
+            This helps protect your privacy while still allowing you to play normally."""
+        )
+        
+        # Check if user already opted out
+        async with self.bot.pool.acquire() as conn:
+            existing = await conn.fetchval(
+                "SELECT userid FROM optout WHERE userid = $1",
+                ctx.author.id
+            )
+            
+            if existing:
+                return await ctx.send(
+                    _("You are already opted out of API data visibility! Use `{prefix}optin` to opt back in.").format(prefix=ctx.prefix)
+                )
+            
+            # Add user to optout table
+            await conn.execute(
+                "INSERT INTO optout (userid) VALUES ($1)",
+                ctx.author.id
+            )
+        
+        await ctx.send(
+            _("✅ **Privacy Protection Enabled!**\n\n"
+              "Your user ID will now be replaced with `0` in all API responses to protect your privacy.\n"
+              "Your profile will return `404 Not Found` when accessed directly via the API.\n\n"
+              "You can still play the game normally - this only affects API data visibility.\n"
+              "Use `{prefix}optinapi` if you want to opt back in later.").format(prefix=ctx.prefix)
+        )
+
+    @commands.command(brief=_("Opt back into API data visibility"))
+    @locale_doc
+    async def optinapi(self, ctx):
+        _(
+            """Opt back into API data visibility.
+            
+            This will restore your user ID visibility in API responses.
+            Your profile will be accessible again via direct API calls."""
+        )
+        
+        # Check if user is actually opted out
+        async with self.bot.pool.acquire() as conn:
+            existing = await conn.fetchval(
+                "SELECT userid FROM optout WHERE userid = $1",
+                ctx.author.id
+            )
+            
+            if not existing:
+                return await ctx.send(
+                    _("You are not currently opted out! Your data is already visible in the API.\nUse `{prefix}optout` to enable privacy protection.").format(prefix=ctx.prefix)
+                )
+            
+            # Remove user from optout table
+            await conn.execute(
+                "DELETE FROM optout WHERE userid = $1",
+                ctx.author.id
+            )
+        
+        await ctx.send(
+            _("✅ **Privacy Protection Disabled!**\n\n"
+              "Your user ID will now be visible again in API responses.\n"
+              "Your profile can be accessed directly via the API.\n\n"
+              "Use `{prefix}optoutapi` if you want to enable privacy protection again.").format(prefix=ctx.prefix)
+        )
 
 
 async def setup(bot):

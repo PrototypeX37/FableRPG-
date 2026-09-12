@@ -18,6 +18,11 @@ class RaidBattle(Battle):
         
         # Load all battle settings
         settings_cog = self.ctx.bot.get_cog("BattleSettings")
+        hp_bar_style = kwargs.get(
+            "hp_bar_style",
+            "colorful" if kwargs.get("emoji_hp_bars", False) else "normal",
+        )
+        normalized_hp_bar_style = self.normalize_hp_bar_style(hp_bar_style)
         if settings_cog:
             # Ensure all settings are loaded, with defaults if not found
             self.config = {
@@ -26,6 +31,8 @@ class RaidBattle(Battle):
                 "element_effects": settings_cog.get_setting("raid", "element_effects", default=True),
                 "luck_effects": settings_cog.get_setting("raid", "luck_effects", default=True),
                 "reflection_damage": settings_cog.get_setting("raid", "reflection_damage", default=True),
+                "hp_bar_style": normalized_hp_bar_style,
+                "emoji_hp_bars": normalized_hp_bar_style != self.HP_BAR_STYLE_NORMAL,
                 "fireball_chance": settings_cog.get_setting("raid", "fireball_chance", default=0.3),
                 "cheat_death": settings_cog.get_setting("raid", "cheat_death", default=True),
                 "tripping": settings_cog.get_setting("raid", "tripping", default=True),
@@ -40,17 +47,50 @@ class RaidBattle(Battle):
                 "element_effects": True,
                 "luck_effects": True,
                 "reflection_damage": True,
+                "hp_bar_style": normalized_hp_bar_style,
+                "emoji_hp_bars": normalized_hp_bar_style != self.HP_BAR_STYLE_NORMAL,
                 "fireball_chance": 0.3,
                 "cheat_death": True,
                 "tripping": True,
                 "status_effects": False,
                 "pets_continue_battle": False
             }
+
+    def select_target(self, current_combatant, alive_enemies):
+        """Pick an enemy target for the acting combatant."""
+        if current_combatant.is_pet:
+            pet_targets = [c for c in alive_enemies if c.is_pet]
+            player_targets = [c for c in alive_enemies if not c.is_pet]
+
+            if pet_targets and player_targets:
+                if random.random() < 0.6:  # 60% chance to target players
+                    return random.choice(player_targets)
+                return random.choice(pet_targets)
+
+            return random.choice(alive_enemies)
+
+        weighted_targets = []
+        weights = []
+
+        for enemy in alive_enemies:
+            if enemy.is_pet:
+                weighted_targets.append(enemy)
+                weights.append(0.4)  # 40% chance to target pets
+            else:
+                weighted_targets.append(enemy)
+                weights.append(0.6)  # 60% chance to target players
+
+        total_weight = sum(weights)
+        normalized_weights = [weight / total_weight for weight in weights]
+        return random.choices(weighted_targets, weights=normalized_weights)[0]
         
     async def start_battle(self):
         """Initialize and start the battle"""
         self.started = True
         self.start_time = datetime.datetime.utcnow()
+        
+        # Save initial battle data to database for replay
+        await self.save_battle_to_database()
         
         # Create team lists for easier access
         self.team_a = self.teams[0]
@@ -64,13 +104,17 @@ class RaidBattle(Battle):
         
         # Shuffle turn order randomly
         random.shuffle(self.turn_order)
-        
+        self.turn_order = self.prioritize_turn_order(self.turn_order)
+
         # Create battle log
         await self.add_to_log(f"Raidbattle started between Team A and Team B!")
+        for opening_message in await self.trigger_ascension_openings():
+            await self.add_to_log(opening_message)
         
-        # Create and send initial embed
-        embed = await self.create_battle_embed()
-        self.battle_message = await self.ctx.send(embed=embed)
+
+        # Create and send initial embeds
+        embeds = await self.create_battle_embeds()
+        self.battle_message = await self.publish_battle_message(embeds=embeds)
         
         # Add a pause after battle start before first attack
         await asyncio.sleep(1)
@@ -102,6 +146,20 @@ class RaidBattle(Battle):
         # If we've checked all combatants and none are alive, end the battle
         if turns_checked >= max_turns:
             return False
+
+        silenced_message = self.consume_ascension_action_lock(current_combatant)
+        if silenced_message:
+            await self.add_to_log(silenced_message)
+            await self.update_display()
+            await asyncio.sleep(1)
+            return True
+
+        locked_message = self.consume_pet_skill_action_lock(current_combatant)
+        if locked_message:
+            await self.add_to_log(locked_message)
+            await self.update_display()
+            await asyncio.sleep(1)
+            return True
             
         # Determine which team the combatant belongs to
         combatant_team = self.team_a if current_combatant in self.team_a.combatants else self.team_b
@@ -112,70 +170,52 @@ class RaidBattle(Battle):
         if not alive_enemies:
             return False
         
-        # Select target
-        if current_combatant.is_pet:
-            # Pets have slightly different targeting - more likely to target other pets
-            pet_targets = [c for c in alive_enemies if c.is_pet]
-            player_targets = [c for c in alive_enemies if not c.is_pet]
-            
-            if pet_targets and player_targets:
-                # If both exist, randomly choose with bias
-                if random.random() < 0.6:  # 60% chance to target players
-                    target = random.choice(player_targets)
-                else:
-                    target = random.choice(pet_targets)
-            else:
-                # Otherwise use whatever we have
-                target = random.choice(alive_enemies)
-        else:
-            # Players target weighted by probability
-            weighted_targets = []
-            weights = []
-            
-            for enemy in alive_enemies:
-                if enemy.is_pet:
-                    weighted_targets.append(enemy)
-                    weights.append(0.4)  # 40% chance to target pets
-                else:
-                    weighted_targets.append(enemy)
-                    weights.append(0.6)  # 60% chance to target players
-            
-            # Normalize weights
-            total_weight = sum(weights)
-            weights = [w/total_weight for w in weights]
-            
-            target = random.choices(weighted_targets, weights=weights)[0]
+        target = self.select_target(current_combatant, alive_enemies)
         
         # Process attack based on luck
         luck_roll = random.randint(1, 100)
         
-        if luck_roll <= current_combatant.luck:
+        # Check for perfect accuracy from Night Vision skill
+        has_perfect_accuracy = getattr(current_combatant, 'perfect_accuracy', False)
+        hit_success = has_perfect_accuracy or (luck_roll <= current_combatant.luck)
+        
+        guard_source = None
+
+        if hit_success:
             # Attack hits
+            blocked_damage = Decimal("0")
+            ignore_reflection_this_hit = False
+            mage_charge_state = self.advance_mage_fireball_charge(current_combatant)
             
-            # Special case for mage fireball
             used_fireball = False
-            if (current_combatant.mage_evolution and 
-                not current_combatant.is_pet and 
-                self.config["class_buffs"] and
-                random.random() < self.config["fireball_chance"]):
-                
-                # Calculate fireball damage
-                evolution_level = current_combatant.mage_evolution
-                damage_multiplier = {
-                    1: 1.10,  # 110%
-                    2: 1.20,  # 120%
-                    3: 1.30,  # 130%
-                    4: 1.50,  # 150%
-                    5: 1.75,  # 175%
-                    6: 2.00,  # 200%
-                }.get(evolution_level, 1.0)
-                
-                damage = (current_combatant.damage + Decimal(random.randint(0, 100)) - target.armor) * Decimal(str(damage_multiplier))
-                damage = max(damage, Decimal('10'))
-                
+            if mage_charge_state and mage_charge_state["fireball_ready"]:
+                damage = self.calculate_mage_fireball_damage(
+                    current_combatant,
+                    target,
+                    damage_variance=100,
+                    minimum_damage=Decimal("10"),
+                    apply_armor=False,
+                )
+                damage, blocked_damage, fireball_barrier_messages = (
+                    self.resolve_damage_after_pet_barriers(
+                        target,
+                        damage,
+                        minimum_damage=Decimal("10"),
+                    )
+                )
+                ignore_reflection_this_hit = True
+
+                damage, guard_messages, guard_source = self.apply_pet_owner_guard(
+                    current_combatant,
+                    target,
+                    damage,
+                )
                 target.take_damage(damage)
-                
                 message = f"{current_combatant.name} casts Fireball! {target.name} takes **{self.format_number(damage)} HP** damage."
+                if fireball_barrier_messages:
+                    message += "\n" + "\n".join(fireball_barrier_messages)
+                if guard_messages:
+                    message += "\n" + "\n".join(guard_messages)
                 used_fireball = True
             else:
                 # Regular attack
@@ -183,25 +223,105 @@ class RaidBattle(Battle):
                 
                 # Start with base damage
                 raw_damage = current_combatant.damage
-                
-                # Apply element effects to base damage if enabled
-                if self.config["element_effects"] and hasattr(self.ctx.bot.cogs["Battles"], "element_ext"):
-                    element_mod = self.ctx.bot.cogs["Battles"].element_ext.calculate_damage_modifier(
-                        self.ctx,
-                        current_combatant.element, 
-                        target.element
-                    )
-                    if element_mod != 0:
-                        raw_damage = raw_damage * (1 + Decimal(str(element_mod)))
-                
-                # Add variance and apply armor
-                raw_damage += Decimal(damage_variance)
-                blocked_damage = min(raw_damage, target.armor)
-                damage = max(raw_damage - target.armor, Decimal('10'))
-                
+
+                outcome = self.resolve_pet_attack_outcome(
+                    current_combatant,
+                    target,
+                    raw_damage,
+                    apply_element_mod=self.config["element_effects"],
+                    damage_variance=damage_variance,
+                    minimum_damage=Decimal("10"),
+                )
+                damage = outcome.final_damage
+                blocked_damage = outcome.blocked_damage
+                skill_messages = outcome.skill_messages
+                defender_messages = outcome.defender_messages
+                ignore_reflection_this_hit = bool(outcome.metadata.get("ignore_reflection_this_hit", False))
+
+                damage, guard_messages, guard_source = self.apply_pet_owner_guard(
+                    current_combatant,
+                    target,
+                    damage,
+                )
                 target.take_damage(damage)
-                
                 message = f"{current_combatant.name} attacks! {target.name} takes **{self.format_number(damage)} HP** damage."
+                if guard_messages:
+                    message += "\n" + "\n".join(guard_messages)
+
+                charge_message = self.format_mage_charge_message(mage_charge_state)
+                if charge_message:
+                    message += "\n" + charge_message
+                
+                # Add skill effect messages
+                if skill_messages:
+                    message += "\n" + "\n".join(skill_messages)
+                if defender_messages:
+                    message += "\n" + "\n".join(defender_messages)
+                    
+                # Check for skeleton summoning after skill processing
+                queued_summons = getattr(current_combatant, 'summon_skeleton_queue', None)
+                if not queued_summons and hasattr(current_combatant, 'summon_skeleton'):
+                    queued_summons = [current_combatant.summon_skeleton]
+                if queued_summons:
+                    from cogs.battles.core.combatant import Combatant
+
+                    for skeleton_data in list(queued_summons):
+                        skeleton_serial = skeleton_data.get(
+                            'serial',
+                            getattr(current_combatant, 'skeleton_count', 1),
+                        )
+                        skeleton = Combatant(
+                            user=f"Skeleton Warrior #{skeleton_serial}",
+                            hp=skeleton_data['hp'],
+                            max_hp=skeleton_data['hp'],
+                            damage=skeleton_data['damage'],
+                            armor=skeleton_data['armor'],
+                            element=skeleton_data['element'],
+                            luck=skeleton_data.get('luck', 50),
+                            is_pet=True,
+                            name=f"Skeleton Warrior #{skeleton_serial}"
+                        )
+                        skeleton.is_summoned = True
+
+                        if current_combatant in self.team_a.combatants:
+                            self.register_summoned_combatant(
+                                skeleton,
+                                team=self.team_a,
+                                summoner=current_combatant,
+                            )
+                            self.team_a.combatants.append(skeleton)
+                            self.turn_order.append(skeleton)
+                            self.turn_order = self.prioritize_turn_order(self.turn_order)
+                            message += f"\n💀 Skeleton Warrior #{skeleton_serial} joins Team A!"
+                        else:
+                            self.register_summoned_combatant(
+                                skeleton,
+                                team=self.team_b,
+                                summoner=current_combatant,
+                            )
+                            self.team_b.combatants.append(skeleton)
+                            self.turn_order.append(skeleton)
+                            self.turn_order = self.prioritize_turn_order(self.turn_order)
+                            message += f"\n💀 Skeleton Warrior #{skeleton_serial} joins Team B!"
+
+                    if hasattr(current_combatant, 'summon_skeleton_queue'):
+                        delattr(current_combatant, 'summon_skeleton_queue')
+                    if hasattr(current_combatant, 'summon_skeleton'):
+                        delattr(current_combatant, 'summon_skeleton')
+
+            grave_message = await self.maybe_trigger_grave_sovereign(
+                current_combatant,
+                target,
+            )
+            if grave_message:
+                message += "\n" + grave_message
+
+            cycle_message = await self.maybe_trigger_cyclebreaker(
+                target,
+                current_combatant,
+            )
+            if cycle_message:
+                message += "\n" + cycle_message
             
             # Handle lifesteal if applicable
             if (self.config["class_buffs"] and 
@@ -211,6 +331,13 @@ class RaidBattle(Battle):
                 lifesteal_amount = (float(damage) * float(current_combatant.lifesteal_percent) / 100.0)
                 current_combatant.heal(lifesteal_amount)
                 message += f" Lifesteals: **{self.format_number(lifesteal_amount)} HP**"
+
+            bonus_lifesteal = self.apply_bonus_lifesteal(current_combatant, damage)
+            if bonus_lifesteal > 0:
+                message += (
+                    f"\n{current_combatant.name} siphons **{self.format_number(bonus_lifesteal)} HP** "
+                    "from bonus lifesteal!"
+                )
             
             # Handle damage reflection if applicable
             # Apply tank evolution reflection multiplier if applicable
@@ -237,7 +364,8 @@ class RaidBattle(Battle):
             
             if (self.config["reflection_damage"] and 
                 reflection_value > 0 and 
-                blocked_damage > 0):
+                blocked_damage > 0 and
+                not ignore_reflection_this_hit):
                 
                 reflected = blocked_damage * Decimal(str(reflection_value))
                 current_combatant.take_damage(reflected)
@@ -245,11 +373,20 @@ class RaidBattle(Battle):
                 
                 if not current_combatant.is_alive():
                     message += f" {current_combatant.name} has been defeated by reflected damage!"
+
+            class_messages = self.resolve_post_hit_class_effects(current_combatant, target)
+            if class_messages:
+                message += "\n" + "\n".join(class_messages)
             
             # Check if target is defeated
             if not target.is_alive():
+                guardian_message = self.maybe_trigger_guardian_angel(target)
+                if guardian_message:
+                    message += f"\n{guardian_message}"
                 # Check for cheat death ability
-                if (self.config["class_buffs"] and 
+                if target.is_alive():
+                    pass
+                elif (self.config["class_buffs"] and 
                     self.config["cheat_death"] and
                     not target.is_pet and 
                     target.death_cheat_chance > 0 and
@@ -257,9 +394,12 @@ class RaidBattle(Battle):
                     
                     cheat_roll = random.randint(1, 100)
                     if cheat_roll <= target.death_cheat_chance:
-                        target.hp = Decimal('75')
+                        target.hp = self.get_cheat_death_recovery_hp(target)
                         target.has_cheated_death = True
-                        message += f"\n{target.name} cheats death and survives with **75 HP**!"
+                        message += (
+                            f"\n{target.name} cheats death and survives with "
+                            f"**{self.format_number(target.hp)} HP**!"
+                        )
                     else:
                         message += f" {target.name} has been defeated!"
                 else:
@@ -275,18 +415,36 @@ class RaidBattle(Battle):
         
         # Add message to battle log
         await self.add_to_log(message)
+
+        if current_combatant.is_pet and not target.is_alive():
+            setattr(current_combatant, 'killed_enemy_this_turn', True)
+
+        for combatant in (target, current_combatant, guard_source):
+            if combatant is None or not getattr(combatant, "is_pet", False) or combatant.is_alive():
+                continue
+            for death_msg in self.process_pet_death_effects(combatant):
+                await self.add_to_log(death_msg)
+
+        if current_combatant.is_pet and current_combatant.is_alive():
+            for turn_msg in self.process_pet_turn_effects(current_combatant):
+                await self.add_to_log(turn_msg)
         
         # Update the battle display
         await self.update_display()
+        await asyncio.sleep(1)
         
         return True
     
-    async def create_battle_embed(self):
-        """Create the battle status embed"""
-        embed = discord.Embed(
-            title=f"Raid Battle",
-            color=self.ctx.bot.config.game.primary_colour
+    def _new_battle_embed(self, title="Raid Battle"):
+        return discord.Embed(
+            title=title,
+            color=self.ctx.bot.config.game.primary_colour,
         )
+
+    async def create_battle_embeds(self):
+        """Create one or more embeds for the current raid state."""
+        embed = self._new_battle_embed()
+        embeds = [embed]
         
         # Get element emoji mapping
         element_emoji_map = {}
@@ -297,7 +455,7 @@ class RaidBattle(Battle):
         for combatant in self.team_a.combatants:
             current_hp = max(0, float(combatant.hp))
             max_hp = float(combatant.max_hp)
-            hp_bar = self.create_hp_bar(current_hp, max_hp)
+            hp_bar = self.create_hp_bar(current_hp, max_hp, combatant=combatant)
             
             # Get element emoji
             element_emoji = "❌"
@@ -314,6 +472,8 @@ class RaidBattle(Battle):
                 
             # Create field value with HP bar
             field_value = f"HP: {current_hp:.1f}/{max_hp:.1f}\n{hp_bar}"
+            if hasattr(combatant, "shield") and Decimal(str(combatant.shield)) > 0:
+                field_value += f"\nShield: {self.format_number(combatant.shield)}"
             
             # Add reflection info if applicable
             if combatant.damage_reflection > 0:
@@ -326,7 +486,7 @@ class RaidBattle(Battle):
         for combatant in self.team_b.combatants:
             current_hp = max(0, float(combatant.hp))
             max_hp = float(combatant.max_hp)
-            hp_bar = self.create_hp_bar(current_hp, max_hp)
+            hp_bar = self.create_hp_bar(current_hp, max_hp, combatant=combatant)
             
             # Get element emoji
             element_emoji = "❌"
@@ -343,6 +503,8 @@ class RaidBattle(Battle):
                 
             # Create field value with HP bar
             field_value = f"HP: {current_hp:.1f}/{max_hp:.1f}\n{hp_bar}"
+            if hasattr(combatant, "shield") and Decimal(str(combatant.shield)) > 0:
+                field_value += f"\nShield: {self.format_number(combatant.shield)}"
             
             # Add reflection info if applicable
             if combatant.damage_reflection > 0:
@@ -351,24 +513,41 @@ class RaidBattle(Battle):
                 
             embed.add_field(name=field_name, value=field_value, inline=False)
         
-        # Add battle log
-        log_text = "\n\n".join([f"**Action #{i}**\n{msg}" for i, msg in self.log])
-        embed.add_field(name="Battle Log", value=log_text or "Battle starting...", inline=False)
-        
-        return embed
+        # Add battle log across as many embed fields as needed.
+        log_chunks = self.format_battle_log_fields()
+        current_embed = embed
+
+        for index, log_chunk in enumerate(log_chunks, start=1):
+            if len(current_embed.fields) >= 25:
+                current_embed = self._new_battle_embed(title="Raid Battle Log")
+                embeds.append(current_embed)
+
+            field_name = "Battle Log" if index == 1 else f"Battle Log (cont. {index})"
+            current_embed.add_field(name=field_name, value=log_chunk, inline=False)
+
+        total_embeds = len(embeds)
+        for index, battle_embed in enumerate(embeds, start=1):
+            footer_suffix = f" [{index}/{total_embeds}]" if total_embeds > 1 else ""
+            battle_embed.set_footer(text=f"Battle ID: {self.battle_id}{footer_suffix}")
+
+        return embeds
+
+    async def create_battle_embed(self):
+        """Create the primary raid embed for compatibility."""
+        return (await self.create_battle_embeds())[0]
     
     async def update_display(self):
         """Update the battle display"""
         # Update after every action for better visibility
-        embed = await self.create_battle_embed()
-        if self.battle_message:
-            await self.battle_message.edit(embed=embed)
-        else:
-            self.battle_message = await self.ctx.send(embed=embed)
+        embeds = await self.create_battle_embeds()
+        await self.publish_battle_message(embeds=embeds)
     
     async def end_battle(self):
         """End the battle and determine rewards"""
         self.finished = True
+        
+        # Save final battle data to database for replay
+        await self.save_battle_to_database()
         
         # Check if it's a timeout/tie
         if await self.is_timed_out():
@@ -432,30 +611,38 @@ class RaidBattle(Battle):
                 break
         
         # Handle rewards
-        if self.money > 0 and winner and loser:
-            # Award money and PvP wins to winner
+        if winner and loser:
+            # Award PvP wins to winners (regardless of money)
             winner_ids = [c.user.id for c in winning_team.combatants if not c.is_pet and hasattr(c.user, "id")]
             
             # Skip rewards if no valid winners
             if winner_ids:
                 async with self.ctx.bot.pool.acquire() as conn:
+                    # Award PvP wins to all winners
                     for winner_id in winner_ids:
                         await conn.execute(
-                            'UPDATE profile SET "pvpwins"="pvpwins"+1, "money"="money"+$1 WHERE'
-                            ' "user"=$2;',
-                            self.money * 2 / len(winner_ids),  # Split the money among winners
+                            'UPDATE profile SET "pvpwins"="pvpwins"+1 WHERE "user"=$1;',
                             winner_id,
                         )
                     
-                    # Log the transaction for first player only (for simplicity)
-                    await self.ctx.bot.log_transaction(
-                        self.ctx,
-                        from_=loser.id,
-                        to=winner.id,
-                        subject="RaidBattle Bet",
-                        data={"Gold": self.money},
-                        conn=conn,
-                    )
+                    # Handle money rewards if there's money involved
+                    if self.money > 0:
+                        for winner_id in winner_ids:
+                            await conn.execute(
+                                'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                                self.money * 2 / len(winner_ids),  # Split the money among winners
+                                winner_id,
+                            )
+                        
+                        # Log the transaction for first player only (for simplicity)
+                        await self.ctx.bot.log_transaction(
+                            self.ctx,
+                            from_=loser.id,
+                            to=winner.id,
+                            subject="RaidBattle Bet",
+                            data={"Gold": self.money},
+                            conn=conn,
+                        )
         
         return winner, loser
     
@@ -484,3 +671,4 @@ class RaidBattle(Battle):
                 
         # Otherwise battle continues
         return False
+

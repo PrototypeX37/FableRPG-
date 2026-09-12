@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import json
+import logging
 import math
 import os
 import random
@@ -10,97 +11,118 @@ from collections import deque
 
 import discord
 from utils import misc as rpgtools
-from discord.ext import commands
+from utils.markdown import escape_markdown
+from discord.ext import commands, tasks
 from discord.ui import View, Button, Select, select
 from discord.enums import ButtonStyle
 
 from .factory import BattleFactory
+from .jury_tower_data import (
+    build_jury_tower_data,
+    JURY_BRACKET_BASE_SNAPSHOT,
+    JURY_COSMETIC_TITLE,
+    _boss_reward_for_judge,
+    JURY_POWER_BRACKETS,
+    JURY_TOWER_FLOOR_COUNT,
+    JURY_SEGMENT_LENGTH,
+)
 from .settings import BattleSettings
 from .utils import create_hp_bar
+from classes.badges import Badge
+from .core.battle import Battle
 from .core.team import Team
 from .core.combatant import Combatant
+from .core.numbers import to_decimal
+from .dragon_party_card import render_dragon_party_card
+from .types.tower import TowerBattle
+from .types.training_dummy import TRAINING_DUMMY_DURATION, TrainingDummyBattle
+from .types.omnithrone import ensure_omnithrone_schema
+from .types.ffa import FreeForAllBattle
 from classes.classes import from_string as class_from_string
 from classes.converters import IntGreaterThan
+from classes.errors import NoChoice
+from classes.items import ItemType, Hand
 from cogs.shard_communication import user_on_cooldown as user_cooldown
+from cogs.soulforge_frontiers.frontier_pve import (
+    FrontierConfigError,
+    build_frontier_boss_encounter,
+    build_frontier_locations,
+    build_frontier_pool,
+    choose_weighted_monster,
+    get_rotation_state,
+    load_frontier_config,
+    resolve_recipe_generations,
+)
+from utils.april_fools import get_pet_display_name, get_pet_display_url
 from utils.checks import has_char, has_money, is_gm
 from utils.i18n import _, locale_doc
 from utils.joins import JoinView, SingleJoinView
 
-class PetEggSelect(Select):
-    def __init__(self, items):
-        self.items = items
-        options = [
-            discord.SelectOption(
-                label=f"{i+1}. {item['type'].title()}",
-                description=item['display_name'][:50],  # Limit description length
-                value=str(i)
-            ) for i, item in enumerate(items)
-        ]
-        
-        super().__init__(
-            placeholder="Select a pet/egg to release...",
-            min_values=1,
-            max_values=1,
-            options=options
+JURY_TOWER_IS_DEV = False
+JURY_TOWER_DEV_USER_ID = 295173706496475136
+JURY_RANK_LABEL = "Iron Rank"
+JURY_CURRENCY_LABEL = "Black Sigils"
+JURY_CURRENCY_LABEL_LOWER = "black sigils"
+JURY_SHOP_LABEL = "Black Vault"
+JURY_TOWER_MIN_LEVEL = 50
+JURY_TOWER_REQUIRED_BATTLE_TOWER_PRESTIGE = 5
+JURY_BONUS_CACHE_THRESHOLD = 2
+JURY_MAJOR_BONUS_CACHE_THRESHOLD = 6
+JURY_BONUS_CACHE_MULTIPLIER = Decimal("0.50")
+JURY_MAJOR_BONUS_CACHE_MULTIPLIER = Decimal("1.00")
+
+logger = logging.getLogger(__name__)
+
+BT_CHALLENGE_MIN_PRESTIGE = 5
+BT_CHALLENGE_PRESTIGE_STEP = Decimal("0.035")
+BT_CHALLENGE_PRESTIGE_CAP = 30
+BT_CHALLENGE_BASE_STAT_STEP = Decimal("0.055")
+BT_CHALLENGE_BASE_STAT_CAP = 30
+
+
+def _pve_location_marker(
+    location: dict,
+    *,
+    locked: bool = False,
+    current: bool = False,
+    unlocked_icon: str = "🟢",
+) -> str:
+    """Return a status marker and flag the active Frontier with a surge."""
+    marker = "⭐" if current else ("🔒" if locked else unlocked_icon)
+    if location.get("frontier_active"):
+        marker += "⚡"
+    return marker
+
+
+def _pet_egg_display_name(item):
+    return str(
+        item.get("display_name")
+        or item.get("name")
+        or item.get("egg_type")
+        or "Unknown"
+    )
+
+
+def _pet_egg_select_description(item):
+    base_name = _pet_egg_display_name(item)
+    type_label = "Pet" if item.get("type") == "pet" else "Egg"
+    description = f"{type_label} | {base_name}"
+    return description[:100].strip() or type_label
+
+
+def build_pet_egg_item_embed(item):
+    if item.get("type") == "pet":
+        pet_name = get_pet_display_name(
+            None,
+            item.get("name") or item.get("display_name", "Unnamed Pet"),
         )
-    
-    async def callback(self, interaction: discord.Interaction):
-        # Update the view with the selected item's details
-        view = self.view
-        if interaction.user.id != view.author.id:
-            return await interaction.response.send_message("This is not your selection.", ephemeral=True)
-        
-        try:
-            selected_index = int(self.values[0])
-            if selected_index < 0 or selected_index >= len(self.items):
-                return await interaction.response.send_message("Invalid selection. Please try again.", ephemeral=True)
-                
-            item = self.items[selected_index]
-            
-            # Create an embed with the selected item's details
-            embed = self.create_item_embed(item)
-            
-            # Update the message with the new embed
-            try:
-                if interaction.response.is_done():
-                    if interaction.message:
-                        await interaction.message.edit(embed=embed, view=view)
-                else:
-                    await interaction.response.edit_message(embed=embed, view=view)
-            except Exception as e:
-                print(f"Error updating message: {e}")
-                if not interaction.response.is_done():
-                    await interaction.response.send_message(f"There was an error updating the selection. Please try again. {e}", ephemeral=True)
-        except Exception as e:
-            print(f"Error in PetEggSelect callback: {e}")
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"An error occurred while processing your selection. Please try again. {e}", ephemeral=True)
-    
-    def create_item_embed(self, item):
-        if item.get('type') == 'pet':
-            return self.create_pet_embed(item)
-        else:  # egg
-            return self.create_egg_embed(item)
-    
-    def create_pet_embed(self, pet):
-        # Safely get pet name with fallback
-        pet_name = pet.get('name') or pet.get('display_name', 'Unnamed Pet')
-        
-        # Safely get growth stage with fallback
-        growth_stage = pet.get('growth_stage', 'baby').lower()
-        
-        # Stage emoji with fallback
-        if growth_stage == "baby":
-            stage_emoji = "🍼"
-        elif growth_stage == "juvenile":
-            stage_emoji = "🌱"
-        elif growth_stage == "young":
-            stage_emoji = "🐕"
-        else:  # adult or any other stage
-            stage_emoji = "🦁"
-            
-        # Element emoji with fallback
-        element = pet.get('element', 'Unknown')
+        growth_stage = str(item.get("growth_stage", "baby")).lower()
+        stage_emoji = {
+            "baby": "🍼",
+            "juvenile": "🌱",
+            "young": "🐕",
+        }.get(growth_stage, "🦁")
+        element = item.get("element", "Unknown")
         element_emoji = {
             "Fire": "🔥",
             "Water": "💧",
@@ -109,108 +131,196 @@ class PetEggSelect(Select):
             "Wind": "💨",
             "Light": "✨",
             "Dark": "🌑",
-            "Corrupted": "☠️"
+            "Corrupted": "☠️",
         }.get(element, "❓")
-        
-        # Safely get level with fallback
-        level = pet.get('level', 1)
-        
-        # Create embed with safe attribute access
+        level = item.get("level", item.get("growth_index", 1))
+
         embed = discord.Embed(
             title=f"{element_emoji} {pet_name} (Lv. {level})",
             description=f"A {element} type pet",
-            color=discord.Color.blue()
+            color=discord.Color.blue(),
         )
-        
-        # Add fields with safe attribute access
-        embed.add_field(name="Growth Stage", value=f"{stage_emoji} {growth_stage.capitalize()}", inline=True)
-        embed.add_field(name="IV", value=f"{pet.get('IV', 0)}%", inline=True)
-        embed.add_field(name="\u200b", value="\u200b", inline=True)  # Empty field for spacing
-        
-        # Stats with fallbacks
-        embed.add_field(name="HP", value=str(pet.get('hp', 0)), inline=True)
-        embed.add_field(name="Attack", value=str(pet.get('attack', 0)), inline=True)
-        embed.add_field(name="Defense", value=str(pet.get('defense', 0)), inline=True)
-        
-        # Additional info with safe access
-        if 'happiness' in pet:
-            embed.add_field(name="Happiness", value=f"{pet['happiness']}%", inline=True)
-        if 'hunger' in pet:
-            embed.add_field(name="Hunger", value=f"{pet['hunger']}%", inline=True)
-        if 'equipped' in pet:
-            status = "✅" if pet['equipped'] else "❌"
+        embed.add_field(
+            name="Growth Stage",
+            value=f"{stage_emoji} {growth_stage.capitalize()}",
+            inline=True,
+        )
+        embed.add_field(name="IV", value=f"{item.get('IV', 0)}%", inline=True)
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
+        embed.add_field(name="HP", value=str(item.get("hp", 0)), inline=True)
+        embed.add_field(name="Attack", value=str(item.get("attack", 0)), inline=True)
+        embed.add_field(name="Defense", value=str(item.get("defense", 0)), inline=True)
+
+        if "happiness" in item:
+            embed.add_field(
+                name="Happiness",
+                value=f"{item.get('happiness', 0)}%",
+                inline=True,
+            )
+        if "hunger" in item:
+            embed.add_field(
+                name="Hunger",
+                value=f"{item.get('hunger', 0)}%",
+                inline=True,
+            )
+        if "equipped" in item:
+            status = "✅" if item.get("equipped") else "❌"
             embed.add_field(name="Equipped", value=status, inline=True)
-            
-        # Set thumbnail if URL is available
-        if 'url' in pet and pet['url']:
-            embed.set_thumbnail(url=pet['url'])
-            
+
+        if item.get("url"):
+            embed.set_thumbnail(url=get_pet_display_url(None, item["url"]))
         return embed
-    
-    def create_egg_embed(self, egg):
-        # Safely get egg type and element with fallbacks
-        egg_type = egg.get('display_name', egg.get('egg_type', 'Unknown Egg'))
-        element = egg.get('element', 'Unknown')
-        
-        # Element emoji with fallback
-        element_emoji = {
-            "Fire": "🔥",
-            "Water": "💧",
-            "Electric": "⚡",
-            "Nature": "🌿",
-            "Wind": "💨",
-            "Light": "✨",
-            "Dark": "🌑",
-            "Corrupted": "☠️"
-        }.get(element, "❓")
-        
-        # Create embed with safe attribute access
-        embed = discord.Embed(
-            title=f"{element_emoji} {egg_type} Egg",
-            description=f"A {element} type egg",
-            color=0xADD8E6
-        )
-        
-        # Calculate time until hatch with safe access
-        hatch_time = egg.get('hatch_time')
-        if hatch_time and isinstance(hatch_time, datetime.datetime):
-            time_left = hatch_time - datetime.datetime.utcnow()
-            if time_left.total_seconds() > 0:
-                hours, remainder = divmod(int(time_left.total_seconds()), 3600)
-                minutes, seconds = divmod(remainder, 60)
-                time_str = f"{hours}h {minutes}m {seconds}s"
-            else:
-                time_str = "Ready to hatch!"
+
+    egg_type = item.get("display_name", item.get("egg_type", "Unknown Egg"))
+    element = item.get("element", "Unknown")
+    element_emoji = {
+        "Fire": "🔥",
+        "Water": "💧",
+        "Electric": "⚡",
+        "Nature": "🌿",
+        "Wind": "💨",
+        "Light": "✨",
+        "Dark": "🌑",
+        "Corrupted": "☠️",
+    }.get(element, "❓")
+
+    embed = discord.Embed(
+        title=f"{element_emoji} {egg_type} Egg",
+        description=f"A {element} type egg",
+        color=0xADD8E6,
+    )
+
+    hatch_time = item.get("hatch_time")
+    if hatch_time and isinstance(hatch_time, datetime.datetime):
+        time_left = hatch_time - datetime.datetime.utcnow()
+        if time_left.total_seconds() > 0:
+            hours, remainder = divmod(int(time_left.total_seconds()), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            time_str = f"{hours}h {minutes}m {seconds}s"
         else:
-            time_str = "Not specified"
-        
-        # Add fields with safe attribute access
-        embed.add_field(
-            name="📊 Stats",
-            value=(
-                f"**IV:** {egg.get('IV', 0)}%\n"
-                f"**HP:** {int(egg.get('hp', 0))}\n"
-                f"**Attack:** {int(egg.get('attack', 0))}\n"
-                f"**Defense:** {int(egg.get('defense', 0))}"
+            time_str = "Ready to hatch!"
+    else:
+        time_str = "Not specified"
+
+    embed.add_field(
+        name="📊 Stats",
+        value=(
+            f"**IV:** {item.get('IV', 0)}%\n"
+            f"**HP:** {int(item.get('hp', 0))}\n"
+            f"**Attack:** {int(item.get('attack', 0))}\n"
+            f"**Defense:** {int(item.get('defense', 0))}"
+        ),
+        inline=True,
+    )
+    embed.add_field(name="⏳ Hatch Time", value=time_str, inline=True)
+    if "id" in item:
+        embed.set_footer(text=f"ID: {item['id']}")
+    if item.get("url"):
+        embed.set_thumbnail(url=item["url"])
+    return embed
+
+
+class PetEggTypeSelect(Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(
+                label="Release a Pet",
+                value="pet",
+                description="Choose one of your pets to release.",
             ),
-            inline=True
+            discord.SelectOption(
+                label="Release an Egg",
+                value="egg",
+                description="Choose one of your eggs to release.",
+            ),
+            discord.SelectOption(
+                label="Cancel",
+                value="cancel",
+                description="Keep everything and forfeit the new egg.",
+            ),
+        ]
+        super().__init__(
+            placeholder="Choose what you want to release...",
+            min_values=1,
+            max_values=1,
+            options=options,
         )
-        
-        embed.add_field(
-            name="⏳ Hatch Time",
-            value=time_str,
-            inline=True
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, PetEggReleaseView):
+            await interaction.response.send_message(
+                "Something went wrong with this selection.",
+                ephemeral=True,
+            )
+            return
+
+        selected_value = self.values[0]
+        if selected_value == "cancel":
+            view.value = "cancel"
+            view.stop()
+            await interaction.response.defer()
+            return
+
+        view.select_category(selected_value)
+        await interaction.response.edit_message(
+            embed=view.build_current_embed(),
+            view=view,
         )
-        
-        # Add ID if available
-        if 'id' in egg:
-            embed.set_footer(text=f"ID: {egg['id']}")
-        
-        # Set thumbnail if URL is available
-        if 'url' in egg and egg['url']:
-            embed.set_thumbnail(url=egg['url'])
-            
-        return embed
+
+
+class PetEggItemSelect(Select):
+    def __init__(self, items, page=0):
+        self.items = items
+        self.total_pages = max(1, (len(items) + 24) // 25)
+        self.current_page = min(page, self.total_pages - 1)
+        start_idx = self.current_page * 25
+        end_idx = min(start_idx + 25, len(items))
+        page_items = items[start_idx:end_idx]
+
+        options = [
+            discord.SelectOption(
+                label=f"{start_idx + i + 1}. {_pet_egg_display_name(item)[:80]}",
+                description=_pet_egg_select_description(item),
+                value=str(start_idx + i),
+            )
+            for i, item in enumerate(page_items)
+        ]
+
+        placeholder_type = "pet" if items and items[0].get("type") == "pet" else "egg"
+        super().__init__(
+            placeholder=(
+                f"Select a {placeholder_type} to inspect..."
+                f" ({self.current_page + 1}/{self.total_pages})"
+            ),
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, PetEggReleaseView):
+            await interaction.response.send_message(
+                "Something went wrong with this selection.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            selected_index = int(self.values[0])
+        except (TypeError, ValueError):
+            await interaction.response.send_message(
+                "Invalid selection. Please try again.",
+                ephemeral=True,
+            )
+            return
+
+        view.select_item(selected_index)
+        await interaction.response.edit_message(
+            embed=view.build_current_embed(),
+            view=view,
+        )
 
 
 class PetEggReleaseView(View):
@@ -219,151 +329,391 @@ class PetEggReleaseView(View):
         self.author = author
         self.items = items
         self.value = None
-        self.message = None  # Store the message reference
-        
-        # Add the select dropdown
-        self.select = PetEggSelect(items)
-        self.add_item(self.select)
-        
-    @discord.ui.button(label="Release", style=discord.ButtonStyle.danger, row=1, emoji="🗑️")
-    async def confirm_release(self, interaction: discord.Interaction, button: Button):
-        try:
-            if interaction.user.id != self.author.id:
-                return await interaction.response.send_message("This is not your selection.", ephemeral=True)
-                
-            if not hasattr(self.select, 'values') or not self.select.values:
-                return await interaction.response.send_message("Please select a pet/egg to release first.", ephemeral=True)
-                
-            # Get the selected item for the confirmation message
-            try:
-                selected_index = int(self.select.values[0])
-                if selected_index < 0 or selected_index >= len(self.items):
-                    return await interaction.response.send_message("Invalid selection. Please try again.", ephemeral=True)
-                    
-                selected_item = self.items[selected_index]
-                
-                # Get the appropriate name based on item type
-                if selected_item.get('type') == 'egg':
-                    item_name = selected_item.get('egg_type', selected_item.get('display_name', 'Unknown Egg'))
-                    item_type = 'Egg'
-                else:
-                    item_name = selected_item.get('name', selected_item.get('display_name', 'Unknown Pet'))
-                    item_type = selected_item.get('type', 'item').capitalize()
-                
-                # Show confirmation dialog with item details
-                confirm_embed = discord.Embed(
-                    title=f"⚠️ Release {item_type}",
-                    description=f"Are you sure you want to release **{item_name}**?\n\nThis action cannot be undone!",
-                    color=discord.Color.orange()
-                )
-                
-                # Add item details to the confirmation
-                if selected_item['type'] == 'pet':
-                    confirm_embed.add_field(
-                        name="Pet Details",
-                        value=f"**Level:** {selected_item.get('growth_stage', 'Unknown')}\n"
-                              f"**IV:** {selected_item.get('IV', '?')}%",
-                        inline=False
-                    )
-                else:  # egg
-                    confirm_embed.add_field(
-                        name="Egg Details",
-                        value=f"**Type:** {selected_item.get('egg_type', 'Unknown')}\n"
-                              f"**IV:** {selected_item.get('IV', '?')}%",
-                        inline=False
-                    )
-                
-                confirm_view = ConfirmView(self.author)
-                
-                # Send the confirmation message
-                await interaction.response.send_message(
-                    embed=confirm_embed,
-                    view=confirm_view,
-                    ephemeral=True
-                )
-                
-                # Wait for confirmation
-                await confirm_view.wait()
-                
-                if confirm_view.value is None:
-                    # Timeout
-                    await interaction.followup.send("Release timed out. No action taken.", ephemeral=True)
-                    return
-                    
-                if confirm_view.value:  # Confirmed
-                    self.value = selected_index
-                    self.stop()
-                else:  # Cancelled
-                    await interaction.followup.send("Release cancelled.", ephemeral=True)
-                    
-            except Exception as e:
-                print(f"Error in confirm_release: {e}")
-                if not interaction.response.is_done():
-                    await interaction.response.send_message("An error occurred. Please try again.", ephemeral=True)
-                
-        except Exception as e:
-            print(f"Error in confirm_release: {e}")
-            if not interaction.response.is_done():
-                await interaction.response.send_message("An error occurred while processing your request. Please try again.", ephemeral=True)
-    
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=1, emoji="❌")
-    async def cancel(self, interaction: discord.Interaction, button: Button):
-        if interaction.user.id != self.author.id:
-            await interaction.response.send_message("This is not your selection.", ephemeral=True)
+        self.message = None
+        self.selected_type = None
+        self.filtered_items = []
+        self.current_page = 0
+        self.selected_index = None
+        self.confirming_release = False
+        self.rebuild_components()
+
+    def _count_for_type(self, item_type):
+        return sum(1 for item in self.items if item.get("type") == item_type)
+
+    def select_category(self, item_type):
+        self.selected_type = item_type
+        self.filtered_items = [
+            item for item in self.items if item.get("type") == item_type
+        ]
+        self.current_page = 0
+        self.selected_index = None
+        self.confirming_release = False
+        self.rebuild_components()
+
+    def select_item(self, selected_index):
+        if 0 <= selected_index < len(self.filtered_items):
+            self.selected_index = selected_index
+            self.confirming_release = False
+            self.rebuild_components()
+
+    def selected_item(self):
+        if self.selected_index is None:
+            return None
+        if not (0 <= self.selected_index < len(self.filtered_items)):
+            return None
+        return self.filtered_items[self.selected_index]
+
+    def go_back_to_category_choice(self):
+        self.selected_type = None
+        self.filtered_items = []
+        self.current_page = 0
+        self.selected_index = None
+        self.confirming_release = False
+        self.rebuild_components()
+
+    def build_type_embed(self):
+        pet_count = self._count_for_type("pet")
+        egg_count = self._count_for_type("egg")
+        embed = discord.Embed(
+            title=_("Release a Pet or Egg"),
+            description=_(
+                "You've reached the maximum number of pets/eggs. Choose whether "
+                "to release a pet, release an egg, or cancel."
+            ),
+            color=discord.Color.orange(),
+        )
+        embed.add_field(
+            name="Available Choices",
+            value=(
+                f"Pets: **{pet_count}**\n"
+                f"Eggs: **{egg_count}**\n"
+                "Cancel: keep everything and forfeit the new egg."
+            ),
+            inline=False,
+        )
+        return embed
+
+    def build_category_embed(self):
+        item_type = "pet" if self.selected_type == "pet" else "egg"
+        count = len(self.filtered_items)
+        title_label = "Pet" if item_type == "pet" else "Egg"
+        embed = discord.Embed(
+            title=f"Choose a {title_label} to Release",
+            description=(
+                f"Select a {item_type} below to inspect it before releasing it."
+                if count
+                else f"You do not have any {item_type}s available to release."
+            ),
+            color=discord.Color.orange(),
+        )
+        embed.add_field(
+            name="How to proceed",
+            value=(
+                "Pick one from the dropdown to review its stats, then press `Release`."
+                if count
+                else "Use `Back` to choose the other category or `Cancel` to stop."
+            ),
+            inline=False,
+        )
+        return embed
+
+    def build_selected_item_embed(self):
+        item = self.selected_item()
+        if item is None:
+            return self.build_category_embed()
+
+        embed = build_pet_egg_item_embed(item)
+        if self.confirming_release:
+            embed.add_field(
+                name="Confirm Release",
+                value=(
+                    "Are you sure you want to release this item?\n"
+                    "This action cannot be undone."
+                ),
+                inline=False,
+            )
+            embed.set_footer(
+                text="Choose Yes to release it or No to keep reviewing."
+            )
+        else:
+            embed.add_field(
+                name="Ready?",
+                value="Press `Release` to confirm this is the item you want to remove.",
+                inline=False,
+            )
+            embed.set_footer(text="Use Back to change category.")
+        return embed
+
+    def build_current_embed(self):
+        if self.selected_type is None:
+            return self.build_type_embed()
+        if self.selected_item() is not None:
+            return self.build_selected_item_embed()
+        return self.build_category_embed()
+
+    def rebuild_components(self):
+        self.clear_items()
+
+        if self.selected_type is None:
+            self.add_item(PetEggTypeSelect())
+            cancel_button = discord.ui.Button(
+                label="Cancel",
+                style=discord.ButtonStyle.secondary,
+                emoji="❌",
+                row=1,
+            )
+            cancel_button.callback = self.cancel_callback
+            self.add_item(cancel_button)
             return
-            
+
+        if self.filtered_items:
+            self.add_item(PetEggItemSelect(self.filtered_items, self.current_page))
+
+            total_pages = max(1, (len(self.filtered_items) + 24) // 25)
+            if total_pages > 1:
+                prev_button = discord.ui.Button(
+                    style=discord.ButtonStyle.secondary,
+                    label="◀️ Previous Page",
+                    row=1,
+                    disabled=self.current_page == 0,
+                )
+                prev_button.callback = self.prev_page_callback
+                self.add_item(prev_button)
+
+                next_button = discord.ui.Button(
+                    style=discord.ButtonStyle.secondary,
+                    label="Next Page ▶️",
+                    row=1,
+                    disabled=self.current_page >= total_pages - 1,
+                )
+                next_button.callback = self.next_page_callback
+                self.add_item(next_button)
+
+        back_button = discord.ui.Button(
+            label="Back",
+            style=discord.ButtonStyle.primary,
+            emoji="↩️",
+            row=2,
+        )
+        back_button.callback = self.back_callback
+        self.add_item(back_button)
+
+        release_button = discord.ui.Button(
+            label="Release",
+            style=discord.ButtonStyle.danger,
+            emoji="🗑️",
+            row=2,
+            disabled=self.selected_item() is None or self.confirming_release,
+        )
+        release_button.callback = self.release_callback
+        self.add_item(release_button)
+
+        cancel_button = discord.ui.Button(
+            label="Cancel",
+            style=discord.ButtonStyle.secondary,
+            emoji="❌",
+            row=2,
+        )
+        cancel_button.callback = self.cancel_callback
+        self.add_item(cancel_button)
+
+        if self.confirming_release and self.selected_item() is not None:
+            yes_button = discord.ui.Button(
+                label="Yes",
+                style=discord.ButtonStyle.danger,
+                emoji="✅",
+                row=3,
+            )
+            yes_button.callback = self.confirm_yes_callback
+            self.add_item(yes_button)
+
+            no_button = discord.ui.Button(
+                label="No",
+                style=discord.ButtonStyle.secondary,
+                emoji="❌",
+                row=3,
+            )
+            no_button.callback = self.confirm_no_callback
+            self.add_item(no_button)
+    
+    async def prev_page_callback(self, interaction: discord.Interaction):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.rebuild_components()
+        await interaction.response.edit_message(
+            embed=self.build_current_embed(),
+            view=self,
+        )
+    
+    async def next_page_callback(self, interaction: discord.Interaction):
+        total_pages = max(1, (len(self.filtered_items) + 24) // 25)
+        if self.current_page < total_pages - 1:
+            self.current_page += 1
+            self.rebuild_components()
+        await interaction.response.edit_message(
+            embed=self.build_current_embed(),
+            view=self,
+        )
+
+    async def back_callback(self, interaction: discord.Interaction):
+        self.go_back_to_category_choice()
+        await interaction.response.edit_message(
+            embed=self.build_current_embed(),
+            view=self,
+        )
+
+    async def release_callback(self, interaction: discord.Interaction):
+        if self.selected_item() is None:
+            await interaction.response.send_message(
+                "Please select a pet or egg first.",
+                ephemeral=True,
+            )
+            return
+        self.confirming_release = True
+        self.rebuild_components()
+        await interaction.response.edit_message(
+            embed=self.build_current_embed(),
+            view=self,
+        )
+
+    async def confirm_yes_callback(self, interaction: discord.Interaction):
+        item = self.selected_item()
+        if item is None:
+            await interaction.response.send_message(
+                "Please select a pet or egg first.",
+                ephemeral=True,
+            )
+            return
+        self.value = item
+        self.stop()
+        await interaction.response.defer()
+
+    async def confirm_no_callback(self, interaction: discord.Interaction):
+        self.confirming_release = False
+        self.rebuild_components()
+        await interaction.response.edit_message(
+            embed=self.build_current_embed(),
+            view=self,
+        )
+
+    async def cancel_callback(self, interaction: discord.Interaction):
         self.value = "cancel"
         self.stop()
-        
+        await interaction.response.defer()
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author.id:
             await interaction.response.send_message("This is not your selection.", ephemeral=True)
             return False
         return True
-        
+
     async def on_timeout(self):
-        # Disable all buttons on timeout
         for item in self.children:
             item.disabled = True
         if self.message:
             try:
                 await self.message.edit(view=self)
-            except:
+            except Exception:
                 pass
 
 
-class ConfirmView(View):
-    def __init__(self, author, **kwargs):
-        super().__init__(**kwargs)
+class OmnithroneCinematicView(View):
+    def __init__(self, scenes: list[dict], author: discord.User):
+        super().__init__(timeout=300)
+        self.scenes = scenes
         self.author = author
-        self.value = None
-        
-    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger, emoji="✅")
-    async def confirm(self, interaction: discord.Interaction, button: Button):
-        if interaction.user.id == self.author.id:
-            self.value = True
-            self.stop()
-            await interaction.message.delete()
-    
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
-    async def cancel(self, interaction: discord.Interaction, button: Button):
-        if interaction.user.id == self.author.id:
-            self.value = False
-            self.stop()
-            await interaction.message.delete()
-    
+        self.current_scene = 0
+        self.message = None
+        self.completed = False
+        self._update_button_state()
+
+    def _update_button_state(self):
+        is_last_scene = self.current_scene >= len(self.scenes) - 1
+        self.advance_button.label = "Begin Battle" if is_last_scene else "Next"
+        self.advance_button.style = (
+            discord.ButtonStyle.success if is_last_scene else discord.ButtonStyle.primary
+        )
+        self.advance_button.emoji = "⚔️" if is_last_scene else "➡️"
+
+    def _build_scene_kwargs(self):
+        scene = self.scenes[self.current_scene]
+        kwargs = {"embed": scene["embed"], "view": self}
+
+        cached_path = scene.get("cached_path")
+        cache_filename = scene.get("cache_filename")
+        if cached_path and cache_filename and os.path.exists(cached_path):
+            kwargs["attachments"] = [discord.File(cached_path, filename=cache_filename)]
+        else:
+            kwargs["attachments"] = []
+
+        return kwargs
+
+    def _build_initial_scene_kwargs(self):
+        scene = self.scenes[self.current_scene]
+        kwargs = {"embed": scene["embed"], "view": self}
+
+        cached_path = scene.get("cached_path")
+        cache_filename = scene.get("cache_filename")
+        if cached_path and cache_filename and os.path.exists(cached_path):
+            kwargs["file"] = discord.File(cached_path, filename=cache_filename)
+
+        return kwargs
+
+    async def show_current_scene(self):
+        self._update_button_state()
+        if self.message is None:
+            return
+        await self.message.edit(**self._build_scene_kwargs())
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author.id:
-            await interaction.response.send_message("This is not your confirmation.", ephemeral=True)
+            await interaction.response.send_message(
+                _("This command was not initiated by you."),
+                ephemeral=True,
+            )
             return False
         return True
 
+    async def on_timeout(self):
+        self.completed = True
+        for item in self.children:
+            item.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
+        self.stop()
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary, emoji="➡️")
+    async def advance_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.message is None and interaction.message is not None:
+            self.message = interaction.message
+
+        is_last_scene = self.current_scene >= len(self.scenes) - 1
+        if is_last_scene:
+            self.completed = True
+            self.stop()
+            await interaction.response.edit_message(view=None)
+            return
+
+        self.current_scene += 1
+        await interaction.response.defer()
+        await self.show_current_scene()
+
 class DialogueView(discord.ui.View):
-    def __init__(self, pages: list[discord.Embed], author: discord.User):
+    def __init__(
+        self,
+        pages: list[discord.Embed],
+        author: discord.User,
+        allowed_user_ids: set[int] | None = None,
+    ):
         super().__init__(timeout=60)
         self.pages = pages
         self.current_page = 0
         self.author = author
+        self.allowed_user_ids = set(allowed_user_ids or {author.id})
+        self.allowed_user_ids.add(int(author.id))
 
     async def update_message(self, interaction: discord.Interaction):
         # If the response hasn't been sent yet, use response.edit_message.
@@ -379,8 +729,14 @@ class DialogueView(discord.ui.View):
             )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # Only allow the view author to interact with these buttons.
-        return interaction.user.id == self.author.id
+        # Only allow permitted users (author or alt invoker when applicable).
+        if interaction.user.id in self.allowed_user_ids:
+            return True
+        await interaction.response.send_message(
+            _("This command was not initiated by you."),
+            ephemeral=True,
+        )
+        return False
 
     @discord.ui.button(label="Previous", style=discord.ButtonStyle.primary)
     async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -397,15 +753,941 @@ class DialogueView(discord.ui.View):
     @discord.ui.button(label="Start Battle", style=discord.ButtonStyle.success)
     async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         # End dialogue immediately
-        await interaction.response.edit_message(content="Dialogue skipped. The battle begins!", embed=None, view=None)
+        await interaction.response.defer()
         self.stop()
 
+class CouplesDialogueView(discord.ui.View):
+    def __init__(self, pages: list[discord.Embed], author: discord.User, partner: discord.User):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.pages = pages
+        self.current_page = 0
+        self.author = author
+        self.partner = partner
+        self.total_pages = len(pages)
+        
+        # Add page numbers to all embeds and update button states
+        self.update_page_footer()
+        self.update_button_states()
+        
+    def update_page_footer(self):
+        """Add page numbers to the current embed footer"""
+        current_embed = self.pages[self.current_page]
+        page_text = f"Page {self.current_page + 1} of {self.total_pages}"
+        
+        # Preserve existing footer text if any
+        if current_embed.footer.text:
+            if "Page" not in current_embed.footer.text:
+                current_embed.set_footer(text=f"{current_embed.footer.text} | {page_text}")
+        else:
+            current_embed.set_footer(text=page_text)
+    
+    def update_button_states(self):
+        """Update button disabled states based on current page"""
+        # Find the Previous and Next buttons
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                if item.emoji and str(item.emoji) == "⬅️":  # Previous button
+                    item.disabled = (self.current_page == 0)
+                elif item.emoji and str(item.emoji) == "➡️":  # Next button
+                    item.disabled = (self.current_page == self.total_pages - 1)
+    
+    async def update_message(self, interaction: discord.Interaction):
+        """Update the message with the current page"""
+        self.update_page_footer()
+        self.update_button_states()
+        
+        if interaction.response.is_done():
+            if interaction.message:
+                await interaction.message.edit(embed=self.pages[self.current_page], view=self)
+        else:
+            await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+    
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Only allow the couple to interact with these buttons"""
+        return interaction.user.id in (self.author.id, self.partner.id)
+    
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.primary, emoji="⬅️", row=0)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page > 0:
+            self.current_page -= 1
+            await self.update_message(interaction)
+    
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary, emoji="➡️", row=0)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            await self.update_message(interaction)
+    
+    @discord.ui.button(label="Begin Battle Together", style=discord.ButtonStyle.success, emoji="💕", row=1)
+    async def start_battle_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Start the battle immediately"""
+        self.stop()
+        await interaction.response.edit_message(
+            content="💕 **The Tower of Eternal Bonds resonates with your love! The battle begins!** 💕", 
+            embed=None, 
+            view=None
+        )
+
+class CouplesDialogueViewOnly(discord.ui.View):
+    """View for dialogue-only viewing without battle buttons"""
+    def __init__(self, pages: list[discord.Embed], author: discord.User, partner: discord.User):
+        super().__init__(timeout=300)  # Longer timeout since it's just for viewing
+        self.pages = pages
+        self.current_page = 0
+        self.author = author
+        self.partner = partner
+        self.total_pages = len(pages)
+        
+        # Add page numbers to all embeds and update button states
+        self.update_page_footer()
+        self.update_button_states()
+        
+    def update_page_footer(self):
+        """Add page numbers to the current embed footer"""
+        current_embed = self.pages[self.current_page]
+        page_text = f"Page {self.current_page + 1} of {self.total_pages}"
+        
+        # Preserve existing footer text if any
+        if current_embed.footer.text:
+            if "Page" not in current_embed.footer.text:
+                current_embed.set_footer(text=f"{current_embed.footer.text} | {page_text}")
+        else:
+            current_embed.set_footer(text=page_text)
+    
+    def update_button_states(self):
+        """Update button disabled states based on current page"""
+        # Find the Previous and Next buttons
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                if item.emoji and str(item.emoji) == "⬅️":  # Previous button
+                    item.disabled = (self.current_page == 0)
+                elif item.emoji and str(item.emoji) == "➡️":  # Next button
+                    item.disabled = (self.current_page == self.total_pages - 1)
+        
+    async def update_message(self, interaction: discord.Interaction):
+        """Update the message with the current page"""
+        self.update_page_footer()
+        self.update_button_states()
+        
+        if interaction.response.is_done():
+            if interaction.message:
+                await interaction.message.edit(embed=self.pages[self.current_page], view=self)
+        else:
+            await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+    
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Only allow the couple to interact with these buttons"""
+        return interaction.user.id in (self.author.id, self.partner.id)
+    
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.primary, emoji="⬅️", row=0)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page > 0:
+            self.current_page -= 1
+            await self.update_message(interaction)
+    
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary, emoji="➡️", row=0)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            await self.update_message(interaction)
+    
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary, emoji="❌", row=0)
+    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Close the dialogue viewer"""
+        self.stop()
+        await interaction.response.edit_message(
+            content="📖 **Dialogue closed.** Use `$cbt start` when you're ready to battle together! 💕", 
+            embed=None, 
+            view=None
+        )
+
+class CouplesTowerView(discord.ui.View):
+    def __init__(self, author, partner, on_join, on_cancel):
+        super().__init__(timeout=120)
+        self.author = author
+        self.partner = partner
+        self.on_join = on_join
+        self.on_cancel = on_cancel
+        self.joined = False
+
+    @discord.ui.button(label="Join Battle", style=discord.ButtonStyle.success, emoji="⚔️")
+    async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.partner.id:
+            return await interaction.response.send_message("You are not the partner in this battle.", ephemeral=True)
+        
+        self.joined = True
+        button.disabled = True
+        self.children[1].disabled = True
+        await interaction.response.edit_message(view=self)
+        self.stop()
+        try:
+            await self.on_join()
+        except Exception as exc:
+            if interaction.channel:
+                await interaction.channel.send(
+                    f"Couples Battle Tower failed to start: {exc}"
+                )
+            raise
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, emoji="❌")
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id not in (self.author.id, self.partner.id):
+            return await interaction.response.send_message("This is not your battle to cancel.", ephemeral=True)
+        
+        self.joined = False
+        self.children[0].disabled = True
+        button.disabled = True
+        await interaction.response.edit_message(view=self)
+        self.stop()
+        if self.on_cancel:
+            await self.on_cancel()
+
+    async def on_timeout(self):
+        if not self.joined:
+            for item in self.children:
+                item.disabled = True
+            if self.on_cancel:
+                await self.on_cancel()
+
+
+class PVELocationSelect(Select):
+    def __init__(self, locations: list[dict], allowed_user_ids):
+        if isinstance(allowed_user_ids, int):
+            allowed_ids = {int(allowed_user_ids)}
+        else:
+            allowed_ids = {
+                int(user_id)
+                for user_id in (allowed_user_ids or [])
+                if user_id is not None
+            }
+        self.allowed_user_ids = allowed_ids
+        self.locations_by_id = {location["id"]: location for location in locations}
+        options = []
+        for location in locations:
+            is_locked = bool(location.get("is_locked", False))
+            tier_keys = sorted(
+                int(tier) for tier in (location.get("tier_weights", {}) or {}).keys()
+            )
+            if tier_keys:
+                tier_band = (
+                    f"T{tier_keys[0]}"
+                    if len(tier_keys) == 1
+                    else f"T{tier_keys[0]}-T{tier_keys[-1]}"
+                )
+            else:
+                tier_band = "T?"
+            god_chance = location.get("god_chance", 0)
+            try:
+                god_text = f"{float(god_chance):g}%"
+            except (TypeError, ValueError):
+                god_text = f"{god_chance}%"
+            desc = f"Lv {location['unlock_level']}+ | {tier_band} | God {god_text}"
+            marker = _pve_location_marker(location, locked=is_locked)
+            label = f"{marker} {location['name']}"
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=location["id"],
+                    description=desc[:100],
+                )
+            )
+
+        super().__init__(
+            placeholder="Choose a location to hunt...",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id not in self.allowed_user_ids:
+            await interaction.response.send_message(
+                "This location selection isn't yours.",
+                ephemeral=True,
+            )
+            return
+
+        view = self.view
+        if not isinstance(view, PVELocationView):
+            await interaction.response.send_message(
+                "Something went wrong with this selection.",
+                ephemeral=True,
+            )
+            return
+
+        selected_id = self.values[0]
+        selected_location = self.locations_by_id.get(selected_id)
+
+        if not selected_location:
+            await interaction.response.edit_message(
+                content="Invalid location selection.",
+                view=view,
+            )
+            return
+
+        if selected_location.get("is_locked"):
+            await interaction.response.send_message(
+                f"🔒 **{selected_location['name']}** unlocks at level {selected_location['unlock_level']}.",
+                ephemeral=True,
+            )
+            return
+
+        view.selected_location = selected_location
+        for child in view.children:
+            child.disabled = True
+
+        await interaction.response.edit_message(
+            content=f"Searching in **{view.selected_location['name']}**...",
+            view=view,
+        )
+        view.stop()
+
+
+class PVELocationView(View):
+    def __init__(
+        self,
+        author_id: int,
+        locations: list[dict],
+        timeout: float = 60.0,
+        allowed_user_ids=None,
+    ):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+        if isinstance(allowed_user_ids, int):
+            allowed_ids = {int(allowed_user_ids)}
+        else:
+            allowed_ids = {
+                int(user_id)
+                for user_id in (allowed_user_ids or [])
+                if user_id is not None
+            }
+        allowed_ids.add(int(author_id))
+        self.allowed_user_ids = allowed_ids
+        self.locations = locations
+        self.selected_location = None
+        self.cancelled = False
+        self.message = None
+        self.add_item(PVELocationSelect(locations, self.allowed_user_ids))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id not in self.allowed_user_ids:
+            await interaction.response.send_message(
+                "This location selection isn't yours.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(
+        label="Cancel",
+        style=discord.ButtonStyle.secondary,
+        emoji="❌",
+        row=1,
+    )
+    async def cancel_button(self, interaction: discord.Interaction, button: Button):
+        self.cancelled = True
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="PvE search cancelled.", view=self)
+        self.stop()
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+
+class ScoutLocationChoiceSelect(Select):
+    RANDOM_VALUE = "__random__"
+
+    def __init__(self, locations: list[dict], allowed_user_ids):
+        if isinstance(allowed_user_ids, int):
+            allowed_ids = {int(allowed_user_ids)}
+        else:
+            allowed_ids = {
+                int(user_id)
+                for user_id in (allowed_user_ids or [])
+                if user_id is not None
+            }
+        self.allowed_user_ids = allowed_ids
+        self.locations_by_id = {location["id"]: location for location in locations}
+
+        options = [
+            discord.SelectOption(
+                label="🎲 Random Unlocked",
+                value=self.RANDOM_VALUE,
+                description="Roll from any unlocked location each scout.",
+            )
+        ]
+
+        for location in locations:
+            tier_keys = sorted(
+                int(tier) for tier in (location.get("tier_weights", {}) or {}).keys()
+            )
+            if tier_keys:
+                tier_band = (
+                    f"T{tier_keys[0]}"
+                    if len(tier_keys) == 1
+                    else f"T{tier_keys[0]}-T{tier_keys[-1]}"
+                )
+            else:
+                tier_band = "T?"
+            god_chance = location.get("god_chance", 0)
+            try:
+                god_text = f"{float(god_chance):g}%"
+            except (TypeError, ValueError):
+                god_text = f"{god_chance}%"
+            desc = f"Lv {location['unlock_level']}+ | {tier_band} | God {god_text}"
+            marker = _pve_location_marker(location)
+            options.append(
+                discord.SelectOption(
+                    label=f"{marker} {location['name']}"[:100],
+                    value=location["id"],
+                    description=desc[:100],
+                )
+            )
+
+        super().__init__(
+            placeholder="Choose your scouting location mode...",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id not in self.allowed_user_ids:
+            await interaction.response.send_message(
+                "This location selection isn't yours.",
+                ephemeral=True,
+            )
+            return
+
+        view = self.view
+        if not isinstance(view, ScoutLocationChoiceView):
+            await interaction.response.send_message(
+                "Something went wrong with this selection.",
+                ephemeral=True,
+            )
+            return
+
+        selected_value = self.values[0]
+        if selected_value == self.RANDOM_VALUE:
+            view.use_random_location = True
+            view.selected_location = None
+            mode_text = "Scouting mode set to **Random Unlocked**."
+        else:
+            selected_location = self.locations_by_id.get(selected_value)
+            if not selected_location:
+                await interaction.response.send_message(
+                    "Invalid location selection.",
+                    ephemeral=True,
+                )
+                return
+            view.use_random_location = False
+            view.selected_location = selected_location
+            mode_text = (
+                f"Scouting mode locked to **{selected_location['name']}**."
+            )
+
+        for child in view.children:
+            child.disabled = True
+        await interaction.response.edit_message(content=mode_text, view=view)
+        view.stop()
+
+
+class ScoutLocationChoiceView(View):
+    def __init__(
+        self,
+        author_id: int,
+        locations: list[dict],
+        timeout: float = 60.0,
+        allowed_user_ids=None,
+    ):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+        if isinstance(allowed_user_ids, int):
+            allowed_ids = {int(allowed_user_ids)}
+        else:
+            allowed_ids = {
+                int(user_id)
+                for user_id in (allowed_user_ids or [])
+                if user_id is not None
+            }
+        allowed_ids.add(int(author_id))
+        self.allowed_user_ids = allowed_ids
+        self.locations = locations
+        self.selected_location = None
+        self.use_random_location = None
+        self.cancelled = False
+        self.message = None
+        self.add_item(ScoutLocationChoiceSelect(locations, self.allowed_user_ids))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id not in self.allowed_user_ids:
+            await interaction.response.send_message(
+                "This location selection isn't yours.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(
+        label="Cancel",
+        style=discord.ButtonStyle.secondary,
+        emoji="❌",
+        row=1,
+    )
+    async def cancel_button(self, interaction: discord.Interaction, button: Button):
+        self.cancelled = True
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="Scouting cancelled.", view=self)
+        self.stop()
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+
+class PveDefaultLocationSelect(Select):
+    CLEAR_VALUE = "__clear_default__"
+
+    def __init__(
+        self,
+        locations: list[dict],
+        allowed_user_ids,
+        current_default_id: str | None = None,
+    ):
+        if isinstance(allowed_user_ids, int):
+            allowed_ids = {int(allowed_user_ids)}
+        else:
+            allowed_ids = {
+                int(user_id)
+                for user_id in (allowed_user_ids or [])
+                if user_id is not None
+            }
+        self.allowed_user_ids = allowed_ids
+        self.locations_by_id = {
+            str(location["id"]).lower(): dict(location) for location in locations
+        }
+        self.current_default_id = (
+            str(current_default_id).strip().lower() if current_default_id else None
+        )
+
+        options = [
+            discord.SelectOption(
+                label="❌ Clear Default",
+                value=self.CLEAR_VALUE,
+                description="Remove your saved default location.",
+            )
+        ]
+
+        for location in locations:
+            location_id = str(location["id"]).lower()
+            is_current = location_id == self.current_default_id
+            marker = _pve_location_marker(location, current=is_current)
+            tier_keys = sorted(
+                int(tier) for tier in (location.get("tier_weights", {}) or {}).keys()
+            )
+            if tier_keys:
+                tier_band = (
+                    f"T{tier_keys[0]}"
+                    if len(tier_keys) == 1
+                    else f"T{tier_keys[0]}-T{tier_keys[-1]}"
+                )
+            else:
+                tier_band = "T?"
+            desc = f"Lv {location['unlock_level']}+ | {tier_band}"
+            options.append(
+                discord.SelectOption(
+                    label=f"{marker} {location['name']}"[:100],
+                    value=location_id,
+                    description=desc[:100],
+                )
+            )
+
+        super().__init__(
+            placeholder="Choose your default PvE location...",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id not in self.allowed_user_ids:
+            await interaction.response.send_message(
+                "This location selection isn't yours.",
+                ephemeral=True,
+            )
+            return
+
+        view = self.view
+        if not isinstance(view, PveDefaultLocationView):
+            await interaction.response.send_message(
+                "Something went wrong with this selection.",
+                ephemeral=True,
+            )
+            return
+
+        selected_value = self.values[0]
+        if selected_value == self.CLEAR_VALUE:
+            view.clear_requested = True
+            view.selected_location = None
+            view.selected_location_id = None
+            message_text = "✅ Default PvE location cleared."
+        else:
+            selected_location = self.locations_by_id.get(selected_value)
+            if not selected_location:
+                await interaction.response.send_message(
+                    "Invalid location selection.",
+                    ephemeral=True,
+                )
+                return
+            view.clear_requested = False
+            view.selected_location = selected_location
+            view.selected_location_id = str(selected_location["id"]).lower()
+            message_text = (
+                f"✅ Default PvE location set to **{selected_location['name']}**."
+            )
+
+        for child in view.children:
+            child.disabled = True
+        await interaction.response.edit_message(content=message_text, view=view)
+        view.stop()
+
+
+class PveDefaultLocationView(View):
+    def __init__(
+        self,
+        author_id: int,
+        locations: list[dict],
+        current_default_id: str | None = None,
+        timeout: float = 60.0,
+        allowed_user_ids=None,
+    ):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+        if isinstance(allowed_user_ids, int):
+            allowed_ids = {int(allowed_user_ids)}
+        else:
+            allowed_ids = {
+                int(user_id)
+                for user_id in (allowed_user_ids or [])
+                if user_id is not None
+            }
+        allowed_ids.add(int(author_id))
+        self.allowed_user_ids = allowed_ids
+        self.locations = locations
+        self.current_default_id = (
+            str(current_default_id).strip().lower() if current_default_id else None
+        )
+        self.selected_location = None
+        self.selected_location_id = None
+        self.clear_requested = False
+        self.cancelled = False
+        self.message = None
+        self.add_item(
+            PveDefaultLocationSelect(
+                locations,
+                self.allowed_user_ids,
+                current_default_id=self.current_default_id,
+            )
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id not in self.allowed_user_ids:
+            await interaction.response.send_message(
+                "This location selection isn't yours.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(
+        label="Cancel",
+        style=discord.ButtonStyle.secondary,
+        emoji="❌",
+        row=1,
+    )
+    async def cancel_button(self, interaction: discord.Interaction, button: Button):
+        self.cancelled = True
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content="Default location update cancelled.",
+            view=self,
+        )
+        self.stop()
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+
 class Battles(commands.Cog):
+    DRAGON_COIN_DROP_CHANCE_PERCENT = 10
+    DRAGON_COIN_DROP_MIN = 2
+    DRAGON_COIN_DROP_MAX = 5
+    MAW_DIVINE_CRATE_DROP_CHANCE = 0.01
+    PVE_LEVEL_BRACKET_SIZE = 10
+    PVE_MAX_TIER = 10
+    PVE_GOD_TIER = 11
+    PVE_GOD_ENCOUNTER_LEVEL = 100
+    PVE_PER_LEVEL_STAT_SCALE = Decimal("0.02")
+    PVE_LEGENDARY_SPAWN_CHANCE = 0.01
+    PVE_SPLICE_SAMPLE_PER_GENERATION = 75
+    PVE_SPLICE_GENERATIONS = (0,)
+    PVE_SPLICE_EXCLUDED_NAME_MARKERS = ("[FINAL]",)
+    JURY_RESET_FRAGMENT_REQUIREMENT = 3
+    JURY_MAX_APPEALS = 4
+    JURY_SHOP_RESET_POTION_COST = 3200
+    JURY_SHOP_RESET_POTION_LIMIT = 1
+    JURY_SHOP_RESET_FRAGMENT_COST = 1000
+    JURY_SHOP_RESET_FRAGMENT_LIMIT = 1
+    JURY_SHOP_APPEAL_COST = 650
+    JURY_SHOP_APPEAL_LIMIT = 1
+    JURY_SHOP_FORTUNE_CRATE_COST = 1800
+    JURY_SHOP_FORTUNE_CRATE_LIMIT = 1
+    JURY_SHOP_WEAPON_SCROLL_COST = 2400
+    JURY_SHOP_WEAPON_SCROLL_LIMIT = 1
+    JURY_SHOP_COSMETIC_TITLE_COST = 5000
+    OMNITHRONE_SANCTUM_LOCATION_ID = "omnithrone_sanctum"
+    OMNITHRONE_SEARCH_DELAY_RANGE = (7, 12)
+    OMNITHRONE_FOUND_DELAY_SECONDS = 6
+    OMNITHRONE_CINEMATIC_CACHE_DIR = os.path.join(
+        "assets", "other", "omnithrone_cinematic"
+    )
+    OMNITHRONE_CINEMATIC_SCENES = (
+        {
+            "title": "Omnithrone Sanctum: The Descent",
+            "description": (
+                "The vault ceiling fractures into a blinding rift as the end-world "
+                "wyrm descends into the sanctum."
+            ),
+            "cache_filename": "omnithrone_scene_1_descent.png",
+            "color": 0x4B4F66,
+            "delay": 3.5,
+        },
+        {
+            "title": "Omnithrone Sanctum: Confrontation",
+            "description": (
+                "You step forward and meet the God of Gods in silence. The throne "
+                "realm trembles as both sides prepare to strike."
+            ),
+            "cache_filename": "omnithrone_scene_2_confrontation.png",
+            "color": 0x7A1E1E,
+            "delay": 3.5,
+        },
+        {
+            "title": "Omnithrone Sanctum: The First Roar",
+            "description": (
+                "A beam of pure annihilation erupts from its maw. You raise your "
+                "shield and hold the line as the sanctum floor splits beneath you."
+            ),
+            "cache_filename": "omnithrone_scene_3_first_roar.png",
+            "color": 0xCC5C12,
+            "delay": 4.0,
+        },
+        {
+            "title": "Omnithrone Sanctum: Oath of the Three",
+            "description": (
+                "The spirits of Elysia, Sepulchure, and Drakath stand beside you. "
+                "Their power converges against the God of Gods."
+            ),
+            "cache_filename": "omnithrone_scene_4_oath_of_three.png",
+            "color": 0xBFA24A,
+            "delay": 4.0,
+        },
+    )
+    PVE_LOCATIONS = (
+        {
+            "id": "verdant_outskirts",
+            "name": "Verdant Outskirts",
+            "unlock_level": 1,
+            "god_chance": 0,
+            "tier_weights": {1: 65, 2: 30, 3: 5},
+        },
+        {
+            "id": "whisperwood",
+            "name": "Whisperwood",
+            "unlock_level": 10,
+            "god_chance": 0,
+            "tier_weights": {2: 55, 3: 35, 4: 10},
+        },
+        {
+            "id": "ashfall_crags",
+            "name": "Ashfall Crags",
+            "unlock_level": 20,
+            "god_chance": 0,
+            "tier_weights": {3: 50, 4: 35, 5: 15},
+        },
+        {
+            "id": "sunken_ruins",
+            "name": "Sunken Ruins",
+            "unlock_level": 30,
+            "god_chance": 0,
+            "tier_weights": {4: 45, 5: 35, 6: 20},
+        },
+        {
+            "id": "stormfront_ridge",
+            "name": "Stormfront Ridge",
+            "unlock_level": 40,
+            "god_chance": 0,
+            "tier_weights": {5: 40, 6: 35, 7: 25},
+        },
+        {
+            "id": "blightfen",
+            "name": "Blightfen",
+            "unlock_level": 50,
+            "god_chance": 1,
+            "tier_weights": {6: 43, 7: 35, 8: 20, 10: 2},
+        },
+        {
+            "id": "crystal_expanse",
+            "name": "Crystal Expanse",
+            "unlock_level": 60,
+            "god_chance": 2,
+            "tier_weights": {7: 42, 8: 32, 9: 18, 10: 8},
+        },
+        {
+            "id": "voidscar_wastes",
+            "name": "Voidscar Wastes",
+            "unlock_level": 70,
+            "god_chance": 4,
+            "tier_weights": {8: 40, 9: 42, 10: 18},
+        },
+        {
+            "id": "pantheon_approach",
+            "name": "Pantheon Approach",
+            "unlock_level": 80,
+            "god_chance": 10,
+            "tier_weights": {8: 30, 9: 31, 10: 39},
+        },
+        {
+            "id": "apex_of_ascension",
+            "name": "Apex of Ascension",
+            "unlock_level": 95,
+            "god_chance": 25,
+            "tier_weights": {9: 30, 10: 70},
+        },
+        {
+            "id": "omnithrone_sanctum",
+            "name": "Omnithrone Sanctum",
+            "unlock_level": 100,
+            "god_chance": 0,
+            "tier_weights": {12: 100},
+            "campaign_only": True,
+        },
+    )
+    GOD_SHARD_ALIGNMENT_EMOJIS = {
+        "Chaos": "<:ChaosShard:1472140674215444521>",
+        "Evil": "<:EvilShard:1472140682759110716>",
+        "Good": "<:GoodShard:1472140691667816479>",
+    }
+    GOD_SHARD_CANONICAL_NAMES = {
+        "Astraea": "Elysia",
+        "Asterea": "Elysia",
+    }
+    GOD_SHARD_DROP_RATES = (0.15, 0.40, 0.10, 0.15, 0.10, 0.10)
+    GOD_SHARD_DEFINITIONS = {
+        "Elysia": {
+            "alignment": "Good",
+            "shards": [
+                "Dawnheart Shard",
+                "Mercy Prism Shard",
+                "Sunveil Shard",
+                "Lifebloom Shard",
+                "Aegis Grace Shard",
+                "Seraphic Echo Shard",
+            ],
+        },
+        "Sepulchure": {
+            "alignment": "Evil",
+            "shards": [
+                "Deathmark Shard",
+                "Gravebone Shard",
+                "Nightveil Shard",
+                "Bloodcurse Shard",
+                "Ruin Sigil Shard",
+                "Voidmourne Shard",
+            ],
+        },
+        "Drakath": {
+            "alignment": "Chaos",
+            "shards": [
+                "Entropy Shard",
+                "Wildspark Shard",
+                "Riftlash Shard",
+                "Discord Shard",
+                "Paradox Shard",
+                "Tempest Fracture Shard",
+            ],
+        },
+    }
+    BATTLE_TOWER_THUMBNAIL_TOKENS = {
+        "GOD_ELYSIA": "https://pub-0e7afc36364b4d5dbd1fd2bea161e4d1.r2.dev/295173706496475136_Elysia_BT12.png",
+        "GOD_SEPULCHURE": "https://pub-0e7afc36364b4d5dbd1fd2bea161e4d1.r2.dev/295173706496475136_Sep_BT12.png",
+        "GOD_DRAKATH": "https://pub-0e7afc36364b4d5dbd1fd2bea161e4d1.r2.dev/295173706496475136_Drakath_BT12.png",
+        # Fallback narrator icon for system/voice lines.
+        "SYSTEM": "https://i.ibb.co/CWTp4xf/download.jpg",
+    }
+    DEFAULT_DIALOGUE_AVATAR = "https://ia803204.us.archive.org/4/items/discordprofilepictures/discordblue.png"
+    TOWER_KEY_FLOOR_BITS = {22: 1, 23: 2, 25: 4}
+    TOWER_KEY_DROP_CHANCE = 0.55
+    TOWER_FREEDOM_MILESTONE_GAINS = {10: 1, 20: 1, 25: 1}
+    TOWER_FREEDOM_FINALE_MISS_GAIN = 2
+    TOWER_FREEDOM_UNLOCK_THRESHOLD = 6
+
     def __init__(self, bot):
         self.bot = bot
+        ids_section = getattr(self.bot.config, "ids", None)
+        battles_ids = getattr(ids_section, "battles", {}) if ids_section else {}
+        if not isinstance(battles_ids, dict):
+            battles_ids = {}
+        self.macro_alert_user_id = battles_ids.get("macro_alert_user_id")
+        self.debug_user_id = battles_ids.get("debug_user_id")
         self.forceleg = False
         self.battle_factory = BattleFactory(bot)
+        # A player can participate in more than one battle when a mode allows it.
+        # Values are battle-scoped registration keys so one battle's cleanup does
+        # not erase another battle's active state.
         self.fighting_players = {}
+        
+        self.dragon_party_views = []  # Track active dragon party views
+        self.battle_settings = BattleSettings(bot)
+        self.active_battles = {}
+        self.settings = BattleSettings(bot)
+        self.currently_in_fight = set()
+        
+        # Macro detection storage
+        self.pve_macro_detection = {}  # {user_id: {"count": int, "timestamp": float}}
+
+        # Frontier locations are a standalone PvE content layer.  A malformed
+        # checked-in roster disables only these locations rather than preventing
+        # the rest of Battles from loading.
+        self.frontier_config = None
+        self.PVE_LOCATIONS = tuple(type(self).PVE_LOCATIONS)
+        try:
+            self.frontier_config = load_frontier_config()
+            self.PVE_LOCATIONS += build_frontier_locations(self.frontier_config)
+        except FrontierConfigError as exc:
+            logger.error("Soulforge Frontiers disabled: %s", exc)
+        
+        self.load_data_files()
 
         # Element mappings
         self.emoji_to_element = {
@@ -415,27 +1697,463 @@ class Battles(commands.Cog):
             "<:f_light:1170191258795376771>": "Light",
             "<:f_dark:1170191180164771920>": "Dark",
             "<:f_wind:1170191149802213526>": "Wind",
-            "<:f_nature:1170191288361033806>": "Nature",
-            "<:f_fire:1170192046632468564>": "Fire"
+            "<:f_nature:1532063420315074742>": "Nature",
+            "<:f_fire:1170192046632468564>": "Fire",
+            "<:f_earth:1170191288361033806>": "Earth",
         }
 
         # Load data files
         self.load_data_files()
+        
+        # Initialize database tables
+        asyncio.create_task(self.initialize_tables())
+    
+    async def initialize_tables(self):
+        """Initialize database tables for battles"""
+        async with self.bot.pool.acquire() as conn:
+            # Create couples battle tower table if it doesn't exist
+            
+            # Create battletower table if it doesn't exist (for regular battle tower)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS battletower (
+                    id BIGINT PRIMARY KEY,
+                    level INTEGER DEFAULT 1,
+                    prestige INTEGER DEFAULT 0,
+                    dialoguetoggle BOOLEAN DEFAULT FALSE
+                )
+            """)
+            await conn.execute(
+                "ALTER TABLE battletower ADD COLUMN IF NOT EXISTS run_key_bits INTEGER NOT NULL DEFAULT 0;"
+            )
+            await conn.execute(
+                "ALTER TABLE battletower ADD COLUMN IF NOT EXISTS freedom_meter INTEGER NOT NULL DEFAULT 0;"
+            )
+            await conn.execute(
+                "ALTER TABLE battletower ADD COLUMN IF NOT EXISTS last_ending_key TEXT NOT NULL DEFAULT '';"
+            )
+            await conn.execute(
+                "ALTER TABLE battletower ADD COLUMN IF NOT EXISTS last_ending_at TIMESTAMPTZ;"
+            )
+            await conn.execute(
+                "ALTER TABLE battletower ADD COLUMN IF NOT EXISTS ironman_level INTEGER NOT NULL DEFAULT 0;"
+            )
+            await conn.execute(
+                "ALTER TABLE battletower ADD COLUMN IF NOT EXISTS ironman_best INTEGER NOT NULL DEFAULT 0;"
+            )
+            await conn.execute(
+                "ALTER TABLE battletower ADD COLUMN IF NOT EXISTS ironman_prestige INTEGER NOT NULL DEFAULT 0;"
+            )
+            await conn.execute(
+                "ALTER TABLE battletower ADD COLUMN IF NOT EXISTS bossrush_prestige INTEGER NOT NULL DEFAULT 0;"
+            )
+            # Floor ghosts: community stats shown when entering a tower floor
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS tower_floor_stats (
+                    floor INTEGER PRIMARY KEY,
+                    clears BIGINT NOT NULL DEFAULT 0,
+                    deaths BIGINT NOT NULL DEFAULT 0,
+                    best_seconds INTEGER,
+                    best_holder BIGINT
+                )
+            """)
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS jurytower (
+                    id BIGINT PRIMARY KEY,
+                    level INTEGER NOT NULL DEFAULT 1,
+                    checkpoint INTEGER NOT NULL DEFAULT 1,
+                    cycles INTEGER NOT NULL DEFAULT 0,
+                    prestige INTEGER NOT NULL DEFAULT 0,
+                    seals INTEGER NOT NULL DEFAULT 0,
+                    favor INTEGER NOT NULL DEFAULT 0,
+                    contempt INTEGER NOT NULL DEFAULT 0,
+                    writs INTEGER NOT NULL DEFAULT 0,
+                    appeals INTEGER NOT NULL DEFAULT 2
+                )
+                """
+            )
+            await conn.execute(
+                "ALTER TABLE jurytower ADD COLUMN IF NOT EXISTS segment_favor INTEGER NOT NULL DEFAULT 0;"
+            )
+            await conn.execute(
+                "ALTER TABLE jurytower ADD COLUMN IF NOT EXISTS segment_contempt INTEGER NOT NULL DEFAULT 0;"
+            )
+            await conn.execute(
+                "ALTER TABLE jurytower ADD COLUMN IF NOT EXISTS scale_attack_base INTEGER NOT NULL DEFAULT 0;"
+            )
+            await conn.execute(
+                "ALTER TABLE jurytower ADD COLUMN IF NOT EXISTS scale_hp_base INTEGER NOT NULL DEFAULT 0;"
+            )
+            await conn.execute(
+                "ALTER TABLE jurytower ADD COLUMN IF NOT EXISTS scale_defense_base INTEGER NOT NULL DEFAULT 0;"
+            )
+            await conn.execute(
+                "ALTER TABLE jurytower ADD COLUMN IF NOT EXISTS scale_power_score INTEGER NOT NULL DEFAULT 0;"
+            )
+            await conn.execute(
+                "ALTER TABLE jurytower ADD COLUMN IF NOT EXISTS scale_bracket TEXT NOT NULL DEFAULT '';"
+            )
+            await conn.execute(
+                "ALTER TABLE jurytower ADD COLUMN IF NOT EXISTS shop_reset_purchases INTEGER NOT NULL DEFAULT 0;"
+            )
+            await conn.execute(
+                "ALTER TABLE jurytower ADD COLUMN IF NOT EXISTS shop_reset_fragment_purchases INTEGER NOT NULL DEFAULT 0;"
+            )
+            await conn.execute(
+                "ALTER TABLE jurytower ADD COLUMN IF NOT EXISTS shop_appeal_purchases INTEGER NOT NULL DEFAULT 0;"
+            )
+            await conn.execute(
+                "ALTER TABLE jurytower ADD COLUMN IF NOT EXISTS shop_fortune_crate_purchases INTEGER NOT NULL DEFAULT 0;"
+            )
+            await conn.execute(
+                "ALTER TABLE jurytower ADD COLUMN IF NOT EXISTS shop_weapon_scroll_purchases INTEGER NOT NULL DEFAULT 0;"
+            )
+            await conn.execute(
+                "ALTER TABLE jurytower ADD COLUMN IF NOT EXISTS shop_title_unlocked BOOLEAN NOT NULL DEFAULT FALSE;"
+            )
+            await conn.execute(
+                "ALTER TABLE jurytower ADD COLUMN IF NOT EXISTS prestige INTEGER NOT NULL DEFAULT 0;"
+            )
+            await conn.execute(
+                'ALTER TABLE IF EXISTS profile ADD COLUMN IF NOT EXISTS resetfragments INTEGER NOT NULL DEFAULT 0;'
+            )
+
+            # Ice Dragon tables
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ice_dragon_abilities (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    ability_type TEXT NOT NULL,
+                    description TEXT,
+                    dmg INTEGER,
+                    effect TEXT,
+                    chance DOUBLE PRECISION,
+                    UNIQUE (name, ability_type)
+                );
+                """
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ice_dragon_stages (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    min_level INTEGER NOT NULL,
+                    max_level INTEGER NOT NULL,
+                    base_multiplier DOUBLE PRECISION NOT NULL,
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    element TEXT NOT NULL DEFAULT 'Water',
+                    move_names TEXT[] NOT NULL DEFAULT '{}',
+                    passive_names TEXT[] NOT NULL DEFAULT '{}'
+                );
+                """
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ice_dragon_drops (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    item_type TEXT NOT NULL,
+                    min_stat INTEGER NOT NULL,
+                    max_stat INTEGER NOT NULL,
+                    base_chance DOUBLE PRECISION NOT NULL,
+                    max_chance DOUBLE PRECISION NOT NULL,
+                    is_global BOOLEAN NOT NULL DEFAULT TRUE,
+                    dragon_stage_id INTEGER,
+                    element TEXT NOT NULL DEFAULT 'Water',
+                    min_level INTEGER,
+                    max_level INTEGER
+                );
+                """
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dragon_records (
+                    id INTEGER PRIMARY KEY,
+                    record_level INTEGER NOT NULL DEFAULT 0,
+                    record_holder BIGINT,
+                    achieved_at TIMESTAMP
+                );
+                """
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ice_dragon_presets (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ice_dragon_preset_stages (
+                    preset_id INTEGER NOT NULL REFERENCES ice_dragon_presets(id) ON DELETE CASCADE,
+                    stage_id INTEGER NOT NULL REFERENCES ice_dragon_stages(id) ON DELETE CASCADE,
+                    UNIQUE (preset_id, stage_id)
+                );
+                """
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dragon_damage_leaderboard (
+                    user_id BIGINT PRIMARY KEY,
+                    total_damage NUMERIC(20,2) NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+            await conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_dragon_damage_leaderboard_total_damage
+                ON dragon_damage_leaderboard(total_damage DESC);
+                """
+            )
+            await conn.execute("ALTER TABLE ice_dragon_stages ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT TRUE;")
+            await conn.execute("ALTER TABLE ice_dragon_drops ADD COLUMN IF NOT EXISTS is_global BOOLEAN NOT NULL DEFAULT TRUE;")
+            await conn.execute("ALTER TABLE ice_dragon_drops ADD COLUMN IF NOT EXISTS dragon_stage_id INTEGER;")
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS god_pve_shards (
+                    user_id BIGINT NOT NULL,
+                    god_name TEXT NOT NULL,
+                    alignment TEXT NOT NULL,
+                    shard_number SMALLINT NOT NULL CHECK (shard_number BETWEEN 1 AND 6),
+                    shard_name TEXT NOT NULL,
+                    obtained_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (user_id, god_name, shard_number)
+                );
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_god_pve_shards_user_id ON god_pve_shards(user_id);"
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS god_pet_ownership_locks (
+                    user_id BIGINT NOT NULL,
+                    god_name TEXT NOT NULL,
+                    source_pet_id BIGINT,
+                    first_locked_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (user_id, god_name)
+                );
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_god_pet_ownership_locks_user_id ON god_pet_ownership_locks(user_id);"
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS godofgods (
+                    id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+                    name TEXT NOT NULL,
+                    hp INTEGER NOT NULL CHECK (hp > 0),
+                    attack INTEGER NOT NULL CHECK (attack > 0),
+                    defense INTEGER NOT NULL CHECK (defense > 0),
+                    element TEXT NOT NULL,
+                    image_url TEXT NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+            await ensure_omnithrone_schema(conn)
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pve_preferences (
+                    user_id BIGINT PRIMARY KEY,
+                    include_splice BOOLEAN NOT NULL DEFAULT FALSE,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+            await conn.execute(
+                "ALTER TABLE pve_preferences ADD COLUMN IF NOT EXISTS default_location_id TEXT;"
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS battle_preferences (
+                    user_id BIGINT PRIMARY KEY,
+                    emoji_hp_bars BOOLEAN NOT NULL DEFAULT FALSE,
+                    hp_bar_style TEXT DEFAULT 'normal',
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+            await conn.execute(
+                "ALTER TABLE battle_preferences ALTER COLUMN emoji_hp_bars SET DEFAULT FALSE;"
+            )
+            await conn.execute(
+                "ALTER TABLE battle_preferences ADD COLUMN IF NOT EXISTS hp_bar_style TEXT;"
+            )
+            await conn.execute(
+                """
+                UPDATE battle_preferences
+                SET hp_bar_style = CASE
+                    WHEN COALESCE(emoji_hp_bars, TRUE) THEN 'colorful'
+                    ELSE 'normal'
+                END
+                WHERE hp_bar_style IS NULL OR TRIM(hp_bar_style) = '';
+                """
+            )
+            await conn.execute(
+                "ALTER TABLE battle_preferences ALTER COLUMN hp_bar_style SET DEFAULT 'normal';"
+            )
+            monster_pets_exists = await conn.fetchval(
+                "SELECT to_regclass('public.monster_pets') IS NOT NULL;"
+            )
+            if monster_pets_exists:
+                await conn.execute(
+                    "DROP TRIGGER IF EXISTS trg_track_god_pet_ownership_lock ON monster_pets;"
+                )
+            await conn.execute("DROP FUNCTION IF EXISTS track_god_pet_ownership_lock();")
+
+            ability_seed = [
+                    ("Ice Breath", "move", "Effect: freeze. Damage: 600. Chance: 30%", 600, "freeze", 0.3),
+                    ("Tail Sweep", "move", "Effect: aoe. Damage: 400. Chance: 40%", 400, "aoe", 0.4),
+                    ("Frost Bite", "move", "Effect: dot. Damage: 300. Chance: 30%", 300, "dot", 0.3),
+                    ("Frosty Ice Burst", "move", "Effect: random_debuff. Damage: 800. Chance: 30%", 800, "random_debuff", 0.3),
+                    ("Minion Army", "move", "Effect: summon_adds. Damage: 200. Chance: 30%", 200, "summon_adds", 0.3),
+                    ("Frost Spears", "move", "Effect: dot. Damage: 500. Chance: 40%", 500, "dot", 0.4),
+                    ("Soul Reaver", "move", "Effect: stun. Damage: 1000. Chance: 30%", 1000, "stun", 0.3),
+                    ("Death Note", "move", "Effect: curse. Damage: 700. Chance: 30%", 700, "curse", 0.3),
+                    ("Dark Shadows", "move", "Effect: aoe_dot. Damage: 900. Chance: 40%", 900, "aoe_dot", 0.4),
+                    ("Void Blast", "move", "Effect: aoe_stun. Damage: 1200. Chance: 30%", 1200, "aoe_stun", 0.3),
+                    ("Soul Crusher", "move", "Effect: death_mark. Damage: 1000. Chance: 30%", 1000, "death_mark", 0.3),
+                    ("Armageddon", "move", "Effect: global_dot. Damage: 800. Chance: 40%", 800, "global_dot", 0.4),
+                    ("Reality Shatter", "move", "Effect: dimension_tear. Damage: 1500. Chance: 30%", 1500, "dimension_tear", 0.3),
+                    ("Soul Harvest", "move", "Effect: soul_drain. Damage: 1200. Chance: 30%", 1200, "soul_drain", 0.3),
+                    ("Void Storm", "move", "Effect: void_explosion. Damage: 1000. Chance: 40%", 1000, "void_explosion", 0.4),
+                    ("Time Freeze", "move", "Effect: time_stop. Damage: 2000. Chance: 30%", 2000, "time_stop", 0.3),
+                    ("Eternal Damnation", "move", "Effect: eternal_curse. Damage: 1500. Chance: 30%", 1500, "eternal_curse", 0.3),
+                    ("Apocalypse", "move", "Effect: world_ender. Damage: 1200. Chance: 40%", 1200, "world_ender", 0.4),
+                    ("Abyssal Devour", "move", "Effect: execute. Damage: 1800. Chance: 25%", 1800, "execute", 0.25),
+                    ("Maw of the Void", "move", "Effect: aoe_dot. Damage: 1200. Chance: 35%", 1200, "aoe_dot", 0.35),
+                    ("Frozen Oblivion", "move", "Effect: freeze. Damage: 1400. Chance: 25%", 1400, "freeze", 0.25),
+                    ("Endless Hunger", "move", "Effect: steal_buffs. Damage: 900. Chance: 15%", 900, "steal_buffs", 0.15),
+                    ("Ice Armor", "passive", "Reduces all damage by 20%.", None, None, None),
+                    ("Corruption", "passive", "Reduces shields/armor by 20%.", None, None, None),
+                    ("Void Fear", "passive", "Reduces attack power by 20%.", None, None, None),
+                    ("Aspect of death", "passive", "Reduces attack and defense by 30%.", None, None, None),
+                    ("Void Corruption", "passive", "Reduces all stats by 25% and inflicts void damage.", None, None, None),
+                    ("Soul Devourer", "passive", "Steals 15% of damage dealt as health.", None, None, None),
+                    ("Eternal Winter", "passive", "Freezes all healing and reduces damage by 40%.", None, None, None),
+                    ("Death's Embrace", "passive", "10% chance to instantly kill on any hit.", None, None, None),
+                    ("Reality Bender", "passive", "Randomly negates 50% of attacks and reflects damage.", None, None, None),
+                    ("Abyssal Presence", "passive", "Reduces attack and defense by 35%.", None, None, None),
+                    ("Puppet Strings", "move", "Effect: possess_player. Damage: 400. Chance: 25%", 400, "possess_player", 0.25),
+                    ("Beastmind Override", "move", "Effect: possess_pet. Damage: 600. Chance: 20%", 600, "possess_pet", 0.2),
+                    ("Dominion of the Void", "move", "Effect: possess_player_and_pet_permanent. Damage: 1200. Chance: 10%", 1200, "possess_player_and_pet_permanent", 0.1),
+                    ("Fractured Will", "move", "Effect: shatter_armor. Damage: 650. Chance: 30%", 650, "shatter_armor", 0.3),
+                    ("Soul Tax", "move", "Effect: drain_max_hp. Damage: 250. Chance: 30%", 250, "drain_max_hp", 0.3),
+                    ("Dread Inversion", "move", "Effect: invert_healing. Damage: 300. Chance: 30%", 300, "invert_healing", 0.3),
+                    ("Terror Link", "move", "Effect: damage_link. Damage: 500. Chance: 30%", 500, "damage_link", 0.3),
+                    ("Panic Cascade", "move", "Effect: turn_skip_chance. Damage: 300. Chance: 35%", 300, "turn_skip_chance", 0.35),
+                    ("Null Phase", "move", "Effect: true_damage_window. Damage: 500. Chance: 20%", 500, "true_damage_window", 0.2),
+                    ("Riftstep", "move", "Effect: extra_dragon_turn. Damage: 350. Chance: 25%", 350, "extra_dragon_turn", 0.25),
+                ]
+            await conn.executemany(
+                "INSERT INTO ice_dragon_abilities (name, ability_type, description, dmg, effect, chance) "
+                "VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (name, ability_type) DO NOTHING",
+                ability_seed,
+            )
+
+            stages_count = await conn.fetchval("SELECT COUNT(*) FROM ice_dragon_stages")
+            if stages_count == 0:
+                stage_seed = [
+                    ("Frostbite Wyrm", 1, 5, 1.0, "Water", ["Ice Breath", "Tail Sweep", "Frost Bite"], ["Ice Armor"]),
+                    ("Corrupted Ice Dragon", 6, 10, 1.15, "Water", ["Frosty Ice Burst", "Minion Army", "Frost Spears"], ["Corruption"]),
+                    ("Permafrost", 11, 15, 1.25, "Water", ["Soul Reaver", "Death Note", "Dark Shadows"], ["Void Fear"]),
+                    ("Absolute Zero", 16, 20, 1.5, "Water", ["Void Blast", "Soul Crusher", "Armageddon"], ["Aspect of death"]),
+                    ("Void Tyrant", 21, 34, 2.0, "Water", ["Reality Shatter", "Soul Harvest", "Void Storm"], ["Void Corruption", "Soul Devourer"]),
+                    ("The Abyssal Maw", 35, 9999, 2.2, "Water", ["Abyssal Devour", "Maw of the Void", "Frozen Oblivion", "Endless Hunger"], ["Abyssal Presence"]),
+                ]
+                await conn.executemany(
+                    "INSERT INTO ice_dragon_stages (name, min_level, max_level, base_multiplier, element, move_names, passive_names) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (name) DO NOTHING",
+                    stage_seed,
+                )
+
+            await conn.execute(
+                """
+                INSERT INTO ice_dragon_stages (
+                    name, min_level, max_level, base_multiplier, element, move_names, passive_names, enabled
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE)
+                ON CONFLICT (name) DO UPDATE SET
+                    min_level = EXCLUDED.min_level,
+                    max_level = EXCLUDED.max_level,
+                    base_multiplier = EXCLUDED.base_multiplier,
+                    element = EXCLUDED.element,
+                    move_names = EXCLUDED.move_names,
+                    passive_names = EXCLUDED.passive_names,
+                    enabled = TRUE;
+                """,
+                "The Abyssal Maw",
+                35,
+                9999,
+                2.2,
+                "Water",
+                ["Abyssal Devour", "Maw of the Void", "Frozen Oblivion", "Endless Hunger"],
+                ["Abyssal Presence"],
+            )
+
+            drops_count = await conn.fetchval("SELECT COUNT(*) FROM ice_dragon_drops")
+            if drops_count == 0:
+                drops_seed = [
+                    ("Frostbite Blade", "Sword", 20, 70, 0.001, 0.005, "Water"),
+                    ("Ice Shard Dagger", "Dagger", 20, 70, 0.001, 0.005, "Water"),
+                    ("Glacial Axe", "Axe", 20, 70, 0.001, 0.005, "Water"),
+                    ("Frozen Spear", "Spear", 20, 70, 0.001, 0.005, "Water"),
+                    ("Permafrost Hammer", "Hammer", 20, 70, 0.001, 0.005, "Water"),
+                    ("Crystal Wand", "Wand", 20, 70, 0.001, 0.005, "Water"),
+                    ("Arctic Shield", "Shield", 20, 70, 0.001, 0.005, "Water"),
+                    ("Dragon's Breath Bow", "Bow", 40, 150, 0.0005, 0.0025, "Water"),
+                    ("Frost Giant's Scythe", "Scythe", 40, 150, 0.0005, 0.0025, "Water"),
+                    ("Absolute Zero Mace", "Mace", 40, 150, 0.0005, 0.0025, "Water"),
+                ]
+                await conn.executemany(
+                    "INSERT INTO ice_dragon_drops (name, item_type, min_stat, max_stat, base_chance, max_chance, element) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (name) DO NOTHING",
+                    drops_seed,
+                )
 
     def load_data_files(self):
         """Load all necessary data files for battles"""
-        # Load battle tower data
-        with open(os.path.join(os.path.dirname(__file__), 'battle_tower_data.json'), 'r') as f:
-            self.battle_data = json.load(f)
+        battles_dir = os.path.dirname(__file__)
+
+        # Load battle tower data (base + optional remastered override)
+        with open(os.path.join(battles_dir, "battle_tower_data.json"), "r", encoding="utf-8") as f:
+            battle_data = json.load(f)
+
+        remastered_battle_path = os.path.join(battles_dir, "battle_tower_data_remastered.json")
+        if os.path.exists(remastered_battle_path):
+            with open(remastered_battle_path, "r", encoding="utf-8") as f:
+                remastered_battle_data = json.load(f)
+            for key, value in remastered_battle_data.items():
+                if key == "victories" and isinstance(value, dict):
+                    battle_data.setdefault("victories", {})
+                    battle_data["victories"].update(value)
+                else:
+                    battle_data[key] = value
+        self.battle_data = battle_data
 
         # Load game levels
-        with open(os.path.join(os.path.dirname(__file__), 'game_levels.json'), 'r') as f:
+        with open(os.path.join(battles_dir, 'game_levels.json'), 'r') as f:
             data = json.load(f)
             self.levels = data['levels']
 
-        # Load dialogue data
-        with open(os.path.join(os.path.dirname(__file__), 'battle_tower_dialogues.json'), 'r') as f:
-            self.dialogue_data = json.load(f)
+        # Load dialogue data (base + optional remastered override)
+        with open(os.path.join(battles_dir, "battle_tower_dialogues.json"), "r", encoding="utf-8") as f:
+            dialogue_data = json.load(f)
+
+        remastered_dialogue_path = os.path.join(battles_dir, "battle_tower_dialogues_remastered.json")
+        if os.path.exists(remastered_dialogue_path):
+            with open(remastered_dialogue_path, "r", encoding="utf-8") as f:
+                remastered_dialogue_data = json.load(f)
+            if isinstance(remastered_dialogue_data.get("dialogues"), dict):
+                dialogue_data.setdefault("dialogues", {})
+                dialogue_data["dialogues"].update(remastered_dialogue_data["dialogues"])
+        self.dialogue_data = dialogue_data
 
         # Load monsters if file exists
         try:
@@ -443,10 +2161,502 @@ class Battles(commands.Cog):
                 self.monsters_data = json.load(f)
         except FileNotFoundError:
             self.monsters_data = {}
-            
+
         # Initialize element extension
         from .extensions.elements import ElementExtension
         self.element_ext = ElementExtension()
+
+        # Load couples battle tower data
+        with open("cogs/battles/couples_battletower_data.json", "r") as f:
+            self.couples_battle_tower_data = json.load(f)
+        with open("cogs/battles/couples_game_levels.json", "r") as f:
+            self.couples_game_levels = json.load(f)
+        self.jury_tower_data = build_jury_tower_data()
+
+    def _canonical_god_shard_name(self, god_name: str) -> str:
+        return self.GOD_SHARD_CANONICAL_NAMES.get(god_name, god_name)
+    
+    def _is_god_shard_monster(self, monster) -> bool:
+        if not monster:
+            return False
+        monster_name = self._canonical_god_shard_name((monster.get("name") or "").strip())
+        return monster_name in self.GOD_SHARD_DEFINITIONS
+
+    def _tower_required_key_mask(self) -> int:
+        mask = 0
+        for bit in self.TOWER_KEY_FLOOR_BITS.values():
+            mask |= bit
+        return mask
+
+    def _tower_key_count(self, run_key_bits: int) -> int:
+        return sum(
+            1 for bit in self.TOWER_KEY_FLOOR_BITS.values() if (int(run_key_bits) & int(bit))
+        )
+
+    def _tower_key_label_for_floor(self, level: int) -> str:
+        return {
+            22: "First Key",
+            23: "Second Key",
+            25: "Third Key",
+        }.get(level, "Tower Key")
+
+    def _tower_door_label(self, door_key: str) -> str:
+        return {
+            "door_1_elysia": "Door 1 - Elysia",
+            "door_2_sepulchure": "Door 2 - Sepulchure",
+            "door_3_drakath": "Door 3 - Drakath",
+            "door_4_freedom": "Door 4 - Hidden Freedom Door",
+        }.get(door_key, door_key.replace("_", " ").title())
+
+    async def _aiplayer_prompt_choice(
+        self,
+        ctx,
+        *,
+        event: dict,
+        choices: list[str],
+        timeout: float = 45,
+    ) -> tuple[bool, str | None]:
+        """Resolve a Densetsu prompt through the JSON bridge when it is active."""
+        ai_cog = self.bot.get_cog("AIPlayer")
+        if ai_cog is None or not await ai_cog.is_active_for(ctx.author.id):
+            return False, None
+        event = dict(event)
+        event["allowed_actions"] = [
+            {"name": choice, "description": f"Choose {choice}."}
+            for choice in choices
+        ]
+        decision = await ai_cog.choose_interaction(
+            user_id=ctx.author.id,
+            event=event,
+            public_channel=ctx.channel,
+            timeout=timeout,
+        )
+        if decision is None or decision.action not in choices:
+            return True, None
+        return True, decision.action
+
+    async def _update_tower_run_progress(self, ctx, level: int):
+        freedom_gain = int(self.TOWER_FREEDOM_MILESTONE_GAINS.get(level, 0) or 0)
+        has_key_roll = level in self.TOWER_KEY_FLOOR_BITS
+        if not freedom_gain and not has_key_roll:
+            return
+
+        async with self.bot.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT COALESCE(run_key_bits, 0) AS run_key_bits, COALESCE(freedom_meter, 0) AS freedom_meter
+                FROM battletower
+                WHERE id = $1
+                """,
+                ctx.author.id,
+            )
+            if not row:
+                return
+
+            old_bits = int(row["run_key_bits"] or 0)
+            new_bits = old_bits
+            old_meter = int(row["freedom_meter"] or 0)
+            new_meter = old_meter + freedom_gain
+            key_message = None
+
+            if has_key_roll:
+                bit = int(self.TOWER_KEY_FLOOR_BITS[level])
+                key_label = self._tower_key_label_for_floor(level)
+                if old_bits & bit:
+                    key_message = f"🔑 **{key_label}** is already resonating for this run."
+                elif random.random() < self.TOWER_KEY_DROP_CHANCE:
+                    new_bits = old_bits | bit
+                    key_message = (
+                        f"🔑 **{key_label}** resonates with your soul. "
+                        f"Keys this run: **{self._tower_key_count(new_bits)}/3**."
+                    )
+                else:
+                    key_message = (
+                        f"🗝️ **{key_label}** slips away this cycle. "
+                        f"Keys this run: **{self._tower_key_count(new_bits)}/3**."
+                    )
+
+            if new_bits != old_bits or freedom_gain:
+                await conn.execute(
+                    """
+                    UPDATE battletower
+                    SET run_key_bits = $1,
+                        freedom_meter = GREATEST(0, COALESCE(freedom_meter, 0) + $2)
+                    WHERE id = $3
+                    """,
+                    new_bits,
+                    freedom_gain,
+                    ctx.author.id,
+                )
+
+        if freedom_gain:
+            shown_meter = min(new_meter, self.TOWER_FREEDOM_UNLOCK_THRESHOLD)
+            await ctx.send(
+                f"🧭 Hidden Door resonance +{freedom_gain} "
+                f"(**{shown_meter}/{self.TOWER_FREEDOM_UNLOCK_THRESHOLD}**)."
+            )
+        if key_message:
+            await ctx.send(key_message)
+
+    async def _get_tower_unlock_state(self, user_id: int) -> dict:
+        async with self.bot.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT COALESCE(run_key_bits, 0) AS run_key_bits, COALESCE(freedom_meter, 0) AS freedom_meter
+                FROM battletower
+                WHERE id = $1
+                """,
+                user_id,
+            )
+
+        run_key_bits = int(row["run_key_bits"]) if row else 0
+        freedom_meter = int(row["freedom_meter"]) if row else 0
+        key_count = self._tower_key_count(run_key_bits)
+        full_key_unlock = (run_key_bits & self._tower_required_key_mask()) == self._tower_required_key_mask()
+        meter_unlock = freedom_meter >= self.TOWER_FREEDOM_UNLOCK_THRESHOLD
+        door4_unlocked = full_key_unlock or meter_unlock
+
+        return {
+            "run_key_bits": run_key_bits,
+            "freedom_meter": freedom_meter,
+            "key_count": key_count,
+            "full_key_unlock": full_key_unlock,
+            "meter_unlock": meter_unlock,
+            "door4_unlocked": door4_unlocked,
+        }
+
+    async def _prompt_finale_door_choice(self, ctx, available_door_keys, endings):
+        entries = []
+        choices = []
+
+        for door_key in available_door_keys:
+            ending = endings.get(door_key)
+            if not ending:
+                continue
+            label = self._tower_door_label(door_key)
+            title = ending.get("title", "Unknown Ending")
+            entries.append(f"**{label}**\n{title}")
+            choices.append(label)
+
+        if not entries:
+            return None
+
+        controlled, ai_choice = await self._aiplayer_prompt_choice(
+            ctx,
+            event={
+                "event": "battletower_finale_door_choice",
+                "doors": [
+                    {
+                        "action": door_key,
+                        "label": self._tower_door_label(door_key),
+                        "title": str(endings[door_key].get("title", "Unknown Ending")),
+                        "description": str(endings[door_key].get("description", "")),
+                        "doubles_finale_reward": door_key == "door_4_freedom",
+                    }
+                    for door_key in available_door_keys
+                    if door_key in endings
+                ],
+            },
+            choices=list(available_door_keys),
+        )
+        if controlled:
+            if ai_choice:
+                return ai_choice
+            chosen = random.choice(available_door_keys)
+            await ctx.send(
+                f"Densetsu did not decide in time. The tower chooses: "
+                f"**{self._tower_door_label(chosen)}**."
+            )
+            return chosen
+
+        try:
+            selected_idx = await self.bot.paginator.Choose(
+                title="Choose Your Door",
+                placeholder="Pick one door",
+                entries=entries,
+                choices=choices,
+                return_index=True,
+                timeout=60,
+            ).paginate(ctx)
+            return available_door_keys[int(selected_idx)]
+        except self.bot.paginator.NoChoice:
+            chosen = random.choice(available_door_keys)
+            await ctx.send(
+                f"You hesitated too long. The tower chooses for you: **{self._tower_door_label(chosen)}**."
+            )
+            return chosen
+        except Exception:
+            return random.choice(available_door_keys)
+
+    async def handle_god_shard_drop(self, ctx, monster):
+        """Roll and award up to 6 unique god shards on god PvE victories."""
+        monster_name_raw = (monster.get("name") or "").strip()
+        monster_name = self._canonical_god_shard_name(monster_name_raw)
+        definition = self.GOD_SHARD_DEFINITIONS.get(monster_name)
+        if not definition:
+            return
+
+        alignment = definition["alignment"]
+        shard_names = definition["shards"]
+        dropped_shards = []
+
+        async with self.bot.pool.acquire() as conn:
+            has_god_pet_ownership_lock = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM god_pet_ownership_locks
+                    WHERE user_id = $1
+                      AND god_name = $2
+                )
+                """,
+                ctx.author.id,
+                monster_name,
+            )
+            if has_god_pet_ownership_lock:
+                return
+
+            owned_rows = await conn.fetch(
+                """
+                SELECT shard_number
+                FROM god_pve_shards
+                WHERE user_id = $1 AND god_name = $2
+                """,
+                ctx.author.id,
+                monster_name,
+            )
+            owned_numbers = {row["shard_number"] for row in owned_rows}
+
+            for idx, (shard_name, drop_rate) in enumerate(
+                zip(shard_names, self.GOD_SHARD_DROP_RATES), start=1
+            ):
+                if idx in owned_numbers:
+                    continue
+                if random.random() >= drop_rate:
+                    continue
+
+                inserted = await conn.fetchrow(
+                    """
+                    INSERT INTO god_pve_shards (
+                        user_id, god_name, alignment, shard_number, shard_name
+                    )
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (user_id, god_name, shard_number) DO NOTHING
+                    RETURNING shard_number, shard_name
+                    """,
+                    ctx.author.id,
+                    monster_name,
+                    alignment,
+                    idx,
+                    shard_name,
+                )
+                if inserted:
+                    dropped_shards.append(inserted)
+
+        if dropped_shards:
+            dropped_shards.sort(key=lambda s: s["shard_number"])
+            lines = [
+                f"**Shard {row['shard_number']}**: {row['shard_name']}"
+                for row in dropped_shards
+            ]
+            alignment_emoji = self.GOD_SHARD_ALIGNMENT_EMOJIS.get(alignment, "🧩")
+            await ctx.send(
+                f"{alignment_emoji} **{monster_name} ({alignment}) Shards Obtained**\n"
+                + "\n".join(lines)
+                + "\nUse `$inventory` to view your collected shards."
+            )
+
+    async def _backfill_god_pet_ownership_locks(self, conn) -> int:
+        monster_pets_exists = await conn.fetchval(
+            "SELECT to_regclass('public.monster_pets') IS NOT NULL;"
+        )
+        if not monster_pets_exists:
+            return 0
+
+        inserted_count = await conn.fetchval(
+            """
+            WITH lock_candidates AS (
+                SELECT
+                    id,
+                    user_id,
+                    growth_stage,
+                    hp,
+                    COALESCE(NULLIF(BTRIM(default_name), ''), NULLIF(BTRIM(name), '')) AS raw_name
+                FROM monster_pets
+            ),
+            canonical_candidates AS (
+                SELECT
+                    user_id,
+                    id AS source_pet_id,
+                    CASE
+                        WHEN raw_name IN ('Astraea', 'Asterea') THEN 'Elysia'
+                        ELSE raw_name
+                    END AS god_name
+                FROM lock_candidates
+                WHERE user_id > 0
+                  AND growth_stage = 'adult'
+                  AND COALESCE(hp, 0) > 10000
+                  AND raw_name IS NOT NULL
+            ),
+            ins AS (
+                INSERT INTO god_pet_ownership_locks (user_id, god_name, source_pet_id)
+                SELECT user_id, god_name, source_pet_id
+                FROM canonical_candidates
+                WHERE god_name IN ('Elysia', 'Sepulchure', 'Drakath')
+                ON CONFLICT (user_id, god_name) DO NOTHING
+                RETURNING 1
+            )
+            SELECT COUNT(*) FROM ins;
+            """
+        )
+        return int(inserted_count or 0)
+
+    @commands.command(hidden=True, name="lockexistinggodpets")
+    @is_gm()
+    async def lockexistinggodpets(self, ctx):
+        """One-time backfill: lock current qualifying god pet owners."""
+        if ctx.author.id != 295173706496475136:
+            return await ctx.send("You are not allowed to run this command.")
+
+        async with self.bot.pool.acquire() as conn:
+            lock_table_exists = await conn.fetchval(
+                "SELECT to_regclass('public.god_pet_ownership_locks') IS NOT NULL;"
+            )
+            if not lock_table_exists:
+                return await ctx.send(
+                    "❌ `god_pet_ownership_locks` does not exist yet. Reload `cogs.battles` first."
+                )
+
+            inserted = await self._backfill_god_pet_ownership_locks(conn)
+
+        await ctx.send(
+            f"✅ Added **{inserted}** ownership lock record(s). "
+            "This command is safe to run again; duplicates are ignored."
+        )
+
+    @commands.command(name="godlocks", aliases=["godlock"])
+    @user_cooldown(10)
+    async def godlocks(self, ctx):
+        """View your own shard/god lock status."""
+        target_user = ctx.author
+
+        async with self.bot.pool.acquire() as conn:
+            lock_table_exists = await conn.fetchval(
+                "SELECT to_regclass('public.god_pet_ownership_locks') IS NOT NULL;"
+            )
+            if not lock_table_exists:
+                return await ctx.send(
+                    "❌ `god_pet_ownership_locks` does not exist yet. Reload `cogs.battles` first."
+                )
+
+            locked_rows = await conn.fetch(
+                """
+                SELECT god_name
+                FROM god_pet_ownership_locks
+                WHERE user_id = $1
+                ORDER BY god_name ASC
+                """,
+                target_user.id,
+            )
+
+            shards_table_exists = await conn.fetchval(
+                "SELECT to_regclass('public.god_pve_shards') IS NOT NULL;"
+            )
+            shard_rows = []
+            if shards_table_exists:
+                shard_rows = await conn.fetch(
+                    """
+                    SELECT god_name, shard_number
+                    FROM god_pve_shards
+                    WHERE user_id = $1
+                    ORDER BY god_name ASC, shard_number ASC
+                    """,
+                    target_user.id,
+                )
+
+        locked_gods = {row["god_name"] for row in locked_rows}
+        shards_by_god = {}
+        for row in shard_rows:
+            god_name = row["god_name"]
+            shard_num = int(row["shard_number"])
+            shards_by_god.setdefault(god_name, set()).add(shard_num)
+        embed = discord.Embed(
+            title="God Shard Progress",
+            description=f"{target_user.mention}\n✅ Owned/locked  |  ❌ Missing",
+            color=discord.Color.gold(),
+        )
+        embed.set_footer(text=f"User ID: {target_user.id}")
+        embed.set_thumbnail(url=target_user.display_avatar.url)
+
+        for god_name, definition in self.GOD_SHARD_DEFINITIONS.items():
+            god_locked = god_name in locked_gods
+            owned_numbers = set(range(1, 7)) if god_locked else shards_by_god.get(god_name, set())
+
+            alignment = definition.get("alignment", "Unknown")
+            alignment_emoji = self.GOD_SHARD_ALIGNMENT_EMOJIS.get(alignment, "")
+            god_mark = "✅" if god_locked else "❌"
+            progress_text = "6/6" if god_locked else f"{len(owned_numbers)}/6"
+
+            shard_lines = []
+            shard_names = definition.get("shards", [])
+            for idx, shard_name in enumerate(shard_names, start=1):
+                shard_mark = "✅" if (god_locked or idx in owned_numbers) else "❌"
+                shard_lines.append(f"{shard_mark} Shard {idx}: {shard_name}")
+
+            field_name = f"{alignment_emoji} {god_name} [{progress_text}]".strip()
+            field_value = f"God Pet: {god_mark}\n" + "\n".join(shard_lines)
+            embed.add_field(name=field_name, value=field_value, inline=False)
+
+        await ctx.send(embed=embed)
+
+    @commands.command(hidden=True, name="gmsetgodofgods")
+    @is_gm()
+    async def gmsetgodofgods(
+        self,
+        ctx,
+        hp: int,
+        attack: int,
+        defense: int,
+        element: str,
+        image_url: str,
+        *,
+        name: str,
+    ):
+        """[GM only] Upsert the tier-12 God of Gods record in database."""
+        if hp <= 0 or attack <= 0 or defense <= 0:
+            return await ctx.send("HP, Attack, and Defense must all be positive integers.")
+
+        clean_name = (name or "").strip()
+        clean_element = (element or "").strip()
+        clean_url = (image_url or "").strip()
+        if not clean_name or not clean_element or not clean_url:
+            return await ctx.send("Name, element, and image URL are required.")
+
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO godofgods (id, name, hp, attack, defense, element, image_url, updated_at)
+                VALUES (1, $1, $2, $3, $4, $5, $6, NOW())
+                ON CONFLICT (id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    hp = EXCLUDED.hp,
+                    attack = EXCLUDED.attack,
+                    defense = EXCLUDED.defense,
+                    element = EXCLUDED.element,
+                    image_url = EXCLUDED.image_url,
+                    updated_at = NOW();
+                """,
+                clean_name,
+                int(hp),
+                int(attack),
+                int(defense),
+                clean_element,
+                clean_url,
+            )
+
+        await ctx.send(
+            f"✅ godofgods updated: **{clean_name}** | HP {hp:,} | ATK {attack:,} | DEF {defense:,} | {clean_element}"
+        )
 
     @commands.command()
     @commands.is_owner()
@@ -463,33 +2673,1010 @@ class Battles(commands.Cog):
                 await ctx.send(f"```\n{chunk}\n```")
         except Exception as e:
             await ctx.send(f"Error getting debug info: {str(e)}")
+
+    @commands.command()
+    @commands.is_owner()
+    async def macro_debug(self, ctx):
+        """View macro detection data (Owner only)"""
+        if not self.pve_macro_detection:
+            await ctx.send("No macro detection data available yet.")
+            return
+        
+        debug_info = "PVE Macro Detection Data (Count > 12):\n"
+        filtered_data = False
+        
+        for user_id, data in self.pve_macro_detection.items():
+            if data["count"] > 48:
+                timestamp_str = datetime.datetime.fromtimestamp(data["timestamp"]).strftime("%Y-%m-%d %H:%M:%S")
+                debug_info += f"User {user_id}: Count={data['count']}, Last Run={timestamp_str}\n"
+                filtered_data = True
+        
+        if not filtered_data:
+            await ctx.send("No users with macro detection count > 48 found.")
+            return
+        
+        # Split into chunks if too long
+        for i in range(0, len(debug_info), 1900):
+            chunk = debug_info[i:i+1900]
+            await ctx.send(f"```\n{chunk}\n```")
     
-    async def is_player_in_fight(self, player_id):
-        """Check if the player is in a fight based on the dictionary"""
-        return player_id in self.fighting_players
+    @commands.command(hidden=True)
+    @commands.is_owner()
+    async def macro_set(self, ctx, user_id: int, count: int):
+        """Manually set macro detection count for a user (Owner only)"""
+        current_time = datetime.datetime.now().timestamp()
+        
+        self.pve_macro_detection[user_id] = {
+            "count": count,
+            "timestamp": current_time
+        }
+        
+        await ctx.send(f"Set macro detection count for user {user_id} to {count}")
 
-    async def add_player_to_fight(self, player_id):
-        """Add the player to the fight dictionary with a lock"""
-        self.fighting_players[player_id] = asyncio.Lock()
-        await self.fighting_players[player_id].acquire()
+    async def is_player_in_fight(self, player_id, fight_id=None):
+        """Check legacy-exclusive state or a specific concurrent battle."""
+        registrations = self.fighting_players.get(int(player_id), set())
+        if fight_id is None:
+            return "default" in registrations
+        return str(fight_id) in registrations
 
-    async def remove_player_from_fight(self, player_id):
-        """Release the lock and remove the player from the fight dictionary"""
-        if player_id in self.fighting_players:
-            self.fighting_players[player_id].release()
+    async def add_player_to_fight(self, player_id, fight_id=None):
+        """Register a player without overwriting their other active battles."""
+        registration = str(fight_id or "default")
+        self.fighting_players.setdefault(int(player_id), set()).add(registration)
+        return registration
+
+    async def try_add_player_to_exclusive_fight(self, player_id):
+        """Register the default slot only when the player has no active battle."""
+        registrations = self.fighting_players.setdefault(int(player_id), set())
+        if registrations:
+            return False
+        registrations.add("default")
+        return True
+
+    async def remove_player_from_fight(self, player_id, fight_id=None):
+        """Remove only the specified battle registration for a player."""
+        player_id = int(player_id)
+        registrations = self.fighting_players.get(player_id)
+        if not registrations:
+            return
+        registrations.discard(str(fight_id or "default"))
+        if not registrations:
             del self.fighting_players[player_id]
+
+    async def check_pve_macro_detection(self, user_id):
+        """
+        Check and update PVE macro detection for a user.
+        Returns True if macro detected (count >= 12), False otherwise.
+        """
+        current_time = datetime.datetime.now().timestamp()
+        
+        if user_id not in self.pve_macro_detection:
+            # First time running PVE
+            self.pve_macro_detection[user_id] = {
+                "count": 1,
+                "timestamp": current_time
+            }
+            return False
+        
+        user_data = self.pve_macro_detection[user_id]
+        time_diff = current_time - user_data["timestamp"]
+        
+        # Convert minutes to seconds
+        thirty_minutes = 30 * 60  # 30 minutes in seconds
+        forty_minutes = 40 * 60   # 40 minutes in seconds
+        
+        if time_diff <= thirty_minutes:
+            # Within 30 minutes, increment count by 2
+            user_data["count"] += 1
+            user_data["timestamp"] = current_time
+        elif time_diff <= forty_minutes:
+            # Between 30-40 minutes, increment count by 2
+            user_data["count"] += 1
+            user_data["timestamp"] = current_time
+        else:
+            # More than 40 minutes, reset counter to 1
+            user_data["count"] = 1
+            user_data["timestamp"] = current_time
+        
+        # Check if macro detected (count >= 48)
+        if user_data["count"] >= 48:
+            print(f"Macro detected for user {user_id}: count={user_data['count']}")
+            return True
+        
+        return False
     
-    async def display_dialogue(self, ctx, level, name_value, dialoguetoggle=False):
+    def get_pve_macro_penalty_level(self, user_id):
+        """
+        Get the macro penalty level for a user.
+        Returns the count if >= 48, otherwise 0.
+        """
+        if user_id not in self.pve_macro_detection:
+            return 0
+        
+        user_data = self.pve_macro_detection[user_id]
+        return user_data["count"] if user_data["count"] >= 48 else 0
+
+    def _get_pve_tier_for_player_level(self, player_level: int) -> int:
+        """Map player levels into 10-level PvE tiers."""
+        normalized_level = max(1, int(player_level))
+        return min(
+            self.PVE_MAX_TIER,
+            ((normalized_level - 1) // self.PVE_LEVEL_BRACKET_SIZE) + 1,
+        )
+
+    def _get_pve_locations_snapshot(
+        self,
+        *,
+        include_campaign_only: bool = False,
+    ) -> list[dict]:
+        """Return locations with current (not startup-cached) Frontier state."""
+        locations = [dict(location) for location in self.PVE_LOCATIONS]
+        if not include_campaign_only:
+            locations = [
+                location for location in locations if not location.get("campaign_only")
+            ]
+        if not self.frontier_config:
+            return locations
+        try:
+            rotation = get_rotation_state(self.frontier_config)
+        except Exception:
+            return [
+                location
+                for location in locations
+                if location.get("location_type") != "soulforge_frontier"
+            ]
+        visible_locations = []
+        for location in locations:
+            if location.get("location_type") != "soulforge_frontier":
+                visible_locations.append(location)
+                continue
+            if location.get("id") != rotation.region_id:
+                continue
+            location["frontier_active"] = True
+            location["frontier_rotation_week"] = rotation.absolute_week
+            visible_locations.append(location)
+        return visible_locations
+
+    def _get_unlocked_pve_locations(self, player_level: int) -> list[dict]:
+        """Return all PvE locations unlocked at the player's current level."""
+        normalized_level = max(1, int(player_level))
+        return [
+            dict(location)
+            for location in self._get_pve_locations_snapshot()
+            if normalized_level >= int(location["unlock_level"])
+        ]
+
+    def _get_pve_location_by_id(
+        self,
+        location_id: str | None,
+        *,
+        include_campaign_only: bool = False,
+    ) -> dict | None:
+        """Look up a PvE location by id."""
+        if not location_id:
+            return None
+        for location in self._get_pve_locations_snapshot(
+            include_campaign_only=include_campaign_only
+        ):
+            if location["id"] == location_id:
+                return dict(location)
+        return None
+
+    @staticmethod
+    def _is_omnithrone_campaign_authorized(ctx) -> bool:
+        """Accept only an internal campaign marker, never a player argument."""
+
+        marker = getattr(ctx, "omnithrone_campaign_authorized", None)
+        if marker is True:
+            return True
+        return bool(
+            isinstance(marker, dict)
+            and str(marker.get("campaign_id") or "").strip()
+            and str(marker.get("chapter_id") or "").strip()
+        )
+
+    def prepare_omnithrone_campaign_context(
+        self,
+        ctx,
+        *,
+        campaign_id: str,
+        chapter_id: str,
+    ) -> None:
+        """Arm a context for one campaign-launched Tier-12 PvE invocation."""
+
+        normalized_campaign = str(campaign_id or "").strip()
+        normalized_chapter = str(chapter_id or "").strip()
+        if not normalized_campaign or not normalized_chapter:
+            raise ValueError("campaign_id and chapter_id are required")
+        ctx.omnithrone_campaign_authorized = {
+            "campaign_id": normalized_campaign,
+            "chapter_id": normalized_chapter,
+        }
+        ctx.locationchoice_override = self.OMNITHRONE_SANCTUM_LOCATION_ID
+        ctx.pve_pool_override = "normal"
+
+    def _get_pve_tier_rates_for_location(self, location: dict) -> list[tuple[int, float]]:
+        """Return exact encounter rates (percent) per tier for a location."""
+        god_chance = float(location.get("god_chance", 0) or 0)
+        god_chance = max(0.0, min(100.0, god_chance))
+
+        tier_weights: dict[int, float] = {}
+        for tier, weight in (location.get("tier_weights", {}) or {}).items():
+            tier_int = int(tier)
+            weight_float = float(weight)
+            if weight_float <= 0:
+                continue
+            tier_weights[tier_int] = tier_weights.get(tier_int, 0.0) + weight_float
+
+        rates: list[tuple[int, float]] = []
+        non_god_budget = max(0.0, 100.0 - god_chance)
+        total_weight = sum(tier_weights.values())
+
+        if total_weight > 0:
+            for tier in sorted(tier_weights):
+                rate = non_god_budget * (tier_weights[tier] / total_weight)
+                rates.append((tier, rate))
+        elif non_god_budget > 0:
+            fallback_tier = self._get_pve_tier_for_player_level(
+                int(location.get("unlock_level", 1))
+            )
+            rates.append((fallback_tier, non_god_budget))
+
+        if god_chance > 0:
+            rates.append((self.PVE_GOD_TIER, god_chance))
+
+        return sorted(rates, key=lambda entry: entry[0])
+
+    def _format_pve_rate_percent(self, value: float) -> str:
+        """Format a percentage value for PvE display."""
+        rounded = round(float(value), 1)
+        if float(rounded).is_integer():
+            return f"{int(rounded)}%"
+        return f"{rounded:.1f}%"
+
+    def _resolve_pve_location_query(self, query: str | None) -> dict | None:
+        """Resolve location by id or name (exact first, then contains match)."""
+        if not query:
+            return None
+
+        normalized = str(query).strip().lower()
+        if not normalized:
+            return None
+
+        locations = self._get_pve_locations_snapshot()
+        for location in locations:
+            if normalized == str(location.get("id", "")).lower():
+                return dict(location)
+
+        for location in locations:
+            if normalized == str(location.get("name", "")).lower():
+                return dict(location)
+
+        matches = [
+            dict(location)
+            for location in locations
+            if normalized in str(location.get("id", "")).lower()
+            or normalized in str(location.get("name", "")).lower()
+        ]
+        if not matches:
+            return None
+        return matches[0]
+
+    async def _cache_omnithrone_cinematic_assets(self) -> dict[str, str]:
+        """Load cached cinematic art from disk."""
+        cached_paths: dict[str, str] = {}
+        os.makedirs(self.OMNITHRONE_CINEMATIC_CACHE_DIR, exist_ok=True)
+
+        for scene in self.OMNITHRONE_CINEMATIC_SCENES:
+            cache_filename = scene.get("cache_filename")
+            if not cache_filename:
+                continue
+            cache_path = os.path.join(self.OMNITHRONE_CINEMATIC_CACHE_DIR, cache_filename)
+
+            if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+                cached_paths[cache_filename] = cache_path
+
+        return cached_paths
+
+    async def _play_omnithrone_sanctum_cinematic(self, ctx, monster_name: str | None = None):
+        """Play a multi-scene pre-fight cinematic for Omnithrone Sanctum encounters."""
+        total_scenes = len(self.OMNITHRONE_CINEMATIC_SCENES)
+        boss_name = monster_name or "The God of Gods"
+        cached_assets = await self._cache_omnithrone_cinematic_assets()
+        scene_payloads = []
+
+        for idx, scene in enumerate(self.OMNITHRONE_CINEMATIC_SCENES, start=1):
+            embed = discord.Embed(
+                title=scene["title"],
+                description=scene["description"].replace("God of Gods", boss_name),
+                color=scene["color"],
+            )
+            embed.set_footer(text=f"Omnithrone Sanctum • Scene {idx}/{total_scenes}")
+
+            cache_filename = scene.get("cache_filename")
+            cached_path = cached_assets.get(cache_filename) if cache_filename else None
+            if cached_path and os.path.exists(cached_path):
+                embed.set_image(url=f"attachment://{cache_filename}")
+            else:
+                if cache_filename:
+                    embed.add_field(
+                        name="Scene Art Missing",
+                        value=(
+                            "Missing local image: "
+                            f"`{os.path.join(self.OMNITHRONE_CINEMATIC_CACHE_DIR, cache_filename)}`"
+                        ),
+                        inline=False,
+                    )
+
+            scene_payloads.append(
+                {
+                    "embed": embed,
+                    "cached_path": cached_path,
+                    "cache_filename": cache_filename,
+                }
+            )
+
+        cinematic_view = OmnithroneCinematicView(scene_payloads, ctx.author)
+        initial_scene = cinematic_view._build_initial_scene_kwargs()
+        cinematic_message = await ctx.send(**initial_scene)
+        cinematic_view.message = cinematic_message
+        await cinematic_view.wait()
+
+    async def _get_godofgods_monster_data(self) -> dict | None:
+        """Fetch the real tier-12 monster data from database storage."""
+        async with self.bot.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT name, hp, attack, defense, element, image_url
+                FROM godofgods
+                WHERE id = 1
+                """
+            )
+        if not row:
+            return None
+
+        return {
+            "name": row["name"],
+            "hp": int(row["hp"]),
+            "attack": int(row["attack"]),
+            "defense": int(row["defense"]),
+            "element": row["element"],
+            "url": row["image_url"],
+            "ispublic": True,
+        }
+
+    async def _get_public_monsters_by_level(
+        self,
+        *,
+        include_frontier_only: bool = False,
+    ) -> dict[int, list[dict]]:
+        """Load public pools while keeping Frontier exclusives out of normal PvE."""
+        if not self.monsters_data:
+            with open("monsters.json", "r") as f:
+                self.monsters_data = json.load(f)
+
+        monsters: dict[int, list[dict]] = {}
+        tier12_data = await self._get_godofgods_monster_data()
+
+        for level_str, monster_list in self.monsters_data.items():
+            try:
+                level = int(level_str)
+            except (TypeError, ValueError):
+                continue
+
+            if level == 12:
+                monsters[level] = [dict(tier12_data)] if tier12_data else []
+                continue
+
+            public_monsters = [
+                dict(monster)
+                for monster in monster_list
+                if monster.get("ispublic", True)
+                and (
+                    include_frontier_only
+                    or not monster.get("frontier_only", False)
+                )
+            ]
+            monsters[level] = public_monsters
+
+        return monsters
+
+    def _load_base_pve_monster_names(self) -> set[str]:
+        """Load base monsters from monsters.json for splice generation mapping."""
+        if not self.monsters_data:
+            with open("monsters.json", "r", encoding="utf-8") as f:
+                self.monsters_data = json.load(f)
+
+        base_names = set()
+        if isinstance(self.monsters_data, dict):
+            for monster_list in self.monsters_data.values():
+                if not isinstance(monster_list, list):
+                    continue
+                for monster in monster_list:
+                    if not isinstance(monster, dict):
+                        continue
+                    name = monster.get("name")
+                    if isinstance(name, str):
+                        cleaned = name.strip()
+                        if cleaned:
+                            base_names.add(cleaned)
+        return base_names
+
+    def _build_splice_generation_map_for_pve(
+        self,
+        base_monster_names: set[str],
+        completed_rows,
+    ) -> dict[str, int]:
+        """
+        Build generation map matching splicegenstats rules.
+        Base monsters are generation -1; child generation is max(parent gens) + 1.
+        """
+        generation_by_name = {name: -1 for name in base_monster_names}
+        max_passes = max(1, len(completed_rows) + 1)
+
+        for _ in range(max_passes):
+            changed = False
+            for row in completed_rows:
+                parent1 = row["pet1_default"]
+                parent2 = row["pet2_default"]
+                result_name = row["result_name"]
+
+                if not isinstance(parent1, str) or not isinstance(parent2, str) or not isinstance(result_name, str):
+                    continue
+
+                parent1 = parent1.strip()
+                parent2 = parent2.strip()
+                result_name = result_name.strip()
+                if not parent1 or not parent2 or not result_name:
+                    continue
+
+                parent1_gen = generation_by_name.get(parent1)
+                parent2_gen = generation_by_name.get(parent2)
+                if parent1_gen is None or parent2_gen is None:
+                    continue
+
+                child_gen = max(parent1_gen, parent2_gen) + 1
+                existing_gen = generation_by_name.get(result_name)
+
+                # Keep canonical base monster mapping untouched.
+                if existing_gen == -1:
+                    continue
+
+                if existing_gen is None or child_gen < existing_gen:
+                    generation_by_name[result_name] = child_gen
+                    changed = True
+
+            if not changed:
+                break
+
+        return generation_by_name
+
+    def _classify_splice_row_generation(
+        self,
+        generation_by_name: dict[str, int],
+        parent1_name,
+        parent2_name,
+    ) -> int | None:
+        if not isinstance(parent1_name, str) or not isinstance(parent2_name, str):
+            return None
+
+        parent1 = parent1_name.strip()
+        parent2 = parent2_name.strip()
+        if not parent1 or not parent2:
+            return None
+
+        parent1_gen = generation_by_name.get(parent1)
+        parent2_gen = generation_by_name.get(parent2)
+        if parent1_gen is None or parent2_gen is None:
+            return None
+
+        return int(max(parent1_gen, parent2_gen) + 1)
+
+    def _build_pending_splice_parent_keys(self, rows) -> set[str]:
+        parent_keys: set[str] = set()
+        for row in rows or ():
+            try:
+                parent_name = row["parent_name"]
+            except (KeyError, TypeError, IndexError):
+                continue
+
+            if not isinstance(parent_name, str):
+                continue
+
+            cleaned_name = parent_name.strip()
+            if cleaned_name:
+                parent_keys.add(cleaned_name.casefold())
+
+        return parent_keys
+
+    def _normalize_splice_pve_result_name(
+        self,
+        result_name,
+        pending_splice_parent_keys: set[str] | None = None,
+    ) -> str | None:
+        if not isinstance(result_name, str):
+            return None
+
+        cleaned_name = result_name.strip()
+        if not cleaned_name:
+            return None
+
+        normalized_upper = cleaned_name.upper()
+        if any(
+            marker in normalized_upper
+            for marker in self.PVE_SPLICE_EXCLUDED_NAME_MARKERS
+        ):
+            return None
+
+        # Keep splice-chain parents that are still in flight out of sampled PvE.
+        if (
+            pending_splice_parent_keys
+            and cleaned_name.casefold() in pending_splice_parent_keys
+        ):
+            return None
+
+        return cleaned_name
+
+    async def _get_splice_pve_monsters_by_level(
+        self,
+        sample_per_generation: int | None = None,
+    ) -> dict[int, list[dict]]:
+        """
+        Build a splice-only PvE pool from splice_combinations.
+        Samples up to N monsters from Gen0, then buckets by power into tiers 1-10.
+        """
+        try:
+            base_monster_names = self._load_base_pve_monster_names()
+        except Exception:
+            return {}
+
+        if not base_monster_names:
+            return {}
+
+        try:
+            async with self.bot.pool.acquire() as conn:
+                completed_rows = await conn.fetch(
+                    """
+                    SELECT id, pet1_default, pet2_default, result_name, hp, attack, defense, element, url, created_at
+                    FROM splice_combinations
+                    ORDER BY created_at ASC, id ASC
+                    """
+                )
+                pending_splice_parent_keys: set[str] = set()
+                splice_requests_exists = await conn.fetchval(
+                    "SELECT to_regclass('public.splice_requests') IS NOT NULL;"
+                )
+                if splice_requests_exists:
+                    pending_parent_rows = await conn.fetch(
+                        """
+                        SELECT DISTINCT parent_name
+                        FROM (
+                            SELECT pet1_default AS parent_name
+                            FROM splice_requests
+                            WHERE status = 'pending'
+                            UNION
+                            SELECT pet2_default AS parent_name
+                            FROM splice_requests
+                            WHERE status = 'pending'
+                        ) pending_parent_names
+                        """
+                    )
+                    pending_splice_parent_keys = (
+                        self._build_pending_splice_parent_keys(pending_parent_rows)
+                    )
+        except Exception:
+            return {}
+
+        if not completed_rows:
+            return {}
+
+        generation_map = self._build_splice_generation_map_for_pve(
+            base_monster_names,
+            completed_rows,
+        )
+
+        target_sample = int(sample_per_generation or self.PVE_SPLICE_SAMPLE_PER_GENERATION)
+        target_sample = max(1, target_sample)
+
+        generation_buckets = {generation: [] for generation in self.PVE_SPLICE_GENERATIONS}
+        seen_by_generation = {generation: set() for generation in self.PVE_SPLICE_GENERATIONS}
+
+        for row in completed_rows:
+            row_generation = self._classify_splice_row_generation(
+                generation_map,
+                row["pet1_default"],
+                row["pet2_default"],
+            )
+            if row_generation not in generation_buckets:
+                continue
+
+            result_name = self._normalize_splice_pve_result_name(
+                row["result_name"],
+                pending_splice_parent_keys,
+            )
+            if result_name is None:
+                continue
+
+            dedupe_key = result_name.casefold()
+            if dedupe_key in seen_by_generation[row_generation]:
+                continue
+            seen_by_generation[row_generation].add(dedupe_key)
+
+            try:
+                hp = int(row["hp"])
+                attack = int(row["attack"])
+                defense = int(row["defense"])
+            except (TypeError, ValueError):
+                continue
+
+            if hp <= 0 or attack <= 0 or defense <= 0:
+                continue
+
+            generation_buckets[row_generation].append(
+                {
+                    "name": result_name,
+                    "hp": hp,
+                    "attack": attack,
+                    "defense": defense,
+                    "element": (row["element"] or "Unknown"),
+                    "url": row["url"] or "",
+                    "ispublic": True,
+                    "splice_generation": int(row_generation),
+                    "splice_source_id": int(row["id"]),
+                }
+            )
+
+        selected_monsters = []
+        for generation in self.PVE_SPLICE_GENERATIONS:
+            candidates = generation_buckets[generation]
+            random.shuffle(candidates)
+            selected_monsters.extend(candidates[:target_sample])
+
+        if not selected_monsters:
+            return {}
+
+        # Spread splice monsters across tiers by total power, weakest -> strongest.
+        random.shuffle(selected_monsters)
+        selected_monsters.sort(key=lambda monster: monster["hp"] + monster["attack"] + monster["defense"])
+
+        total_count = len(selected_monsters)
+        tier_buckets = {tier: [] for tier in range(1, self.PVE_MAX_TIER + 1)}
+        for index, monster in enumerate(selected_monsters):
+            tier = min(
+                self.PVE_MAX_TIER,
+                max(1, ((index * self.PVE_MAX_TIER) // total_count) + 1),
+            )
+            monster_copy = dict(monster)
+            monster_copy["pve_pool"] = "splice"
+            tier_buckets[tier].append(monster_copy)
+
+        return {tier: bucket for tier, bucket in tier_buckets.items() if bucket}
+
+    def _merge_pve_monster_pools(
+        self,
+        default_pool: dict[int, list[dict]],
+        splice_pool: dict[int, list[dict]],
+    ) -> dict[int, list[dict]]:
+        """Merge splice monsters into the normal PvE pool by tier."""
+        merged: dict[int, list[dict]] = {
+            int(tier): [dict(monster) for monster in monster_list]
+            for tier, monster_list in (default_pool or {}).items()
+        }
+        for tier, monster_list in (splice_pool or {}).items():
+            tier_key = int(tier)
+            merged.setdefault(tier_key, [])
+            merged[tier_key].extend(dict(monster) for monster in monster_list)
+        return merged
+
+    async def _get_user_pve_splice_toggle(self, user_id: int) -> bool:
+        """Return whether a user has splice injection enabled for PvE."""
+        async with self.bot.pool.acquire() as conn:
+            enabled = await conn.fetchval(
+                "SELECT include_splice FROM pve_preferences WHERE user_id = $1;",
+                user_id,
+            )
+        return bool(enabled)
+
+    async def _set_user_pve_splice_toggle(self, user_id: int, enabled: bool):
+        """Persist user preference for splice injection into PvE pool."""
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO pve_preferences (user_id, include_splice, updated_at)
+                VALUES ($1, $2, NOW())
+                ON CONFLICT (user_id)
+                DO UPDATE SET include_splice = EXCLUDED.include_splice, updated_at = NOW();
+                """,
+                user_id,
+                bool(enabled),
+            )
+
+    async def _get_user_pve_default_location_id(self, user_id: int) -> str | None:
+        """Return user's default PvE location id, if set."""
+        async with self.bot.pool.acquire() as conn:
+            location_id = await conn.fetchval(
+                "SELECT default_location_id FROM pve_preferences WHERE user_id = $1;",
+                user_id,
+            )
+        if location_id is None:
+            return None
+        location_text = str(location_id).strip()
+        return location_text or None
+
+    async def _set_user_pve_default_location_id(self, user_id: int, location_id: str | None):
+        """Persist user's default PvE location id (or clear when None)."""
+        normalized = None if location_id is None else str(location_id).strip().lower()
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO pve_preferences (user_id, default_location_id, updated_at)
+                VALUES ($1, $2, NOW())
+                ON CONFLICT (user_id)
+                DO UPDATE
+                SET default_location_id = EXCLUDED.default_location_id,
+                    updated_at = NOW();
+                """,
+                user_id,
+                normalized,
+            )
+
+    async def _get_user_hp_bar_style(self, user_id: int) -> str:
+        """Return a user's preferred HP bar style for battles they start."""
+        async with self.bot.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT hp_bar_style, emoji_hp_bars
+                FROM battle_preferences
+                WHERE user_id = $1;
+                """,
+                user_id,
+            )
+        if not row:
+            return "normal"
+
+        stored_style = row["hp_bar_style"]
+        if stored_style:
+            return Battle.normalize_hp_bar_style(stored_style)
+
+        return "colorful" if bool(row["emoji_hp_bars"]) else "normal"
+
+    async def _set_user_hp_bar_style(self, user_id: int, style: str):
+        """Persist a user's preferred HP bar style for battles they start."""
+        normalized_style = Battle.normalize_hp_bar_style(style)
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO battle_preferences (user_id, emoji_hp_bars, hp_bar_style, updated_at)
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (user_id)
+                DO UPDATE
+                SET emoji_hp_bars = EXCLUDED.emoji_hp_bars,
+                    hp_bar_style = EXCLUDED.hp_bar_style,
+                    updated_at = NOW();
+                """,
+                user_id,
+                normalized_style != Battle.HP_BAR_STYLE_NORMAL,
+                normalized_style,
+            )
+
+    async def _get_user_emoji_hp_bars_enabled(self, user_id: int) -> bool:
+        """Backwards-compatible boolean wrapper for HP bar preference."""
+        return await self._get_user_hp_bar_style(user_id) != Battle.HP_BAR_STYLE_NORMAL
+
+    async def _set_user_emoji_hp_bars_enabled(self, user_id: int, enabled: bool):
+        """Backwards-compatible boolean wrapper for HP bar preference."""
+        await self._set_user_hp_bar_style(
+            user_id,
+            Battle.HP_BAR_STYLE_COLORFUL if enabled else Battle.HP_BAR_STYLE_NORMAL,
+        )
+
+    async def _get_pve_monster_pool_for_user(
+        self,
+        user_id: int,
+        force_include_splice: bool | None = None,
+    ) -> tuple[dict[int, list[dict]], bool]:
+        """
+        Build PvE pool for a user.
+        Returns (pool, splice_injected).
+        """
+        default_pool = await self._get_public_monsters_by_level()
+
+        include_splice = (
+            bool(force_include_splice)
+            if force_include_splice is not None
+            else await self._get_user_pve_splice_toggle(user_id)
+        )
+        if not include_splice:
+            return default_pool, False
+
+        splice_pool = await self._get_splice_pve_monsters_by_level()
+        if not splice_pool:
+            return default_pool, False
+
+        return self._merge_pve_monster_pools(default_pool, splice_pool), True
+
+    @staticmethod
+    def _is_frontier_location(location: dict | None) -> bool:
+        return bool(
+            location
+            and location.get("location_type") == "soulforge_frontier"
+            and location.get("frontier_region_id")
+        )
+
+    async def _get_frontier_build_inputs(self):
+        """Load immutable public baselines plus the current legacy recipe rows."""
+        public_pool = await self._get_public_monsters_by_level(
+            include_frontier_only=True
+        )
+        async with self.bot.pool.acquire() as conn:
+            splice_rows = await conn.fetch(
+                """
+                SELECT id, pet1_default, pet2_default, result_name,
+                       hp, attack, defense, element, url, created_at,
+                       frontier_recipe_id
+                FROM splice_combinations
+                ORDER BY id ASC;
+                """
+            )
+        generation_by_recipe_id = resolve_recipe_generations(
+            self._load_base_pve_monster_names(),
+            splice_rows,
+        )
+        return public_pool, splice_rows, generation_by_recipe_id
+
+    async def _get_pve_monster_pool_for_location(
+        self,
+        user_id: int,
+        location: dict | None,
+        force_include_splice: bool | None = None,
+    ) -> tuple[dict[int, list[dict]], bool]:
+        """Build a deterministic Frontier pool, or delegate to normal PvE."""
+        if not self.frontier_config or not self._is_frontier_location(location):
+            return await self._get_pve_monster_pool_for_user(
+                user_id,
+                force_include_splice=force_include_splice,
+            )
+
+        public_pool, splice_rows, generation_map = await self._get_frontier_build_inputs()
+        build = build_frontier_pool(
+            self.frontier_config,
+            location["frontier_region_id"],
+            public_pool,
+            splice_rows,
+            generation_by_recipe_id=generation_map,
+        )
+        if (
+            build.missing_legacy_splice_ids
+            or build.name_mismatches
+            or build.generation_mismatches
+        ):
+            logger.warning(
+                "Frontier roster drift in %s: missing=%s names=%s generations=%s",
+                build.region_id,
+                build.missing_legacy_splice_ids,
+                build.name_mismatches,
+                build.generation_mismatches,
+            )
+        return build.pool, bool(build.included_legacy_splice_ids)
+
+    async def get_frontier_boss_encounter(
+        self,
+        region_id: str,
+        when: datetime.datetime | None = None,
+    ) -> dict | None:
+        """Return the separately gated active Frontier boss encounter."""
+        if not self.frontier_config:
+            return None
+        public_pool, splice_rows, generation_map = await self._get_frontier_build_inputs()
+        monster = build_frontier_boss_encounter(
+            self.frontier_config,
+            region_id,
+            public_pool,
+            splice_rows,
+            when=when,
+            generation_by_recipe_id=generation_map,
+        )
+        if monster is None:
+            return None
+        location = self._get_pve_location_by_id(region_id)
+        monster["pve_location_id"] = region_id
+        monster["pve_location_name"] = (
+            location.get("name", region_id) if location else region_id
+        )
+        return monster
+
+    def _roll_pve_tier_for_location(self, location: dict) -> int:
+        """
+        Roll a tier using location-specific weights and god chance.
+        God chance is a percentage.
+        """
+        god_chance = float(location.get("god_chance", 0) or 0)
+        god_chance = max(0.0, min(100.0, god_chance))
+
+        if god_chance > 0 and random.random() < (god_chance / 100):
+            return self.PVE_GOD_TIER
+
+        tier_weights = location.get("tier_weights", {})
+        tiers = []
+        weights = []
+        for tier, weight in tier_weights.items():
+            tier_int = int(tier)
+            weight_float = float(weight)
+            if weight_float <= 0:
+                continue
+            tiers.append(tier_int)
+            weights.append(weight_float)
+
+        if not tiers:
+            return self._get_pve_tier_for_player_level(location.get("unlock_level", 1))
+        return int(random.choices(tiers, weights=weights, k=1)[0])
+
+    def _roll_pve_tier(self, player_level: int, allow_legendary: bool = True) -> int:
+        """Roll the PvE tier for an encounter, with optional legendary god chance."""
+        if (
+            allow_legendary
+            and player_level >= 5
+            and random.random() < self.PVE_LEGENDARY_SPAWN_CHANCE
+        ):
+            return self.PVE_GOD_TIER
+        return self._get_pve_tier_for_player_level(player_level)
+
+    def _get_encounter_level_range_for_tier(self, tier: int) -> tuple[int, int]:
+        """Return encounter-level range for a given PvE tier."""
+        normalized_tier = int(tier)
+        if normalized_tier >= self.PVE_GOD_TIER:
+            return self.PVE_GOD_ENCOUNTER_LEVEL, self.PVE_GOD_ENCOUNTER_LEVEL
+
+        normalized_tier = max(1, min(self.PVE_MAX_TIER, normalized_tier))
+        range_min = (normalized_tier - 1) * self.PVE_LEVEL_BRACKET_SIZE
+        range_max = normalized_tier * self.PVE_LEVEL_BRACKET_SIZE
+        return range_min, range_max
+
+    def _scale_monster_for_encounter(
+        self, monster: dict, tier: int, encounter_level: int | None = None
+    ) -> dict:
+        """
+        Scale monster stats by encounter level inside its tier range.
+        The range minimum keeps base stats, then each level step adds +2%.
+        """
+        range_min, range_max = self._get_encounter_level_range_for_tier(tier)
+
+        if encounter_level is None:
+            encounter_level = random.randint(range_min, range_max)
+        encounter_level = max(range_min, min(range_max, int(encounter_level)))
+
+        scale_steps = max(0, encounter_level - range_min)
+        scale_multiplier = Decimal("1") + (
+            self.PVE_PER_LEVEL_STAT_SCALE * Decimal(scale_steps)
+        )
+
+        scaled_monster = dict(monster)
+        for stat_key in ("hp", "attack", "defense"):
+            base_value = Decimal(str(monster.get(stat_key, 0)))
+            scaled_value = int(
+                (base_value * scale_multiplier).to_integral_value(
+                    rounding=ROUND_HALF_UP
+                )
+            )
+            scaled_monster[stat_key] = max(1, scaled_value)
+
+        scaled_monster["encounter_level"] = encounter_level
+        scaled_monster["pve_tier"] = int(tier)
+        scaled_monster["pve_stat_multiplier"] = float(scale_multiplier)
+        return scaled_monster
+    
+    async def display_dialogue(self, ctx, level, name_value, dialoguetoggle=False, god_value=None):
         """Display dialogue for battle tower levels"""
         # Skip dialogue if toggle is on
         if dialoguetoggle:
-            await ctx.send("The battle begins!")
+            await self._send_with_retry(ctx, content="The battle begins!", suppress_failure=True)
             return
         
         # Get the dialogue for this level
         level_str = str(level)
         if level_str not in self.dialogue_data["dialogues"]:
-            await ctx.send("The battle begins!")
+            await self._send_with_retry(ctx, content="The battle begins!", suppress_failure=True)
             return
         
         dialogue_info = self.dialogue_data["dialogues"][level_str]
@@ -506,28 +3693,49 @@ class Battles(commands.Cog):
                     if fetched_user:
                         random_user_objects.append(fetched_user)
                 if len(random_user_objects) < 2:
-                    await ctx.send("The battle begins!")
+                    await self._send_with_retry(ctx, content="The battle begins!", suppress_failure=True)
                     return
         
         # Process dialogue lines
         processed_lines = []
+        player_god = god_value if isinstance(god_value, str) and god_value else "an unknown god"
         for line in dialogue_info["lines"]:
             speaker = line["speaker"]
-            text = line["text"].replace("PLAYER", name_value)
+            text = (
+                line["text"]
+                .replace("{PLAYER_GOD}", player_god)
+                .replace("PLAYER_GOD", player_god)
+                .replace("PLAYER", name_value)
+            )
             thumbnail = line["thumbnail"]
+
+            if speaker == "PLAYER":
+                speaker = name_value
             
             # Replace placeholder thumbnails
-            if thumbnail == "PLAYER_AVATAR":
+            if thumbnail in self.BATTLE_TOWER_THUMBNAIL_TOKENS:
+                thumbnail = self.BATTLE_TOWER_THUMBNAIL_TOKENS[thumbnail]
+            elif thumbnail == "PLAYER_AVATAR":
                 thumbnail = ctx.author.avatar.url if ctx.author.avatar else ctx.author.default_avatar.url
+            elif thumbnail == "RANDOM_USER_1_AVATAR":
+                if random_user_objects:
+                    thumbnail = random_user_objects[0].avatar.url if random_user_objects[0].avatar else self.DEFAULT_DIALOGUE_AVATAR
+                else:
+                    thumbnail = self.DEFAULT_DIALOGUE_AVATAR
+            elif thumbnail == "RANDOM_USER_2_AVATAR":
+                if len(random_user_objects) > 1:
+                    thumbnail = random_user_objects[1].avatar.url if random_user_objects[1].avatar else self.DEFAULT_DIALOGUE_AVATAR
+                else:
+                    thumbnail = self.DEFAULT_DIALOGUE_AVATAR
             elif "special" in dialogue_info and dialogue_info["special"] == "random_users":
                 if speaker == "RANDOM_USER_1" and random_user_objects:
                     speaker = random_user_objects[0].display_name
                     text = text.replace("RANDOM_USER_1", speaker)
-                    thumbnail = random_user_objects[0].avatar.url if random_user_objects[0].avatar else "https://ia803204.us.archive.org/4/items/discordprofilepictures/discordblue.png"
+                    thumbnail = random_user_objects[0].avatar.url if random_user_objects[0].avatar else self.DEFAULT_DIALOGUE_AVATAR
                 elif speaker == "RANDOM_USER_2" and len(random_user_objects) > 1:
                     speaker = random_user_objects[1].display_name
                     text = text.replace("RANDOM_USER_2", speaker)
-                    thumbnail = random_user_objects[1].avatar.url if random_user_objects[1].avatar else "https://ia803204.us.archive.org/4/items/discordprofilepictures/discordblue.png"
+                    thumbnail = random_user_objects[1].avatar.url if random_user_objects[1].avatar else self.DEFAULT_DIALOGUE_AVATAR
             
             processed_lines.append({
                 "speaker": speaker,
@@ -550,11 +3758,26 @@ class Battles(commands.Cog):
         pages = [create_dialogue_page(i) for i in range(len(processed_lines))]
         
         # Show dialogue
-        view = DialogueView(pages, ctx.author)
-        await ctx.send(embed=pages[0], view=view)
-        await view.wait()
+        allowed_dialogue_users = {int(ctx.author.id)}
+        alt_invoker_id = getattr(ctx, "alt_invoker_id", None)
+        if alt_invoker_id is not None:
+            allowed_dialogue_users.add(int(alt_invoker_id))
+
+        view = DialogueView(
+            pages,
+            ctx.author,
+            allowed_user_ids=allowed_dialogue_users,
+        )
+        dialogue_message = await self._send_with_retry(
+            ctx,
+            embed=pages[0],
+            view=view,
+            suppress_failure=True,
+        )
+        if dialogue_message is not None:
+            await view.wait()
         
-        await ctx.send("The battle begins!")
+        await self._send_with_retry(ctx, content="The battle begins!", suppress_failure=True)
 
     @has_char()
     @user_cooldown(90)
@@ -575,6 +3798,7 @@ class Battles(commands.Cog):
             The battle's winner will receive a PvP win, which shows on their profile.
             (This command has a cooldown of 90 seconds.)"""
         )
+        ctx = self._guard_battle_context(ctx)
         if enemy == ctx.author:
             return await ctx.send(_("You can't battle yourself."))
         if ctx.character_data["money"] < money:
@@ -613,7 +3837,15 @@ class Battles(commands.Cog):
             check_fail_message=_("You don't have enough money to join the battle."),
         )
 
-        await ctx.send(text, view=view)
+        join_message = await ctx.send(text, view=view)
+        if join_message is None:
+            await self.bot.reset_cooldown(ctx)
+            await self.bot.pool.execute(
+                'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                money,
+                ctx.author.id,
+            )
+            return
 
         try:
             enemy_ = await future
@@ -658,19 +3890,27 @@ class Battles(commands.Cog):
         
         # Update the database with results
         async with self.bot.pool.acquire() as conn:
+            # Award PvP wins regardless of money
             await conn.execute(
-                'UPDATE profile SET "pvpwins"="pvpwins"+1, "money"="money"+$1 WHERE "user"=$2;',
-                money * 2,
+                'UPDATE profile SET "pvpwins"="pvpwins"+1 WHERE "user"=$1;',
                 winner.id,
             )
-            await self.bot.log_transaction(
-                ctx,
-                from_=looser.id,
-                to=winner.id,
-                subject="Battle Bet",
-                data={"Gold": money},
-                conn=conn,
-            )
+            
+            # Handle money rewards if there's money involved
+            if money > 0:
+                await conn.execute(
+                    'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                    money * 2,
+                    winner.id,
+                )
+                await self.bot.log_transaction(
+                    ctx,
+                    from_=looser.id,
+                    to=winner.id,
+                    subject="Battle Bet",
+                    data={"Gold": money},
+                    conn=conn,
+                )
         
         await ctx.send(
             _("{winner} won the battle vs {looser}! Congratulations!").format(
@@ -699,6 +3939,290 @@ class Battles(commands.Cog):
             await ctx.send(f"Successfully updated level for user {user_id} to {level}.")
         except Exception as e:
             await ctx.send(f"An error occurred while updating the level: {e}")
+
+    async def _run_gm_test_battle(self, ctx, battle, label: str):
+        try:
+            await self.add_player_to_fight(ctx.author.id)
+            await battle.start_battle()
+
+            while not await battle.is_battle_over():
+                await battle.process_turn()
+                await asyncio.sleep(1)
+
+            result = await battle.end_battle()
+            battle_timed_out = hasattr(battle, "battle_timed_out") and battle.battle_timed_out
+
+            if result and result.name == "Player":
+                player_alive = any(not c.is_pet and c.is_alive() for c in battle.player_team.combatants)
+                if player_alive or battle.config.get("pets_continue_battle", False):
+                    outcome = "Victory"
+                else:
+                    outcome = "Player Defeated"
+            elif battle_timed_out:
+                outcome = "Timed Out"
+            else:
+                outcome = "Defeat"
+
+            await ctx.send(
+                f"{label} complete. Result: **{outcome}**. Battle ID: `{battle.battle_id}`"
+            )
+        except Exception as e:
+            error_message = f"An error occurred during {label}: {e}\n{traceback.format_exc()}"
+            await ctx.send(error_message[:1900] + "..." if len(error_message) > 1900 else error_message)
+            print(error_message)
+        finally:
+            await self.remove_player_from_fight(ctx.author.id)
+
+    @is_gm()
+    @has_char()
+    @commands.command(name="gmbtmanual", hidden=True)
+    async def gmbtmanual(
+        self,
+        ctx,
+        minion1_hp: int,
+        minion1_atk: int,
+        minion1_def: int,
+        minion2_hp: int,
+        minion2_atk: int,
+        minion2_def: int,
+        boss_hp: int,
+        boss_atk: int,
+        boss_def: int,
+    ):
+        """[GM only] Start a manual battle tower test with exact enemy stats."""
+        if not await self._ensure_jury_tower_dev_access(ctx):
+            return
+        stat_values = [
+            minion1_hp,
+            minion1_atk,
+            minion1_def,
+            minion2_hp,
+            minion2_atk,
+            minion2_def,
+            boss_hp,
+            boss_atk,
+            boss_def,
+        ]
+        if any(value < 0 for value in stat_values):
+            return await ctx.send("All enemy stats must be 0 or greater.")
+        if minion1_hp <= 0 or minion1_atk <= 0 or minion2_hp <= 0 or minion2_atk <= 0 or boss_hp <= 0 or boss_atk <= 0:
+            return await ctx.send("HP and attack values must be greater than 0 for all three enemies.")
+
+        if await self.is_player_in_fight(ctx.author.id):
+            return await ctx.send("You are already in a battle.")
+
+        player_combatant = await self.battle_factory.create_player_combatant(ctx, ctx.author, include_pet=True)
+        pet_combatant = await self.battle_factory.pet_ext.get_pet_combatant(ctx, ctx.author)
+
+        player_team = Team("Player", [player_combatant])
+        if pet_combatant:
+            player_team.add_combatant(pet_combatant)
+
+        enemy_specs = [
+            {
+                "name": "Test Minion 1",
+                "hp": minion1_hp,
+                "attack": minion1_atk,
+                "defense": minion1_def,
+                "element": "Unknown",
+            },
+            {
+                "name": "Test Minion 2",
+                "hp": minion2_hp,
+                "attack": minion2_atk,
+                "defense": minion2_def,
+                "element": "Unknown",
+            },
+            {
+                "name": "Test Boss",
+                "hp": boss_hp,
+                "attack": boss_atk,
+                "defense": boss_def,
+                "element": "Unknown",
+            },
+        ]
+
+        enemy_team = Team("Enemy", [])
+        for enemy_spec in enemy_specs:
+            enemy_team.add_combatant(
+                await self.battle_factory.create_monster_combatant(enemy_spec, name=enemy_spec["name"])
+            )
+
+        preview = discord.Embed(
+            title="GM BT Test",
+            description="Manual tower test using exact enemy stats. Pets are enabled for the player side.",
+            color=0xC0392B,
+        )
+        player_lines = [
+            f"Player: **HP {float(player_combatant.max_hp):.1f} / ATK {float(player_combatant.damage):.1f} / DEF {float(player_combatant.armor):.1f}**"
+        ]
+        if pet_combatant:
+            player_lines.append(
+                f"Pet: **HP {float(pet_combatant.max_hp):.1f} / ATK {float(pet_combatant.damage):.1f} / DEF {float(pet_combatant.armor):.1f}**"
+            )
+        preview.add_field(name="Player Side", value="\n".join(player_lines), inline=False)
+        preview.add_field(
+            name="Enemy Lineup",
+            value=(
+                f"Test Minion 1: **HP {minion1_hp} / ATK {minion1_atk} / DEF {minion1_def}**\n"
+                f"Test Minion 2: **HP {minion2_hp} / ATK {minion2_atk} / DEF {minion2_def}**\n"
+                f"Test Boss: **HP {boss_hp} / ATK {boss_atk} / DEF {boss_def}**"
+            ),
+            inline=False,
+        )
+        await ctx.send(embed=preview)
+
+        level_data = {
+            "minion1_name": "Test Minion 1",
+            "minion2_name": "Test Minion 2",
+            "boss_name": "Test Boss",
+            "minion1": {"hp": minion1_hp, "damage": minion1_atk, "armor": minion1_def},
+            "minion2": {"hp": minion2_hp, "damage": minion2_atk, "armor": minion2_def},
+            "boss": {"hp": boss_hp, "damage": boss_atk, "armor": boss_def},
+        }
+
+        battle = TowerBattle(
+            ctx,
+            [player_team, enemy_team],
+            level=1,
+            level_data=level_data,
+            allow_pets=True,
+        )
+        battle.config["allow_pets"] = True
+        battle.config["pets_continue_battle"] = True
+
+        await self._run_gm_test_battle(ctx, battle, "GM BT manual test")
+
+    @is_gm()
+    @has_char()
+    @commands.command(hidden=True)
+    async def gmbttest(self, ctx, floor: int, prestige: int = None):
+        """[GM only] Run a plain tower test using Jury Tower stat generation for a floor."""
+        if not await self._ensure_jury_tower_dev_access(ctx):
+            return
+        if floor < 1 or floor > JURY_TOWER_FLOOR_COUNT:
+            return await ctx.send(f"Floor must be between 1 and {JURY_TOWER_FLOOR_COUNT}.")
+        if prestige is not None and prestige < 0:
+            return await ctx.send("Prestige must be 0 or greater.")
+        if await self.is_player_in_fight(ctx.author.id):
+            return await ctx.send("You are already in a battle.")
+
+        floor_data = self._get_jury_floor_data(floor)
+        if not floor_data:
+            return await ctx.send(f"No Jury Tower data exists for floor {floor}.")
+
+        async with self.bot.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT level, checkpoint, prestige, scale_attack_base, scale_hp_base, scale_defense_base,
+                       scale_power_score, scale_bracket
+                FROM jurytower
+                WHERE id = $1
+                """,
+                ctx.author.id,
+            )
+
+        if prestige is None:
+            prestige = int(row["prestige"] or 0) if row else 0
+        else:
+            prestige = int(prestige or 0)
+
+        player_combatant = await self.battle_factory.create_player_combatant(ctx, ctx.author, include_pet=True)
+        pet_combatant = await self.battle_factory.pet_ext.get_pet_combatant(ctx, ctx.author)
+        player_team = Team("Player", [player_combatant])
+        if pet_combatant:
+            player_team.add_combatant(pet_combatant)
+
+        snapshot_source = "Fresh snapshot from current equipped stats"
+        if row:
+            scale_snapshot, snapshot_source = await self._resolve_jury_scale_snapshot(ctx, row)
+        else:
+            current_snapshot = await self.battle_factory.build_jury_tower_scale_snapshot(
+                ctx,
+                ctx.author,
+                True,
+            )
+            bracket_payload = self._jury_bracket_payload_from_snapshot(current_snapshot)
+            scale_snapshot = bracket_payload["snapshot"]
+            snapshot_source = f"Fresh bracket snapshot - {bracket_payload['bracket_label']}"
+
+        enemy_specs = self.battle_factory.build_jury_tower_enemy_specs(
+            floor_data,
+            scale_snapshot,
+            prestige_level=prestige,
+        )
+        enemy_team = Team("Enemy", [])
+        for enemy_spec in enemy_specs:
+            enemy_team.add_combatant(
+                await self.battle_factory.create_monster_combatant(
+                    enemy_spec,
+                    name=enemy_spec["name"],
+                )
+            )
+
+        level_data = {
+            "minion1_name": enemy_specs[0]["name"],
+            "minion2_name": enemy_specs[1]["name"],
+            "boss_name": enemy_specs[2]["name"],
+            "minion1": {
+                "hp": enemy_specs[0]["hp"],
+                "damage": enemy_specs[0]["attack"],
+                "armor": enemy_specs[0]["defense"],
+                "element": enemy_specs[0]["element"],
+            },
+            "minion2": {
+                "hp": enemy_specs[1]["hp"],
+                "damage": enemy_specs[1]["attack"],
+                "armor": enemy_specs[1]["defense"],
+                "element": enemy_specs[1]["element"],
+            },
+            "boss": {
+                "hp": enemy_specs[2]["hp"],
+                "damage": enemy_specs[2]["attack"],
+                "armor": enemy_specs[2]["defense"],
+                "element": enemy_specs[2]["element"],
+            },
+        }
+
+        battle = TowerBattle(
+            ctx,
+            [player_team, enemy_team],
+            level=floor,
+            level_data=level_data,
+            allow_pets=True,
+        )
+        battle.config["allow_pets"] = True
+        battle.config["pets_continue_battle"] = True
+
+        preview = discord.Embed(
+            title=f"GM Jury Test - Floor {floor}",
+            description=(
+                f"**{floor_data['judge_name']}, {floor_data['judge_title']}**\n"
+                f"**{floor_data['title']}**\n"
+                f"Phase: **{floor_data.get('act_label', 'Outer Gate')}**\n"
+                "Running as a plain tower fight with Jury-scaled enemies."
+            ),
+            color=floor_data.get("color", 0x8B5CF6),
+        )
+        preview.add_field(
+            name="Test Setup",
+            value=(
+                f"Prestige: **{prestige}**\n"
+                f"Snapshot Source: **{snapshot_source}**\n"
+                f"{JURY_RANK_LABEL}: **{self._format_jury_bracket(row, scale_snapshot) or 'Unassigned'}**\n"
+                f"{self._format_jury_scale_snapshot(scale_snapshot) or 'No scale snapshot.'}"
+            ),
+            inline=False,
+        )
+        enemy_lines = []
+        for enemy in enemy_specs:
+            enemy_lines.append(
+                f"{enemy['name']}: **HP {enemy['hp']} / ATK {enemy['attack']} / DEF {enemy['defense']}**"
+            )
+        preview.add_field(name="Generated Enemies", value="\n".join(enemy_lines), inline=False)
+        await ctx.send(embed=preview)
+
+        await self._run_gm_test_battle(ctx, battle, f"GM Jury test for floor {floor}")
 
     @battletower.command()
     @locale_doc
@@ -785,40 +4309,58 @@ class Battles(commands.Cog):
                     return
 
                 try:
-                    user_level = await connection.fetchval('SELECT level FROM battletower WHERE id = $1', ctx.author.id)
+                    progress_row = await connection.fetchrow(
+                        """
+                        SELECT
+                            level,
+                            prestige,
+                            COALESCE(run_key_bits, 0) AS run_key_bits,
+                            COALESCE(freedom_meter, 0) AS freedom_meter,
+                            COALESCE(ironman_level, 0) AS ironman_level,
+                            COALESCE(ironman_best, 0) AS ironman_best,
+                            COALESCE(ironman_prestige, 0) AS ironman_prestige,
+                            COALESCE(bossrush_prestige, 0) AS bossrush_prestige
+                        FROM battletower
+                        WHERE id = $1
+                        """,
+                        ctx.author.id,
+                    )
+                    if not progress_row:
+                        await ctx.send("You have not started Battletower. You can start by using `$battletower start`")
+                        return
 
-                    level_names_1 = [
-                        "The Tower's Foyer",
-                        "Shadowy Staircase",
-                        "Chamber of Whispers",
-                        "Serpent's Lair",
-                        "Halls of Despair",
-                        "Crimson Abyss",
-                        "Forgotten Abyss",
-                        "Dreadlord's Domain",
-                        "Gates of Twilight",
-                        "Twisted Reflections",
-                        "Voidforged Sanctum",
-                        "Nexus of Chaos",
-                        "Eternal Torment Halls",
-                        "Abyssal Desolation",
-                        "Cursed Citadel",
-                        "The Spire of Shadows",
-                        "Tempest's Descent",
-                        "Roost of Doombringers",
-                        "The Endless Spiral",
-                        "Malevolent Apex",
-                        "Apocalypse's Abyss",
-                        "Chaosborne Throne",
-                        "Supreme Darkness",
-                        "The Tower's Heart",
-                        "The Ultimate Test",
-                        "Realm of Annihilation",
-                        "Lord of Despair",
-                        "Abyssal Overlord",
-                        "The End of All",
-                        "The Final Confrontation"
-                    ]
+                    user_level = int(progress_row["level"] or 1)
+                    prestige_level = int(progress_row["prestige"] or 0)
+                    run_key_bits = int(progress_row["run_key_bits"] or 0)
+                    freedom_meter = int(progress_row["freedom_meter"] or 0)
+                    ironman_level = int(progress_row["ironman_level"] or 0)
+                    ironman_best = int(progress_row["ironman_best"] or 0)
+                    ironman_prestige = int(progress_row["ironman_prestige"] or 0)
+                    bossrush_prestige = int(progress_row["bossrush_prestige"] or 0)
+                    prestige_challenges_open = prestige_level >= BT_CHALLENGE_MIN_PRESTIGE
+                    bossrush_used = bossrush_prestige >= prestige_level if prestige_challenges_open else False
+                    ironman_used = ironman_prestige >= prestige_level and ironman_level <= 0 if prestige_challenges_open else False
+                    ironman_active = (
+                        prestige_challenges_open
+                        and ironman_level > 0
+                        and ironman_prestige == prestige_level
+                    )
+                    bossrush_status = (
+                        "used" if bossrush_used else "available"
+                    ) if prestige_challenges_open else "locked"
+                    if not prestige_challenges_open:
+                        ironman_status = "locked"
+                    elif ironman_active:
+                        ironman_status = "active"
+                    else:
+                        ironman_status = "used" if ironman_used else "available"
+                    keys_this_run = self._tower_key_count(run_key_bits)
+                    hidden_door_ready = (
+                        keys_this_run == 3
+                        or freedom_meter >= self.TOWER_FREEDOM_UNLOCK_THRESHOLD
+                    )
+
+                    level_names_1 = self.battle_data.get("level_names") or []
 
                     # Function to generate the formatted level list
                     def generate_level_list(levels, start_level=1):
@@ -830,15 +4372,37 @@ class Battles(commands.Cog):
                         return result
 
                     # Create embed for levels 1-30
-                    prestige_level = await connection.fetchval('SELECT prestige FROM battletower WHERE id = $1',
-                                                               ctx.author.id)
-
                     embed_1 = discord.Embed(
                         title="Battle Tower Progress (Levels 1-30)",
-                        description=f"Level: {user_level}\nPrestige Level: {prestige_level}",
+                        description=(
+                            f"Level: {user_level}\n"
+                            f"Prestige Level: {prestige_level}\n"
+                            f"Keys This Run: {keys_this_run}/3\n"
+                            f"Hidden Door Resonance: "
+                            f"{min(freedom_meter, self.TOWER_FREEDOM_UNLOCK_THRESHOLD)}/{self.TOWER_FREEDOM_UNLOCK_THRESHOLD}\n"
+                            f"Hidden Door Ready: {'✅' if hidden_door_ready else '❌'}\n"
+                            f"Ironman: {'floor ' + str(ironman_level) if ironman_level else 'no active run'} "
+                            f"(best ascent: {ironman_best}, run prestige: {ironman_prestige or 'none'})\n"
+                            f"Prestige Challenges: "
+                            f"{'open' if prestige_challenges_open else f'locked until prestige {BT_CHALLENGE_MIN_PRESTIGE}'}\n"
+                            f"Boss Rush This Run: {bossrush_status}\n"
+                            f"Ironman This Run: {ironman_status}"
+                        ),
                         color=0x0000FF
                     )
                     embed_1.add_field(name="Level Progress", value=generate_level_list(level_names_1), inline=False)
+
+                    # This week's corrupted floors
+                    corrupted_floors = self.get_corrupted_floors()
+                    corrupted_lines = "\n".join(
+                        f"{data['emoji']} Floor {floor} — **{data['name']}**: {data['description']}"
+                        for floor, data in sorted(corrupted_floors.items())
+                    )
+                    embed_1.add_field(
+                        name="⚠️ Corrupted Floors This Week",
+                        value=f"{corrupted_lines}\nCleanse one for a bonus crate + gold!",
+                        inline=False,
+                    )
                     embed_1.set_footer(text="**Rewards are granted every 5 levels**")
 
                     # Send the embeds to the current context (channel)
@@ -850,7 +4414,397 @@ class Battles(commands.Cog):
         except Exception as e:
             await ctx.send(f"An error occurred while accessing the database: {e}")
 
-    async def handle_victory(self, ctx, level, name_value, dialoguetoggle, minion1_name=None, minion2_name=None, emotes=None, player_balance=0, victory_description=None):
+    @battletower.command(name="records", aliases=["record", "ghosts"])
+    async def battletower_records(self, ctx):
+        """Show global Battle Tower floor records."""
+        try:
+            async with self.bot.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT floor, clears, deaths, best_seconds, best_holder
+                    FROM tower_floor_stats
+                    ORDER BY floor ASC
+                    """
+                )
+            stats = {int(row["floor"]): row for row in rows}
+            lines = []
+            for floor in range(1, 31):
+                row = stats.get(floor)
+                if not row:
+                    lines.append(f"`{floor:>2}` — no attempts recorded")
+                    continue
+                clears = int(row["clears"] or 0)
+                deaths = int(row["deaths"] or 0)
+                attempts = clears + deaths
+                death_rate = (deaths / attempts * 100) if attempts else 0
+                if row["best_seconds"] and row["best_holder"]:
+                    best = f"best **{int(row['best_seconds'])}s** by <@{row['best_holder']}>"
+                else:
+                    best = "no clear record"
+                lines.append(
+                    f"`{floor:>2}` — {best} · {attempts:,} attempts · {death_rate:.0f}% deaths"
+                )
+
+            embed = discord.Embed(
+                title="Battle Tower Floor Records",
+                description="\n".join(lines),
+                color=0x95A5A6,
+            )
+            embed.set_footer(text="Global all-time records per floor.")
+            await ctx.send(embed=embed)
+        except Exception as e:
+            await ctx.send(f"An error occurred while fetching Battle Tower records: {e}")
+
+    def _get_other_god_message(self, victory_data, player_god=None):
+        """Pick a god message, preferring one that is not the player's god."""
+        god_messages = victory_data.get("god_messages")
+        if not isinstance(god_messages, dict) or not god_messages:
+            return None
+
+        normalized_player_god = (
+            player_god.strip().lower()
+            if isinstance(player_god, str) and player_god.strip()
+            else None
+        )
+
+        filtered_messages = [
+            msg
+            for god_name, msg in god_messages.items()
+            if isinstance(msg, str)
+            and msg.strip()
+            and (normalized_player_god is None or god_name.lower() != normalized_player_god)
+        ]
+
+        if not filtered_messages:
+            filtered_messages = [
+                msg for msg in god_messages.values() if isinstance(msg, str) and msg.strip()
+            ]
+
+        return random.choice(filtered_messages) if filtered_messages else None
+
+    # --- Weekly corrupted floors -------------------------------------------------
+    # Each week 3 tower floors are gripped by a corruption that buffs their
+    # enemies; cleansing one grants a bonus crate + gold on top of normal rewards.
+
+    TOWER_CORRUPTIONS = {
+        "vicious": {
+            "name": "Vicious",
+            "emoji": "🗡️",
+            "description": "Enemies deal 30% more damage.",
+            "damage_mult": 1.30,
+            "hp_mult": 1.0,
+        },
+        "stalwart": {
+            "name": "Stalwart",
+            "emoji": "🛡️",
+            "description": "Enemies have 40% more HP.",
+            "damage_mult": 1.0,
+            "hp_mult": 1.40,
+        },
+        "unhallowed": {
+            "name": "Unhallowed",
+            "emoji": "👻",
+            "description": "Enemies deal 20% more damage and have 20% more HP.",
+            "damage_mult": 1.20,
+            "hp_mult": 1.20,
+        },
+    }
+
+    def get_corrupted_floors(self):
+        """This week's corrupted tower floors as {floor: corruption dict}.
+
+        Seeded by ISO week: deterministic across restarts and identical for
+        every player until the week rolls over.
+        """
+        iso = datetime.datetime.utcnow().isocalendar()
+        rng = random.Random(f"bt-corrupted-{iso[0]}-W{iso[1]}")
+        floors = rng.sample(range(1, 31), 3)
+        return {
+            floor: self.TOWER_CORRUPTIONS[rng.choice(sorted(self.TOWER_CORRUPTIONS))]
+            for floor in floors
+        }
+
+    def apply_corruption_to_level_data(self, level_data, corruption):
+        """Return a copy of the floor data with enemy stats scaled up."""
+        scaled = {k: (dict(v) if isinstance(v, dict) else v) for k, v in level_data.items()}
+        hp_multiplier = to_decimal(corruption.get("hp_mult", 1), 1)
+        damage_multiplier = to_decimal(corruption.get("damage_mult", 1), 1)
+        for slot in ("minion1", "minion2", "boss"):
+            enemy = scaled.get(slot)
+            if isinstance(enemy, dict):
+                # Floor 16 can supply Decimal stats from the database while
+                # corruption definitions use floats. Normalize at this data
+                # boundary so mixed numeric sources cannot reach arithmetic.
+                enemy["hp"] = round(to_decimal(enemy.get("hp", 0)) * hp_multiplier)
+                enemy["damage"] = round(
+                    to_decimal(enemy.get("damage", 0)) * damage_multiplier
+                )
+        return scaled
+
+    async def award_corruption_bonus(self, ctx, corruption, emotes):
+        """Bonus loot roll for cleansing a corrupted floor."""
+        crate_options = (
+            self.battle_data.get("chest_options", {})
+            .get("random", {})
+            .get("crate_options", [])
+        )
+        if crate_options:
+            values = [opt["value"] for opt in crate_options]
+            weights = [opt["weight"] for opt in crate_options]
+            crate_type = random.choices(values, weights)[0]
+        else:
+            crate_type = "common"
+        money_bonus = random.randint(10, 50) * 1000
+        money_bonus = int(money_bonus * await self._freebooter_money_multiplier(ctx.author.id))
+        async with self.bot.pool.acquire() as connection:
+            await connection.execute(
+                f'UPDATE profile SET crates_{crate_type} = crates_{crate_type} + 1, money = money + $1 WHERE "user" = $2',
+                money_bonus,
+                ctx.author.id,
+            )
+        emote = (emotes or {}).get(crate_type, "")
+        await self._send_with_retry(
+            ctx,
+            content=(
+                f"{corruption['emoji']} **Corruption cleansed!** The floor's dark essence condenses into "
+                f"a bonus {emote} **{crate_type.capitalize()} Crate** and **${money_bonus:,}**!"
+            ),
+            suppress_failure=True,
+        )
+        # Let other systems (feats, ...) count the cleanse
+        self.bot.dispatch("corrupted_floor_cleansed", ctx)
+
+    async def _freebooter_money_multiplier(self, user_id):
+        """Freebooter spec: bonus money from victories (1.0 when unspecced)."""
+        spec_cog = self.bot.get_cog("Specializations")
+        if not spec_cog:
+            return 1.0
+        try:
+            fx = await spec_cog.get_user_spec_effects(user_id)
+        except Exception:
+            return 1.0
+        eff = fx.get("money_bonus_pct")
+        return 1 + eff["value"] / 100 if eff else 1.0
+
+    @staticmethod
+    def _bt_challenge_mode_label(mode):
+        return "Ironman" if mode == "ironman" else "Boss Rush"
+
+    def _bt_challenge_scale_snapshot(self, player_combatant, pet_combatant):
+        return self.battle_factory._build_jury_scale_snapshot_from_combatants(
+            player_combatant,
+            pet_combatant,
+        )
+
+    async def _bt_challenge_prestige_available(self, ctx, row, mode, active_ironman=False):
+        prestige = int(row["prestige"] or 0) if row else 0
+        mode_label = self._bt_challenge_mode_label(mode)
+        if prestige < BT_CHALLENGE_MIN_PRESTIGE:
+            await ctx.send(
+                f"**{mode_label}** opens at Battle Tower prestige "
+                f"**{BT_CHALLENGE_MIN_PRESTIGE}+**. You are prestige **{prestige}**."
+            )
+            return False
+
+        if mode == "bossrush":
+            used_prestige = int(row["bossrush_prestige"] or 0)
+            if used_prestige >= prestige:
+                await ctx.send(
+                    f"**Boss Rush** has already been attempted for prestige **{prestige}**. "
+                    "Prestige the tower again to reopen it."
+                )
+                return False
+        elif mode == "ironman" and not active_ironman:
+            used_prestige = int(row["ironman_prestige"] or 0)
+            if used_prestige >= prestige:
+                await ctx.send(
+                    f"**Ironman** has already been attempted for prestige **{prestige}**. "
+                    "Prestige the tower again to start another run."
+                )
+                return False
+        return True
+
+    def _bt_challenge_prestige_multiplier(self, prestige):
+        prestige_over = max(0, min(BT_CHALLENGE_PRESTIGE_CAP, int(prestige or 0)) - BT_CHALLENGE_MIN_PRESTIGE)
+        return Decimal("1") + (Decimal(prestige_over) * BT_CHALLENGE_PRESTIGE_STEP)
+
+    def _bt_challenge_base_multiplier(self, prestige):
+        capped = max(0, min(BT_CHALLENGE_BASE_STAT_CAP, int(prestige or 0)))
+        return Decimal("1") + (Decimal(capped) * BT_CHALLENGE_BASE_STAT_STEP)
+
+    def _bt_challenge_reward_multiplier(self, prestige):
+        prestige_over = max(0, int(prestige or 0) - BT_CHALLENGE_MIN_PRESTIGE)
+        return Decimal("1") + (Decimal(prestige_over) * Decimal("0.04"))
+
+    @staticmethod
+    def _bt_challenge_difficulty_prestige(prestige):
+        prestige = max(0, int(prestige or 0))
+        return max(0, prestige - (prestige // 5))
+
+    def _bt_challenge_floor_factor(self, floor, mode):
+        floor = max(1, min(30, int(floor or 1)))
+        progress = Decimal(floor - 1) / Decimal("29")
+        if mode == "bossrush":
+            return Decimal("0.85") + (progress * Decimal("0.15"))
+        return Decimal("0.55") + (progress * Decimal("0.45"))
+
+    def _scale_bt_challenge_enemy_spec(self, spec, floor, slot, prestige, snapshot, mode):
+        scaled = dict(spec)
+
+        floor = max(1, min(30, int(floor or 1)))
+        is_boss = slot == "boss"
+        prestige_multiplier = self._bt_challenge_prestige_multiplier(prestige)
+        base_multiplier = self._bt_challenge_base_multiplier(prestige)
+        floor_factor = self._bt_challenge_floor_factor(floor, mode)
+        if mode == "bossrush":
+            round_budget = Decimal("2.75") if is_boss else Decimal("1.45")
+            hp_pressure = Decimal("0.035") if is_boss else Decimal("0.027")
+            armor_pct = Decimal("0.15") if is_boss else Decimal("0.105")
+        else:
+            round_budget = Decimal("2.25") if is_boss else Decimal("1.15")
+            hp_pressure = Decimal("0.030") if is_boss else Decimal("0.022")
+            armor_pct = Decimal("0.13") if is_boss else Decimal("0.09")
+        round_budget *= prestige_multiplier * floor_factor
+
+        attack_base = Decimal(str((snapshot or {}).get("attack_base", 1) or 1))
+        hp_base = Decimal(str((snapshot or {}).get("hp_base", 1) or 1))
+        defense_base = Decimal(str((snapshot or {}).get("defense_base", 1) or 1))
+
+        base_hp = Decimal(str(spec.get("hp", 100) or 100))
+        base_attack = Decimal(str(spec.get("attack", 20) or 20))
+        base_defense = Decimal(str(spec.get("defense", 10) or 10))
+
+        hp = max(base_hp * base_multiplier, attack_base * round_budget)
+        damage_pressure = (
+            defense_base
+            + (hp_base * hp_pressure * prestige_multiplier * floor_factor)
+        )
+        damage = max(base_attack * base_multiplier, damage_pressure)
+        armor = max(base_defense * base_multiplier, attack_base * armor_pct * prestige_multiplier)
+
+        scaled["hp"] = max(1, int(round(float(hp))))
+        scaled["attack"] = max(1, int(round(float(damage))))
+        scaled["defense"] = max(0, int(round(float(armor))))
+        return scaled
+
+    def _bt_bossrush_rewards(self, prestige):
+        prestige = max(BT_CHALLENGE_MIN_PRESTIGE, int(prestige or BT_CHALLENGE_MIN_PRESTIGE))
+        bonus_tiers = max(0, min(2, (prestige - BT_CHALLENGE_MIN_PRESTIGE) // 10))
+        return {
+            "fortune": 1 + bonus_tiers,
+            "divine": 0,
+            "lp": min(200, 50 + (prestige * 5)),
+            "money_multiplier": self._bt_challenge_reward_multiplier(prestige),
+        }
+
+    def _bt_ironman_rewards(self, prestige):
+        prestige = max(BT_CHALLENGE_MIN_PRESTIGE, int(prestige or BT_CHALLENGE_MIN_PRESTIGE))
+        bonus_tiers = max(0, min(2, (prestige - BT_CHALLENGE_MIN_PRESTIGE) // 10))
+        return {
+            "fortune": bonus_tiers,
+            "divine": 1 + bonus_tiers,
+            "lp": min(450, 150 + (prestige * 10)),
+            "money_multiplier": self._bt_challenge_reward_multiplier(prestige),
+            "milestone_roll_bonus": bonus_tiers,
+        }
+
+    async def show_floor_ghosts(self, ctx, level):
+        """Community 'ghost' stats for a floor, shown before the fight."""
+        try:
+            async with self.bot.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT clears, deaths, best_seconds, best_holder FROM tower_floor_stats WHERE floor = $1",
+                    level,
+                )
+            if not row or (row["clears"] + row["deaths"]) < 5:
+                return  # not enough data for a meaningful ghost
+            total = row["clears"] + row["deaths"]
+            death_rate = row["deaths"] / total * 100
+            text = (
+                f"👻 **Floor {level} ghosts:** {death_rate:.0f}% of {total:,} "
+                "attempts ended in death here."
+            )
+            if row["best_seconds"] and row["best_holder"]:
+                holder_id = int(row["best_holder"])
+                guild = getattr(ctx, "guild", None)
+                holder = guild.get_member(holder_id) if guild else None
+                if holder is None:
+                    holder = self.bot.get_user(holder_id)
+
+                holder_name = (
+                    getattr(holder, "display_name", None)
+                    or getattr(holder, "name", None)
+                    or f"User {holder_id}"
+                )
+                holder_name = discord.utils.escape_mentions(
+                    discord.utils.escape_markdown(str(holder_name))
+                )
+                text += (
+                    f" Fastest clear: **{row['best_seconds']}s** "
+                    f"by **{holder_name}**."
+                )
+            await self._send_with_retry(
+                ctx,
+                content=text,
+                allowed_mentions=discord.AllowedMentions.none(),
+                suppress_failure=True,
+            )
+        except Exception:
+            pass
+
+    async def record_floor_outcome(self, ctx, level, cleared, seconds=None):
+        """Update the community floor stats after a fight."""
+        try:
+            async with self.bot.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO tower_floor_stats (floor, clears, deaths)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (floor) DO UPDATE
+                    SET clears = tower_floor_stats.clears + EXCLUDED.clears,
+                        deaths = tower_floor_stats.deaths + EXCLUDED.deaths
+                    """,
+                    level,
+                    1 if cleared else 0,
+                    0 if cleared else 1,
+                )
+                if cleared and seconds is not None and seconds > 0:
+                    new_record = await conn.fetchval(
+                        """
+                        UPDATE tower_floor_stats
+                        SET best_seconds = $2, best_holder = $3
+                        WHERE floor = $1 AND (best_seconds IS NULL OR $2 < best_seconds)
+                        RETURNING TRUE
+                        """,
+                        level,
+                        int(seconds),
+                        ctx.author.id,
+                    )
+                    if new_record:
+                        await self._send_with_retry(
+                            ctx,
+                            content=(
+                                f"👻 **New floor record!** {ctx.author.mention} cleared "
+                                f"floor {level} in **{int(seconds)}s**!"
+                            ),
+                            suppress_failure=True,
+                        )
+        except Exception:
+            pass
+
+    async def handle_victory(
+        self,
+        ctx,
+        level,
+        name_value,
+        dialoguetoggle,
+        minion1_name=None,
+        minion2_name=None,
+        emotes=None,
+        player_balance=0,
+        victory_description=None,
+        player_god=None,
+    ):
         """Handle victory rewards for battle tower."""
         if victory_description:
             await ctx.send(victory_description)
@@ -881,6 +4835,11 @@ class Battles(commands.Cog):
             description = description.replace("{minion1_name}", minion1_name)
         if minion2_name:
             description = description.replace("{minion2_name}", minion2_name)
+        if "{OTHER_GOD_MESSAGE}" in description:
+            other_god_message = self._get_other_god_message(victory_data, player_god)
+            if not other_god_message:
+                other_god_message = "A divine warning echoes in your mind, then vanishes."
+            description = description.replace("{OTHER_GOD_MESSAGE}", other_god_message)
         
         # Create and send the victory embed
         victory_embed = discord.Embed(
@@ -889,6 +4848,9 @@ class Battles(commands.Cog):
             color=0x00ff00  # Green color for success
         )
         await ctx.send(embed=victory_embed)
+
+        # Track run-based hidden-door progress (key rolls + resonance milestones).
+        await self._update_tower_run_progress(ctx, level)
         
         # Handle chest rewards if this level has them
         if "has_chest" in victory_data and victory_data["has_chest"]:
@@ -902,9 +4864,21 @@ class Battles(commands.Cog):
             async with self.bot.pool.acquire() as connection:
                 await connection.execute('UPDATE battletower SET level = level + 1 WHERE id = $1', ctx.author.id)
             await ctx.send(f'You have advanced to floor: {newlevel}')
+
+        self.bot.dispatch(
+            "battletower_completion",
+            ctx,
+            True,
+            level,
+            level_name,
+            name_value,
+            minion1_name,
+            minion2_name,
+        )
     
     async def handle_chest_rewards(self, ctx, level, name_value, emotes):
         """Handle chest rewards for battle tower victories."""
+
         level_str = str(level)
         victory_data = self.battle_data["victories"][level_str]
         chest_rewards = victory_data["chest_rewards"]
@@ -935,9 +4909,11 @@ class Battles(commands.Cog):
             await self.handle_prestige_chest_rewards(ctx, level, emotes)
         else:
             await self.handle_default_chest_rewards(ctx, level, chest_rewards["default"], emotes)
+
     
     async def handle_prestige_chest_rewards(self, ctx, level, emotes):
         """Handle randomized rewards for prestige players in battle tower."""
+        money_mult = await self._freebooter_money_multiplier(ctx.author.id)
         async with self.bot.pool.acquire() as connection:
             # Generate random rewards for both chests
             left_reward_type = random.choice(['crate', 'money'])
@@ -961,16 +4937,49 @@ class Battles(commands.Cog):
             else:
                 right_money_amount = random.choice(chest_options["money_options"])
             
+            left_reward = (
+                {"type": "crate", "rarity": left_crate_type, "amount": 1}
+                if left_reward_type == "crate"
+                else {
+                    "type": "money",
+                    "base_amount": int(left_money_amount),
+                    "actual_amount": int(left_money_amount * money_mult),
+                }
+            )
+            right_reward = (
+                {"type": "crate", "rarity": right_crate_type, "amount": 1}
+                if right_reward_type == "crate"
+                else {
+                    "type": "money",
+                    "base_amount": int(right_money_amount),
+                    "actual_amount": int(right_money_amount * money_mult),
+                }
+            )
+            controlled, choice = await self._aiplayer_prompt_choice(
+                ctx,
+                event={
+                    "event": "battletower_treasure_choice",
+                    "floor": int(level),
+                    "prestige_rewards_are_randomized_before_choice": True,
+                    "options": {"left": left_reward, "right": right_reward},
+                },
+                choices=["left", "right"],
+            )
+
             # Process user choice
             def check(m):
                 return m.author == ctx.author and m.content.lower() in ['left', 'right']
-                
-            try:
-                msg = await self.bot.wait_for('message', check=check, timeout=60.0)
-                choice = msg.content.lower()
-            except asyncio.TimeoutError:
+
+            if controlled and choice is None:
                 choice = random.choice(["left", "right"])
-                await ctx.send('You took too long to decide. The chest will be chosen at random.')
+                await ctx.send("Densetsu did not decide in time. The chest will be chosen at random.")
+            elif not controlled:
+                try:
+                    msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                    choice = msg.content.lower()
+                except asyncio.TimeoutError:
+                    choice = random.choice(["left", "right"])
+                    await ctx.send('You took too long to decide. The chest will be chosen at random.')
             
             # Process the reward based on choice
             new_level = level + 1
@@ -987,9 +4996,11 @@ class Battles(commands.Cog):
                     else:
                         await ctx.send(f'You could have gotten **${right_money_amount}** if you chose the right chest.')
                 else:
-                    await ctx.send(f'You open the chest on the left and find **${left_money_amount}**!')
+                    payout = int(left_money_amount * money_mult)
+                    plunder_note = " 💰 *Plunder!*" if payout > left_money_amount else ""
+                    await ctx.send(f'You open the chest on the left and find **${payout:,}**!{plunder_note}')
                     await connection.execute('UPDATE profile SET money = money + $1 WHERE "user" = $2',
-                                            left_money_amount, ctx.author.id)
+                                            payout, ctx.author.id)
                     
                     # Show what they missed
                     if right_reward_type == 'crate':
@@ -1009,9 +5020,11 @@ class Battles(commands.Cog):
                     else:
                         await ctx.send(f'You could have gotten **${left_money_amount}** if you chose the left chest.')
                 else:
-                    await ctx.send(f'You open the chest on the right and find **${right_money_amount}**!')
+                    payout = int(right_money_amount * money_mult)
+                    plunder_note = " 💰 *Plunder!*" if payout > right_money_amount else ""
+                    await ctx.send(f'You open the chest on the right and find **${payout:,}**!{plunder_note}')
                     await connection.execute('UPDATE profile SET money = money + $1 WHERE "user" = $2',
-                                            right_money_amount, ctx.author.id)
+                                            payout, ctx.author.id)
                     
                     # Show what they missed
                     if left_reward_type == 'crate':
@@ -1032,13 +5045,31 @@ class Battles(commands.Cog):
         def check(m):
             return m.author == ctx.author and m.content.lower() in ['left', 'right']
             
-        try:
-            msg = await self.bot.wait_for('message', check=check, timeout=60.0)
-            choice = msg.content.lower()
-        except asyncio.TimeoutError:
+        controlled, choice = await self._aiplayer_prompt_choice(
+            ctx,
+            event={
+                "event": "battletower_treasure_choice",
+                "floor": int(level),
+                "prestige_rewards_are_randomized_before_choice": False,
+                "options": {
+                    "left": dict(rewards["left"]),
+                    "right": dict(rewards["right"]),
+                },
+            },
+            choices=["left", "right"],
+        )
+        if controlled and choice is None:
             newlevel = level + 1
             choice = random.choice(["left", "right"])
-            await ctx.send('You took too long to decide. The chest will be chosen at random.')
+            await ctx.send("Densetsu did not decide in time. The chest will be chosen at random.")
+        elif not controlled:
+            try:
+                msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                choice = msg.content.lower()
+            except asyncio.TimeoutError:
+                newlevel = level + 1
+                choice = random.choice(["left", "right"])
+                await ctx.send('You took too long to decide. The chest will be chosen at random.')
         
         # Process the reward based on choice
         if choice is not None:
@@ -1144,70 +5175,234 @@ class Battles(commands.Cog):
     
     async def handle_finale_rewards(self, ctx, level):
         """Handle level 30 finale rewards for battle tower."""
+        victory_data = self.battle_data["victories"].get("30", {})
+        unlock_state = await self._get_tower_unlock_state(ctx.author.id)
+        keys_this_run = int(unlock_state["key_count"])
+        freedom_meter = int(unlock_state["freedom_meter"])
+        hidden_door_ready = bool(unlock_state["door4_unlocked"])
+        hidden_ready_reason = (
+            "All 3 keys resonated this run."
+            if unlock_state["full_key_unlock"]
+            else "Your resonance meter reached the hidden threshold."
+            if unlock_state["meter_unlock"]
+            else "Not unlocked this cycle."
+        )
+
         # Create and send cosmic embed
         cosmic_embed = discord.Embed(
-            title="The Cosmic Abyss: A Symphony of Despair",
-            description=self.battle_data["victories"]["30"]["description"],
-            color=0xff0000  # Red color for the climax
+            title=victory_data.get("title", self.battle_data["victories"]["30"]["title"]),
+            description=victory_data.get("description", self.battle_data["victories"]["30"]["description"]),
+            color=0xff0000,  # Red color for the climax
+        )
+        cosmic_embed.add_field(
+            name="Hidden Door Status",
+            value=(
+                f"Keys This Run: **{keys_this_run}/3**\n"
+                f"Resonance Meter: **{min(freedom_meter, self.TOWER_FREEDOM_UNLOCK_THRESHOLD)}/{self.TOWER_FREEDOM_UNLOCK_THRESHOLD}**\n"
+                f"Door 4 Ready: {'✅' if hidden_door_ready else '❌'}\n"
+                f"{hidden_ready_reason}"
+            ),
+            inline=False,
         )
         await ctx.send(embed=cosmic_embed)
-        
+
+        endings = victory_data.get("endings", {})
+        selected_door_key = None
+        if isinstance(endings, dict) and endings:
+            ordered_doors = [
+                "door_1_elysia",
+                "door_2_sepulchure",
+                "door_3_drakath",
+                "door_4_freedom",
+            ]
+            available_door_keys = [
+                door_key
+                for door_key in ordered_doors
+                if door_key in endings and (door_key != "door_4_freedom" or hidden_door_ready)
+            ]
+            if available_door_keys:
+                selected_door_key = await self._prompt_finale_door_choice(
+                    ctx, available_door_keys, endings
+                )
+                if not selected_door_key:
+                    selected_door_key = random.choice(available_door_keys)
+
+                selected_ending = endings.get(selected_door_key)
+                if selected_ending:
+                    ending_embed = discord.Embed(
+                        title=selected_ending.get("title", self._tower_door_label(selected_door_key)),
+                        description=selected_ending.get("description", "The path forward is unclear."),
+                        color=0x8B0000,
+                    )
+                    await ctx.send(embed=ending_embed)
+
+        if selected_door_key:
+            try:
+                await self.bot.pool.execute(
+                    """
+                    UPDATE battletower
+                    SET last_ending_key=$2, last_ending_at=NOW()
+                    WHERE id=$1
+                    """,
+                    ctx.author.id,
+                    selected_door_key,
+                )
+            except Exception:
+                logger.exception(
+                    "Could not persist Battle Tower ending %s for user %s",
+                    selected_door_key,
+                    ctx.author.id,
+                )
+
+        door_four_unlock_granted = False
+        if selected_door_key == "door_4_freedom":
+            quests = self.bot.get_cog("Quests")
+            if quests is not None and hasattr(quests, "grant_system_unlock"):
+                try:
+                    door_four_unlock_granted = await quests.grant_system_unlock(
+                        ctx.author.id,
+                        "battle_tower_door_4_freedom",
+                        source="battle_tower:door_4",
+                        metadata={
+                            "ending_key": selected_door_key,
+                            "prestige": int(
+                                await self.bot.pool.fetchval(
+                                    "SELECT COALESCE(prestige, 0) FROM battletower WHERE id=$1",
+                                    ctx.author.id,
+                                )
+                                or 0
+                            ),
+                        },
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not persist Door Four campaign unlock for user %s",
+                        ctx.author.id,
+                    )
+
+        # Door 4 bonus: always double finale rewards when the hidden door is chosen.
+        # This includes both:
+        # - full key unlock (all 3 keys this run), and
+        # - resonance-meter unlock (pity path).
+        door4_double_rewards = selected_door_key == "door_4_freedom"
+        reward_multiplier = 2 if door4_double_rewards else 1
+
         # Check prestige level
         async with self.bot.pool.acquire() as connection:
-            prestige_level = await connection.fetchval('SELECT prestige FROM battletower WHERE id = $1', ctx.author.id)
-            
+            prestige_level = await connection.fetchval(
+                'SELECT prestige FROM battletower WHERE id = $1',
+                ctx.author.id,
+            )
+            prestige_level = int(prestige_level or 0)
+
+        # Get emoji mapping for display
+        emotes = {
+            "common": "<:c_common:1403797578197368923>",
+            "uncommon": "<:c_uncommon:1403797597532983387>",
+            "rare": "<:c_rare:1403797594827657247>",
+            "magic": "<:c_Magic:1403797589169541330>",
+            "legendary": "<:c_Legendary:1403797587236225044>",
+            "mystery": "<:c_mystspark:1403797593129222235>",
+            "fortune": "<:c_money:1403797585411575971>",
+            "divine": "<:c_divine:1403797579635884202>",
+        }
+
         if prestige_level >= 1:
-            # Update level
-            async with self.bot.pool.acquire() as connection:
-                await connection.execute('UPDATE battletower SET level = level + 1 WHERE id = $1', ctx.author.id)
-                
-            await ctx.send(f'This is the end for you... {ctx.author.mention}.. or is it..?')
-            
-            # Award a random premium crate
-            success = True
-            self.bot.dispatch("raid_completion", ctx, success, ctx.author.id)
-            
-            # Get premium crate options
             premium_options = self.battle_data["chest_options"]["random_premium"]
             crate_options = premium_options["types"]
             weights = premium_options["weights"]
-            
-            # Select random crate type
             selected_crate = random.choices(crate_options, weights)[0]
-            
-            # Award the crate
             async with self.bot.pool.acquire() as connection:
                 await connection.execute(
-                    f'UPDATE profile SET crates_{selected_crate} = crates_{selected_crate} + 1 WHERE "user" = $1',
-                    ctx.author.id)
-                    
-            # Get emoji mapping for display
-            emotes = {
-                "common": "<:F_common:1139514874016309260>",
-                "uncommon": "<:F_uncommon:1139514875828252702>",
-                "rare": "<:F_rare:1139514880517484666>",
-                "magic": "<:F_Magic:1139514865174720532>",
-                "legendary": "<:F_Legendary:1139514868400132116>",
-                "mystery": "<:F_mystspark:1139521536320094358>",
-                "fortune": "<:f_money:1146593710516224090>",
-                "divine": "<:f_divine:1169412814612471869>"
-            }
-                    
-            await ctx.send(f"You have received 1 {emotes[selected_crate]} crate for completing the battletower on prestige level: {prestige_level}. Congratulations!")
+                    f'UPDATE profile SET crates_{selected_crate} = crates_{selected_crate} + $1 WHERE "user" = $2',
+                    reward_multiplier,
+                    ctx.author.id,
+                )
+            reward_message = (
+                f"You have received {reward_multiplier} {emotes[selected_crate]} crate"
+                f"{'' if reward_multiplier == 1 else 's'} for completing the battletower "
+                f"on prestige level: {prestige_level}. Congratulations!"
+            )
         else:
-            # First-time completion gets divine crate
             async with self.bot.pool.acquire() as connection:
                 await connection.execute(
-                    'UPDATE profile SET crates_divine = crates_divine + 1 WHERE "user" = $1',
-                    ctx.author.id)
-                await connection.execute('UPDATE battletower SET level = level + 1 WHERE id = $1', ctx.author.id)
-                
-            await ctx.send(f'This is the end for you... {ctx.author.mention}.. or is it..?')
-            await ctx.send("You have received 1 <:f_divine:1169412814612471869> crate for completing the battletower, congratulations.")
-            
+                    'UPDATE profile SET crates_divine = crates_divine + $1 WHERE "user" = $2',
+                    reward_multiplier,
+                    ctx.author.id,
+                )
+            reward_message = (
+                f"You have received {reward_multiplier} <:f_divine:1169412814612471869> crate"
+                f"{'' if reward_multiplier == 1 else 's'} "
+                "for completing the battletower, congratulations."
+            )
+
+        # Progression updates after floor 30:
+        # - always advance to level 31 (prestige prompt remains in `fight`)
+        # - reset run keys for the next cycle
+        # - apply hidden-door resonance gain/consumption
+        freedom_delta = 0
+        if not hidden_door_ready:
+            freedom_delta += self.TOWER_FREEDOM_FINALE_MISS_GAIN
+        elif (
+            selected_door_key == "door_4_freedom"
+            and unlock_state["meter_unlock"]
+            and not unlock_state["full_key_unlock"]
+        ):
+            freedom_delta -= self.TOWER_FREEDOM_UNLOCK_THRESHOLD
+
+        async with self.bot.pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE battletower
+                SET level = level + 1,
+                    run_key_bits = 0,
+                    freedom_meter = GREATEST(0, COALESCE(freedom_meter, 0) + $1)
+                WHERE id = $2
+                """,
+                freedom_delta,
+                ctx.author.id,
+            )
+
+        await ctx.send(f'This is the end for you... {ctx.author.mention}.. or is it..?')
+        if door4_double_rewards:
+            if unlock_state.get("full_key_unlock"):
+                await ctx.send(
+                    "🔓 The hidden fourth door recognizes your 3 keys. Finale rewards are **doubled**."
+                )
+            elif unlock_state.get("meter_unlock"):
+                await ctx.send(
+                    "🔓 Hidden-door resonance activates the pity system. Finale rewards are **doubled**."
+                )
+            else:
+                await ctx.send(
+                    "🔓 The hidden fourth door opens. Finale rewards are **doubled**."
+                )
+            if door_four_unlock_granted:
+                await ctx.send(
+                    "📖 **A path beyond the tower is now permanently recorded in your Chronicle.**"
+                )
+        await ctx.send(reward_message)
+
+        if not hidden_door_ready:
+            new_meter = max(0, freedom_meter + self.TOWER_FREEDOM_FINALE_MISS_GAIN)
+            await ctx.send(
+                f"🧭 The hidden door stayed sealed this cycle. "
+                f"Resonance +{self.TOWER_FREEDOM_FINALE_MISS_GAIN} "
+                f"(**{min(new_meter, self.TOWER_FREEDOM_UNLOCK_THRESHOLD)}/{self.TOWER_FREEDOM_UNLOCK_THRESHOLD}**)."
+            )
+        elif (
+            selected_door_key == "door_4_freedom"
+            and unlock_state["meter_unlock"]
+            and not unlock_state["full_key_unlock"]
+        ):
+            remaining_meter = max(0, freedom_meter - self.TOWER_FREEDOM_UNLOCK_THRESHOLD)
+            await ctx.send(
+                f"🗝️ Hidden-door resonance consumed: "
+                f"{self.TOWER_FREEDOM_UNLOCK_THRESHOLD}. Remaining: **{remaining_meter}**."
+            )
+
         # Complete the raid
-        completed = True
-        self.bot.dispatch("raid_completion", ctx, completed, ctx.author.id)
+        self.bot.dispatch("raid_completion", ctx, True, ctx.author.id)
         try:
             await self.remove_player_from_fight(ctx.author.id)
         except Exception as e:
@@ -1218,6 +5413,7 @@ class Battles(commands.Cog):
     @user_cooldown(600)
     async def fight(self, ctx):
         """Fight the current level in the battle tower."""
+        ctx = self._guard_battle_context(ctx)
         try:
             # Check if user has started the battle tower
             async with self.bot.pool.acquire() as connection:
@@ -1228,7 +5424,12 @@ class Battles(commands.Cog):
                     return
 
                 # Get user's level and other data
+
                 level = await connection.fetchval('SELECT level FROM battletower WHERE id = $1', ctx.author.id)
+                if level == 0:
+                    await connection.execute('UPDATE battletower SET level = 1 WHERE id = $1', ctx.author.id)
+                    level = 1
+
                 player_balance = await connection.fetchval('SELECT money FROM profile WHERE "user" = $1', ctx.author.id)
                 god_value = await connection.fetchval('SELECT god FROM profile WHERE "user" = $1', ctx.author.id)
                 name_value = await connection.fetchval('SELECT name FROM profile WHERE "user" = $1', ctx.author.id)
@@ -1241,24 +5442,25 @@ class Battles(commands.Cog):
                     confirm = await ctx.confirm(confirm_message)
                     if confirm:
                         async with self.bot.pool.acquire() as connection:
-                            await connection.execute(
-                                'UPDATE battletower SET level = 1, prestige = prestige + 1 WHERE id = $1',
+                            new_prestige = await connection.fetchval(
+                                'UPDATE battletower SET level = 1, prestige = prestige + 1, run_key_bits = 0 WHERE id = $1 RETURNING prestige',
                                 ctx.author.id)
                         await ctx.send(
                             "You have prestiged. Your level has been reset to 1. The rewards for your next run will be completely randomized.")
+                        self.bot.dispatch("battletower_prestige", ctx, new_prestige)
                         await self.bot.reset_cooldown(ctx)
                         return
                     else:
                         await ctx.send("Prestige canceled.")
                         await self.bot.reset_cooldown(ctx)
                         return
-                except asyncio.TimeoutError:
+                except (asyncio.TimeoutError, NoChoice):
                     await ctx.send("Prestige canceled due to timeout.")
                     await self.bot.reset_cooldown(ctx)
                     return
 
             # Display dialogue for the current level
-            await self.display_dialogue(ctx, level, name_value, dialoguetoggle)
+            await self.display_dialogue(ctx, level, name_value, dialoguetoggle, god_value)
 
             # Check if player is already in a fight
             if await self.is_player_in_fight(ctx.author.id):
@@ -1277,6 +5479,92 @@ class Battles(commands.Cog):
                 await self.remove_player_from_fight(ctx.author.id)
                 await self.bot.reset_cooldown(ctx)
                 return
+
+            # Special handling for level 16 - use random players as minions
+            if level == 16:
+                async with self.bot.pool.acquire() as connection:
+                    query = 'SELECT "user" FROM profile WHERE "user" != $1 ORDER BY RANDOM() LIMIT 2'
+                    random_users = await connection.fetch(query, ctx.author.id)
+
+                    random_user_objects = []
+                    for user in random_users:
+                        user_id = user['user']
+                        try:
+                            fetched_user = await self.bot.fetch_user(user_id)
+                            if fetched_user:
+                                random_user_objects.append(fetched_user)
+                        except:
+                            continue
+
+                    if len(random_user_objects) >= 2:
+                        random_user_object_1 = random_user_objects[0]
+                        random_user_object_2 = random_user_objects[1]
+                        async with self.bot.pool.acquire() as conn:
+                            minion1atk, minion1def = await self.bot.get_raidstats(random_user_object_1, conn=conn)
+                            minion2atk, minion2def = await self.bot.get_raidstats(random_user_object_2, conn=conn)
+
+                            # Calculate HP for minion 1
+                            minion1_result = await conn.fetchrow('SELECT "health", "stathp", "xp" FROM profile WHERE "user" = $1', random_user_object_1.id)
+                            if minion1_result:
+                                from utils import misc as rpgtools
+                                minion1_level = rpgtools.xptolevel(minion1_result['xp'])
+                                base_health = 200
+                                minion1_health = minion1_result['health'] + base_health
+                                minion1_stathp = minion1_result['stathp'] * 50
+                                minion1_total_hp = minion1_health + (minion1_level * 15) + minion1_stathp
+                            else:
+                                minion1_total_hp = 250  # fallback
+
+                            # Calculate HP for minion 2
+                            minion2_result = await conn.fetchrow('SELECT "health", "stathp", "xp" FROM profile WHERE "user" = $1', random_user_object_2.id)
+                            if minion2_result:
+                                minion2_level = rpgtools.xptolevel(minion2_result['xp'])
+                                base_health = 200
+                                minion2_health = minion2_result['health'] + base_health
+                                minion2_stathp = minion2_result['stathp'] * 50
+                                minion2_total_hp = minion2_health + (minion2_level * 15) + minion2_stathp
+                            else:
+                                minion2_total_hp = 150  # fallback
+
+                        level_data = level_data.copy()
+                        level_data["minion1_name"] = random_user_object_1.display_name
+                        level_data["minion2_name"] = random_user_object_2.display_name
+                        level_data["minion1"] = {
+                            "hp": minion1_total_hp,
+                            "damage": minion1atk,
+                            "armor": minion1def,
+                            "element": "unknown"
+                        }
+                        level_data["minion2"] = {
+                            "hp": minion2_total_hp,
+                            "damage": minion2atk,
+                            "armor": minion2def,
+                            "element": "unknown"
+                        }
+                    else:
+                        await self._send_with_retry(
+                            ctx,
+                            content="Warning: Could not find enough players for special level 16 battle. Using default enemies.",
+                            suppress_failure=True,
+                        )
+
+            # Weekly corrupted floor: scale enemies up and flag the bonus reward
+            corruption = self.get_corrupted_floors().get(level)
+            if corruption:
+                level_data = self.apply_corruption_to_level_data(level_data, corruption)
+                corruption_embed = discord.Embed(
+                    title=f"{corruption['emoji']} Corrupted Floor!",
+                    description=(
+                        f"A dark power grips floor {level} this week: **{corruption['name']}** — "
+                        f"{corruption['description']}\nCleanse it for a bonus reward!"
+                    ),
+                    color=0x8B00FF,
+                )
+                await ctx.send(embed=corruption_embed)
+
+            # Floor ghosts: community death rate + fastest clear
+            await self.show_floor_ghosts(ctx, level)
+            fight_started_at = datetime.datetime.utcnow()
 
             # Create and start the battle
             battle = await self.battle_factory.create_battle(
@@ -1303,14 +5591,14 @@ class Battles(commands.Cog):
 
             # Define emoji map for rewards
             emotes = {
-                "common": "<:F_common:1139514874016309260>",
-                "uncommon": "<:F_uncommon:1139514875828252702>",
-                "rare": "<:F_rare:1139514880517484666>",
-                "magic": "<:F_Magic:1139514865174720532>",
-                "legendary": "<:F_Legendary:1139514868400132116>",
-                "mystery": "<:F_mystspark:1139521536320094358>",
-                "fortune": "<:f_money:1146593710516224090>",
-                "divine": "<:f_divine:1169412814612471869>"
+                "common": "<:c_common:1403797578197368923>",
+                "uncommon": "<:c_uncommon:1403797597532983387>",
+                "rare": "<:c_rare:1403797594827657247>",
+                "magic": "<:c_Magic:1403797589169541330>",
+                "legendary": "<:c_Legendary:1403797587236225044>",
+                "mystery": "<:c_mystspark:1403797593129222235>",
+                "fortune": "<:c_money:1403797585411575971>",
+                "divine": "<:c_divine:1403797579635884202>",
             }
 
             # Handle victory or defeat
@@ -1333,18 +5621,41 @@ class Battles(commands.Cog):
                         minion1_name=minion1_name,
                         minion2_name=minion2_name,
                         emotes=emotes,
-                        player_balance=player_balance
+                        player_balance=player_balance,
+                        player_god=god_value,
                     )
+
+                    # Bonus loot for cleansing a corrupted floor
+                    if corruption:
+                        await self.award_corruption_bonus(ctx, corruption, emotes)
+
+                    # Floor ghosts: record the clear + time
+                    fight_seconds = (datetime.datetime.utcnow() - fight_started_at).total_seconds()
+                    await self.record_floor_outcome(ctx, level, True, fight_seconds)
                 else:
-                    await ctx.send(f"**{ctx.author.mention}**, you have been defeated. Better luck next time!")
+                    await self._send_with_retry(
+                        ctx,
+                        content=f"**{ctx.author.mention}**, you have been defeated. Better luck next time!",
+                        suppress_failure=True,
+                    )
+                    await self.record_floor_outcome(ctx, level, False)
             else:
                 # Check if it was a timeout or defeat
                 if battle_timed_out:
                     # It was a timeout
-                    await ctx.send("The battle timed out. Try again later.")
+                    await self._send_with_retry(
+                        ctx,
+                        content="The battle timed out. Try again later.",
+                        suppress_failure=True,
+                    )
                 else:
                     # It was a defeat
-                    await ctx.send(f"**{ctx.author.mention}**, you have been defeated. Better luck next time!")
+                    await self._send_with_retry(
+                        ctx,
+                        content=f"**{ctx.author.mention}**, you have been defeated. Better luck next time!",
+                        suppress_failure=True,
+                    )
+                    await self.record_floor_outcome(ctx, level, False)
 
             # Remove player from fight tracking
             await self.remove_player_from_fight(ctx.author.id)
@@ -1352,7 +5663,2620 @@ class Battles(commands.Cog):
         except Exception as e:
             import traceback
             error_message = f"An error occurred during the battletower battle: {e}\n{traceback.format_exc()}"
-            await ctx.send(error_message)
+            await self._send_with_retry(ctx, content=error_message[:1900], suppress_failure=True)
+            print(error_message)
+            await self.remove_player_from_fight(ctx.author.id)
+            await self.bot.reset_cooldown(ctx)
+
+    @has_char()
+    @battletower.command(name="ironman")
+    async def ironman(self, ctx):
+        """Climb the tower in an independent die-once Ironman run."""
+        ctx = self._guard_battle_context(ctx)
+        try:
+            async with self.bot.pool.acquire() as connection:
+                row = await connection.fetchrow(
+                    """
+                    SELECT level, prestige, COALESCE(ironman_level, 0) AS ironman_level,
+                           COALESCE(ironman_best, 0) AS ironman_best,
+                           COALESCE(ironman_prestige, 0) AS ironman_prestige
+                    FROM battletower
+                    WHERE id = $1
+                    """,
+                    ctx.author.id,
+                )
+                if not row:
+                    await self.bot.reset_cooldown(ctx)
+                    return await ctx.send("You have not started Battletower. Use `$battletower start` first.")
+
+            if await self.is_player_in_fight(ctx.author.id):
+                await self.bot.reset_cooldown(ctx)
+                return await ctx.send("You are already in a battle!")
+
+            prestige = int(row["prestige"] or 0)
+            floor = int(row["ironman_level"] or 0)
+            active_run_prestige = int(row["ironman_prestige"] or 0)
+            active_ironman = floor > 0 and active_run_prestige == prestige
+            if floor > 0 and active_run_prestige != prestige:
+                async with self.bot.pool.acquire() as connection:
+                    await connection.execute(
+                        "UPDATE battletower SET ironman_level = 0 WHERE id = $1",
+                        ctx.author.id,
+                    )
+                floor = 0
+                active_ironman = False
+
+            if not await self._bt_challenge_prestige_available(
+                ctx,
+                row,
+                "ironman",
+                active_ironman=active_ironman,
+            ):
+                return
+
+            if floor <= 0:
+                floor = 1
+                async with self.bot.pool.acquire() as connection:
+                    await connection.execute(
+                        """
+                        UPDATE battletower
+                        SET ironman_level = 1,
+                            ironman_prestige = prestige
+                        WHERE id = $1
+                        """,
+                        ctx.author.id,
+                    )
+                await ctx.send(
+                    f"🏔️ **Prestige {prestige} Ironman run started.** "
+                    "Floor 1 awaits; die once and the run is ash."
+                )
+
+            await self.add_player_to_fight(ctx.author.id)
+            carried_hp = {}
+            announced_difficulty = False
+            difficulty_prestige = self._bt_challenge_difficulty_prestige(prestige)
+            while 1 <= floor <= 30:
+                try:
+                    level_data = self.levels[str(floor)]
+                except KeyError:
+                    await self.bot.reset_cooldown(ctx)
+                    return await ctx.send(f"No data found for ironman floor {floor}.")
+
+                corruption = self.get_corrupted_floors().get(floor)
+                if corruption:
+                    level_data = self.apply_corruption_to_level_data(level_data, corruption)
+                    await ctx.send(
+                        f"{corruption['emoji']} Ironman floor {floor} is **{corruption['name']}** this week: "
+                        f"{corruption['description']}"
+                    )
+
+                player_combatant = await self.battle_factory.create_player_combatant(
+                    ctx, ctx.author, include_pet=True
+                )
+                pet_combatant = await self.battle_factory.pet_ext.get_pet_combatant(ctx, ctx.author)
+                if "player" in carried_hp:
+                    player_combatant.hp = max(0, min(player_combatant.max_hp, carried_hp["player"]))
+                if pet_combatant and "pet" in carried_hp:
+                    pet_combatant.hp = max(0, min(pet_combatant.max_hp, carried_hp["pet"]))
+
+                player_team = Team("Player", [player_combatant])
+                if pet_combatant:
+                    player_team.add_combatant(pet_combatant)
+                scale_snapshot = self._bt_challenge_scale_snapshot(player_combatant, pet_combatant)
+
+                enemy_team = Team("Enemy", [])
+                for slot, fallback_name in (("minion1", "Minion"), ("minion2", "Minion"), ("boss", "Boss")):
+                    enemy_data = level_data.get(slot)
+                    if not isinstance(enemy_data, dict):
+                        continue
+                    name = level_data.get(f"{slot}_name", fallback_name)
+                    spec = {
+                        "name": name,
+                        "hp": enemy_data.get("hp", 100),
+                        "attack": enemy_data.get("damage", 20),
+                        "defense": enemy_data.get("armor", 10),
+                        "element": enemy_data.get("element", "Unknown"),
+                    }
+                    spec = self._scale_bt_challenge_enemy_spec(
+                        spec,
+                        floor,
+                        slot,
+                        difficulty_prestige,
+                        scale_snapshot,
+                        "ironman",
+                    )
+                    enemy = await self.battle_factory.create_monster_combatant(spec, name=name)
+                    if slot == "boss":
+                        setattr(enemy, "is_boss", True)
+                    enemy_team.add_combatant(enemy)
+
+                if not announced_difficulty:
+                    await ctx.send(
+                        f"🏔️ **Ironman difficulty:** prestige **{difficulty_prestige}** enemy stats "
+                        f"(current tower prestige **{prestige}**) "
+                        f"(power snapshot ATK {scale_snapshot['attack_base']:,} / "
+                        f"HP {scale_snapshot['hp_base']:,} / DEF {scale_snapshot['defense_base']:,})."
+                    )
+                    announced_difficulty = True
+
+                battle = TowerBattle(ctx, [player_team, enemy_team], level=floor, level_data=level_data, allow_pets=True)
+                battle.config["allow_pets"] = True
+                await battle.start_battle()
+                while not await battle.is_battle_over():
+                    await battle.process_turn()
+                    await asyncio.sleep(1)
+                result = await battle.end_battle()
+                timed_out = hasattr(battle, "battle_timed_out") and battle.battle_timed_out
+                player_alive = any(not c.is_pet and c.is_alive() for c in player_team.combatants)
+                victory = bool(result and result.name == "Player" and player_alive)
+
+                if victory:
+                    if floor == 30:
+                        rewards = self._bt_ironman_rewards(prestige)
+                        async with self.bot.pool.acquire() as connection:
+                            await connection.execute(
+                                """
+                                UPDATE profile
+                                SET crates_divine = crates_divine + $1,
+                                    crates_fortune = crates_fortune + $2
+                                WHERE "user" = $3
+                                """,
+                                rewards["divine"],
+                                rewards["fortune"],
+                                ctx.author.id,
+                            )
+                            await connection.execute(
+                                """
+                                UPDATE battletower
+                                SET ironman_best = GREATEST(ironman_best, 30),
+                                    ironman_level = 0
+                                WHERE id = $1
+                                """,
+                                ctx.author.id,
+                            )
+                        legacy = self.bot.get_cog("Legacy")
+                        if legacy:
+                            await legacy.award_points(ctx.author.id, rewards["lp"])
+                        crate_lines = [f"**{rewards['divine']} Divine Crate(s)**"]
+                        if rewards["fortune"]:
+                            crate_lines.append(f"**{rewards['fortune']} Fortune Crate(s)**")
+                        await ctx.send(
+                            f"🏔️ **PRESTIGE {prestige} IRONMAN ASCENT COMPLETE** — floor 30 falls! "
+                            f"Rewards: **+{rewards['lp']} Legacy Points** and {', '.join(crate_lines)}."
+                        )
+                        self.bot.dispatch("ironman_completion", ctx, floor, True, True)
+                        return
+
+                    reward_lines = []
+                    if floor in {5, 10, 15, 20, 25, 30}:
+                        rewards = self._bt_ironman_rewards(prestige)
+                        rolls = floor // 5 + rewards["milestone_roll_bonus"]
+                        crate_options = self.battle_data["chest_options"]["random"]["crate_options"]
+                        crate_values = [opt["value"] for opt in crate_options]
+                        crate_weights = [opt["weight"] for opt in crate_options]
+                        crates = random.choices(crate_values, weights=crate_weights, k=rolls)
+                        money = int(
+                            floor
+                            * 12000
+                            * float(rewards["money_multiplier"])
+                            * await self._freebooter_money_multiplier(ctx.author.id)
+                        )
+                        async with self.bot.pool.acquire() as connection:
+                            for crate in crates:
+                                await connection.execute(
+                                    f'UPDATE profile SET crates_{crate} = crates_{crate} + 1 WHERE "user" = $1',
+                                    ctx.author.id,
+                                )
+                            await connection.execute(
+                                'UPDATE profile SET money = money + $1 WHERE "user" = $2',
+                                money,
+                                ctx.author.id,
+                            )
+                        reward_lines.append(
+                            f"Milestone reward: {', '.join(crate.capitalize() for crate in crates)} crate(s) and **${money:,}**."
+                        )
+
+                    next_floor = floor + 1
+                    async with self.bot.pool.acquire() as connection:
+                        await connection.execute(
+                            """
+                            UPDATE battletower
+                            SET ironman_level = $2,
+                                ironman_best = GREATEST(ironman_best, $3)
+                            WHERE id = $1
+                            """,
+                            ctx.author.id,
+                            next_floor,
+                            floor,
+                        )
+                    carried_hp = {"player": player_combatant.hp}
+                    if pet_combatant:
+                        carried_hp["pet"] = pet_combatant.hp
+                    await ctx.send(
+                        f"🏔️ Ironman floor **{floor}** cleared. Continuing to floor **{next_floor}**."
+                        + (f"\n{reward_lines[0]}" if reward_lines else "")
+                    )
+                    self.bot.dispatch("ironman_completion", ctx, floor, True, False)
+                    floor = next_floor
+                    await asyncio.sleep(2)
+                    continue
+
+                survived = max(0, floor - 1)
+                async with self.bot.pool.acquire() as connection:
+                    await connection.execute(
+                        """
+                        UPDATE battletower
+                        SET ironman_best = GREATEST(ironman_best, $2),
+                            ironman_level = 0
+                        WHERE id = $1
+                        """,
+                        ctx.author.id,
+                        survived,
+                    )
+                if timed_out:
+                    await ctx.send(
+                        f"🏔️ Ironman timed out on floor **{floor}**. Floors survived: **{survived}**. The run is ash."
+                    )
+                else:
+                    await ctx.send(
+                        f"🏔️ Ironman run ended on floor **{floor}**. Floors survived: **{survived}**. No consolation rewards."
+                    )
+                self.bot.dispatch("ironman_completion", ctx, floor, False, False)
+                return
+        except Exception as e:
+            error_message = f"An error occurred during Ironman: {e}\n{traceback.format_exc()}"
+            await self._send_with_retry(ctx, content=error_message[:1900], suppress_failure=True)
+            await self.bot.reset_cooldown(ctx)
+        finally:
+            await self.remove_player_from_fight(ctx.author.id)
+
+    @has_char()
+    @battletower.command(name="bossrush")
+    async def bossrush(self, ctx):
+        """Face the tower's six milestone bosses once per tower prestige run."""
+        ctx = self._guard_battle_context(ctx)
+        try:
+            async with self.bot.pool.acquire() as connection:
+                row = await connection.fetchrow(
+                    """
+                    SELECT level, prestige, COALESCE(bossrush_prestige, 0) AS bossrush_prestige
+                    FROM battletower
+                    WHERE id = $1
+                    """,
+                    ctx.author.id,
+                )
+            if not row:
+                return await ctx.send("You have not started Battletower. Use `$battletower start` first.")
+
+            prestige = int(row["prestige"] or 0)
+            if not await self._bt_challenge_prestige_available(ctx, row, "bossrush"):
+                return
+
+            if await self.is_player_in_fight(ctx.author.id):
+                return await ctx.send("You are already in a battle!")
+
+            await self.add_player_to_fight(ctx.author.id)
+            async with self.bot.pool.acquire() as connection:
+                await connection.execute(
+                    "UPDATE battletower SET bossrush_prestige = prestige WHERE id = $1",
+                    ctx.author.id,
+                )
+
+            # Assemble the six milestone bosses at their base stats
+            boss_specs = []
+            for floor in (5, 10, 15, 20, 25, 30):
+                floor_data = self.levels.get(str(floor), {})
+                boss_data = floor_data.get("boss", {})
+                boss_specs.append({
+                    "floor": floor,
+                    "name": floor_data.get("boss_name", f"Floor {floor} Boss"),
+                    "hp": boss_data.get("hp", 100),
+                    "attack": boss_data.get("damage", 20),
+                    "defense": boss_data.get("armor", 10),
+                    "element": boss_data.get("element", "Unknown"),
+                })
+
+            player_combatant = await self.battle_factory.create_player_combatant(
+                ctx, ctx.author, include_pet=True
+            )
+            pet_combatant = await self.battle_factory.pet_ext.get_pet_combatant(ctx, ctx.author)
+            player_team = Team("Player", [player_combatant])
+            if pet_combatant:
+                player_team.add_combatant(pet_combatant)
+            scale_snapshot = self._bt_challenge_scale_snapshot(player_combatant, pet_combatant)
+            difficulty_prestige = self._bt_challenge_difficulty_prestige(prestige)
+
+            enemy_team = Team("Enemy", [])
+            for spec in boss_specs:
+                scaled_spec = self._scale_bt_challenge_enemy_spec(
+                    spec,
+                    spec.get("floor", 30),
+                    "boss",
+                    difficulty_prestige,
+                    scale_snapshot,
+                    "bossrush",
+                )
+                boss = await self.battle_factory.create_monster_combatant(scaled_spec, name=scaled_spec["name"])
+                setattr(boss, "is_boss", True)
+                enemy_team.add_combatant(boss)
+
+            lineup = " → ".join(spec["name"] for spec in boss_specs)
+            intro = discord.Embed(
+                title=f"⚔️ PRESTIGE {prestige} BOSS RUSH",
+                description=(
+                    f"No minions. No mercy. Six bosses, one you.\n**{lineup}**\n"
+                    "Fall anywhere along the line and you leave with nothing.\n"
+                    f"Enemy stats use prestige **{difficulty_prestige}** "
+                    f"(current tower prestige **{prestige}**) and your current "
+                    f"ATK {scale_snapshot['attack_base']:,} / HP {scale_snapshot['hp_base']:,} / "
+                    f"DEF {scale_snapshot['defense_base']:,} power snapshot."
+                ),
+                color=0xC0392B,
+            )
+            await ctx.send(embed=intro)
+
+            battle = TowerBattle(ctx, [player_team, enemy_team], level=1, level_data={}, allow_pets=True)
+            battle.config["allow_pets"] = True
+
+            await battle.start_battle()
+            while not await battle.is_battle_over():
+                await battle.process_turn()
+                await asyncio.sleep(1)
+            result = await battle.end_battle()
+            battle_timed_out = hasattr(battle, "battle_timed_out") and battle.battle_timed_out
+
+            player_alive = any(
+                not c.is_pet and c.is_alive() for c in battle.player_team.combatants
+            )
+            if result and result.name == "Player" and (
+                player_alive or battle.config.get("pets_continue_battle", False)
+            ):
+                rewards = self._bt_bossrush_rewards(prestige)
+                money_reward = int(
+                    150000
+                    * float(rewards["money_multiplier"])
+                    * await self._freebooter_money_multiplier(ctx.author.id)
+                )
+                async with self.bot.pool.acquire() as connection:
+                    await connection.execute(
+                        """
+                        UPDATE profile
+                        SET crates_fortune = crates_fortune + $1,
+                            crates_divine = crates_divine + $2,
+                            money = money + $3
+                        WHERE "user" = $4;
+                        """,
+                        rewards["fortune"],
+                        rewards["divine"],
+                        money_reward,
+                        ctx.author.id,
+                    )
+                legacy = self.bot.get_cog("Legacy")
+                if legacy:
+                    await legacy.award_points(ctx.author.id, rewards["lp"])
+                crate_lines = [f"**{rewards['fortune']} Fortune Crate(s)**"]
+                if rewards["divine"]:
+                    crate_lines.append(f"**{rewards['divine']} Divine Crate(s)**")
+                await ctx.send(
+                    f"👑 **PRESTIGE {prestige} BOSS RUSH CLEARED!** "
+                    f"{ctx.author.mention} felled all six milestone bosses!\n"
+                    f"Rewards: {', '.join(crate_lines)}, **${money_reward:,}**, "
+                    f"and **+{rewards['lp']} Legacy Points**!"
+                )
+                self.bot.dispatch("bossrush_completion", ctx, True)
+            elif battle_timed_out:
+                await ctx.send("The Boss Rush timed out. The bosses grow restless...")
+                self.bot.dispatch("bossrush_completion", ctx, False)
+            else:
+                await ctx.send(
+                    f"**{ctx.author.mention}** fell in the Boss Rush. "
+                    "The line of bosses stands unbroken."
+                )
+                self.bot.dispatch("bossrush_completion", ctx, False)
+        except Exception as e:
+            error_message = f"An error occurred during the boss rush: {e}\n{traceback.format_exc()}"
+            await self._send_with_retry(ctx, content=error_message[:1900], suppress_failure=True)
+            await self.bot.reset_cooldown(ctx)
+        finally:
+            await self.remove_player_from_fight(ctx.author.id)
+
+    def _get_jury_floor_data(self, floor: int) -> dict | None:
+        return self.jury_tower_data.get("floors", {}).get(str(int(floor)))
+
+    @staticmethod
+    def _jury_clear_cycle_from_row(row) -> int:
+        return int(row["cycles"] if row is not None and row["cycles"] is not None else 0) + 1
+
+    def _resolve_jury_boss_reward(self, row, floor_data: dict) -> dict | None:
+        if not floor_data or not floor_data.get("boss_floor"):
+            return None
+        if int(floor_data.get("floor", 0) or 0) != JURY_TOWER_FLOOR_COUNT:
+            return floor_data.get("boss_reward")
+        judge_index = int(floor_data.get("judge_index", 0) or 0)
+        cycle_clear_number = self._jury_clear_cycle_from_row(row)
+        return _boss_reward_for_judge(judge_index, cycle_clear_number)
+
+    def _jury_seal_count(self, seals: int) -> int:
+        return int(int(seals or 0)).bit_count()
+
+    def _jury_verdict_label(self, favor_delta: int, contempt_delta: int) -> tuple[str, int]:
+        score = int(favor_delta or 0) - int(contempt_delta or 0)
+        if score >= 3:
+            return "Unanimous", 0x2ECC71
+        if score >= 1:
+            return "Favored", 0x58D68D
+        if score == 0:
+            return "Hung Jury", 0xF1C40F
+        if score <= -2:
+            return "Contempt Citation", 0xE74C3C
+        return "Contested", 0xF39C12
+
+    def _jury_segment_marks_from_row(self, row) -> tuple[int, int]:
+        if not row:
+            return 0, 0
+        try:
+            return int(row["segment_favor"] or 0), int(row["segment_contempt"] or 0)
+        except (KeyError, IndexError, TypeError):
+            return 0, 0
+
+    def _jury_segment_score(self, favor_total: int, contempt_total: int) -> int:
+        return int(favor_total or 0) - int(contempt_total or 0)
+
+    def _jury_bonus_cache_reward(self, favor_total: int, contempt_total: int, boss_reward: dict | None) -> dict:
+        base_boss_writs = int((boss_reward or {}).get("writs", 0) or 0)
+        score = self._jury_segment_score(favor_total, contempt_total)
+        reward = {
+            "score": score,
+            "favor": int(favor_total or 0),
+            "contempt": int(contempt_total or 0),
+            "label": None,
+            "base_writs": 0,
+            "multiplier": Decimal("0"),
+        }
+        if base_boss_writs <= 0:
+            return reward
+
+        if score >= JURY_MAJOR_BONUS_CACHE_THRESHOLD:
+            reward["label"] = "Major Bonus Cache"
+            reward["multiplier"] = JURY_MAJOR_BONUS_CACHE_MULTIPLIER
+        elif score >= JURY_BONUS_CACHE_THRESHOLD:
+            reward["label"] = "Bonus Cache"
+            reward["multiplier"] = JURY_BONUS_CACHE_MULTIPLIER
+        else:
+            return reward
+
+        reward["base_writs"] = int(
+            (
+                Decimal(str(base_boss_writs)) * Decimal(str(reward["multiplier"]))
+            ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        )
+        return reward
+
+    def _jury_scale_snapshot_from_row(self, row) -> dict[str, int]:
+        if not row:
+            return {"attack_base": 0, "hp_base": 0, "defense_base": 0}
+        return {
+            "attack_base": int(row["scale_attack_base"] or 0),
+            "hp_base": int(row["scale_hp_base"] or 0),
+            "defense_base": int(row["scale_defense_base"] or 0),
+        }
+
+    def _jury_scale_power_score_from_row(self, row) -> int:
+        if not row:
+            return 0
+        try:
+            return int(row["scale_power_score"] or 0)
+        except (KeyError, IndexError, TypeError):
+            return 0
+
+    def _jury_scale_bracket_key_from_row(self, row) -> str:
+        if not row:
+            return ""
+        try:
+            return str(row["scale_bracket"] or "").strip().lower()
+        except (KeyError, IndexError, TypeError):
+            return ""
+
+    def _jury_shop_reset_purchases_from_row(self, row) -> int:
+        if not row:
+            return 0
+        try:
+            return int(row["shop_reset_purchases"] or 0)
+        except (KeyError, IndexError, TypeError):
+            return 0
+
+    def _jury_shop_purchase_count(self, row, column: str) -> int:
+        if not row:
+            return 0
+        try:
+            return int(row[column] or 0)
+        except (KeyError, IndexError, TypeError):
+            return 0
+
+    def _jury_shop_item_available(self, row, column: str, limit: int) -> int:
+        return max(0, int(limit or 0) - self._jury_shop_purchase_count(row, column))
+
+    def _jury_shop_title_unlocked(self, row) -> bool:
+        if not row:
+            return False
+        try:
+            return bool(row["shop_title_unlocked"])
+        except (KeyError, IndexError, TypeError):
+            return False
+
+    def _jury_scale_snapshot_score(self, snapshot: dict[str, int] | None) -> Decimal:
+        if not snapshot:
+            return Decimal("0")
+        attack_base = Decimal(str(int(snapshot.get("attack_base", 0) or 0)))
+        hp_base = Decimal(str(int(snapshot.get("hp_base", 0) or 0)))
+        defense_base = Decimal(str(int(snapshot.get("defense_base", 0) or 0)))
+        if attack_base <= 0 and hp_base <= 0 and defense_base <= 0:
+            return Decimal("0")
+        # HP contributes less than full base power to tighten score progression.
+        return attack_base + defense_base + (hp_base * Decimal("0.4"))
+
+    def _jury_power_bracket_for_score(self, power_score: Decimal | int | float) -> dict:
+        normalized_score = Decimal(str(power_score or 0))
+        selected = JURY_POWER_BRACKETS[-1]
+        for bracket in JURY_POWER_BRACKETS:
+            max_score = bracket.get("max_score")
+            if max_score is None or normalized_score <= Decimal(str(max_score)):
+                selected = bracket
+                break
+        return dict(selected)
+
+    def _jury_power_bracket_info_from_snapshot(self, snapshot: dict[str, int] | None) -> dict:
+        score = self._jury_scale_snapshot_score(snapshot)
+        if score <= 0:
+            return {}
+        return self._jury_power_bracket_for_score(score)
+
+    def _jury_power_bracket_info_from_row(self, row) -> dict:
+        stored_score = self._jury_scale_power_score_from_row(row)
+        if stored_score > 0:
+            return self._jury_power_bracket_for_score(stored_score)
+        bracket_key = self._jury_scale_bracket_key_from_row(row)
+        for bracket in JURY_POWER_BRACKETS:
+            if bracket["key"] == bracket_key:
+                return dict(bracket)
+        snapshot = self._jury_scale_snapshot_from_row(row)
+        score = self._jury_scale_snapshot_score(snapshot)
+        if score > 0:
+            return self._jury_power_bracket_for_score(score)
+        return {}
+
+    def _build_jury_bracket_snapshot(self, bracket: dict) -> dict[str, int]:
+        multiplier = Decimal(str(bracket.get("multiplier", 1)))
+        return {
+            key: max(1, int(round(float(Decimal(str(base_value)) * multiplier))))
+            for key, base_value in JURY_BRACKET_BASE_SNAPSHOT.items()
+        }
+
+    def _jury_bracket_payload_from_score(self, power_score: Decimal | int | float) -> dict:
+        normalized_score = Decimal(str(power_score or 0))
+        bracket = self._jury_power_bracket_for_score(normalized_score)
+        rounded_score = max(
+            0,
+            int(
+                normalized_score.quantize(
+                    Decimal("1"),
+                    rounding=ROUND_HALF_UP,
+                )
+            ),
+        )
+        return {
+            "power_score": rounded_score,
+            "bracket_key": bracket["key"],
+            "bracket_label": bracket["label"],
+            "snapshot": self._build_jury_bracket_snapshot(bracket),
+        }
+
+    def _jury_bracket_payload_from_snapshot(self, snapshot: dict[str, int] | None) -> dict:
+        score = self._jury_scale_snapshot_score(snapshot)
+        return self._jury_bracket_payload_from_score(score)
+
+    def _jury_writ_multiplier(self, row=None, snapshot: dict[str, int] | None = None) -> Decimal:
+        bracket_info = self._jury_power_bracket_info_from_snapshot(snapshot) if snapshot else {}
+        if not bracket_info:
+            bracket_info = self._jury_power_bracket_info_from_row(row)
+        return Decimal(str(bracket_info.get("writ_multiplier", 1)))
+
+    def _format_jury_writ_bonus(self, row=None, snapshot: dict[str, int] | None = None) -> str:
+        multiplier = self._jury_writ_multiplier(row=row, snapshot=snapshot)
+        bonus_percent = ((multiplier - Decimal("1")) * Decimal("100")).quantize(
+            Decimal("1"),
+            rounding=ROUND_HALF_UP,
+        )
+        return f"+{int(bonus_percent)}%"
+
+    def _apply_jury_writ_multiplier(self, writs: int, row=None, snapshot: dict[str, int] | None = None) -> int:
+        base_writs = max(0, int(writs or 0))
+        multiplier = self._jury_writ_multiplier(row=row, snapshot=snapshot)
+        scaled = (Decimal(str(base_writs)) * multiplier).quantize(
+            Decimal("1"),
+            rounding=ROUND_HALF_UP,
+        )
+        return int(scaled)
+
+    def _jury_scale_snapshot_refresh_allowed(self, row) -> bool:
+        if not row:
+            return False
+        level = int(row["level"] or 0)
+        checkpoint = int(row["checkpoint"] or 0)
+        return 1 < level <= JURY_TOWER_FLOOR_COUNT and level == checkpoint
+
+    async def _persist_jury_scale_state(
+        self,
+        user_id: int,
+        snapshot: dict[str, int],
+        power_score: int,
+        bracket_key: str,
+    ) -> None:
+        async with self.bot.pool.acquire() as connection:
+            await connection.execute(
+                """
+                INSERT INTO jurytower (
+                    id,
+                    scale_attack_base,
+                    scale_hp_base,
+                    scale_defense_base,
+                    scale_power_score,
+                    scale_bracket
+                )
+                VALUES ($6, $1, $2, $3, $4, $5)
+                ON CONFLICT (id)
+                DO UPDATE SET
+                    scale_attack_base = EXCLUDED.scale_attack_base,
+                    scale_hp_base = EXCLUDED.scale_hp_base,
+                    scale_defense_base = EXCLUDED.scale_defense_base,
+                    scale_power_score = EXCLUDED.scale_power_score,
+                    scale_bracket = EXCLUDED.scale_bracket
+                """,
+                snapshot["attack_base"],
+                snapshot["hp_base"],
+                snapshot["defense_base"],
+                int(power_score or 0),
+                str(bracket_key or ""),
+                user_id,
+            )
+
+    async def _force_refresh_jury_scale_snapshot_for_user(
+        self,
+        ctx,
+        user_id: int,
+        allow_pets: bool,
+    ) -> bool:
+        """Rebuild and persist a Jury Tower snapshot for a specific user."""
+        try:
+            user = ctx.guild.get_member(user_id) if ctx.guild else None
+            if user is None:
+                user = self.bot.get_user(user_id)
+            if user is None:
+                try:
+                    user = await self.bot.fetch_user(user_id)
+                except Exception:
+                    return False
+
+            current_snapshot = await self.battle_factory.build_jury_tower_scale_snapshot(
+                ctx,
+                user,
+                allow_pets,
+            )
+            bracket_payload = self._jury_bracket_payload_from_snapshot(current_snapshot)
+            await self._persist_jury_scale_state(
+                user_id,
+                bracket_payload["snapshot"],
+                bracket_payload["power_score"],
+                bracket_payload["bracket_key"],
+            )
+            return True
+        except Exception:
+            return False
+
+    def _format_jury_bracket(self, row, snapshot: dict[str, int] | None = None) -> str | None:
+        bracket_info = self._jury_power_bracket_info_from_snapshot(snapshot) if snapshot else {}
+        if not bracket_info:
+            bracket_info = self._jury_power_bracket_info_from_row(row)
+        label = bracket_info.get("label")
+        if not label:
+            return None
+        return label
+
+    def _format_jury_reset_fragments(self, fragment_count: int) -> str:
+        current = max(0, int(fragment_count or 0))
+        return f"{current}/{self.JURY_RESET_FRAGMENT_REQUIREMENT}"
+
+    def _jury_shop_reset_available(self, row) -> int:
+        purchases = self._jury_shop_reset_purchases_from_row(row)
+        return max(0, self.JURY_SHOP_RESET_POTION_LIMIT - purchases)
+
+    def _normalize_jury_shop_item(self, item: str | None) -> str | None:
+        normalized = "".join(ch for ch in str(item or "").lower() if ch.isalnum())
+        alias_map = {
+            "reset": {
+                "reset",
+                "resetpotion",
+                "potion",
+            },
+            "fragment": {
+                "fragment",
+                "fragments",
+                "resetfragment",
+                "resetfragments",
+            },
+            "appeal": {
+                "appeal",
+                "appeals",
+            },
+            "fortune": {
+                "fortune",
+                "fortunecrate",
+                "crate",
+            },
+            "weapelement": {
+                "weapelement",
+                "weaponchange",
+                "weaponelementchange",
+                "elementscroll",
+                "weaponelementscroll",
+                "weapelementscroll",
+            },
+            "title": {
+                "title",
+                "cosmetic",
+                "cosmetictitle",
+                "jurytitle",
+            },
+        }
+        for key, aliases in alias_map.items():
+            if normalized in aliases:
+                return key
+        return None
+
+    async def _grant_user_consumable(
+        self,
+        connection,
+        user_id: int,
+        consumable_type: str,
+        amount: int = 1,
+    ) -> int:
+        quantity = max(0, int(amount or 0))
+        if quantity <= 0:
+            return 0
+        existing = await connection.fetchrow(
+            'SELECT id, quantity FROM user_consumables WHERE user_id = $1 AND consumable_type = $2;',
+            user_id,
+            consumable_type,
+        )
+        if existing:
+            await connection.execute(
+                'UPDATE user_consumables SET quantity = quantity + $1 WHERE id = $2;',
+                quantity,
+                existing["id"],
+            )
+            return int(existing["quantity"] or 0) + quantity
+        await connection.execute(
+            'INSERT INTO user_consumables (user_id, consumable_type, quantity) VALUES ($1, $2, $3);',
+            user_id,
+            consumable_type,
+            quantity,
+        )
+        return quantity
+
+    async def _ensure_jury_tower_dev_access(self, ctx) -> bool:
+        if not JURY_TOWER_IS_DEV:
+            return True
+        if ctx.author.id == JURY_TOWER_DEV_USER_ID:
+            return True
+        await ctx.send("Jury Tower is currently in developer testing.")
+        return False
+
+    async def _ensure_jury_tower_entry_requirements(self, ctx, connection=None) -> bool:
+        owns_connection = connection is None
+        if owns_connection:
+            connection = await self.bot.pool.acquire()
+        try:
+            xp_value = await connection.fetchval(
+                'SELECT "xp" FROM profile WHERE "user" = $1;',
+                ctx.author.id,
+            )
+            level = int(rpgtools.xptolevel(int(xp_value or 0)))
+            battle_tower_prestige = int(
+                await connection.fetchval(
+                    'SELECT prestige FROM battletower WHERE id = $1;',
+                    ctx.author.id,
+                )
+                or 0
+            )
+
+            requirement_failures = []
+            if level < JURY_TOWER_MIN_LEVEL:
+                requirement_failures.append(
+                    f"Level: **{level} / {JURY_TOWER_MIN_LEVEL}**"
+                )
+            if battle_tower_prestige < JURY_TOWER_REQUIRED_BATTLE_TOWER_PRESTIGE:
+                requirement_failures.append(
+                    f"Battle Tower Prestige: **{battle_tower_prestige} / {JURY_TOWER_REQUIRED_BATTLE_TOWER_PRESTIGE}**"
+                )
+
+            if requirement_failures:
+                await ctx.send(
+                    "You do not meet the Jury Tower entry requirements.\n"
+                    + "\n".join(requirement_failures)
+                )
+                return False
+            return True
+        finally:
+            if owns_connection:
+                await self.bot.pool.release(connection)
+
+    async def _award_jury_reset_fragments(
+        self,
+        connection,
+        user_id: int,
+        amount: int,
+    ) -> dict[str, int]:
+        awarded = max(0, int(amount or 0))
+        if awarded <= 0:
+            return {
+                "awarded_fragments": 0,
+                "converted_potions": 0,
+                "remaining_fragments": 0,
+            }
+
+        profile_row = await connection.fetchrow(
+            'SELECT resetfragments, resetpotion FROM profile WHERE "user" = $1 FOR UPDATE',
+            user_id,
+        )
+        if not profile_row:
+            return {
+                "awarded_fragments": 0,
+                "converted_potions": 0,
+                "remaining_fragments": 0,
+            }
+
+        total_fragments = int(profile_row["resetfragments"] or 0) + awarded
+        converted_potions = total_fragments // self.JURY_RESET_FRAGMENT_REQUIREMENT
+        remaining_fragments = total_fragments % self.JURY_RESET_FRAGMENT_REQUIREMENT
+
+        await connection.execute(
+            """
+            UPDATE profile
+            SET resetfragments = $1,
+                resetpotion = resetpotion + $2
+            WHERE "user" = $3
+            """,
+            remaining_fragments,
+            converted_potions,
+            user_id,
+        )
+        return {
+            "awarded_fragments": awarded,
+            "converted_potions": converted_potions,
+            "remaining_fragments": remaining_fragments,
+        }
+
+    def _format_jury_scale_snapshot(self, snapshot: dict[str, int] | None) -> str | None:
+        if not snapshot:
+            return None
+        attack_base = int(snapshot.get("attack_base", 0) or 0)
+        hp_base = int(snapshot.get("hp_base", 0) or 0)
+        defense_base = int(snapshot.get("defense_base", 0) or 0)
+        if attack_base <= 0 and hp_base <= 0 and defense_base <= 0:
+            return None
+        return (
+            f"Attack Base: **{attack_base}**\n"
+            f"HP Base: **{hp_base}**\n"
+            f"Defense Base: **{defense_base}**"
+        )
+
+    async def _resolve_jury_scale_snapshot(self, ctx, row) -> tuple[dict[str, int], str]:
+        stored_snapshot = self._jury_scale_snapshot_from_row(row)
+        allow_pets = self.battle_factory.settings.get_setting("jurytower", "allow_pets", default=True)
+        stored_power_score = self._jury_scale_power_score_from_row(row)
+        if stored_power_score <= 0:
+            stored_snapshot_score = self._jury_scale_snapshot_score(stored_snapshot)
+            if stored_snapshot_score > 0:
+                bracket_payload = self._jury_bracket_payload_from_snapshot(stored_snapshot)
+                if row:
+                    await self._persist_jury_scale_state(
+                        ctx.author.id,
+                        bracket_payload["snapshot"],
+                        bracket_payload["power_score"],
+                        bracket_payload["bracket_key"],
+                    )
+                return bracket_payload["snapshot"], "Existing run normalized to a locked bracket"
+
+            current_snapshot = await self.battle_factory.build_jury_tower_scale_snapshot(
+                ctx,
+                ctx.author,
+                allow_pets,
+            )
+            bracket_payload = self._jury_bracket_payload_from_snapshot(current_snapshot)
+            if row:
+                await self._persist_jury_scale_state(
+                    ctx.author.id,
+                    bracket_payload["snapshot"],
+                    bracket_payload["power_score"],
+                    bracket_payload["bracket_key"],
+                )
+            return bracket_payload["snapshot"], f"Initial run locked to {bracket_payload['bracket_label']}"
+
+        stored_bracket_payload = self._jury_bracket_payload_from_score(stored_power_score)
+        stored_bracket_key = str(stored_bracket_payload["bracket_key"] or "")
+        if (
+            self._jury_scale_bracket_key_from_row(row) != stored_bracket_key
+            or stored_snapshot != stored_bracket_payload["snapshot"]
+        ):
+            if row:
+                await self._persist_jury_scale_state(
+                    ctx.author.id,
+                    stored_bracket_payload["snapshot"],
+                    stored_bracket_payload["power_score"],
+                    stored_bracket_payload["bracket_key"],
+                )
+            stored_snapshot = stored_bracket_payload["snapshot"]
+            if not self._jury_scale_snapshot_refresh_allowed(row):
+                return (
+                    stored_snapshot,
+                    f"Stored run normalized to {stored_bracket_payload['bracket_label']}",
+                )
+
+        if not self._jury_scale_snapshot_refresh_allowed(row):
+            return stored_snapshot, "Locked run snapshot"
+
+        current_snapshot = await self.battle_factory.build_jury_tower_scale_snapshot(
+            ctx,
+            ctx.author,
+            allow_pets,
+        )
+        current_score = self._jury_scale_snapshot_score(current_snapshot)
+        refresh_threshold = Decimal(str(stored_power_score)) * Decimal("1.20")
+        if current_score >= refresh_threshold:
+            bracket_payload = self._jury_bracket_payload_from_snapshot(current_snapshot)
+            current_bracket = stored_bracket_key
+            if bracket_payload["bracket_key"] != current_bracket:
+                await self._persist_jury_scale_state(
+                    ctx.author.id,
+                    bracket_payload["snapshot"],
+                    bracket_payload["power_score"],
+                    bracket_payload["bracket_key"],
+                )
+                return (
+                    bracket_payload["snapshot"],
+                    f"Checkpoint refresh promoted the run to {bracket_payload['bracket_label']}",
+                )
+
+        return stored_snapshot, "Locked run snapshot"
+
+    async def _jury_next_prestige_scale_payload(self, ctx, row) -> dict | None:
+        allow_pets = self.battle_factory.settings.get_setting("jurytower", "allow_pets", default=True)
+        current_snapshot = await self.battle_factory.build_jury_tower_scale_snapshot(
+            ctx,
+            ctx.author,
+            allow_pets,
+        )
+        current_payload = self._jury_bracket_payload_from_snapshot(current_snapshot)
+        current_score = int(current_payload.get("power_score", 0) or 0)
+
+        stored_snapshot = self._jury_scale_snapshot_from_row(row)
+        stored_score = self._jury_scale_power_score_from_row(row)
+        stored_bracket = self._jury_scale_bracket_key_from_row(row)
+
+        if stored_score > current_score and stored_snapshot:
+            stored_bracket_info = self._jury_power_bracket_info_from_row(row)
+            return {
+                "snapshot": stored_snapshot,
+                "power_score": stored_score,
+                "bracket_key": stored_bracket,
+                "bracket_label": stored_bracket_info.get("label", ""),
+                "source": "stored",
+            }
+
+        if current_score > 0:
+            current_payload["source"] = "floor_77"
+            return current_payload
+
+        if stored_score > 0 and stored_snapshot:
+            stored_bracket_info = self._jury_power_bracket_info_from_row(row)
+            return {
+                "snapshot": stored_snapshot,
+                "power_score": stored_score,
+                "bracket_key": stored_bracket,
+                "bracket_label": stored_bracket_info.get("label", ""),
+                "source": "stored",
+            }
+
+        return None
+
+    async def _prompt_jury_choice(self, ctx, floor_data: dict) -> str:
+        choice_data = floor_data.get("choice") or {}
+        default_choice = choice_data.get("default")
+        if not choice_data:
+            return default_choice
+        if not choice_data.get("prompt", False):
+            return default_choice
+
+        def clip_text(text: str | None, limit: int = 170) -> str | None:
+            value = str(text or "").strip()
+            if not value:
+                return None
+            if len(value) <= limit:
+                return value
+            return value[: max(0, limit - 3)].rstrip() + "..."
+
+        embed = discord.Embed(
+            title=f"Jury Tower - Floor {floor_data['floor']} Stance",
+            description=choice_data.get("prompt_text", "Choose your stance for this case."),
+            color=floor_data.get("color", 0x8B5CF6),
+        )
+
+        aliases = {}
+        lines = []
+        for index, option in enumerate(choice_data.get("options", []), start=1):
+            key = option.get("key")
+            label = option.get("label", key)
+            effect = clip_text(option.get("effect"), 120)
+            aliases[str(index)] = key
+            aliases[str(key).lower()] = key
+            aliases[str(label).lower()] = key
+            option_line = f"`{index}` **{label}**"
+            if effect:
+                option_line += f" - {effect}"
+            lines.append(option_line)
+
+        embed.add_field(name="Options", value="\n\n".join(lines) or "No options.", inline=False)
+        embed.set_footer(text=f"Reply with 1-{len(lines)} or the option name. Default: {default_choice}")
+        await ctx.send(embed=embed)
+
+        def check(message):
+            return message.author == ctx.author and message.channel == ctx.channel
+
+        try:
+            response = await self.bot.wait_for("message", check=check, timeout=45.0)
+            lowered = response.content.strip().lower()
+            selected_key = aliases.get(lowered, default_choice)
+            selected_option = next(
+                (option for option in choice_data.get("options", []) if option.get("key") == selected_key),
+                None,
+            )
+            if selected_option:
+                confirmation_lines = [f"Stance locked: **{selected_option.get('label', selected_key)}**"]
+                selected_effect = clip_text(selected_option.get("effect"), 140)
+                if selected_effect:
+                    confirmation_lines.append(selected_effect)
+                await ctx.send("\n".join(confirmation_lines))
+            return selected_key
+        except asyncio.TimeoutError:
+            await ctx.send(f"No stance was chosen in time. Defaulting to **{default_choice}**.")
+            return default_choice
+
+    async def _display_jury_floor_intro(self, ctx, row, floor_data: dict, scale_snapshot: dict | None = None):
+        embed = discord.Embed(
+            title=f"Jury Tower - Floor {floor_data['floor']}",
+            description=(
+                f"**{floor_data['judge_name']}, {floor_data['judge_title']}**\n"
+                f"**{floor_data['title']}**"
+            ),
+            color=floor_data.get("color", 0x8B5CF6),
+        )
+        if floor_data.get("mechanic_hint"):
+            embed.add_field(name="Trial", value=floor_data["mechanic_hint"], inline=False)
+        floor_base_writs = int(floor_data.get("writs_reward", 0) or 0)
+        floor_scaled_writs = self._apply_jury_writ_multiplier(
+            floor_base_writs,
+            row=row,
+            snapshot=scale_snapshot,
+        )
+        reward_lines = [f"{JURY_CURRENCY_LABEL} on Clear: **+{floor_scaled_writs}**"]
+        boss_reward = self._resolve_jury_boss_reward(row, floor_data) if floor_data.get("boss_floor") else {}
+        if boss_reward:
+            base_checkpoint_writs = int(boss_reward.get("writs", 0) or 0)
+            scaled_checkpoint_writs = self._apply_jury_writ_multiplier(
+                base_checkpoint_writs,
+                row=row,
+                snapshot=scale_snapshot,
+            )
+            reward_lines.append(f"Boss Cache: **+{scaled_checkpoint_writs} {JURY_CURRENCY_LABEL}**")
+            reward_lines.append(f"Gold: **${boss_reward.get('money', 0)}**")
+            reward_lines.append(f"Appeals: **+{boss_reward.get('appeals', 0)}**")
+            if boss_reward.get("reset_fragment", 0):
+                reward_lines.append(f"Reset Fragment: **+{boss_reward.get('reset_fragment', 0)}**")
+            if boss_reward.get("reset_potion", 0):
+                reward_lines.append(f"Reset Potion: **+{boss_reward.get('reset_potion', 0)}**")
+            reward_lines.append(f"Seal: **{floor_data.get('seal_name', 'Court Seal')}**")
+        embed.add_field(name="On Clear", value="\n".join(reward_lines), inline=False)
+        await ctx.send(embed=embed)
+
+    async def _handle_jury_victory(self, ctx, floor: int, floor_data: dict, battle):
+        verdict = battle.verdict_result or {"favor": 0, "contempt": 0, "writs": floor_data.get("writs_reward", 0), "notes": []}
+        boss_reward = None
+        verdict_name, verdict_color = self._jury_verdict_label(verdict["favor"], verdict["contempt"])
+
+        async with self.bot.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT level, checkpoint, cycles, prestige, seals, favor, contempt, writs, appeals,
+                       segment_favor, segment_contempt,
+                       scale_attack_base, scale_hp_base, scale_defense_base,
+                       scale_power_score, scale_bracket, shop_reset_purchases,
+                       shop_reset_fragment_purchases, shop_appeal_purchases,
+                       shop_fortune_crate_purchases, shop_weapon_scroll_purchases,
+                       shop_title_unlocked
+                FROM jurytower
+                WHERE id = $1
+                """,
+                ctx.author.id,
+            )
+            if not row:
+                return await ctx.send("Your Jury Tower record could not be found.")
+            if floor_data.get("boss_floor"):
+                boss_reward = self._resolve_jury_boss_reward(row, floor_data)
+                if not boss_reward:
+                    boss_reward = floor_data.get("boss_reward")
+
+            new_level = min(floor + 1, JURY_TOWER_FLOOR_COUNT + 1)
+            current_prestige = int(row["prestige"] or 0)
+            new_checkpoint = int(row["checkpoint"] or 1)
+            new_seals = int(row["seals"] or 0)
+            new_appeals = int(row["appeals"] or 0)
+            base_writs_gain = int(verdict.get("writs", 0) or 0)
+            seal_earned = False
+            segment_favor, segment_contempt = self._jury_segment_marks_from_row(row)
+            updated_segment_favor = segment_favor + int(verdict.get("favor", 0) or 0)
+            updated_segment_contempt = segment_contempt + int(verdict.get("contempt", 0) or 0)
+            scale_snapshot_to_store = self._jury_scale_snapshot_from_row(row)
+            scale_power_score_to_store = self._jury_scale_power_score_from_row(row)
+            scale_bracket_to_store = self._jury_scale_bracket_key_from_row(row)
+            next_prestige_scale_note = None
+            boss_bonus_reward = {
+                "score": self._jury_segment_score(updated_segment_favor, updated_segment_contempt),
+                "favor": updated_segment_favor,
+                "contempt": updated_segment_contempt,
+                "label": None,
+                "base_writs": 0,
+                "multiplier": Decimal("0"),
+                "scaled_writs": 0,
+            }
+            fragment_reward_result = {
+                "awarded_fragments": 0,
+                "converted_potions": 0,
+                "remaining_fragments": 0,
+            }
+
+            if boss_reward:
+                base_writs_gain += int(boss_reward.get("writs", 0) or 0)
+                boss_bonus_reward = self._jury_bonus_cache_reward(
+                    updated_segment_favor,
+                    updated_segment_contempt,
+                    boss_reward,
+                )
+                base_writs_gain += int(boss_bonus_reward.get("base_writs", 0) or 0)
+            writs_gain = self._apply_jury_writ_multiplier(base_writs_gain, row=row)
+            writ_bonus_gain = max(0, writs_gain - base_writs_gain)
+            boss_bonus_reward["scaled_writs"] = self._apply_jury_writ_multiplier(
+                int(boss_bonus_reward.get("base_writs", 0) or 0),
+                row=row,
+            )
+
+            if floor_data.get("boss_floor"):
+                new_checkpoint = new_level
+                seal_earned = not bool(new_seals & (1 << int(floor_data["judge_index"])))
+                new_seals |= (1 << int(floor_data["judge_index"]))
+                new_appeals = min(4, new_appeals + int(boss_reward.get("appeals", 1)))
+                updated_segment_favor = 0
+                updated_segment_contempt = 0
+                crate_type = boss_reward.get("crate_type")
+                if crate_type:
+                    await connection.execute(
+                        f'UPDATE profile SET crates_{crate_type} = crates_{crate_type} + 1 WHERE "user" = $1',
+                        ctx.author.id,
+                    )
+                money_reward = int(boss_reward.get("money", 0) or 0)
+                if money_reward:
+                    await connection.execute(
+                        'UPDATE profile SET money = money + $1 WHERE "user" = $2',
+                        money_reward,
+                        ctx.author.id,
+                    )
+                reset_potion_reward = int(boss_reward.get("reset_potion", 0) or 0)
+                if reset_potion_reward:
+                    await connection.execute(
+                        'UPDATE profile SET resetpotion = resetpotion + $1 WHERE "user" = $2',
+                        reset_potion_reward,
+                        ctx.author.id,
+                    )
+                fragment_reward = int(boss_reward.get("reset_fragment", 0) or 0)
+                if fragment_reward:
+                    fragment_reward_result = await self._award_jury_reset_fragments(
+                        connection,
+                        ctx.author.id,
+                        fragment_reward,
+                    )
+                if floor >= JURY_TOWER_FLOOR_COUNT:
+                    next_prestige_scale = await self._jury_next_prestige_scale_payload(ctx, row)
+                    if next_prestige_scale:
+                        scale_snapshot_to_store = next_prestige_scale["snapshot"]
+                        scale_power_score_to_store = int(next_prestige_scale.get("power_score", 0) or 0)
+                        scale_bracket_to_store = str(next_prestige_scale.get("bracket_key", "") or "")
+                        next_prestige_scale_note = next_prestige_scale
+
+            await connection.execute(
+                """
+                UPDATE jurytower
+                SET level = $1,
+                    checkpoint = $2,
+                    seals = $3,
+                    appeals = $4,
+                    favor = favor + $5,
+                    contempt = contempt + $6,
+                    writs = writs + $7,
+                    segment_favor = $8,
+                    segment_contempt = $9,
+                    scale_attack_base = $10,
+                    scale_hp_base = $11,
+                    scale_defense_base = $12,
+                    scale_power_score = $13,
+                    scale_bracket = $14
+                WHERE id = $15
+                """,
+                new_level,
+                new_checkpoint,
+                new_seals,
+                new_appeals,
+                int(verdict.get("favor", 0) or 0),
+                int(verdict.get("contempt", 0) or 0),
+                writs_gain,
+                updated_segment_favor,
+                updated_segment_contempt,
+                int(scale_snapshot_to_store.get("attack_base", 0) or 0),
+                int(scale_snapshot_to_store.get("hp_base", 0) or 0),
+                int(scale_snapshot_to_store.get("defense_base", 0) or 0),
+                int(scale_power_score_to_store or 0),
+                scale_bracket_to_store,
+                ctx.author.id,
+            )
+
+        await self._progress_custom_quest_source(
+            ctx,
+            [ctx.author],
+            "jurytower",
+            floor_data.get("title"),
+            floor_data.get("seal_name"),
+            str(floor),
+        )
+
+        summary = discord.Embed(
+            title=f"Verdict: {verdict_name}",
+            description=(
+                f"{floor_data.get('victory_text', 'The hall yields.')}\n\n"
+                f"Cleared **Floor {floor} - {floor_data['title']}**."
+            ),
+            color=verdict_color,
+        )
+        summary.add_field(
+            name="Verdict",
+            value=(
+                f"Favor: **+{verdict.get('favor', 0)}**\n"
+                f"Contempt: **+{verdict.get('contempt', 0)}**\n"
+                f"{JURY_CURRENCY_LABEL}: **+{writs_gain}**"
+                + (
+                    f"\n{JURY_RANK_LABEL} Bonus: **{self._format_jury_writ_bonus(row=row)}** (+{writ_bonus_gain} sigils)"
+                    if writ_bonus_gain > 0
+                    else ""
+                )
+            ),
+            inline=False,
+        )
+
+        notes = verdict.get("notes") or []
+        if notes:
+            summary.add_field(name="Notes", value="\n".join(f"- {note}" for note in notes), inline=False)
+
+        if boss_reward:
+            base_checkpoint_writs = int(boss_reward.get("writs", 0) or 0)
+            scaled_checkpoint_writs = self._apply_jury_writ_multiplier(base_checkpoint_writs, row=row)
+            fragment_lines = ""
+            if fragment_reward_result["awarded_fragments"] > 0:
+                fragment_lines += (
+                    f"\nReset Fragment: **+{fragment_reward_result['awarded_fragments']}**"
+                )
+                fragment_lines += (
+                    f"\nFragment Progress: **{self._format_jury_reset_fragments(fragment_reward_result['remaining_fragments'])}**"
+                )
+            if fragment_reward_result["converted_potions"] > 0:
+                fragment_lines += (
+                    f"\nFragments Reforged: **+{fragment_reward_result['converted_potions']} Reset Potion**"
+                )
+            summary.add_field(
+                name="Checkpoint Rewards",
+                value=(
+                    f"Sigil Cache: **+{scaled_checkpoint_writs}**"
+                    + (
+                        f" (Base: {base_checkpoint_writs})\n"
+                        if scaled_checkpoint_writs != base_checkpoint_writs
+                        else "\n"
+                    )
+                    +
+                    f"Crate: **{boss_reward.get('crate_type', 'none').title()}**\n"
+                    f"Gold: **${boss_reward.get('money', 0)}**\n"
+                    f"Appeals Restored: **+{boss_reward.get('appeals', 0)}**"
+                    + (
+                        f"\nReset Potion: **+{boss_reward.get('reset_potion', 0)}**"
+                        if boss_reward.get("reset_potion", 0)
+                        else ""
+                    )
+                    + fragment_lines
+                ),
+                inline=False,
+            )
+            bonus_lines = [
+                f"Hall Score: **{boss_bonus_reward['score']:+d}**",
+                f"Hall Marks: **{boss_bonus_reward['favor']} Favor / {boss_bonus_reward['contempt']} Contempt**",
+            ]
+            if boss_bonus_reward["scaled_writs"] > 0:
+                bonus_lines.append(
+                    f"{boss_bonus_reward['label']}: **+{boss_bonus_reward['scaled_writs']} {JURY_CURRENCY_LABEL_LOWER}**"
+                )
+                if int(boss_bonus_reward["base_writs"]) != int(boss_bonus_reward["scaled_writs"]):
+                    bonus_lines.append(
+                        f"Base Bonus: **+{int(boss_bonus_reward['base_writs'])}**"
+                    )
+            else:
+                bonus_lines.append(
+                    f"No bonus cache unlocked. Reach **+{JURY_BONUS_CACHE_THRESHOLD}** for a bonus cache or **+{JURY_MAJOR_BONUS_CACHE_THRESHOLD}** for a major one."
+                )
+            summary.add_field(
+                name="Judge Bonus",
+                value="\n".join(bonus_lines),
+                inline=False,
+            )
+            if seal_earned:
+                summary.add_field(
+                    name="Seal Claimed",
+                    value=f"You claimed **{floor_data.get('seal_name', 'Court Seal')}**.",
+                    inline=False,
+                )
+            if floor >= JURY_TOWER_FLOOR_COUNT:
+                summary.add_field(
+                    name="Cycle Complete",
+                    value=(
+                        "The seventh hall has fallen. Your next `jurytower fight` will begin "
+                        f"**Prestige {current_prestige + 1}**."
+                    ),
+                    inline=False,
+                )
+                if next_prestige_scale_note and next_prestige_scale_note.get("bracket_label"):
+                    summary.add_field(
+                        name="Next Prestige",
+                        value=(
+                            f"Next prestige is seeded from your floor 77 clear.\n"
+                            f"Starting {JURY_RANK_LABEL}: **{next_prestige_scale_note['bracket_label']}**"
+                        ),
+                        inline=False,
+                    )
+            else:
+                summary.add_field(
+                    name="Checkpoint Secured",
+                    value=f"You may now resume from **Floor {floor + 1}**.",
+                    inline=False,
+                )
+        else:
+            summary.add_field(name="Next Floor", value=f"Proceed to **Floor {floor + 1}**.", inline=False)
+
+        await ctx.send(embed=summary)
+        self.bot.dispatch(
+            "jurytower_completion",
+            ctx,
+            True,
+            int(floor),
+            bool(floor_data.get("boss_floor")),
+        )
+
+    async def _handle_jury_defeat(self, ctx, floor: int, floor_data: dict):
+        async with self.bot.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT level, checkpoint, appeals
+                FROM jurytower
+                WHERE id = $1
+                """,
+                ctx.author.id,
+            )
+            if not row:
+                return await ctx.send("Your Jury Tower record could not be found.")
+
+            checkpoint = int(row["checkpoint"] or 1)
+            level = int(row["level"] or floor)
+            appeals = int(row["appeals"] or 0)
+
+            if level > checkpoint and appeals > 0:
+                new_level = level
+                new_appeals = appeals - 1
+                outcome_text = (
+                    f"You fell on **Floor {floor}**, but an appeal was burned. "
+                    f"Retry the same floor. Appeals remaining: **{new_appeals}**."
+                )
+            elif level > checkpoint:
+                new_level = checkpoint
+                new_appeals = 0
+                outcome_text = (
+                    f"You exhausted your appeals. You are dragged back to **Floor {checkpoint}**."
+                )
+            else:
+                new_level = level
+                new_appeals = appeals
+                outcome_text = (
+                    f"You fell on **Floor {floor}**. Try again when ready."
+                )
+
+            await connection.execute(
+                """
+                UPDATE jurytower
+                SET level = $1,
+                    appeals = $2,
+                    contempt = contempt + 1,
+                    segment_contempt = segment_contempt + 1
+                WHERE id = $3
+                """,
+                new_level,
+                new_appeals,
+                ctx.author.id,
+            )
+
+        await ctx.send(outcome_text)
+
+
+    @commands.group(aliases=["jt"])
+    async def jurytower(self, ctx):
+        """Commands for the Jury Tower."""
+        if ctx.invoked_subcommand is None:
+            if not await self._ensure_jury_tower_dev_access(ctx):
+                return
+            async with self.bot.pool.acquire() as connection:
+                row = await connection.fetchrow(
+                    """
+                    SELECT level, checkpoint, prestige, seals, writs, appeals,
+                           scale_attack_base, scale_hp_base, scale_defense_base,
+                           scale_power_score, scale_bracket
+                    FROM jurytower
+                    WHERE id = $1
+                    """,
+                    ctx.author.id,
+                )
+
+            if not row:
+                embed = discord.Embed(
+                    title="Jury Tower",
+                    description=(
+                        "Seven iron judges wait across seventy-seven floors.\n"
+                        "No wasted words. No easy mercy."
+                    ),
+                    color=0x8B5CF6,
+                )
+                embed.add_field(
+                    name="Get Started",
+                    value=(
+                        "`$jt start` - enter the tower\n"
+                        "`$jt help` - view the full guide\n"
+                        f"Requirements: **level {JURY_TOWER_MIN_LEVEL}** and "
+                        f"**Battle Tower Prestige {JURY_TOWER_REQUIRED_BATTLE_TOWER_PRESTIGE}**"
+                    ),
+                    inline=False,
+                )
+                embed.add_field(
+                    name="What Matters",
+                    value=(
+                        f"`{JURY_TOWER_FLOOR_COUNT}` floors\n"
+                        "Boss floors every 11 levels\n"
+                        "Choices change the fight\n"
+                        f"{JURY_CURRENCY_LABEL} buy rewards in `$jt shop`"
+                    ),
+                    inline=False,
+                )
+                return await ctx.send(embed=embed)
+
+            level = int(row["level"] or 1)
+            if level > JURY_TOWER_FLOOR_COUNT:
+                title_line = "Cycle Complete"
+                subtitle_line = "The black halls fall silent."
+            else:
+                floor_data = self._get_jury_floor_data(level)
+                if floor_data:
+                    title_line = f"Floor {level} - {floor_data['title']}"
+                    subtitle_line = f"{floor_data['judge_name']}, {floor_data['judge_title']}"
+                else:
+                    title_line = f"Floor {level}"
+                    subtitle_line = "Unknown hall"
+
+            embed = discord.Embed(
+                title="Jury Tower",
+                description=f"**{title_line}**\n{subtitle_line}",
+                color=0x8B5CF6,
+            )
+            embed.add_field(
+                name="Run",
+                value=(
+                    f"Checkpoint: **{row['checkpoint']}**\n"
+                    f"Appeals: **{row['appeals']}**\n"
+                    f"Prestige: **{row['prestige']}**\n"
+                    f"{JURY_CURRENCY_LABEL}: **{row['writs']}**\n"
+                    f"Seals: **{self._jury_seal_count(int(row['seals'] or 0))}/7**"
+                ),
+                inline=False,
+            )
+            bracket_text = self._format_jury_bracket(row)
+            if bracket_text:
+                embed.add_field(name=JURY_RANK_LABEL, value=bracket_text, inline=False)
+            embed.add_field(
+                name="Commands",
+                value=(
+                    "`$jt fight` - continue the climb\n"
+                    "`$jt progress` - full run details\n"
+                    f"`$jt shop` - open the {JURY_SHOP_LABEL.lower()}\n"
+                    "`$jt help` - full guide"
+                ),
+                inline=False,
+            )
+            await ctx.send(embed=embed)
+
+
+    @jurytower.command(name="help", aliases=["info"])
+    async def jurytower_help(self, ctx):
+        if not await self._ensure_jury_tower_dev_access(ctx):
+            return
+
+        judges = self.jury_tower_data.get("judges", [])
+        judge_lines = []
+        for judge in judges:
+            judge_lines.append(
+                f"**{judge['judge_name']}** - {judge.get('title', judge.get('trial_type', 'Trial').title())}"
+            )
+
+        tier_lines = []
+        for bracket in JURY_POWER_BRACKETS:
+            bonus_percent = int(round((float(bracket.get("writ_multiplier", 1.0)) - 1.0) * 100))
+            tier_lines.append(f"{bracket['label']}: **+{bonus_percent}% sigils**")
+
+        checkpoint_lines = []
+        for floor in (11, 22, 33, 44, 55, 66, 77):
+            floor_data = self._get_jury_floor_data(floor)
+            if not floor_data:
+                continue
+            boss_reward = floor_data.get("boss_reward") or {}
+            reward_bits = [
+                f"{boss_reward.get('crate_type', 'none').title()} crate",
+                f"${int(boss_reward.get('money', 0) or 0):,}",
+            ]
+            if boss_reward.get("reset_fragment", 0):
+                reward_bits.append(f"+{boss_reward['reset_fragment']} reset fragment")
+            if boss_reward.get("reset_potion", 0):
+                reward_bits.append(f"+{boss_reward['reset_potion']} reset potion")
+            checkpoint_lines.append(
+                f"**{floor}**: {', '.join(reward_bits)}"
+            )
+
+        shop_lines = [
+            f"`reset` - {self.JURY_SHOP_RESET_POTION_COST} sigils",
+            f"`fragment` - {self.JURY_SHOP_RESET_FRAGMENT_COST} sigils",
+            f"`appeal` - {self.JURY_SHOP_APPEAL_COST} sigils",
+            f"`fortune` - {self.JURY_SHOP_FORTUNE_CRATE_COST} sigils",
+            f"`weapelement` - {self.JURY_SHOP_WEAPON_SCROLL_COST} sigils",
+            f"`title` - {self.JURY_SHOP_COSMETIC_TITLE_COST} sigils",
+        ]
+
+        overview = discord.Embed(
+            title="Jury Tower",
+            description=(
+                "A 77-floor solo climb through seven iron judges.\n"
+                "Each judge changes the fight. Winning is not just stats."
+            ),
+            color=0x8B5CF6,
+        )
+        overview.add_field(
+            name="Commands",
+            value=(
+                "`$jt start` - enter the tower\n"
+                "`$jt fight` - fight your current floor\n"
+                "`$jt progress` - view your run\n"
+                f"`$jt shop` - open the {JURY_SHOP_LABEL.lower()}\n"
+                "`$jt buy <item>` - buy from the shop\n"
+                "`$jt help` - show this guide"
+            ),
+            inline=False,
+        )
+        overview.add_field(
+            name="Tower Flow",
+            value=(
+                f"Requirements: **level {JURY_TOWER_MIN_LEVEL}** and "
+                f"**Battle Tower Prestige {JURY_TOWER_REQUIRED_BATTLE_TOWER_PRESTIGE}**\n"
+                f"`{JURY_TOWER_FLOOR_COUNT}` floors total\n"
+                "Each judge controls 11 floors\n"
+                "Boss floors: `11, 22, 33, 44, 55, 66, 77`\n"
+                "Beat a boss and your checkpoint moves forward\n"
+                "Clear floor 77 to begin the next prestige"
+            ),
+            inline=False,
+        )
+        overview.add_field(
+            name="The Seven",
+            value="\n".join(judge_lines),
+            inline=False,
+        )
+        overview.add_field(
+            name="Run Rules",
+            value=(
+                "You start with **2 Appeals** and cap at **4**.\n"
+                "Lose above checkpoint with appeals left: stay on that floor and burn one.\n"
+                "Lose with no appeals left: fall back to checkpoint."
+            ),
+            inline=False,
+        )
+        overview.add_field(
+            name="Favor / Contempt",
+            value=(
+                "Favor means the judges liked how you cleared the floor.\n"
+                "Contempt means you won in a way they disliked.\n"
+                "Each 11-floor judge arc keeps its own hall score.\n"
+                f"At the boss, **+{JURY_BONUS_CACHE_THRESHOLD}** unlocks a bonus cache and **+{JURY_MAJOR_BONUS_CACHE_THRESHOLD}** unlocks a major bonus cache.\n"
+                "Base rewards are always guaranteed."
+            ),
+            inline=False,
+        )
+
+        rewards = discord.Embed(
+            title="Jury Tower Rewards",
+            description="How tiers, prestiges, and rewards work.",
+            color=0x8B5CF6,
+        )
+        rewards.add_field(
+            name="Ranks",
+            value=(
+                f"Your first run locks on the first fight based on your power.\n"
+                f"Later prestiges inherit the snapshot from the build that cleared floor 77.\n"
+                f"The {JURY_RANK_LABEL.lower()} does not change every floor.\n"
+                f"At a boss checkpoint, it only updates if your build is at least **20% stronger** and lands in a higher {JURY_RANK_LABEL.lower()}.\n\n"
+                + "\n".join(tier_lines)
+            ),
+            inline=False,
+        )
+        rewards.add_field(
+            name="Prestige",
+            value=(
+                "After floor 77, your next `$jt fight` starts the next prestige.\n"
+                "Prestige resets floor progress, checkpoint, seals, favor, contempt, appeals, and shop stock.\n"
+                f"Prestige keeps your {JURY_CURRENCY_LABEL_LOWER} and title.\n"
+                "Enemy stats gain **+2% HP** and **+1% Attack/Defense** per prestige."
+            ),
+            inline=False,
+        )
+        rewards.add_field(
+            name="Boss Rewards",
+            value=(
+                f"Every floor gives {JURY_CURRENCY_LABEL_LOWER}.\n"
+                "Boss floors also give gold, a crate, +1 Appeal, and a seal.\n"
+                f"Clean hall scores unlock extra {JURY_CURRENCY_LABEL_LOWER} on boss clears.\n"
+                f"{JURY_CURRENCY_LABEL} persist across prestiges and are your main repeat currency."
+            ),
+            inline=False,
+        )
+        rewards.add_field(
+            name="Boss Floors",
+            value="\n".join(checkpoint_lines),
+            inline=False,
+        )
+        rewards.add_field(
+            name="Reset Potions",
+            value=(
+                "Floors **22, 44, and 66** each give **1 Reset Fragment**.\n"
+                f"Every **{self.JURY_RESET_FRAGMENT_REQUIREMENT} fragments** automatically reforge into **1 Reset Potion**.\n"
+                "Floor **77** also gives **1 full Reset Potion**."
+            ),
+            inline=False,
+        )
+        rewards.add_field(
+            name=JURY_SHOP_LABEL,
+            value=(
+                "\n".join(shop_lines)
+                + f"\n\n`$jt buy title` unlocks **{JURY_COSMETIC_TITLE}** permanently."
+            ),
+            inline=False,
+        )
+
+        for embed in (overview, rewards):
+            await ctx.send(embed=embed)
+
+
+    @jurytower.command(
+        name="forcesnapshot",
+        aliases=["snapshotrefresh", "refreshsnapshot", "forceallsnapshot", "snapshotall"],
+    )
+    async def jurytower_force_snapshot(self, ctx):
+        """[GM only] Rebuild and persist snapshots for every user that has a character."""
+        if not await self._ensure_jury_tower_dev_access(ctx):
+            return
+
+        async with self.bot.pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT "user" AS id
+                FROM profile
+                ORDER BY "user"
+                """
+            )
+
+        if not rows:
+            return await ctx.send("No users with characters were found to snapshot.")
+
+        allow_pets = self.battle_factory.settings.get_setting(
+            "jurytower",
+            "allow_pets",
+            default=True,
+        )
+        total = 0
+        failed = []
+
+        for row in rows:
+            user_id = int(row["id"])
+            success = await self._force_refresh_jury_scale_snapshot_for_user(
+                ctx,
+                user_id,
+                allow_pets,
+            )
+            if success:
+                total += 1
+            else:
+                failed.append(user_id)
+
+        message = f"✅ Forced snapshot refresh for **{total}** user(s)."
+        if failed:
+            failed_text = ", ".join(str(user_id) for user_id in failed[:25])
+            if len(failed) > 25:
+                failed_text += ", ..."
+            message += f"\n❌ Failed for **{len(failed)}** user(s): `{failed_text}`"
+        await ctx.send(message)
+
+    @is_gm()
+    @jurytower.command(name="score", aliases=["scoresnapshot", "scoredetail"])
+    async def jurytower_score(self, ctx, target: discord.Member):
+        """[GM only] Calculate a target user's current Jury Tower score and show a breakdown."""
+        if not await self._ensure_jury_tower_dev_access(ctx):
+            return
+
+        allow_pets = self.battle_factory.settings.get_setting(
+            "jurytower",
+            "allow_pets",
+            default=True,
+        )
+
+        async with self.bot.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT scale_attack_base, scale_hp_base, scale_defense_base, scale_power_score
+                FROM jurytower
+                WHERE id = $1
+                """,
+                target.id,
+            )
+
+        stored_snapshot = self._jury_scale_snapshot_from_row(row)
+        stored_score = self._jury_scale_snapshot_score(stored_snapshot)
+        snapshot_source = "Stored Jury Tower snapshot (fallback)."
+
+        try:
+            snapshot = await self.battle_factory.build_jury_tower_scale_snapshot(
+                ctx,
+                target,
+                allow_pets,
+            )
+            score = self._jury_scale_snapshot_score(snapshot)
+            if score <= 0:
+                raise ValueError("Empty snapshot result.")
+            snapshot_source = "Fresh combatant snapshot."
+            if stored_score > 0:
+                snapshot_source = "Fresh combatant snapshot (ignoring stored snapshot)."
+        except Exception:
+            snapshot = stored_snapshot
+            score = stored_score
+            if score <= 0:
+                return await ctx.send(
+                    "Could not calculate a Jury Tower score for that user (no valid snapshot found)."
+                )
+            snapshot_source = "Stored Jury Tower snapshot (live snapshot generation failed)."
+
+        attack_base = Decimal(str(snapshot.get("attack_base", 0) or 0))
+        hp_base = Decimal(str(snapshot.get("hp_base", 0) or 0))
+        defense_base = Decimal(str(snapshot.get("defense_base", 0) or 0))
+        hp_weight = Decimal("0.4")
+        weighted_hp = hp_base * hp_weight
+        total_score = attack_base + defense_base + weighted_hp
+        bracket_payload = self._jury_bracket_payload_from_score(score)
+        bracket_label = bracket_payload.get("bracket_label", "Unranked")
+        writ_multiplier = Decimal(str(bracket_payload.get("writ_multiplier", 1)))
+
+        embed = discord.Embed(
+            title="Jury Tower Score Breakdown",
+            description=f"{target.mention}",
+            color=0x8B5CF6,
+        )
+        embed.add_field(
+            name="Source",
+            value=snapshot_source,
+            inline=False,
+        )
+        embed.add_field(
+            name="Raw Snapshot",
+            value=(
+                f"Attack Base: **{int(attack_base)}**\n"
+                f"HP Base: **{int(hp_base)}**\n"
+                f"Defense Base: **{int(defense_base)}**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Weighted Breakdown",
+            value=(
+                f"Attack Contribution: **{attack_base:.1f}**\n"
+                f"HP Contribution (40%): **{weighted_hp:.1f}**\n"
+                f"Defense Contribution: **{defense_base:.1f}**\n"
+                f"Total Score: **{total_score:.1f}**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Bracket",
+            value=(
+                f"{bracket_label}\n"
+                f"Score stored in DB: **{int(stored_score)}**\n"
+                f"Writ multiplier: **{writ_multiplier}x**"
+            ),
+            inline=False,
+        )
+        await ctx.send(embed=embed)
+
+    @is_gm()
+    @jurytower.command(name="setscore", hidden=True, aliases=["editjuryscore", "forcescore"])
+    async def jurytower_set_score(self, ctx, target: discord.Member, attack_base: int, hp_base: int, defense_base: int):
+        """[Owner only] Set a player's Jury Tower raw score components and persist bracket state."""
+        if ctx.author.id != 295173706496475136:
+            return await ctx.send("Only the game owner can run this command.")
+
+        attack_base = max(0, int(attack_base or 0))
+        hp_base = max(0, int(hp_base or 0))
+        defense_base = max(0, int(defense_base or 0))
+        if attack_base == 0 and hp_base == 0 and defense_base == 0:
+            return await ctx.send("At least one component must be greater than zero.")
+
+        snapshot = {
+            "attack_base": attack_base,
+            "hp_base": hp_base,
+            "defense_base": defense_base,
+        }
+        bracket_payload = self._jury_bracket_payload_from_snapshot(snapshot)
+
+        async with self.bot.pool.acquire() as connection:
+            await connection.execute(
+                """
+                INSERT INTO jurytower (
+                    id,
+                    scale_attack_base,
+                    scale_hp_base,
+                    scale_defense_base,
+                    scale_power_score,
+                    scale_bracket
+                ) VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (id) DO UPDATE SET
+                    scale_attack_base = EXCLUDED.scale_attack_base,
+                    scale_hp_base = EXCLUDED.scale_hp_base,
+                    scale_defense_base = EXCLUDED.scale_defense_base,
+                    scale_power_score = EXCLUDED.scale_power_score,
+                    scale_bracket = EXCLUDED.scale_bracket
+                """,
+                target.id,
+                snapshot["attack_base"],
+                snapshot["hp_base"],
+                snapshot["defense_base"],
+                bracket_payload["power_score"],
+                bracket_payload["bracket_key"],
+            )
+
+        weighted_hp = Decimal(str(snapshot["hp_base"])) * Decimal("0.4")
+        total_score = (
+            Decimal(str(snapshot["attack_base"]))
+            + Decimal(str(snapshot["defense_base"]))
+            + weighted_hp
+        )
+        await ctx.send(
+            f"Updated {target.mention} Jury Tower score snapshot.\n"
+            f"Attack: **{snapshot['attack_base']}**\n"
+            f"HP: **{snapshot['hp_base']}**\n"
+            f"Defense: **{snapshot['defense_base']}**\n"
+            f"Weighted score: **{total_score:.1f}**\n"
+            f"Rank: **{bracket_payload['bracket_label']}**"
+        )
+
+
+    @has_char()
+    @jurytower.command(name="start")
+    async def jurytower_start(self, ctx):
+        if not await self._ensure_jury_tower_dev_access(ctx):
+            return
+        async with self.bot.pool.acquire() as connection:
+            if not await self._ensure_jury_tower_entry_requirements(ctx, connection):
+                return
+            exists = await connection.fetchval("SELECT 1 FROM jurytower WHERE id = $1", ctx.author.id)
+            if exists:
+                return await ctx.send("You are already in the Jury Tower. Use `$jt` or `$jt progress` to view your run.")
+            await connection.execute("INSERT INTO jurytower (id) VALUES ($1)", ctx.author.id)
+
+        embed = discord.Embed(
+            title="The Jury Tower Stirs",
+            description=(
+                "Seventy-seven floors. Seven iron judges.\n"
+                "Power matters, but so do your choices."
+            ),
+            color=0x8B5CF6,
+        )
+        embed.add_field(
+            name="Run Rules",
+            value=(
+                f"- Requires **level {JURY_TOWER_MIN_LEVEL}** and "
+                f"**Battle Tower Prestige {JURY_TOWER_REQUIRED_BATTLE_TOWER_PRESTIGE}**\n"
+                f"- {JURY_TOWER_FLOOR_COUNT} floors\n"
+                "- Boss floors set checkpoints\n"
+                "- Appeals protect progress away from checkpoint\n"
+                f"- {JURY_CURRENCY_LABEL} carry across prestiges\n"
+                f"- Your first run locks on the first fight; later prestiges inherit the floor 77 clear snapshot\n"
+                f"- Checkpoints can promote that {JURY_RANK_LABEL.lower()} if your build jumps by 20%\n"
+                f"- Every judge arc builds a hall score; boss clears at **+{JURY_BONUS_CACHE_THRESHOLD}** and **+{JURY_MAJOR_BONUS_CACHE_THRESHOLD}** unlock bonus sigil caches\n"
+                "- Floors 22, 44, and 66 grant reset fragments that reforge into potions\n"
+                f"- The {JURY_SHOP_LABEL.lower()} can sell one extra reset potion per cycle for sigils\n"
+                "- Each new prestige lightly increases enemy stats"
+            ),
+            inline=False,
+        )
+        await ctx.send(embed=embed)
+
+
+    @has_char()
+    @jurytower.command(name="progress")
+    async def jurytower_progress(self, ctx):
+        if not await self._ensure_jury_tower_dev_access(ctx):
+            return
+        async with self.bot.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT level, checkpoint, cycles, prestige, seals, favor, contempt, writs, appeals,
+                       segment_favor, segment_contempt,
+                       scale_attack_base, scale_hp_base, scale_defense_base,
+                       scale_power_score, scale_bracket, shop_title_unlocked
+                FROM jurytower
+                WHERE id = $1
+                """,
+                ctx.author.id,
+            )
+            if not row:
+                return await ctx.send("You have not started the Jury Tower. Use `$jt start`.")
+            profile_row = await connection.fetchrow(
+                'SELECT resetpotion, resetfragments, crates_fortune FROM profile WHERE "user" = $1',
+                ctx.author.id,
+            )
+            weapon_scrolls = await connection.fetchval(
+                'SELECT quantity FROM user_consumables WHERE user_id = $1 AND consumable_type = $2',
+                ctx.author.id,
+                "weapon_element_scroll",
+            )
+        reset_potions = int(profile_row["resetpotion"] or 0) if profile_row else 0
+        reset_fragments = int(profile_row["resetfragments"] or 0) if profile_row else 0
+        fortune_crates = int(profile_row["crates_fortune"] or 0) if profile_row else 0
+        weapon_scrolls = int(weapon_scrolls or 0)
+
+        level = int(row["level"] or 1)
+        if level > JURY_TOWER_FLOOR_COUNT:
+            current_floor = "Cycle complete"
+            current_title = "The black halls fall silent"
+            current_judge = "All seven judged"
+        else:
+            floor_data = self._get_jury_floor_data(level)
+            current_floor = f"Floor {level}"
+            current_title = floor_data["title"] if floor_data else "Unknown"
+            current_judge = (
+                f"{floor_data['judge_name']}, {floor_data['judge_title']}"
+                if floor_data
+                else "Unknown judge"
+            )
+
+        embed = discord.Embed(
+            title="Jury Tower",
+            description=(
+                f"**{current_floor}**\n"
+                f"{current_title}\n"
+                f"{current_judge}"
+            ),
+            color=0x8B5CF6,
+        )
+        embed.add_field(
+            name="Run",
+            value=(
+                f"Checkpoint: **{row['checkpoint']}**\n"
+                f"Appeals: **{row['appeals']}**\n"
+                f"Cycles Completed: **{row['cycles']}**\n"
+                f"Prestige: **{row['prestige']}**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Marks",
+            value=(
+                f"Favor: **{row['favor']}**\n"
+                f"Contempt: **{row['contempt']}**\n"
+                f"{JURY_CURRENCY_LABEL}: **{row['writs']}**\n"
+                f"Seals: **{self._jury_seal_count(int(row['seals'] or 0))}/7**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Current Hall",
+            value=(
+                f"Favor: **{int(row['segment_favor'] or 0)}**\n"
+                f"Contempt: **{int(row['segment_contempt'] or 0)}**\n"
+                f"Score: **{self._jury_segment_score(int(row['segment_favor'] or 0), int(row['segment_contempt'] or 0)):+d}**\n"
+                f"Bonus Cache at **+{JURY_BONUS_CACHE_THRESHOLD}**\n"
+                f"Major Bonus Cache at **+{JURY_MAJOR_BONUS_CACHE_THRESHOLD}**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Judgment",
+            value=(
+                "Favor = good judgment.\n"
+                "Contempt = bad judgment.\n"
+                "Your current hall score decides whether the next boss pays bonus sigils."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Inventory",
+            value=(
+                f"Reset Potions: **{reset_potions}**\n"
+                f"Reset Fragments: **{self._format_jury_reset_fragments(reset_fragments)}**\n"
+                f"Fortune Crates: **{fortune_crates}**\n"
+                f"Weapon Element Changes: **{weapon_scrolls}**\n"
+                f"Title: **{JURY_COSMETIC_TITLE if self._jury_shop_title_unlocked(row) else 'Unclaimed'}**"
+            ),
+            inline=False,
+        )
+        scale_text = self._format_jury_scale_snapshot(self._jury_scale_snapshot_from_row(row))
+        bracket_text = self._format_jury_bracket(row)
+        tier_lines = [f"{JURY_RANK_LABEL}: **{bracket_text or 'Unassigned'}**"]
+        if scale_text:
+            tier_lines.append(scale_text)
+        embed.add_field(name=JURY_RANK_LABEL, value="\n".join(tier_lines), inline=False)
+        embed.set_footer(text=f"Use $jt shop to view the {JURY_SHOP_LABEL.lower()}.")
+        await ctx.send(embed=embed)
+
+
+    @has_char()
+    @jurytower.command(name="shop")
+    async def jurytower_shop(self, ctx):
+        if not await self._ensure_jury_tower_dev_access(ctx):
+            return
+        async with self.bot.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT writs, cycles, prestige, appeals, shop_reset_purchases,
+                       shop_reset_fragment_purchases, shop_appeal_purchases,
+                       shop_fortune_crate_purchases, shop_weapon_scroll_purchases,
+                       shop_title_unlocked, scale_power_score, scale_bracket,
+                       scale_attack_base, scale_hp_base, scale_defense_base
+                FROM jurytower
+                WHERE id = $1
+                """,
+                ctx.author.id,
+            )
+            if not row:
+                return await ctx.send("You have not started the Jury Tower. Use `$jt start`.")
+            profile_row = await connection.fetchrow(
+                'SELECT resetpotion, resetfragments, crates_fortune FROM profile WHERE "user" = $1',
+                ctx.author.id,
+            )
+            weapon_scrolls = await connection.fetchval(
+                'SELECT quantity FROM user_consumables WHERE user_id = $1 AND consumable_type = $2',
+                ctx.author.id,
+                "weapon_element_scroll",
+            )
+
+        fragments = int(profile_row["resetfragments"] or 0) if profile_row else 0
+        potions = int(profile_row["resetpotion"] or 0) if profile_row else 0
+        fortune_crates = int(profile_row["crates_fortune"] or 0) if profile_row else 0
+        weapon_scrolls = int(weapon_scrolls or 0)
+        embed = discord.Embed(
+            title=JURY_SHOP_LABEL,
+            description=f"Spend {JURY_CURRENCY_LABEL_LOWER} on limited rewards. Buy with `$jt buy <item>`.",
+            color=0x8B5CF6,
+        )
+        embed.add_field(
+            name="Your Stock",
+            value=(
+                f"{JURY_CURRENCY_LABEL}: **{row['writs']}**\n"
+                f"Appeals: **{row['appeals']}/{self.JURY_MAX_APPEALS}**\n"
+                f"Reset Potions: **{potions}**\n"
+                f"Reset Fragments: **{self._format_jury_reset_fragments(fragments)}**\n"
+                f"Fortune Crates: **{fortune_crates}**\n"
+                f"Weapon Element Changes: **{weapon_scrolls}**\n"
+                f"Title: **{JURY_COSMETIC_TITLE if self._jury_shop_title_unlocked(row) else 'Unclaimed'}**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Utility",
+            value=(
+                f"`reset` - **{self.JURY_SHOP_RESET_POTION_COST}** sigils "
+                f"({self._jury_shop_reset_available(row)}/{self.JURY_SHOP_RESET_POTION_LIMIT} left)\n"
+                f"`fragment` - **{self.JURY_SHOP_RESET_FRAGMENT_COST}** sigils "
+                f"({self._jury_shop_item_available(row, 'shop_reset_fragment_purchases', self.JURY_SHOP_RESET_FRAGMENT_LIMIT)}/{self.JURY_SHOP_RESET_FRAGMENT_LIMIT} left)\n"
+                f"`appeal` - **{self.JURY_SHOP_APPEAL_COST}** sigils "
+                f"({self._jury_shop_item_available(row, 'shop_appeal_purchases', self.JURY_SHOP_APPEAL_LIMIT)}/{self.JURY_SHOP_APPEAL_LIMIT} left)"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Rewards",
+            value=(
+                f"`fortune` - **{self.JURY_SHOP_FORTUNE_CRATE_COST}** sigils "
+                f"({self._jury_shop_item_available(row, 'shop_fortune_crate_purchases', self.JURY_SHOP_FORTUNE_CRATE_LIMIT)}/{self.JURY_SHOP_FORTUNE_CRATE_LIMIT} left)\n"
+                f"`weapelement` - **{self.JURY_SHOP_WEAPON_SCROLL_COST}** sigils "
+                f"({self._jury_shop_item_available(row, 'shop_weapon_scroll_purchases', self.JURY_SHOP_WEAPON_SCROLL_LIMIT)}/{self.JURY_SHOP_WEAPON_SCROLL_LIMIT} left)\n"
+                f"`title` - **{self.JURY_SHOP_COSMETIC_TITLE_COST}** sigils "
+                f"({'owned' if self._jury_shop_title_unlocked(row) else 'available'})"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Notes",
+            value=(
+                f"Fragments auto-reforge at **{self.JURY_RESET_FRAGMENT_REQUIREMENT} = 1 Reset Potion**.\n"
+                "Shop limits reset on prestige.\n"
+                "Use `$jt buy <item>` to purchase."
+            ),
+            inline=False,
+        )
+        await ctx.send(embed=embed)
+
+
+    @has_char()
+    @jurytower.command(name="buy")
+    async def jurytower_buy(self, ctx, *, item: str):
+        if not await self._ensure_jury_tower_dev_access(ctx):
+            return
+        item_key = self._normalize_jury_shop_item(item)
+        if item_key is None:
+            return await ctx.send(
+                "Valid shop items are `reset`, `fragment`, `appeal`, `fortune`, `weapelement`, and `title`."
+            )
+
+        purchase_text = {
+            "reset": (
+                self.JURY_SHOP_RESET_POTION_COST,
+                "1 Reset Potion",
+            ),
+            "fragment": (
+                self.JURY_SHOP_RESET_FRAGMENT_COST,
+                "1 Reset Fragment",
+            ),
+            "appeal": (
+                self.JURY_SHOP_APPEAL_COST,
+                "1 Appeal",
+            ),
+            "fortune": (
+                self.JURY_SHOP_FORTUNE_CRATE_COST,
+                "1 Fortune Crate",
+            ),
+            "weapelement": (
+                self.JURY_SHOP_WEAPON_SCROLL_COST,
+                "1 Weapon Element Change",
+            ),
+            "title": (
+                self.JURY_SHOP_COSMETIC_TITLE_COST,
+                f"the cosmetic title {JURY_COSMETIC_TITLE}",
+            ),
+        }
+        cost, reward_label = purchase_text[item_key]
+        async with self.bot.pool.acquire() as preview_connection:
+            preview_row = await preview_connection.fetchrow(
+                """
+                SELECT writs, appeals, shop_reset_purchases, shop_reset_fragment_purchases,
+                       shop_appeal_purchases, shop_fortune_crate_purchases,
+                       shop_weapon_scroll_purchases, shop_title_unlocked
+                FROM jurytower
+                WHERE id = $1
+                """,
+                ctx.author.id,
+            )
+        if not preview_row:
+            return await ctx.send("You have not started the Jury Tower. Use `$jurytower start`.")
+        if int(preview_row["writs"] or 0) < cost:
+            return await ctx.send(f"You need **{cost} {JURY_CURRENCY_LABEL}** for that purchase.")
+        if item_key == "reset" and self._jury_shop_reset_available(preview_row) <= 0:
+            return await ctx.send("You already bought the shop reset potion for this cycle.")
+        if item_key == "fragment" and self._jury_shop_item_available(
+            preview_row,
+            "shop_reset_fragment_purchases",
+            self.JURY_SHOP_RESET_FRAGMENT_LIMIT,
+        ) <= 0:
+            return await ctx.send("You already bought the shop reset fragment for this cycle.")
+        if item_key == "appeal" and self._jury_shop_item_available(
+            preview_row,
+            "shop_appeal_purchases",
+            self.JURY_SHOP_APPEAL_LIMIT,
+        ) <= 0:
+            return await ctx.send("You already bought the shop appeal for this cycle.")
+        if item_key == "appeal" and int(preview_row["appeals"] or 0) >= self.JURY_MAX_APPEALS:
+            return await ctx.send(f"You already have the maximum **{self.JURY_MAX_APPEALS} Appeals**.")
+        if item_key == "fortune" and self._jury_shop_item_available(
+            preview_row,
+            "shop_fortune_crate_purchases",
+            self.JURY_SHOP_FORTUNE_CRATE_LIMIT,
+        ) <= 0:
+            return await ctx.send("You already bought the shop fortune crate for this cycle.")
+        if item_key == "weapelement" and self._jury_shop_item_available(
+            preview_row,
+            "shop_weapon_scroll_purchases",
+            self.JURY_SHOP_WEAPON_SCROLL_LIMIT,
+        ) <= 0:
+            return await ctx.send("You already bought the shop weapon element change for this cycle.")
+        if item_key == "title" and self._jury_shop_title_unlocked(preview_row):
+            return await ctx.send(f"You already unlocked **{JURY_COSMETIC_TITLE}**.")
+        if not await ctx.confirm(
+            f"Spend **{cost} {JURY_CURRENCY_LABEL}** for **{reward_label}**?"
+        ):
+            return await ctx.send("The purchase was cancelled.")
+
+        async with self.bot.pool.acquire() as connection:
+            async with connection.transaction():
+                row = await connection.fetchrow(
+                    """
+                    SELECT writs, appeals, shop_reset_purchases, shop_reset_fragment_purchases,
+                           shop_appeal_purchases, shop_fortune_crate_purchases,
+                           shop_weapon_scroll_purchases, shop_title_unlocked
+                    FROM jurytower
+                    WHERE id = $1
+                    FOR UPDATE
+                    """,
+                    ctx.author.id,
+                )
+                if not row:
+                    return await ctx.send("You have not started the Jury Tower. Use `$jurytower start`.")
+
+                writs = int(row["writs"] or 0)
+                if writs < cost:
+                    return await ctx.send(f"You need **{cost} {JURY_CURRENCY_LABEL}** for that purchase.")
+
+                summary_line = ""
+                if item_key == "reset":
+                    remaining_before = self._jury_shop_reset_available(row)
+                    if remaining_before <= 0:
+                        return await ctx.send("You already bought the shop reset potion for this cycle.")
+                    await connection.execute(
+                        """
+                        UPDATE jurytower
+                        SET writs = writs - $1,
+                            shop_reset_purchases = shop_reset_purchases + 1
+                        WHERE id = $2
+                        """,
+                        cost,
+                        ctx.author.id,
+                    )
+                    await connection.execute(
+                        'UPDATE profile SET resetpotion = resetpotion + 1 WHERE "user" = $1',
+                        ctx.author.id,
+                    )
+                    remaining_after = max(0, remaining_before - 1)
+                    summary_line = (
+                        f"You spend **{cost} {JURY_CURRENCY_LABEL}** and receive **1 Reset Potion**. "
+                        f"Shop resets remaining this cycle: **{remaining_after}/{self.JURY_SHOP_RESET_POTION_LIMIT}**."
+                    )
+                elif item_key == "fragment":
+                    remaining_before = self._jury_shop_item_available(
+                        row,
+                        "shop_reset_fragment_purchases",
+                        self.JURY_SHOP_RESET_FRAGMENT_LIMIT,
+                    )
+                    if remaining_before <= 0:
+                        return await ctx.send("You already bought the shop reset fragment for this cycle.")
+                    await connection.execute(
+                        """
+                        UPDATE jurytower
+                        SET writs = writs - $1,
+                            shop_reset_fragment_purchases = shop_reset_fragment_purchases + 1
+                        WHERE id = $2
+                        """,
+                        cost,
+                        ctx.author.id,
+                    )
+                    fragment_award = await self._award_jury_reset_fragments(connection, ctx.author.id, 1)
+                    summary_line = (
+                        f"You spend **{cost} {JURY_CURRENCY_LABEL}** and receive **1 Reset Fragment**. "
+                        f"Fragments now: **{self._format_jury_reset_fragments(fragment_award['remaining_fragments'])}**."
+                    )
+                    if fragment_award["converted_potions"] > 0:
+                        summary_line += (
+                            f" The fragments reforge into **{fragment_award['converted_potions']} Reset Potion**."
+                        )
+                elif item_key == "appeal":
+                    remaining_before = self._jury_shop_item_available(
+                        row,
+                        "shop_appeal_purchases",
+                        self.JURY_SHOP_APPEAL_LIMIT,
+                    )
+                    current_appeals = int(row["appeals"] or 0)
+                    if remaining_before <= 0:
+                        return await ctx.send("You already bought the shop appeal for this cycle.")
+                    if current_appeals >= self.JURY_MAX_APPEALS:
+                        return await ctx.send(
+                            f"You already have the maximum **{self.JURY_MAX_APPEALS} Appeals**."
+                        )
+                    new_appeals = min(self.JURY_MAX_APPEALS, current_appeals + 1)
+                    await connection.execute(
+                        """
+                        UPDATE jurytower
+                        SET writs = writs - $1,
+                            appeals = $2,
+                            shop_appeal_purchases = shop_appeal_purchases + 1
+                        WHERE id = $3
+                        """,
+                        cost,
+                        new_appeals,
+                        ctx.author.id,
+                    )
+                    summary_line = (
+                        f"You spend **{cost} {JURY_CURRENCY_LABEL}** and gain **1 Appeal**. "
+                        f"Appeals: **{new_appeals}/{self.JURY_MAX_APPEALS}**."
+                    )
+                elif item_key == "fortune":
+                    remaining_before = self._jury_shop_item_available(
+                        row,
+                        "shop_fortune_crate_purchases",
+                        self.JURY_SHOP_FORTUNE_CRATE_LIMIT,
+                    )
+                    if remaining_before <= 0:
+                        return await ctx.send("You already bought the shop fortune crate for this cycle.")
+                    await connection.execute(
+                        """
+                        UPDATE jurytower
+                        SET writs = writs - $1,
+                            shop_fortune_crate_purchases = shop_fortune_crate_purchases + 1
+                        WHERE id = $2
+                        """,
+                        cost,
+                        ctx.author.id,
+                    )
+                    await connection.execute(
+                        'UPDATE profile SET crates_fortune = crates_fortune + 1 WHERE "user" = $1',
+                        ctx.author.id,
+                    )
+                    summary_line = (
+                        f"You spend **{cost} {JURY_CURRENCY_LABEL}** and receive **1 Fortune Crate**."
+                    )
+                elif item_key == "weapelement":
+                    remaining_before = self._jury_shop_item_available(
+                        row,
+                        "shop_weapon_scroll_purchases",
+                        self.JURY_SHOP_WEAPON_SCROLL_LIMIT,
+                    )
+                    if remaining_before <= 0:
+                        return await ctx.send(
+                            "You already bought the shop weapon element change for this cycle."
+                        )
+                    await connection.execute(
+                        """
+                        UPDATE jurytower
+                        SET writs = writs - $1,
+                            shop_weapon_scroll_purchases = shop_weapon_scroll_purchases + 1
+                        WHERE id = $2
+                        """,
+                        cost,
+                        ctx.author.id,
+                    )
+                    new_quantity = await self._grant_user_consumable(
+                        connection,
+                        ctx.author.id,
+                        "weapon_element_scroll",
+                        1,
+                    )
+                    summary_line = (
+                        f"You spend **{cost} {JURY_CURRENCY_LABEL}** and receive **1 Weapon Element Scroll**. "
+                        f"Total Weapon Element Changes: **{new_quantity}**."
+                    )
+                elif item_key == "title":
+                    if self._jury_shop_title_unlocked(row):
+                        return await ctx.send(f"You already unlocked **{JURY_COSMETIC_TITLE}**.")
+                    await connection.execute(
+                        """
+                        UPDATE jurytower
+                        SET writs = writs - $1,
+                            shop_title_unlocked = TRUE
+                        WHERE id = $2
+                        """,
+                        cost,
+                        ctx.author.id,
+                    )
+                    profile_badges_raw = await connection.fetchval(
+                        'SELECT "badges" FROM profile WHERE "user" = $1;',
+                        ctx.author.id,
+                    )
+                    try:
+                        current_badges = (
+                            Badge(0)
+                            if profile_badges_raw is None
+                            else Badge.from_db(profile_badges_raw)
+                        )
+                    except Exception:
+                        current_badges = Badge(0)
+                    if not current_badges & Badge.FAVORED_BY_THE_SEVEN:
+                        await connection.execute(
+                            'UPDATE profile SET "badges" = $1 WHERE "user" = $2;',
+                            (current_badges | Badge.FAVORED_BY_THE_SEVEN).to_db(),
+                            ctx.author.id,
+                        )
+                    summary_line = (
+                        f"You spend **{cost} {JURY_CURRENCY_LABEL}** and unlock the cosmetic title "
+                        f"**{JURY_COSMETIC_TITLE}** and the profile badge **Favored by the Seven**."
+                    )
+
+        await ctx.send(summary_line)
+
+
+    @has_char()
+    @jurytower.command(name="fight", aliases=["begin"])
+    @user_cooldown(1800)
+    async def jurytower_fight(self, ctx):
+        ctx = self._guard_battle_context(ctx)
+        if not await self._ensure_jury_tower_dev_access(ctx):
+            await self.bot.reset_cooldown(ctx)
+            return
+        try:
+            async with self.bot.pool.acquire() as connection:
+                if not await self._ensure_jury_tower_entry_requirements(ctx, connection):
+                    await self.bot.reset_cooldown(ctx)
+                    return
+                row = await connection.fetchrow(
+                """
+                    SELECT level, checkpoint, cycles, prestige, seals, favor, contempt, writs, appeals,
+                           scale_attack_base, scale_hp_base, scale_defense_base,
+                           scale_power_score, scale_bracket, shop_reset_purchases
+                    FROM jurytower
+                    WHERE id = $1
+                    """,
+                    ctx.author.id,
+                )
+                if not row:
+                    await self.bot.reset_cooldown(ctx)
+                    return await ctx.send("You have not started the Jury Tower. Use `$jurytower start`.")
+
+                level = int(row["level"] or 1)
+                if level > JURY_TOWER_FLOOR_COUNT:
+                    confirm = await ctx.confirm(
+                        f"You have completed the current cycle of the Jury Tower. Begin **Prestige {int(row['prestige'] or 0) + 1}**?"
+                    )
+                    if not confirm:
+                        await self.bot.reset_cooldown(ctx)
+                        return await ctx.send("No new case was opened.")
+
+                    await connection.execute(
+                        """
+                        UPDATE jurytower
+                        SET level = 1,
+                            checkpoint = 1,
+                            cycles = cycles + 1,
+                            prestige = prestige + 1,
+                            seals = 0,
+                            favor = 0,
+                            contempt = 0,
+                            segment_favor = 0,
+                            segment_contempt = 0,
+                            appeals = 2,
+                            shop_reset_purchases = 0,
+                            shop_reset_fragment_purchases = 0,
+                            shop_appeal_purchases = 0,
+                            shop_fortune_crate_purchases = 0,
+                            shop_weapon_scroll_purchases = 0
+                        WHERE id = $1
+                        """,
+                        ctx.author.id,
+                    )
+                    row = await connection.fetchrow(
+                        """
+                        SELECT level, checkpoint, cycles, prestige, seals, favor, contempt, writs, appeals,
+                               scale_attack_base, scale_hp_base, scale_defense_base,
+                               scale_power_score, scale_bracket, shop_reset_purchases
+                        FROM jurytower
+                        WHERE id = $1
+                        """,
+                        ctx.author.id,
+                    )
+                    level = 1
+                    await ctx.send(
+                        f"Prestige **{int(row['prestige'] or 0)}** begins. The seven judges reconvene."
+                    )
+
+            floor_data = self._get_jury_floor_data(level)
+            if not floor_data:
+                await self.bot.reset_cooldown(ctx)
+                return await ctx.send(f"No Jury Tower data exists for floor {level}.")
+
+            scale_snapshot, _snapshot_source = await self._resolve_jury_scale_snapshot(ctx, row)
+            allow_pets = self.battle_factory.settings.get_setting(
+                "jurytower",
+                "allow_pets",
+                default=True,
+            )
+            frozen_player_combatant = await self.battle_factory.create_player_combatant(
+                ctx,
+                ctx.author,
+                include_pet=allow_pets,
+            )
+            frozen_pet_combatant = None
+            if allow_pets:
+                frozen_pet_combatant = await self.battle_factory.pet_ext.get_pet_combatant(
+                    ctx,
+                    ctx.author,
+                )
+            await self._display_jury_floor_intro(ctx, row, floor_data, scale_snapshot)
+            choice_key = await self._prompt_jury_choice(ctx, floor_data)
+
+            if await self.is_player_in_fight(ctx.author.id):
+                await self.bot.reset_cooldown(ctx)
+                return await ctx.send("You are already in a battle.")
+
+            await self.add_player_to_fight(ctx.author.id)
+
+            battle = await self.battle_factory.create_battle(
+                "jurytower",
+                ctx,
+                player=ctx.author,
+                floor_number=level,
+                floor_data=floor_data,
+                choice_key=choice_key,
+                jury_scale_snapshot=scale_snapshot,
+                jury_prestige_level=int(row["prestige"] or 0),
+                jury_player_combatant=frozen_player_combatant,
+                jury_pet_combatant=frozen_pet_combatant,
+            )
+
+            await battle.start_battle()
+            while not await battle.is_battle_over():
+                await battle.process_turn()
+                await asyncio.sleep(1)
+
+            result = await battle.end_battle()
+            battle_timed_out = hasattr(battle, "battle_timed_out") and battle.battle_timed_out
+
+            if result and result.name == "Player":
+                player_alive = any(not c.is_pet and c.is_alive() for c in battle.player_team.combatants)
+                if player_alive or battle.config.get("pets_continue_battle", False):
+                    await self._handle_jury_victory(ctx, level, floor_data, battle)
+                else:
+                    await self._handle_jury_defeat(ctx, level, floor_data)
+            elif battle_timed_out:
+                await self._send_with_retry(
+                    ctx,
+                    content="The fight timed out. The floor remains open.",
+                    suppress_failure=True,
+                )
+            else:
+                await self._handle_jury_defeat(ctx, level, floor_data)
+
+            await self.remove_player_from_fight(ctx.author.id)
+
+        except Exception as e:
+            import traceback
+            error_message = f"An error occurred during the Jury Tower battle: {e}\n{traceback.format_exc()}"
+            await self._send_with_retry(
+                ctx,
+                content=error_message[:1900] + "..." if len(error_message) > 1900 else error_message,
+                suppress_failure=True,
+            )
             print(error_message)
             await self.remove_player_from_fight(ctx.author.id)
             await self.bot.reset_cooldown(ctx)
@@ -1380,6 +8304,7 @@ class Battles(commands.Cog):
             The battle's winner will receive a PvP win, which shows on their profile.
             (This command has a cooldown of 5 minutes)"""
         )
+        ctx = self._guard_battle_context(ctx)
         try:
             if enemy == ctx.author:
                 await self.bot.reset_cooldown(ctx)
@@ -1438,7 +8363,32 @@ class Battles(commands.Cog):
                 check_fail_message=_("You don't have enough money to join the raidbattle."),
             )
 
-            await ctx.send(text, view=view)
+            join_message = await self._send_with_retry(
+                ctx,
+                content=text,
+                view=view,
+                suppress_failure=True,
+            )
+            if join_message is None:
+                await self.bot.reset_cooldown(ctx)
+                await self.bot.pool.execute(
+                    'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                    money,
+                    ctx.author.id,
+                )
+                return
+
+            ai_offer_task = None
+            ai_player = self.bot.get_cog("AIPlayer")
+            if ai_player is not None:
+                ai_offer_task = ai_player.start_raidbattle_offer(
+                    future=future,
+                    view=view,
+                    challenger=ctx.author,
+                    requested_enemy=enemy,
+                    wager=money,
+                    public_channel=ctx.channel,
+                )
 
             try:
                 enemy_ = await future
@@ -1450,11 +8400,17 @@ class Battles(commands.Cog):
                     money,
                     ctx.author.id,
                 )
-                return await ctx.send(
+                return await self._send_with_retry(
+                    ctx,
+                    content=
                     _("No one wanted to join your raidbattle, {author}!").format(
                         author=ctx.author.mention
-                    )
+                    ),
+                    suppress_failure=True,
                 )
+            finally:
+                if ai_offer_task is not None and not ai_offer_task.done():
+                    ai_offer_task.cancel()
 
             # Deduct money from the enemy
             await self.bot.pool.execute(
@@ -1485,17 +8441,31 @@ class Battles(commands.Cog):
             
             if result:
                 winner, loser = result
-                await ctx.send(
+                await self._send_with_retry(
+                    ctx,
+                    content=
                     _("{winner} won the raidbattle vs {loser}! Congratulations!").format(
                         winner=winner.mention, loser=loser.mention
-                    )
+                    ),
+                    suppress_failure=True,
+                )
+                await self._progress_custom_quest_source(
+                    ctx,
+                    [winner],
+                    "raidbattle",
+                    "1v1",
+                    getattr(loser, "display_name", None),
+                    getattr(loser, "name", None),
                 )
             else:
                 # Battle ended in a tie
-                await ctx.send(
+                await self._send_with_retry(
+                    ctx,
+                    content=
                     _("The raidbattle between {p1} and {p2} ended in a tie! Money has been refunded.").format(
                         p1=ctx.author.mention, p2=enemy_.mention
-                    )
+                    ),
+                    suppress_failure=True,
                 )
                 # Refund money to both players
                 async with self.bot.pool.acquire() as conn:
@@ -1509,8 +8479,298 @@ class Battles(commands.Cog):
             import traceback
             error_message = f"Error occurred: {e}\n"
             error_message += traceback.format_exc()
-            await ctx.send(error_message)
+            await self._send_with_retry(ctx, content=error_message[:1900], suppress_failure=True)
             print(error_message)
+
+    @has_char()
+    @user_cooldown(100)
+    @commands.command(brief=_("Battle with a teammate against one player (includes raidstats)"))
+    @locale_doc
+    async def raidbattle2v1(self, ctx, money: IntGreaterThan(-1) = 0, *targets: str):
+        _(
+            """`[money]` - A whole number that can be 0 or greater; defaults to 0
+            `[teammate]` - A user who will join your team
+            `[enemy]` - A user who will fight alone; defaults to anyone
+
+            Fight with one teammate against a single player while betting money.
+            To decide the players' stats, their items, race and class bonuses and raidstats are evaluated.
+
+            You also have a chance of tripping depending on your luck.
+
+            The money is removed from all players at the start of the battle. Once a winning side has been decided, the winners receive the pot split between them.
+            The battle is divided into turns, in which each combatant (player or pet) takes an action.
+
+            The battle ends if one side's all combatants' HP drop to 0 (winner decided), or if 5 minutes after the battle started pass (tie).
+            In case of a tie, all players will get their money back.
+
+            Each member of the winning side will receive a PvP win.
+            (This command has a cooldown of 5 minutes)"""
+        )
+        ctx = self._guard_battle_context(ctx)
+        deducted_ids = []
+        battle_resolved = False
+
+        async def safe_reset_cooldown():
+            try:
+                await self.bot.reset_cooldown(ctx)
+            except Exception as cooldown_error:
+                print(f"[raidbattle2v1] cooldown reset failed: {cooldown_error}")
+
+        async def refund_players(user_ids):
+            unique_ids = list(dict.fromkeys(user_ids))
+            for user_id in unique_ids:
+                await self.bot.pool.execute(
+                    'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                    money,
+                    user_id,
+                )
+
+        async def check_character_and_money(user: discord.User) -> bool:
+            if not await self.bot.pool.fetchrow('SELECT 1 FROM profile WHERE "user"=$1', user.id):
+                return False
+            if money > 0:
+                return await has_money(self.bot, user.id, money)
+            return True
+
+        try:
+            mentions = list(dict.fromkeys(ctx.message.mentions))
+            teammate = mentions[0] if len(mentions) >= 1 else None
+            enemy = mentions[1] if len(mentions) >= 2 else None
+
+            if len(mentions) > 2:
+                await ctx.send(
+                    _("Usage: `{prefix}raidbattle2v1 [money] <teammate> [enemy]`").format(
+                        prefix=ctx.clean_prefix
+                    )
+                )
+                await safe_reset_cooldown()
+                return
+
+            if teammate is None:
+                await ctx.send(_("You must specify a teammate for a 2v1 raidbattle."))
+                await safe_reset_cooldown()
+                return
+
+            if teammate == ctx.author:
+                await ctx.send(_("You can't be your own teammate."))
+                await safe_reset_cooldown()
+                return
+
+            if enemy and enemy in {ctx.author, teammate}:
+                await ctx.send(_("Invalid team configuration."))
+                await safe_reset_cooldown()
+                return
+
+            if ctx.character_data["money"] < money:
+                await ctx.send(_("You are too poor."))
+                await safe_reset_cooldown()
+                return
+
+            await self.bot.pool.execute(
+                'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
+                money,
+                ctx.author.id,
+            )
+            deducted_ids.append(ctx.author.id)
+
+            teammate_future = asyncio.Future()
+            teammate_view = SingleJoinView(
+                teammate_future,
+                Button(
+                    style=ButtonStyle.primary,
+                    label=_("Join the team!"),
+                    emoji="🤝",
+                ),
+                allowed=teammate,
+                prohibited=ctx.author,
+                timeout=60,
+                check=check_character_and_money,
+                check_fail_message=_("You don't have a character or enough money to join the raidbattle."),
+            )
+
+            teammate_message = await ctx.send(
+                _("{teammate}, {author} has invited you to join them in a 2v1 raidbattle! The price is **${money}** per player.").format(
+                    teammate=teammate.mention,
+                    author=ctx.author.mention,
+                    money=money,
+                ),
+                view=teammate_view,
+            )
+            if teammate_message is None:
+                await refund_players(deducted_ids)
+                await safe_reset_cooldown()
+                return
+
+            try:
+                teammate_ = await asyncio.wait_for(teammate_future, timeout=60)
+            except asyncio.TimeoutError:
+                await refund_players(deducted_ids)
+                await ctx.send(
+                    _("Your teammate did not join in time, {author}.").format(
+                        author=ctx.author.mention
+                    )
+                )
+                await safe_reset_cooldown()
+                return
+
+            await self.bot.pool.execute(
+                'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
+                money,
+                teammate_.id,
+            )
+            deducted_ids.append(teammate_.id)
+
+            enemy_future = asyncio.Future()
+            enemy_view = SingleJoinView(
+                enemy_future,
+                Button(
+                    style=ButtonStyle.primary,
+                    label=_("Accept Challenge"),
+                    emoji="⚔️",
+                ),
+                allowed=enemy,
+                prohibited=[ctx.author, teammate_],
+                timeout=60,
+                check=check_character_and_money,
+                check_fail_message=_("You don't have a character or enough money to join the raidbattle."),
+            )
+
+            if enemy:
+                enemy_text = _("{enemy}, you have been challenged to a 2v1 raidbattle by {author} and {teammate}! The price is **${money}**.").format(
+                    enemy=enemy.mention,
+                    author=ctx.author.mention,
+                    teammate=teammate_.mention,
+                    money=money,
+                )
+            else:
+                enemy_text = _("{author} and {teammate} seek a 2v1 raidbattle challenger! The price is **${money}**.").format(
+                    author=ctx.author.mention,
+                    teammate=teammate_.mention,
+                    money=money,
+                )
+
+            enemy_message = await ctx.send(enemy_text, view=enemy_view)
+            if enemy_message is None:
+                await refund_players(deducted_ids)
+                await safe_reset_cooldown()
+                return
+
+            try:
+                enemy_ = await asyncio.wait_for(enemy_future, timeout=60)
+            except asyncio.TimeoutError:
+                await refund_players(deducted_ids)
+                if enemy:
+                    await ctx.send(_("Your chosen opponent did not join in time. Money has been refunded."))
+                else:
+                    await ctx.send(_("No one wanted to take the 2v1 raidbattle. Money has been refunded."))
+                await safe_reset_cooldown()
+                return
+
+            await self.bot.pool.execute(
+                'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
+                money,
+                enemy_.id,
+            )
+            deducted_ids.append(enemy_.id)
+
+            team_a = [ctx.author, teammate_]
+            team_b = [enemy_]
+
+            await self._send_with_retry(
+                ctx,
+                content=
+                _("**Team A**: {team_a_members}\n**Team B**: {team_b_members}\n\nLet the battle begin!").format(
+                    team_a_members=", ".join(member.mention for member in team_a),
+                    team_b_members=", ".join(member.mention for member in team_b),
+                ),
+                suppress_failure=True,
+            )
+
+            battle = await self.battle_factory.create_battle(
+                "raid",
+                ctx,
+                team_a=team_a,
+                team_b=team_b,
+                money=money,
+            )
+
+            await battle.start_battle()
+
+            while not await battle.is_battle_over():
+                await battle.process_turn()
+                await asyncio.sleep(2)
+
+            result = await battle.end_battle()
+            battle_resolved = True
+
+            if result:
+                winner, loser = result
+                team_a_ids = {member.id for member in team_a}
+                if winner and winner.id in team_a_ids:
+                    winning_team = team_a
+                    losing_team = team_b
+                else:
+                    winning_team = team_b
+                    losing_team = team_a
+
+                await self._send_with_retry(
+                    ctx,
+                    content=
+                    _("Team {winning_team} won the 2v1 raidbattle against Team {losing_team}! Congratulations!").format(
+                        winning_team=", ".join(member.mention for member in winning_team),
+                        losing_team=", ".join(member.mention for member in losing_team),
+                    ),
+                    suppress_failure=True,
+                )
+                losing_names = [member.display_name for member in losing_team] + [member.name for member in losing_team]
+                await self._progress_custom_quest_source(
+                    ctx,
+                    winning_team,
+                    "raidbattle",
+                    "2v1",
+                    *losing_names,
+                )
+            else:
+                await self._send_with_retry(
+                    ctx,
+                    content=
+                    _("The 2v1 raidbattle between {team_a_members} and {team_b_members} ended in a tie! Money has been refunded.").format(
+                        team_a_members=", ".join(member.mention for member in team_a),
+                        team_b_members=", ".join(member.mention for member in team_b),
+                    ),
+                    suppress_failure=True,
+                )
+        except Exception as e:
+            if deducted_ids and not battle_resolved:
+                await refund_players(deducted_ids)
+                await safe_reset_cooldown()
+            error_message = f"Error occurred: {e}\n"
+            error_message += traceback.format_exc()
+            await self._send_with_retry(ctx, content=error_message[:1900], suppress_failure=True)
+            print(error_message)
+
+    @raidbattle2v1.error
+    async def raidbattle2v1_error(self, ctx, error):
+        original = getattr(error, "original", error)
+
+        if isinstance(error, commands.CommandOnCooldown):
+            await ctx.send(
+                _("You are on cooldown. Try again in {time}.").format(
+                    time=datetime.timedelta(seconds=int(error.retry_after))
+                )
+            )
+            return
+
+        if isinstance(error, commands.BadArgument):
+            await ctx.send(
+                _("Usage: `{prefix}raidbattle2v1 [money] <teammate> [enemy]`").format(
+                    prefix=ctx.clean_prefix
+                )
+            )
+            return
+
+        await ctx.send(f"raidbattle2v1 error: {type(original).__name__}: {original}")
+        print(f"[raidbattle2v1] {type(original).__name__}: {original}")
 
     @has_char()
     @user_cooldown(100)
@@ -1536,434 +8796,318 @@ class Battles(commands.Cog):
             Each member of the winning team will receive a PvP win, which shows on their profile.
             (This command has a cooldown of 5 minutes)"""
         )
-        # Check if the initiator has enough money
-        if ctx.character_data["money"] < money:
-            await self.bot.reset_cooldown(ctx)
-            return await ctx.send(_("You are too poor."))
-
-        # Determine if we're using open enrollment
-        open_enrollment = teammate is None and (not opponents or len(opponents) == 0)
-
-        if not open_enrollment:
-            # Validate specific player configuration
-            if teammate == ctx.author:
+        ctx = self._guard_battle_context(ctx)
+        try:
+            # Check if the initiator has enough money
+            if ctx.character_data["money"] < money:
                 await self.bot.reset_cooldown(ctx)
-                return await ctx.send(_("You can't be your own teammate."))
+                return await ctx.send(_("You are too poor."))
 
-            if not opponents or len(opponents) != 2:
-                await self.bot.reset_cooldown(ctx)
-                return await ctx.send(_("You must specify exactly two opponents."))
+            # Determine if we're using open enrollment
+            open_enrollment = teammate is None and (not opponents or len(opponents) == 0)
 
-            if ctx.author in opponents or teammate in opponents:
-                await self.bot.reset_cooldown(ctx)
-                return await ctx.send(_("Invalid team configuration."))
+            if not open_enrollment:
+                # Validate specific player configuration
+                if teammate == ctx.author:
+                    await self.bot.reset_cooldown(ctx)
+                    return await ctx.send(_("You can't be your own teammate."))
 
-        # Deduct money from initiating player
-        await self.bot.pool.execute(
-            'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
-            money,
-            ctx.author.id,
-        )
+                if not opponents or len(opponents) != 2:
+                    await self.bot.reset_cooldown(ctx)
+                    return await ctx.send(_("You must specify exactly two opponents."))
 
-        # Function to check if a user has enough money and a character
-        async def check_character_and_money(user: discord.User) -> bool:
-            # Check if user has a character
-            if not await self.bot.pool.fetchrow('SELECT 1 FROM profile WHERE "user"=$1', user.id):
-                return False
-            # Check if user has enough money (if bet amount > 0)
-            if money > 0:
-                return await has_money(self.bot, user.id, money)
-            return True
+                if ctx.author in opponents or teammate in opponents:
+                    await self.bot.reset_cooldown(ctx)
+                    return await ctx.send(_("Invalid team configuration."))
 
-        # Handle open or specific enrollment
-        if open_enrollment:
-            # Open enrollment implementation
-            participants = [ctx.author]
-            participant_ids = {ctx.author.id}
-            
-            battle_msg = None
-            
-            class OpenBattleView(discord.ui.View):
-                def __init__(self, bot):
-                    super().__init__(timeout=60)
-                    self.bot = bot
-                    self.is_complete = False
-                
-                @discord.ui.button(label=_("Join Battle"), style=discord.ButtonStyle.primary, emoji="⚔️")
-                async def join_battle(self, interaction: discord.Interaction, button: discord.ui.Button):
-                    user = interaction.user
-                    
-                    # Check if user is already in the battle
-                    if user.id in participant_ids:
-                        return await interaction.response.send_message(
-                            _("You have already joined this battle."), ephemeral=True
-                        )
-                    
-                    # Check if user has a character and enough money
-                    if not await check_character_and_money(user):
-                        if not await self.bot.pool.fetchrow('SELECT 1 FROM profile WHERE "user"=$1', user.id):
-                            return await interaction.response.send_message(
-                                _("You don't have a character to participate."), ephemeral=True
-                            )
-                        else:
-                            return await interaction.response.send_message(
-                                _("You don't have enough money to join this battle."), ephemeral=True
-                            )
-                    
-                    # Deduct money from the player
-                    if money > 0:
-                        await self.bot.pool.execute(
-                            'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
-                            money,
-                            user.id,
-                        )
-                    
-                    # Add user to participants
-                    participants.append(user)
-                    participant_ids.add(user.id)
-                    
-                    # Acknowledge the interaction
-                    await interaction.response.send_message(_("You have joined the battle!"), ephemeral=True)
-                    
-                    # Update the battle message
-                    joined_text = "\n".join([f"• {p.mention}" for p in participants])
-                    needed = 4 - len(participants)
-                    
-                    await battle_msg.edit(content=_(
-                        "{author} has started a 2v2 raidbattle! The price is **${money}** per player.\n"
-                        "**Participants ({count}/4):**\n{participants}\n\n"
-                        "{needed_text}"
-                    ).format(
-                        author=ctx.author.mention,
-                        money=money,
-                        count=len(participants),
-                        participants=joined_text,
-                        needed_text=_("Need {more} more players to start!").format(more=needed) if needed > 0 else _("Battle ready to begin!")
-                    ))
-                    
-                    # If we have 4 players, start the battle
-                    if len(participants) >= 4:
-                        self.is_complete = True
-                        for item in self.children:
-                            item.disabled = True
-                        await battle_msg.edit(view=self)
-                        self.stop()
-            
-            # Create the view and send the initial message
-            view = OpenBattleView(self.bot)
-            battle_msg = await ctx.send(
-                _("{author} has started a 2v2 raidbattle! The price is **${money}** per player.\n"
-                "**Participants (1/4):**\n• {author}\n\n"
-                "Need 3 more players to start!").format(
-                    author=ctx.author.mention,
-                    money=money
-                ),
-                view=view
-            )
-            
-            # Wait for the view to complete or timeout
-            await view.wait()
-            
-            # Check if we have enough players
-            if not view.is_complete:
-                await self.bot.reset_cooldown(ctx)
-                # Refund money to all participants
-                for participant in participants:
-                    await self.bot.pool.execute(
-                        'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
-                        money,
-                        participant.id,
-                    )
-                return await ctx.send(_("Not enough players joined the battle. Money has been refunded."))
-            
-            # Randomly assign teams
-            random.shuffle(participants)
-            team_a = participants[:2]
-            team_b = participants[2:]
-            
-        else:
-            # Specific player enrollment
-            # Create future for teammate
-            teammate_future = asyncio.Future()
-            view = SingleJoinView(
-                teammate_future,
-                Button(
-                    style=ButtonStyle.primary,
-                    label=_("Join the team!"),
-                    emoji="🤝",
-                ),
-                allowed=teammate,
-                prohibited=ctx.author,
-                timeout=60,
-                check=check_character_and_money,
-                check_fail_message=_("You don't have a character or enough money to join the raidbattle."),
-            )
-            
-            # Send invitation to teammate
-            await ctx.send(
-                _("{teammate}, {author} has invited you to join their team in a 2v2 raidbattle! The price is **${money}** per player.").format(
-                    teammate=teammate.mention,
-                    author=ctx.author.mention,
-                    money=money
-                ),
-                view=view
-            )
-            
-            # Wait for teammate to join
-            try:
-                teammate_ = await asyncio.wait_for(teammate_future, timeout=60)
-            except asyncio.TimeoutError:
-                await self.bot.reset_cooldown(ctx)
-                # Refund money to author
-                await self.bot.pool.execute(
-                    'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
-                    money,
-                    ctx.author.id,
-                )
-                return await ctx.send(
-                    _("Your teammate did not join in time, {author}.").format(
-                        author=ctx.author.mention
-                    )
-                )
-            
-            # Take money from teammate
+            # Deduct money from initiating player
             await self.bot.pool.execute(
                 'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
                 money,
-                teammate_.id,
+                ctx.author.id,
             )
-            
-            # Invite opponents
-            opponent_futures = []
-            for opponent in opponents:
-                future = asyncio.Future()
+
+            # Function to check if a user has enough money and a character
+            async def check_character_and_money(user: discord.User) -> bool:
+                # Check if user has a character
+                if not await self.bot.pool.fetchrow('SELECT 1 FROM profile WHERE "user"=$1', user.id):
+                    return False
+                # Check if user has enough money (if bet amount > 0)
+                if money > 0:
+                    return await has_money(self.bot, user.id, money)
+                return True
+
+            # Handle open or specific enrollment
+            if open_enrollment:
+                # Open enrollment implementation
+                participants = [ctx.author]
+                participant_ids = {ctx.author.id}
+                join_lock = asyncio.Lock()
+                battle_cog = self
+                
+                battle_msg = None
+                
+                class OpenBattleView(discord.ui.View):
+                    def __init__(self, bot):
+                        super().__init__(timeout=60)
+                        self.bot = bot
+                        self.is_complete = False
+                    
+                    @discord.ui.button(label=_("Join Battle"), style=discord.ButtonStyle.primary, emoji="⚔️")
+                    async def join_battle(self, interaction: discord.Interaction, button: discord.ui.Button):
+                        user = interaction.user
+
+                        async with join_lock:
+                            if self.is_complete or len(participants) >= 4:
+                                return await interaction.response.send_message(
+                                    _("This battle is already full."), ephemeral=True
+                                )
+
+                            # Check if user is already in the battle
+                            if user.id in participant_ids:
+                                return await interaction.response.send_message(
+                                    _("You have already joined this battle."), ephemeral=True
+                                )
+
+                            # Check if user has a character and enough money
+                            if not await check_character_and_money(user):
+                                if not await self.bot.pool.fetchrow('SELECT 1 FROM profile WHERE "user"=$1', user.id):
+                                    return await interaction.response.send_message(
+                                        _("You don't have a character to participate."), ephemeral=True
+                                    )
+                                else:
+                                    return await interaction.response.send_message(
+                                        _("You don't have enough money to join this battle."), ephemeral=True
+                                    )
+
+                            # Deduct money from the player
+                            if money > 0:
+                                await self.bot.pool.execute(
+                                    'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
+                                    money,
+                                    user.id,
+                                )
+
+                            # Add user to participants
+                            participants.append(user)
+                            participant_ids.add(user.id)
+
+                            # Acknowledge the interaction
+                            await interaction.response.send_message(_("You have joined the battle!"), ephemeral=True)
+
+                            # Update the battle message
+                            joined_text = "\n".join([f"• {p.mention}" for p in participants])
+                            needed = 4 - len(participants)
+
+                            await battle_cog._edit_message_with_retry(
+                                battle_msg,
+                                content=_(
+                                    "{author} has started a 2v2 raidbattle! The price is **${money}** per player.\n"
+                                    "**Participants ({count}/4):**\n{participants}\n\n"
+                                    "{needed_text}"
+                                ).format(
+                                    author=ctx.author.mention,
+                                    money=money,
+                                    count=len(participants),
+                                    participants=joined_text,
+                                    needed_text=_("Need {more} more players to start!").format(more=needed) if needed > 0 else _("Battle ready to begin!")
+                                ),
+                                suppress_failure=True,
+                            )
+
+                            # If we have 4 players, start the battle
+                            if len(participants) >= 4:
+                                self.is_complete = True
+                                for item in self.children:
+                                    item.disabled = True
+                                await battle_cog._edit_message_with_retry(
+                                    battle_msg,
+                                    view=self,
+                                    suppress_failure=True,
+                                )
+                                self.stop()
+                
+                # Create the view and send the initial message
+                view = OpenBattleView(self.bot)
+                battle_msg = await ctx.send(
+                    _("{author} has started a 2v2 raidbattle! The price is **${money}** per player.\n"
+                    "**Participants (1/4):**\n• {author}\n\n"
+                    "Need 3 more players to start!").format(
+                        author=ctx.author.mention,
+                        money=money
+                    ),
+                    view=view
+                )
+                if battle_msg is None:
+                    await self.bot.reset_cooldown(ctx)
+                    await self.bot.pool.execute(
+                        'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                        money,
+                        ctx.author.id,
+                    )
+                    return
+                
+                # Wait for the view to complete or timeout
+                await view.wait()
+                
+                # Check if we have enough players
+                if not view.is_complete:
+                    await self.bot.reset_cooldown(ctx)
+                    # Refund money to all participants
+                    for participant in participants:
+                        await self.bot.pool.execute(
+                            'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                            money,
+                            participant.id,
+                    )
+                    return await ctx.send(_("Not enough players joined the battle. Money has been refunded."))
+
+                if len(participants) > 4:
+                    overflow_participants = participants[4:]
+                    participants = participants[:4]
+                    for participant in overflow_participants:
+                        await self.bot.pool.execute(
+                            'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                            money,
+                            participant.id,
+                        )
+                    await ctx.send(_("Battle enrollment exceeded 4 players. Extra participants were refunded and removed."))
+                
+                # Randomly assign teams
+                random.shuffle(participants)
+                team_a = participants[:2]
+                team_b = participants[2:]
+                
+            else:
+                # Specific player enrollment
+                # Create future for teammate
+                teammate_future = asyncio.Future()
                 view = SingleJoinView(
-                    future,
+                    teammate_future,
                     Button(
                         style=ButtonStyle.primary,
-                        label=_("Accept Challenge"),
-                        emoji="⚔️",
+                        label=_("Join the team!"),
+                        emoji="🤝",
                     ),
-                    allowed=opponent,
-                    prohibited=[ctx.author, teammate_],
+                    allowed=teammate,
+                    prohibited=ctx.author,
                     timeout=60,
                     check=check_character_and_money,
                     check_fail_message=_("You don't have a character or enough money to join the raidbattle."),
                 )
                 
+                # Send invitation to teammate
                 await ctx.send(
-                    _("{opponent}, you have been challenged to a 2v2 raidbattle by {author} and {teammate}! The price is **${money}** per player.").format(
-                        opponent=opponent.mention,
+                    _("{teammate}, {author} has invited you to join their team in a 2v2 raidbattle! The price is **${money}** per player.").format(
+                        teammate=teammate.mention,
                         author=ctx.author.mention,
-                        teammate=teammate_.mention,
                         money=money
                     ),
                     view=view
                 )
-                opponent_futures.append(future)
-            
-            # Wait for both opponents to join
-            opponents_ = []
-            try:
-                for future in opponent_futures:
-                    opponent = await asyncio.wait_for(future, timeout=60)
-                    opponents_.append(opponent)
-                    
-                    # Take money from opponent
-                    await self.bot.pool.execute(
-                        'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
-                        money,
-                        opponent.id,
-                    )
-            except asyncio.TimeoutError:
-                await self.bot.reset_cooldown(ctx)
-                # Refund money to all participants so far
-                participants = [ctx.author, teammate_] + opponents_
-                for participant in participants:
+                
+                # Wait for teammate to join
+                try:
+                    teammate_ = await asyncio.wait_for(teammate_future, timeout=60)
+                except asyncio.TimeoutError:
+                    await self.bot.reset_cooldown(ctx)
+                    # Refund money to author
                     await self.bot.pool.execute(
                         'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
                         money,
-                        participant.id,
+                        ctx.author.id,
                     )
-                return await ctx.send(
-                    _("Not all opponents joined in time. Money has been refunded.")
-                )
-            
-            # Set teams
-            team_a = [ctx.author, teammate_]
-            team_b = opponents_
-
-        # Announce teams
-        await ctx.send(
-            _("**Team A**: {team_a_members}\n**Team B**: {team_b_members}\n\nLet the battle begin!").format(
-                team_a_members=", ".join(member.mention for member in team_a),
-                team_b_members=", ".join(member.mention for member in team_b)
-            )
-        )
-
-        # Create and start the battle
-        battle = await self.battle_factory.create_battle(
-            "team",
-            ctx,
-            team_a=team_a,
-            team_b=team_b,
-            money=money
-        )
-        
-        # Start the battle
-        await battle.start_battle()
-        
-        # Run the battle until completion
-        while not await battle.is_battle_over():
-            await battle.process_turn()
-            await asyncio.sleep(4)  # Delay between turns for readability
-        
-        # Get the result
-        result = await battle.end_battle()
-        
-        if result:
-            # Battle has a winner
-            winning_team, losing_team = result
-            await ctx.send(
-                _("Team {winning_team} won the battle against Team {losing_team}! Congratulations!").format(
-                    winning_team=winning_team,
-                    losing_team=losing_team
-                )
-            )
-        else:
-            # Battle ended in a tie
-            await ctx.send(_("The battle ended in a tie! All money has been refunded."))
-            # Refund money to all players
-            for player in team_a + team_b:
+                    return await ctx.send(
+                        _("Your teammate did not join in time, {author}.").format(
+                            author=ctx.author.mention
+                        )
+                    )
+                
+                # Take money from teammate
                 await self.bot.pool.execute(
-                    'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                    'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
                     money,
-                    player.id,
+                    teammate_.id,
                 )
+                
+                # Invite opponents
+                opponent_futures = []
+                for opponent in opponents:
+                    future = asyncio.Future()
+                    view = SingleJoinView(
+                        future,
+                        Button(
+                            style=ButtonStyle.primary,
+                            label=_("Accept Challenge"),
+                            emoji="⚔️",
+                        ),
+                        allowed=opponent,
+                        prohibited=[ctx.author, teammate_],
+                        timeout=60,
+                        check=check_character_and_money,
+                        check_fail_message=_("You don't have a character or enough money to join the raidbattle."),
+                    )
+                    
+                    await ctx.send(
+                        _("{opponent}, you have been challenged to a 2v2 raidbattle by {author} and {teammate}! The price is **${money}** per player.").format(
+                            opponent=opponent.mention,
+                            author=ctx.author.mention,
+                            teammate=teammate_.mention,
+                            money=money
+                        ),
+                        view=view
+                    )
+                    opponent_futures.append(future)
+                
+                # Wait for both opponents to join
+                opponents_ = []
+                try:
+                    for future in opponent_futures:
+                        opponent = await asyncio.wait_for(future, timeout=60)
+                        opponents_.append(opponent)
+                        
+                        # Take money from opponent
+                        await self.bot.pool.execute(
+                            'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
+                            money,
+                            opponent.id,
+                        )
+                except asyncio.TimeoutError:
+                    await self.bot.reset_cooldown(ctx)
+                    # Refund money to all participants so far
+                    participants = [ctx.author, teammate_] + opponents_
+                    for participant in participants:
+                        await self.bot.pool.execute(
+                            'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                            money,
+                            participant.id,
+                        )
+                    return await ctx.send(
+                        _("Not all opponents joined in time. Money has been refunded.")
+                    )
+                
+                # Set teams
+                team_a = [ctx.author, teammate_]
+                team_b = opponents_
 
-    @has_char()
-    @commands.command(brief=_("Battle against a monster and gain XP"))
-    @user_cooldown(1800)  # 30-minute cooldown
-    @locale_doc
-    async def pve(self, ctx):
-        """Battle against a monster and gain experience points."""
-        # Check for monster override from scout command
-        monster_override = getattr(ctx, 'monster_override', None)
-        levelchoice_override = getattr(ctx, 'levelchoice_override', None)
-
-        # Load monsters data
-        try:
-            if not self.monsters_data:
-                with open("monsters.json", "r") as f:
-                    self.monsters_data = json.load(f)
-            
-            # Convert keys from strings to integers and filter out non-public monsters
-            monsters = {}
-            for level_str, monster_list in self.monsters_data.items():
-                level = int(level_str)
-                # Only keep monsters where ispublic is True (defaulting to True if key is missing)
-                public_monsters = [monster for monster in monster_list if monster.get("ispublic", True)]
-                monsters[level] = public_monsters
-        except Exception as e:
-            await ctx.send(_("Error loading monsters data. Please contact the admin."))
-            await self.bot.reset_cooldown(ctx)
-            return
-
-        # Fetch the player's XP and determine level
-        player_xp = ctx.character_data.get("xp", 0)
-        player_level = rpgtools.xptolevel(player_xp)
-
-        # Send an embed indicating that the player is searching for a monster
-        searching_embed = discord.Embed(
-            title=_("Searching for a monster..."),
-            description=_("Your journey begins as you venture into the unknown to find a worthy foe."),
-            color=self.bot.config.game.primary_colour,
-        )
-        searching_message = await ctx.send(embed=searching_embed)
-
-        # Determine monster to fight
-        if not monster_override:
-            # Simulate searching time
-            await asyncio.sleep(random.randint(3, 8))
-
-            # Determine if a legendary monster should spawn
-            legendary_spawn_chance = 0.01  # 1% chance
-            spawn_legendary = False
-
-            if player_level >= 5:
-                if random.random() < legendary_spawn_chance:
-                    spawn_legendary = True
-
-            if ctx.author.id == 295173706496475136 and self.forceleg:
-                spawn_legendary = True
-
-            if spawn_legendary:
-                # Select legendary monster
-                monster = random.choice(monsters[11])
-                legendary_embed = discord.Embed(
-                    title=_("A Legendary God Appears!"),
-                    description=_(
-                        "Behold! **{monster}** has descended to challenge you! Prepare for an epic battle!"
-                    ).format(monster=monster["name"]),
-                    color=discord.Color.gold(),
-                )
-                await searching_message.edit(embed=legendary_embed)
-                levelchoice = 11
-                await asyncio.sleep(4)
-            else:
-                # Determine monster level based on player level
-                if player_level <= 4:
-                    levelchoice = random.randint(1, 2)
-                elif player_level <= 8:
-                    levelchoice = random.randint(1, 3)
-                elif player_level <= 12:
-                    levelchoice = random.randint(1, 4)
-                elif player_level <= 15:
-                    levelchoice = random.randint(1, 5)
-                elif player_level <= 20:
-                    levelchoice = random.randint(1, 6)
-                elif player_level <= 25:
-                    levelchoice = random.randint(1, 7)
-                elif player_level <= 30:
-                    levelchoice = random.randint(1, 8)
-                elif player_level <= 35:
-                    levelchoice = random.randint(1, 9)
-                elif player_level <= 40:
-                    # For levels 1-40, levels 1-9 have normal chance, level 10 has half chance
-                    level_weights = [10] * 10  # Default weight of 10 for all levels
-                    level_weights[9] = 5  # Level 10 (index 9) gets half weight (5/10)
-                    levelchoice = random.choices(range(1, 11), weights=level_weights, k=1)[0]
-                else:  # player_level > 40
-                    # For level 41+, levels 1-9 and 11 have normal chance, level 10 has half chance
-                    level_weights = [10] * 11  # Default weight of 10 for all levels
-                    level_weights[9] = 5  # Level 10 (index 9) gets half weight (5/10)
-                    levelchoice = random.choices(range(1, 12), weights=level_weights, k=1)[0]
-
-                monster = random.choice(monsters[levelchoice])
-        else:
-            # Use override from scout command
-            monster = monster_override
-            levelchoice = levelchoice_override
-
-        # Update embed with found monster
-        found_embed = discord.Embed(
-            title=_("Monster Found!"),
-            description=_("A Level {level} **{monster}** has appeared! Prepare to fight..").format(
-                level=levelchoice, monster=monster["name"]
-            ),
-            color=self.bot.config.game.primary_colour,
-        )
-        await searching_message.edit(embed=found_embed)
-        await asyncio.sleep(4)
-
-        # Create and start the battle
-        try:
-            battle = await self.battle_factory.create_battle(
-                "pve",
+            # Announce teams
+            await self._send_with_retry(
                 ctx,
-                player=ctx.author,
-                monster_data=monster,
-                monster_level=levelchoice
+                content=
+                _("**Team A**: {team_a_members}\n**Team B**: {team_b_members}\n\nLet the battle begin!").format(
+                    team_a_members=", ".join(member.mention for member in team_a),
+                    team_b_members=", ".join(member.mention for member in team_b)
+                ),
+                suppress_failure=True,
+            )
+
+            # Create and start the battle
+            battle = await self.battle_factory.create_battle(
+                "team",
+                ctx,
+                team_a=team_a,
+                team_b=team_b,
+                money=money
             )
             
             # Start the battle
@@ -1972,19 +9116,1276 @@ class Battles(commands.Cog):
             # Run the battle until completion
             while not await battle.is_battle_over():
                 await battle.process_turn()
-                await asyncio.sleep(1)  # 1 second delay between turns
-            
-            # End the battle and determine the outcome
+                await asyncio.sleep(2)  # Match raidbattle pacing
+
+            # Get the result
             result = await battle.end_battle()
             
-            # Handle egg drops and other PvE-specific outcomes
-            if result and result.name == "Player":
-                # Player won - check for egg drops based on level
-                if levelchoice < 12:
-                    # Calculate base egg chance
-                    base_egg_chance = 0.50 - ((levelchoice - 1) / 9) * 0.45
+            if result:
+                # Battle has a winner
+                winning_team, losing_team = result
+                await self._send_with_retry(
+                    ctx,
+                    content=
+                    _("Team {winning_team} won the battle against Team {losing_team}! Congratulations!").format(
+                        winning_team=winning_team,
+                        losing_team=losing_team
+                    ),
+                    suppress_failure=True,
+                )
+                winning_members = team_a if winning_team == "A" else team_b
+                losing_members = team_b if winning_team == "A" else team_a
+                losing_names = [member.display_name for member in losing_members] + [member.name for member in losing_members]
+                await self._progress_custom_quest_source(
+                    ctx,
+                    winning_members,
+                    "raidbattle",
+                    "2v2",
+                    *losing_names,
+                )
+            else:
+                # Battle ended in a tie
+                await self._send_with_retry(
+                    ctx,
+                    content=_("The battle ended in a tie! All money has been refunded."),
+                    suppress_failure=True,
+                )
+                # Refund money to all players
+                for player in team_a + team_b:
+                    await self.bot.pool.execute(
+                        'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                        money,
+                        player.id,
+                    )
+        except Exception as e:
+            await self._send_with_retry(ctx, content=str(e), suppress_failure=True)
+
+    async def _take_ffa_entry_fee(self, ctx, user_id, money, paid_ids):
+        """Deduct the stake, log it, and record the payer.
+
+        `paid_ids` is what the battle actually trusts at payout time - see
+        FreeForAllBattle.paid_player_ids.
+        """
+        if money <= 0:
+            paid_ids.add(user_id)
+            return
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
+                money,
+                user_id,
+            )
+            await self.bot.log_transaction(
+                ctx,
+                from_=user_id,
+                to=0,
+                subject=FreeForAllBattle.ENTRY_SUBJECT,
+                data={"Gold": money},
+                conn=conn,
+            )
+        paid_ids.add(user_id)
+
+    async def _refund_ffa_entry(self, ctx, players, money, paid_ids):
+        """Refund a lobby that never started and forget the payers."""
+        if money <= 0:
+            paid_ids.clear()
+            return
+        async with self.bot.pool.acquire() as conn:
+            for player in players:
+                if player.id not in paid_ids:
+                    continue
+                await conn.execute(
+                    'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                    money,
+                    player.id,
+                )
+                await self.bot.log_transaction(
+                    ctx,
+                    from_=0,
+                    to=player.id,
+                    subject=FreeForAllBattle.REFUND_SUBJECT,
+                    data={"Gold": money},
+                    conn=conn,
+                )
+        paid_ids.clear()
+
+    @has_char()
+    @user_cooldown(100)
+    @commands.command(
+        brief=_("Three-sided battle - last side standing wins"),
+        aliases=["3way", "ffa", "freeforall"],
+    )
+    @locale_doc
+    async def raidbattle3way(
+        self,
+        ctx,
+        money: IntGreaterThan(-1) = 0,
+        players: commands.Greedy[discord.Member] = None,
+    ):
+        _(
+            """`[money]` - A whole number that can be 0 or greater; defaults to 0
+            `[players]` - Either two users (for 1v1v1) or five users (for 2v2v2)
+
+            Fight a three-sided battle where every side is against both others.
+            Stats are evaluated the same way as raidbattle, including raidstats.
+
+            Mention nobody to open a public lobby - the battle starts once three
+            players have joined and each fights for themselves.
+
+            The money is taken from every player at the start. The last side
+            standing takes their own stake back plus everyone else's, split
+            evenly among that side's members.
+
+            The battle ends when only one side has anyone left standing, or after
+            5 minutes (a tie, where everyone is refunded).
+            (This command has a cooldown of 100 seconds)"""
+        )
+        ctx = self._guard_battle_context(ctx)
+        paid_ids = set()
+        try:
+            if ctx.character_data["money"] < money:
+                await self.bot.reset_cooldown(ctx)
+                return await ctx.send(_("You are too poor."))
+
+            players = list(players or [])
+            open_enrollment = not players
+
+            if not open_enrollment:
+                if len(players) not in (2, 5):
+                    await self.bot.reset_cooldown(ctx)
+                    return await ctx.send(
+                        _("Mention exactly two players for 1v1v1, or five for 2v2v2.")
+                    )
+                if ctx.author in players:
+                    await self.bot.reset_cooldown(ctx)
+                    return await ctx.send(_("You can't fight yourself."))
+                if len(set(players)) != len(players):
+                    await self.bot.reset_cooldown(ctx)
+                    return await ctx.send(_("You can't list the same player twice."))
+
+            async def check_character_and_money(user: discord.User) -> bool:
+                if not await self.bot.pool.fetchrow(
+                    'SELECT 1 FROM profile WHERE "user"=$1', user.id
+                ):
+                    return False
+                if money > 0:
+                    return await has_money(self.bot, user.id, money)
+                return True
+
+            await self._take_ffa_entry_fee(ctx, ctx.author.id, money, paid_ids)
+
+            if open_enrollment:
+                participants = [ctx.author]
+                participant_ids = {ctx.author.id}
+                battle_cog = self
+
+                class OpenFFAView(View):
+                    def __init__(self):
+                        super().__init__(timeout=60)
+                        self.is_complete = False
+
+                    @discord.ui.button(
+                        style=ButtonStyle.primary,
+                        label=_("Join the free-for-all!"),
+                        emoji="⚔️",
+                    )
+                    async def join(self, interaction: discord.Interaction, button: Button):
+                        user = interaction.user
+                        if user.id in participant_ids:
+                            return await interaction.response.send_message(
+                                _("You have already joined this battle."), ephemeral=True
+                            )
+                        if not await check_character_and_money(user):
+                            return await interaction.response.send_message(
+                                _("You don't have a character or enough money to join."),
+                                ephemeral=True,
+                            )
+
+                        await battle_cog._take_ffa_entry_fee(
+                            ctx, user.id, money, paid_ids
+                        )
+                        participants.append(user)
+                        participant_ids.add(user.id)
+                        await interaction.response.send_message(
+                            _("You have joined the battle!"), ephemeral=True
+                        )
+
+                        joined_text = "\n".join(f"• {p.mention}" for p in participants)
+                        needed = 3 - len(participants)
+                        await battle_cog._edit_message_with_retry(
+                            battle_msg,
+                            content=_(
+                                "{author} has started a three-way battle! "
+                                "The price is **${money}** per player.\n"
+                                "**Fighters ({count}/3):**\n{participants}\n\n"
+                                "{needed_text}"
+                            ).format(
+                                author=ctx.author.mention,
+                                money=money,
+                                count=len(participants),
+                                participants=joined_text,
+                                needed_text=_("Need {more} more to start!").format(
+                                    more=needed
+                                )
+                                if needed > 0
+                                else _("Battle ready to begin!"),
+                            ),
+                            suppress_failure=True,
+                        )
+
+                        if len(participants) >= 3:
+                            self.is_complete = True
+                            for item in self.children:
+                                item.disabled = True
+                            await battle_cog._edit_message_with_retry(
+                                battle_msg, view=self, suppress_failure=True
+                            )
+                            self.stop()
+
+                view = OpenFFAView()
+                battle_msg = await ctx.send(
+                    _(
+                        "{author} has started a three-way battle! "
+                        "The price is **${money}** per player.\n"
+                        "**Fighters (1/3):**\n• {author}\n\n"
+                        "Need 2 more to start!"
+                    ).format(author=ctx.author.mention, money=money),
+                    view=view,
+                )
+                if battle_msg is None:
+                    await self.bot.reset_cooldown(ctx)
+                    await self._refund_ffa_entry(ctx, participants, money, paid_ids)
+                    return
+
+                await view.wait()
+
+                if not view.is_complete:
+                    await self.bot.reset_cooldown(ctx)
+                    await self._refund_ffa_entry(ctx, participants, money, paid_ids)
+                    return await ctx.send(
+                        _("Not enough players joined. Money has been refunded.")
+                        if money > 0
+                        else _("Not enough players joined.")
+                    )
+            else:
+                participants = [ctx.author]
+                futures = []
+                for player in players:
+                    future = asyncio.Future()
+                    join_view = SingleJoinView(
+                        future,
+                        Button(
+                            style=ButtonStyle.primary,
+                            label=_("Accept Challenge"),
+                            emoji="⚔️",
+                        ),
+                        allowed=player,
+                        prohibited=ctx.author,
+                        timeout=60,
+                        check=check_character_and_money,
+                        check_fail_message=_(
+                            "You don't have a character or enough money to join."
+                        ),
+                    )
+                    await ctx.send(
+                        _(
+                            "{player}, {author} has challenged you to a three-way "
+                            "battle! The price is **${money}** per player."
+                        ).format(
+                            player=player.mention,
+                            author=ctx.author.mention,
+                            money=money,
+                        ),
+                        view=join_view,
+                    )
+                    futures.append(future)
+
+                try:
+                    for future in futures:
+                        joined = await asyncio.wait_for(future, timeout=60)
+                        await self._take_ffa_entry_fee(ctx, joined.id, money, paid_ids)
+                        participants.append(joined)
+                except asyncio.TimeoutError:
+                    await self.bot.reset_cooldown(ctx)
+                    await self._refund_ffa_entry(ctx, participants, money, paid_ids)
+                    return await ctx.send(
+                        _("Not everyone joined in time. Money has been refunded.")
+                        if money > 0
+                        else _("Not everyone joined in time.")
+                    )
+
+            # Split into three sides of equal size
+            random.shuffle(participants)
+            per_side = len(participants) // 3
+            sides = [
+                participants[index * per_side:(index + 1) * per_side]
+                for index in range(3)
+            ]
+
+            await self._send_with_retry(
+                ctx,
+                content=_(
+                    "🔵 **Side A**: {a}\n🔴 **Side B**: {b}\n🟡 **Side C**: {c}\n\n"
+                    "Every side fights both others. Last one standing wins!"
+                ).format(
+                    a=", ".join(m.mention for m in sides[0]),
+                    b=", ".join(m.mention for m in sides[1]),
+                    c=", ".join(m.mention for m in sides[2]),
+                ),
+                suppress_failure=True,
+            )
+
+            battle = await self.battle_factory.create_battle(
+                "ffa",
+                ctx,
+                team_members=sides,
+                money=money,
+                paid_player_ids=paid_ids,
+            )
+
+            await battle.start_battle()
+
+            while not await battle.is_battle_over():
+                await battle.process_turn()
+                await asyncio.sleep(2)
+
+            result = await battle.end_battle()
+
+            if result:
+                winning_name, losing_names = result
+                side_by_name = {"A": sides[0], "B": sides[1], "C": sides[2]}
+                winning_members = side_by_name.get(winning_name, [])
+                losing_members = [
+                    member
+                    for name in losing_names
+                    for member in side_by_name.get(name, [])
+                ]
+                await self._send_with_retry(
+                    ctx,
+                    content=_(
+                        "Side {winner} wins the three-way against {losers}! "
+                        "Congratulations {members}!"
+                    ).format(
+                        winner=winning_name,
+                        losers=" and ".join(losing_names),
+                        members=", ".join(m.mention for m in winning_members),
+                    ),
+                    suppress_failure=True,
+                )
+                losing_display = [m.display_name for m in losing_members] + [
+                    m.name for m in losing_members
+                ]
+                await self._progress_custom_quest_source(
+                    ctx,
+                    winning_members,
+                    "raidbattle",
+                    "3way",
+                    *losing_display,
+                )
+            else:
+                await self._send_with_retry(
+                    ctx,
+                    content=_("The battle timed out! All money has been refunded.")
+                    if money > 0
+                    else _("The battle timed out!"),
+                    suppress_failure=True,
+                )
+        except Exception as e:
+            await self._send_with_retry(ctx, content=str(e), suppress_failure=True)
+
+    @has_char()
+    @commands.command(
+        brief=_("Toggle splice monsters in your PvE pool"),
+        aliases=["pvesplices", "pvepoolsplice", "splicepve"],
+    )
+    @locale_doc
+    async def pvesplice(self, ctx, mode: str = "toggle"):
+        """
+        Toggle splice monster injection in your regular PvE pool.
+
+        Usage:
+        - `$pvesplice` (toggle)
+        - `$pvesplice on`
+        - `$pvesplice off`
+        - `$pvesplice status`
+        """
+        normalized = str(mode or "toggle").strip().lower()
+        current = await self._get_user_pve_splice_toggle(ctx.author.id)
+
+        if normalized in {"status", "state", "show"}:
+            new_state = current
+            changed = False
+        elif normalized in {"on", "enable", "enabled", "yes", "true", "1"}:
+            new_state = True
+            changed = new_state != current
+        elif normalized in {"off", "disable", "disabled", "no", "false", "0"}:
+            new_state = False
+            changed = new_state != current
+        elif normalized in {"toggle", "flip", "switch"}:
+            new_state = not current
+            changed = True
+        else:
+            await ctx.send("Usage: `$pvesplice [on|off|toggle|status]`")
+            return
+
+        if changed:
+            await self._set_user_pve_splice_toggle(ctx.author.id, new_state)
+
+        if new_state:
+            await ctx.send(
+                "✅ Splice injection is **ON**. Your `$pve` and `$scout` pools now include sampled Gen 0 splice monsters."
+            )
+        else:
+            await ctx.send(
+                "✅ Splice injection is **OFF**. Your `$pve` and `$scout` use only the default monster pool."
+            )
+
+    @has_char()
+    @commands.command(
+        brief=_("Set your preferred battle HP bar style"),
+        aliases=["battlebar", "battlehpbar", "hpbars"],
+    )
+    @locale_doc
+    async def battlebars(self, ctx, mode: str = "status"):
+        """
+        Set the HP bar style used in battles you start.
+
+        Usage:
+        - `$battlebars status`
+        - `$battlebars normal`
+        - `$battlebars colorful`
+        - `$battlebars team`
+        - `$battlebars toggle`
+
+        Note: shared battle embeds can only use one style, so your preference
+        applies to battles started by you.
+        """
+        normalized = str(mode or "status").strip().lower()
+        current = await self._get_user_hp_bar_style(ctx.author.id)
+
+        if normalized in {"status", "state", "show"}:
+            new_state = current
+            changed = False
+        elif normalized in {"normal", "classic", "default", "old", "text"}:
+            new_state = Battle.HP_BAR_STYLE_NORMAL
+            changed = new_state != current
+        elif normalized in {"color", "colour", "colorful", "colourful", "emoji", "new", "red", "allred"}:
+            new_state = Battle.HP_BAR_STYLE_COLORFUL
+            changed = new_state != current
+        elif normalized in {"team", "vs", "split", "faction", "friendlyfoe", "redblue", "blue"}:
+            new_state = Battle.HP_BAR_STYLE_TEAM
+            changed = new_state != current
+        elif normalized in {"toggle", "flip", "switch"}:
+            cycle = [
+                Battle.HP_BAR_STYLE_NORMAL,
+                Battle.HP_BAR_STYLE_COLORFUL,
+                Battle.HP_BAR_STYLE_TEAM,
+            ]
+            current_index = cycle.index(current) if current in cycle else 0
+            new_state = cycle[(current_index + 1) % len(cycle)]
+            changed = True
+        else:
+            await ctx.send("Usage: `$battlebars [normal|colorful|team|toggle|status]`")
+            return
+
+        if changed:
+            await self._set_user_hp_bar_style(ctx.author.id, new_state)
+
+        if new_state == Battle.HP_BAR_STYLE_NORMAL:
+            await ctx.send(
+                "✅ Battle HP bars are **NORMAL** for battles you start."
+            )
+        elif new_state == Battle.HP_BAR_STYLE_TEAM:
+            await ctx.send(
+                "✅ Battle HP bars are **TEAM COLORS** for battles you start. Friendly bars are blue, enemy bars are red."
+            )
+        else:
+            await ctx.send(
+                "✅ Battle HP bars are **COLORFUL** for battles you start."
+            )
+
+    @has_char()
+    @commands.command(
+        brief=_("Set a default PvE location for $pve and $scout"),
+        aliases=["pvedefaultloc", "pvelocationdefault", "scoutdefault"],
+    )
+    @locale_doc
+    async def pvedefault(self, ctx):
+        _(
+            """Open a dropdown to set your default PvE location.
+
+            Your default is used by `$pve` and `$scout` to skip location selection.
+            You can also clear your default from the same dropdown."""
+        )
+        player_level = rpgtools.xptolevel(ctx.character_data.get("xp", 0))
+        unlocked_locations = self._get_unlocked_pve_locations(player_level)
+        if not unlocked_locations:
+            await ctx.send("No PvE locations are unlocked for your level yet.")
+            return
+
+        current_default_id = await self._get_user_pve_default_location_id(ctx.author.id)
+        current_default_location = None
+        if current_default_id:
+            current_default_location = self._get_pve_location_by_id(current_default_id)
+            if current_default_location is None:
+                await self._set_user_pve_default_location_id(ctx.author.id, None)
+                current_default_id = None
+            else:
+                current_default_id = str(current_default_location["id"]).lower()
+
+        current_label = (
+            f"**{current_default_location['name']}** (`{current_default_location['id']}`)"
+            if current_default_location
+            else "None"
+        )
+        embed = discord.Embed(
+            title="Set Default PvE Location",
+            description=(
+                f"Your level: **{player_level}**\n"
+                f"Current default: {current_label}\n\n"
+                "Pick an unlocked location below, or choose **Clear Default**."
+            ),
+            color=self.bot.config.game.primary_colour,
+        )
+        embed.set_footer(text="This default is used for both $pve and $scout.")
+
+        allowed_user_ids = {ctx.author.id}
+        alt_invoker_id = getattr(ctx, "alt_invoker_id", None)
+        if alt_invoker_id is not None:
+            allowed_user_ids.add(int(alt_invoker_id))
+
+        view = PveDefaultLocationView(
+            author_id=ctx.author.id,
+            locations=unlocked_locations,
+            current_default_id=current_default_id,
+            timeout=60.0,
+            allowed_user_ids=allowed_user_ids,
+        )
+        message = await ctx.send(embed=embed, view=view)
+        view.message = message
+        await view.wait()
+
+        if view.cancelled:
+            return
+
+        if view.clear_requested:
+            await self._set_user_pve_default_location_id(ctx.author.id, None)
+            return
+
+        if view.selected_location_id:
+            await self._set_user_pve_default_location_id(
+                ctx.author.id,
+                view.selected_location_id,
+            )
+            return
+
+        await ctx.send("⏱️ Default location selection timed out.")
+
+    @has_char()
+    @commands.command(
+        brief=_("Show PvE location unlocks and tier highlights"),
+        aliases=["pvelocs", "pvemap"],
+    )
+    @locale_doc
+    async def pvelocations(self, ctx):
+        _(
+            """Show all PvE locations, their unlock levels, and strongest tier rates.
+            Use `$pveinfo <location>` for exact tier-by-tier odds."""
+        )
+        player_level = rpgtools.xptolevel(ctx.character_data.get("xp", 0))
+        lines = []
+
+        for location in self._get_pve_locations_snapshot():
+            unlock_level = int(location.get("unlock_level", 1))
+            unlocked = player_level >= unlock_level
+            status_icon = _pve_location_marker(
+                location,
+                locked=not unlocked,
+                unlocked_icon="✅",
+            )
+
+            rates = self._get_pve_tier_rates_for_location(location)
+            if rates:
+                tier_ids = [tier for tier, _ in rates]
+                min_tier = min(tier_ids)
+                max_tier = max(tier_ids)
+                tier_band = f"T{min_tier}" if min_tier == max_tier else f"T{min_tier}-T{max_tier}"
+                top_tier, top_rate = max(rates, key=lambda entry: entry[1])
+                top_label = "God" if top_tier == self.PVE_GOD_TIER else f"T{top_tier}"
+                top_rate_text = self._format_pve_rate_percent(top_rate)
+            else:
+                tier_band = "T?"
+                top_label = "T?"
+                top_rate_text = "0%"
+
+            lines.append(
+                f"{status_icon} **{location['name']}** (`{location['id']}`) "
+                f"- Lv {unlock_level}+ - {tier_band} - Top {top_label} {top_rate_text}"
+            )
+
+        if not lines:
+            await ctx.send("No PvE locations are configured.")
+            return
+
+        embed = discord.Embed(
+            title="PvE Locations",
+            description=f"Your level: **{player_level}**",
+            color=self.bot.config.game.primary_colour,
+        )
+
+        # Keep each field below Discord's 1024-char limit.
+        chunk: list[str] = []
+        chunk_len = 0
+        section_index = 1
+        for line in lines:
+            projected = chunk_len + len(line) + 1
+            if chunk and projected > 980:
+                field_name = "Locations" if section_index == 1 else f"Locations ({section_index})"
+                embed.add_field(name=field_name, value="\n".join(chunk), inline=False)
+                section_index += 1
+                chunk = [line]
+                chunk_len = len(line) + 1
+            else:
+                chunk.append(line)
+                chunk_len = projected
+        if chunk:
+            field_name = "Locations" if section_index == 1 else f"Locations ({section_index})"
+            embed.add_field(name=field_name, value="\n".join(chunk), inline=False)
+
+        embed.set_footer(text="Use `$pveinfo <location name or id>` for exact odds.")
+        await ctx.send(embed=embed)
+
+    @has_char()
+    @commands.command(
+        brief=_("Show exact encounter rates for one PvE location"),
+        aliases=["pvelocinfo", "locationinfo"],
+    )
+    @locale_doc
+    async def pveinfo(self, ctx, *, location_query: str = ""):
+        _(
+            """`<location>` - location name or id
+            Show exact tier encounter odds for a PvE location."""
+        )
+        player_level = rpgtools.xptolevel(ctx.character_data.get("xp", 0))
+        query = str(location_query or "").strip()
+        if not query:
+            location_list = ", ".join(
+                f"`{loc['id']}`" for loc in self._get_pve_locations_snapshot()
+            )
+            await ctx.send(
+                "Usage: `$pveinfo <location name or id>`\n"
+                f"Available ids: {location_list}"
+            )
+            return
+
+        location = self._resolve_pve_location_query(query)
+        if not location:
+            await ctx.send(
+                "Unknown location. Use `$pvelocations` to view ids, then run `$pveinfo <id>`."
+            )
+            return
+
+        unlock_level = int(location.get("unlock_level", 1))
+        unlocked = player_level >= unlock_level
+        rates = self._get_pve_tier_rates_for_location(location)
+        if rates:
+            rate_lines = []
+            for tier, rate in rates:
+                if tier == self.PVE_GOD_TIER:
+                    tier_name = "Tier 11 (God)"
+                elif tier == 12:
+                    tier_name = "Tier 12 (Level X)"
+                else:
+                    tier_name = f"Tier {tier}"
+                rate_lines.append(
+                    f"• {tier_name}: **{self._format_pve_rate_percent(rate)}**"
+                )
+            rates_text = "\n".join(rate_lines)
+        else:
+            rates_text = "No tier rates configured."
+
+        splice_enabled = await self._get_user_pve_splice_toggle(ctx.author.id)
+        if self._is_frontier_location(location):
+            pool_text = (
+                "Regional wilds plus this week's nine curated splices and two elites. "
+                "The boss is challenged separately with `$frontier boss`."
+                if location.get("frontier_active")
+                else "Regional wilds only. This Frontier is not experiencing the current weekly surge."
+            )
+        else:
+            pool_text = (
+                "Default + sampled Gen 0 splice monsters (`$pvesplice` is ON)."
+                if splice_enabled
+                else "Default monster pool only (`$pvesplice` is OFF)."
+            )
+
+        embed = discord.Embed(
+            title=f"PvE Info: {location['name']}",
+            description=(
+                f"ID: `{location['id']}`\n"
+                f"Unlock: **Lv {unlock_level}+** "
+                f"({'Unlocked' if unlocked else '🔒 Locked'})"
+            ),
+            color=self.bot.config.game.primary_colour,
+        )
+        embed.add_field(name="Encounter Rates", value=rates_text, inline=False)
+        embed.add_field(name="Monster Pool", value=pool_text, inline=False)
+        embed.add_field(
+            name="How This Works",
+            value=(
+                "Location first rolls a tier using these odds, then picks a random "
+                "monster from your current tier pool."
+            ),
+            inline=False,
+        )
+        await ctx.send(embed=embed)
+
+    @has_char()
+    @commands.command(brief=_("Battle against a monster and gain XP"))
+    @user_cooldown(1800)  # 30-minute cooldown
+    @locale_doc
+    async def pve(self, ctx, pool_option: str = "default"):
+        """Battle against a monster and gain experience points.
+
+        Optional legacy override:
+        - `$pve splice` to force splice injection for this run
+        - `$pve normal` to force default-only pool for this run
+        """
+        ctx = self._guard_battle_context(ctx)
+        pool_override = getattr(ctx, "pve_pool_override", None)
+        requested_pool = str(pool_override or pool_option or "").strip().lower()
+        if requested_pool in {"", "default"}:
+            include_splice_override = None
+        elif requested_pool in {"splice", "splices", "sp"}:
+            include_splice_override = True
+        elif requested_pool in {"normal", "base", "off", "nosplice"}:
+            include_splice_override = False
+        else:
+            await ctx.send(
+                "Unknown PvE option. Use `$pve` normally, `$pvesplice on/off`, "
+                "or one-run overrides `$pve splice` / `$pve normal`."
+            )
+            await self.bot.reset_cooldown(ctx)
+            return
+
+        # Check for macro detection
+        authorized_ai_player = bool(
+            getattr(ctx, "authorized_ai_player", False)
+        )
+        macro_detected = (
+            False
+            if authorized_ai_player
+            else await self.check_pve_macro_detection(ctx.author.id)
+        )
+        if macro_detected:
+            try:
+                if self.macro_alert_user_id:
+                    user = await self.bot.fetch_user(self.macro_alert_user_id)
+                    await user.send(f"User {ctx.author.id} detected using macros in PVE command!")
+            except:
+                pass  # Silently fail if DM fails
+        
+        # Debug: Log macro detection data
+        if ctx.author.id in self.pve_macro_detection:
+            user_data = self.pve_macro_detection[ctx.author.id]
+            print(f"Macro debug - User {ctx.author.id}: count={user_data['count']}, macro_detected={macro_detected}")
+
+        
+        # Check for monster override from scout command
+        monster_override = getattr(ctx, 'monster_override', None)
+        levelchoice_override = getattr(ctx, 'levelchoice_override', None)
+        locationchoice_override = getattr(ctx, 'locationchoice_override', None)
+
+        # Load monsters data
+        try:
+            monsters, splice_injected = await self._get_pve_monster_pool_for_user(
+                ctx.author.id,
+                force_include_splice=include_splice_override,
+            )
+        except Exception as e:
+            await ctx.send(_("Error loading monsters data. Please contact the admin."))
+            await self.bot.reset_cooldown(ctx)
+            return
+
+        # Fetch the player's XP and determine level
+        player_xp = ctx.character_data.get("xp", 0)
+        player_level = rpgtools.xptolevel(player_xp)
+        selected_location = None
+
+        if not monster_override:
+            all_locations = []
+            for location in self._get_pve_locations_snapshot():
+                location_entry = dict(location)
+                location_entry["is_locked"] = player_level < int(location_entry["unlock_level"])
+                all_locations.append(location_entry)
+
+            unlocked_locations = [
+                location for location in all_locations if not location.get("is_locked")
+            ]
+            if not unlocked_locations:
+                await ctx.send(_("No PvE locations are unlocked for your level yet."))
+                await self.bot.reset_cooldown(ctx)
+                return
+
+            if locationchoice_override:
+                override_id = str(locationchoice_override).strip().lower()
+                selected_location = next(
+                    (
+                        location
+                        for location in unlocked_locations
+                        if str(location.get("id", "")).lower() == override_id
+                    ),
+                    None,
+                )
+
+            if selected_location is None:
+                default_location_id = await self._get_user_pve_default_location_id(
+                    ctx.author.id
+                )
+                if default_location_id:
+                    default_id = default_location_id.lower()
+                    selected_location = next(
+                        (
+                            location
+                            for location in unlocked_locations
+                            if str(location.get("id", "")).lower() == default_id
+                        ),
+                        None,
+                    )
+                    if selected_location is None:
+                        default_exists = self._get_pve_location_by_id(default_location_id)
+                        if default_exists is None:
+                            await self._set_user_pve_default_location_id(
+                                ctx.author.id, None
+                            )
+
+            def format_god_percent(value):
+                try:
+                    return f"{float(value):g}%"
+                except (TypeError, ValueError):
+                    return f"{value}%"
+
+            def build_location_block(location, icon):
+                tier_keys = sorted(int(tier) for tier in location["tier_weights"].keys())
+                if tier_keys:
+                    tier_band = (
+                        f"T{tier_keys[0]}"
+                        if len(tier_keys) == 1
+                        else f"T{tier_keys[0]}-T{tier_keys[-1]}"
+                    )
+                else:
+                    tier_band = "T?"
+                god_text = format_god_percent(location.get("god_chance", 0))
+                return (
+                    f"{icon} **{location['name']}**\n"
+                    f"`Lv {location['unlock_level']}+`  `Tiers {tier_band}`  `God {god_text}`"
+                )
+
+            unlocked_blocks = []
+            locked_blocks = []
+            for location in all_locations:
+                if location.get("is_locked"):
+                    locked_blocks.append(
+                        build_location_block(
+                            location,
+                            _pve_location_marker(location, locked=True),
+                        )
+                    )
+                else:
+                    unlocked_blocks.append(
+                        build_location_block(
+                            location,
+                            _pve_location_marker(location),
+                        )
+                    )
+
+            location_embed = discord.Embed(
+                title=_("Choose a PvE Location"),
+                description=(
+                    f"Your level: **{player_level}**\n"
+                    "Pick a location from the dropdown below.\n"
+                    "Preview key: `Lv` unlock level, `Tiers` encounter band, `God` god encounter chance."
+                ),
+                color=self.bot.config.game.primary_colour,
+            )
+
+            def add_location_fields(embed, title, blocks):
+                if not blocks:
+                    return
+                chunk = []
+                chunk_len = 0
+                section_index = 1
+                for block in blocks:
+                    projected = chunk_len + len(block) + 2
+                    if chunk and projected > 980:
+                        suffix = "" if section_index == 1 else f" ({section_index})"
+                        embed.add_field(
+                            name=f"{title}{suffix}",
+                            value="\n\n".join(chunk),
+                            inline=False,
+                        )
+                        section_index += 1
+                        chunk = [block]
+                        chunk_len = len(block)
+                    else:
+                        chunk.append(block)
+                        chunk_len = projected
+                if chunk:
+                    suffix = "" if section_index == 1 else f" ({section_index})"
+                    embed.add_field(
+                        name=f"{title}{suffix}",
+                        value="\n\n".join(chunk),
+                        inline=False,
+                    )
+
+            add_location_fields(
+                location_embed,
+                f"Unlocked ({len(unlocked_blocks)})",
+                unlocked_blocks,
+            )
+            add_location_fields(
+                location_embed,
+                f"Locked ({len(locked_blocks)})",
+                locked_blocks,
+            )
+
+            location_embed.add_field(
+                name=_("Need Exact Odds?"),
+                value=_("Use `$pveinfo <location>` for full tier rates."),
+                inline=False,
+            )
+            if splice_injected:
+                location_embed.set_footer(
+                    text="Splice injection active: sampled Gen 0 splice monsters are mixed into your pool."
+                )
+            else:
+                location_embed.set_footer(
+                    text="Tip: Use `$pvelocations` for a quick overview of all zones."
+                )
+
+            if selected_location is None:
+                allowed_location_users = {ctx.author.id}
+                alt_invoker_id = getattr(ctx, "alt_invoker_id", None)
+                if alt_invoker_id is not None:
+                    allowed_location_users.add(int(alt_invoker_id))
+
+                location_view = PVELocationView(
+                    author_id=ctx.author.id,
+                    locations=all_locations,
+                    timeout=60.0,
+                    allowed_user_ids=allowed_location_users,
+                )
+                location_message = await ctx.send(embed=location_embed, view=location_view)
+                if location_message is None:
+                    await self.bot.reset_cooldown(ctx)
+                    return
+                location_view.message = location_message
+
+                await location_view.wait()
+
+                if location_view.cancelled:
+                    await self.bot.reset_cooldown(ctx)
+                    return
+
+                if not location_view.selected_location:
+                    await ctx.send(_("⏱️ Location selection timed out."))
+                    await self.bot.reset_cooldown(ctx)
+                    return
+
+                selected_location = location_view.selected_location
+            else:
+                await ctx.send(
+                    _("Using your default PvE location: **{location}**.").format(
+                        location=selected_location["name"]
+                    )
+                )
+
+            if self._is_frontier_location(selected_location):
+                try:
+                    monsters, frontier_injected = (
+                        await self._get_pve_monster_pool_for_location(
+                            ctx.author.id,
+                            selected_location,
+                            force_include_splice=include_splice_override,
+                        )
+                    )
+                    splice_injected = splice_injected or frontier_injected
+                except Exception:
+                    logger.exception("Failed to build Soulforge Frontier PvE pool")
+                    await ctx.send(
+                        _("This Frontier's creatures could not be loaded. Please contact the admin.")
+                    )
+                    await self.bot.reset_cooldown(ctx)
+                    return
+
+        # Send an embed indicating that the player is searching for a monster
+        if selected_location:
+            searching_description = _(
+                "You head toward **{location}** in search of a worthy foe."
+            ).format(location=selected_location["name"])
+        else:
+            searching_description = _(
+                "Your journey begins as you venture into the unknown to find a worthy foe."
+            )
+
+        searching_embed = discord.Embed(
+            title=_("Searching for a monster..."),
+            description=searching_description,
+            color=self.bot.config.game.primary_colour,
+        )
+        searching_message = await ctx.send(embed=searching_embed)
+        if searching_message is None:
+            await self.bot.reset_cooldown(ctx)
+            return
+        selected_location_id = (
+            str(selected_location.get("id", "")).lower() if selected_location else ""
+        )
+        is_omnithrone_location = (
+            selected_location_id == self.OMNITHRONE_SANCTUM_LOCATION_ID
+        )
+
+        # Determine monster to fight
+        if not monster_override:
+            # Simulate searching time
+            if is_omnithrone_location:
+                min_delay, max_delay = self.OMNITHRONE_SEARCH_DELAY_RANGE
+            else:
+                min_delay, max_delay = 3, 8
+            await asyncio.sleep(random.randint(min_delay, max_delay))
+            levelchoice = self._roll_pve_tier_for_location(selected_location)
+            monster_pool = monsters.get(levelchoice, [])
+            if not monster_pool:
+                await ctx.send(_("No public monsters are configured for this tier."))
+                await self.bot.reset_cooldown(ctx)
+                return
+
+            base_monster = (
+                choose_weighted_monster(monster_pool)
+                if self._is_frontier_location(selected_location)
+                else random.choice(monster_pool)
+            )
+            forced_level = (
+                self.PVE_GOD_ENCOUNTER_LEVEL
+                if levelchoice == self.PVE_GOD_TIER
+                else None
+            )
+            monster = self._scale_monster_for_encounter(
+                base_monster,
+                levelchoice,
+                encounter_level=forced_level,
+            )
+            if base_monster.get("pve_pool"):
+                monster["pve_pool"] = base_monster["pve_pool"]
+            monster["pve_location_id"] = selected_location["id"]
+            monster["pve_location_name"] = selected_location["name"]
+
+            if levelchoice == self.PVE_GOD_TIER:
+                legendary_embed = discord.Embed(
+                    title=_("A Legendary God Appears!"),
+                    description=_(
+                        "Behold! **Level {level} {monster}** has descended to challenge you! Prepare for an epic battle!"
+                    ).format(
+                        level=monster["encounter_level"],
+                        monster=monster["name"],
+                    ),
+                    color=discord.Color.gold(),
+                )
+                if selected_location:
+                    legendary_embed.add_field(
+                        name=_("Location"),
+                        value=selected_location["name"],
+                        inline=False,
+                    )
+                await self._edit_message_with_retry(
+                    searching_message,
+                    embed=legendary_embed,
+                    suppress_failure=True,
+                )
+                await asyncio.sleep(4)
+        else:
+            # Use override from scout command
+            monster = dict(monster_override)
+            levelchoice = int(
+                levelchoice_override
+                or monster.get("pve_tier")
+                or self._get_pve_tier_for_player_level(player_level)
+            )
+            if "encounter_level" not in monster:
+                monster = self._scale_monster_for_encounter(monster, levelchoice)
+            selected_location = self._get_pve_location_by_id(
+                monster.get("pve_location_id")
+            )
+            if not selected_location:
+                selected_location = self._get_pve_location_by_id(locationchoice_override)
+            if not selected_location and monster.get("pve_location_name"):
+                selected_location = {
+                    "name": monster["pve_location_name"],
+                    "id": monster.get("pve_location_id", "unknown"),
+                }
+
+        encounter_level = int(monster.get("encounter_level", levelchoice))
+        is_frontier_monster = monster.get("pve_pool") in {
+            "frontier",
+            "frontier_wild",
+        }
+        ctx.frontier_encounter = dict(monster) if is_frontier_monster else None
+        self.bot.dispatch("frontier_sighting", ctx, dict(monster), None)
+        selected_location_id = (
+            str(selected_location.get("id", "")).lower() if selected_location else ""
+        )
+        is_omnithrone_encounter = (
+            selected_location_id == self.OMNITHRONE_SANCTUM_LOCATION_ID
+            or int(levelchoice) == 12
+            or int(monster.get("pve_tier", 0) or 0) == 12
+        )
+
+        # Update embed with found monster
+        is_splice_pool = monster.get("pve_pool") in {"splice", "frontier"}
+        if is_omnithrone_encounter:
+            found_description = _(
+                "In **Omnithrone Sanctum**, Level {level} **{monster}** has manifested upon the Final Throne.\n\n"
+                "The vault goes silent. Ancient sigils ignite. The world itself feels one heartbeat away from collapse.\n"
+                "Stand your ground and face the end-world sovereign."
+            ).format(
+                level=encounter_level,
+                monster=monster["name"],
+            )
+        elif selected_location:
+            found_description = (
+                _(
+                    "In **{location}**, a Spliced Level {level} **{monster}** has appeared! Prepare to fight.."
+                ).format(
+                    location=selected_location["name"],
+                    level=encounter_level,
+                    monster=monster["name"],
+                )
+                if is_splice_pool
+                else _(
+                    "In **{location}**, a Level {level} **{monster}** has appeared! Prepare to fight.."
+                ).format(
+                    location=selected_location["name"],
+                    level=encounter_level,
+                    monster=monster["name"],
+                )
+            )
+        else:
+            found_description = (
+                _(
+                    "A Spliced Level {level} **{monster}** has appeared! Prepare to fight.."
+                ).format(
+                    level=encounter_level,
+                    monster=monster["name"],
+                )
+                if is_splice_pool
+                else _(
+                    "A Level {level} **{monster}** has appeared! Prepare to fight.."
+                ).format(
+                    level=encounter_level,
+                    monster=monster["name"],
+                )
+            )
+
+        found_embed = discord.Embed(
+            title=_("Monster Found!"),
+            description=found_description,
+            color=self.bot.config.game.primary_colour,
+        )
+        await self._edit_message_with_retry(
+            searching_message,
+            embed=found_embed,
+            suppress_failure=True,
+        )
+        if is_omnithrone_encounter:
+            confirm = (
+                False
+                if authorized_ai_player
+                else await ctx.confirm(
+                    _(
+                        "This encounter is not intended to be fought yet. "
+                        "You will die. Are you sure you want to continue?"
+                    ),
+                    timeout=45,
+                )
+            )
+            if not confirm:
+                retreat_embed = discord.Embed(
+                    title=_("Retreat"),
+                    description=_(
+                        "You step away from the Final Throne before the battle begins."
+                    ),
+                    color=discord.Color.orange(),
+                )
+                await self._edit_message_with_retry(
+                    searching_message,
+                    embed=retreat_embed,
+                    suppress_failure=True,
+                )
+                return
+        if is_omnithrone_encounter:
+            await asyncio.sleep(self.OMNITHRONE_FOUND_DELAY_SECONDS)
+        else:
+            await asyncio.sleep(4)
+        if is_omnithrone_encounter:
+            await self._play_omnithrone_sanctum_cinematic(ctx, monster.get("name"))
+
+        # Check for macro penalty
+        macro_penalty_level = (
+            0
+            if authorized_ai_player
+            else self.get_pve_macro_penalty_level(ctx.author.id)
+        )
+        
+        async def send_pve_error(exc):
+            import traceback
+
+            error_message = f"Error occurred: {exc}\n"
+            error_message += traceback.format_exc()
+            await self._send_with_retry(ctx, content=error_message[:1900], suppress_failure=True)
+            print(error_message)
+
+        battle_started = False
+        try:
+            battle = await self.battle_factory.create_battle(
+                "pve",
+                ctx,
+                player=ctx.author,
+                monster_data=monster,
+                monster_level=levelchoice,
+                macro_penalty_level=macro_penalty_level
+            )
+            battle_started = True
+            await battle.start_battle()
+
+            while not await battle.is_battle_over():
+                await battle.process_turn()
+                await asyncio.sleep(1)  # 1 second delay between turns
+        except Exception as e:
+            await send_pve_error(e)
+            if not battle_started:
+                await self.bot.reset_cooldown(ctx)
+            return
+
+        try:
+            result = await battle.end_battle()
+        except Exception as e:
+            await send_pve_error(e)
+            return
+
+        # Handle egg drops and other PvE-specific outcomes
+        if result and result.name == "Player":
+            # Player won - handle PvE drops (skip if macro penalty is active)
+            if levelchoice < 12 and macro_penalty_level == 0:
+                # God fights now roll alignment shards directly (not affected by ranger bonuses).
+                if self._is_god_shard_monster(monster):
+                    await self.handle_god_shard_drop(ctx, monster)
+                else:
+                    # Non-god fights retain egg drop behavior.
+                    if levelchoice == 11:
+                        base_egg_chance = 0.02
+                    else:
+                        base_egg_chance = 0.50 - ((levelchoice - 1) / 9) * 0.45
                     final_egg_chance = base_egg_chance
-                    
+
                     # Check for Ranger class bonus
                     ranger_egg_bonuses = {
                         "Caretaker": 0.02,  # +2% (total 7%)
@@ -1995,7 +10396,7 @@ class Battles(commands.Cog):
                         "Warden": 0.13,     # +13% (total 18%)
                         "Ranger": 0.15,     # +15% (total 25%)
                     }
-                    
+
                     # Apply ranger bonus if player has the class
                     async with self.bot.pool.acquire() as conn:
                         profile = await conn.fetchrow('SELECT class FROM profile WHERE "user"=$1;', ctx.author.id)
@@ -2006,31 +10407,162 @@ class Battles(commands.Cog):
                                 if class_name in ranger_egg_bonuses:
                                     class_bonus = ranger_egg_bonuses[class_name]
                                     ranger_bonus = max(ranger_bonus, class_bonus)
-                                    
+
                             # Apply ranger bonus with scaling
                             bonus_multiplier = 1.0 - ((levelchoice - 1) / 9) * (1/3)
                             adjusted_ranger_bonus = ranger_bonus * bonus_multiplier
                             final_egg_chance += adjusted_ranger_bonus
-                    
+
                     # Check for egg drop
-                    if random.random() < final_egg_chance:
-                        # Handle egg drop logic
+                    if monster.get("egg_eligible", True) and random.random() < final_egg_chance:
                         await self.handle_egg_drop(ctx, monster, levelchoice)
-            
-                # Dispatch PVE completion event
-                success = True
-                self.bot.dispatch("PVE_completion", ctx, success)
-            
+
+            # Dispatch PVE completion event
+            success = True
+            self.bot.dispatch(
+                "PVE_completion",
+                ctx,
+                success,
+                monster["name"],
+                monster.get("element", "Unknown"),
+                levelchoice,
+                getattr(battle, "battle_id", None),
+            )
+
+    @staticmethod
+    def _roll_egg_stats(monster) -> dict:
+        """Roll one egg's IV and stats without touching the database.
+
+        Rolling before the capacity check lets Densetsu compare the incoming
+        egg against the ones it already owns. Nothing is persisted here, so a
+        cancelled or declined drop discards the roll exactly as it did when the
+        roll happened further down.
+        """
+        iv_percentage = random.uniform(10, 1000)
+        if iv_percentage < 20:
+            iv_percentage = random.uniform(90, 100)
+        elif iv_percentage < 70:
+            iv_percentage = random.uniform(80, 90)
+        elif iv_percentage < 150:
+            iv_percentage = random.uniform(70, 80)
+        elif iv_percentage < 350:
+            iv_percentage = random.uniform(60, 70)
+        elif iv_percentage < 700:
+            iv_percentage = random.uniform(50, 60)
+        else:
+            iv_percentage = random.uniform(30, 50)
+
+        total_iv_points = (iv_percentage / 100) * 200
+
+        def allocate_iv_points(total_points):
+            a = random.random()
+            b = random.random()
+            c = random.random()
+            total = a + b + c
+            hp_iv = int(round(total_points * (a / total)))
+            attack_iv = int(round(total_points * (b / total)))
+            defense_iv = int(round(total_points * (c / total)))
+
+            # Ensure sum matches total
+            iv_sum = hp_iv + attack_iv + defense_iv
+            if iv_sum != int(round(total_points)):
+                diff = int(round(total_points)) - iv_sum
+                max_iv = max(hp_iv, attack_iv, defense_iv)
+                if hp_iv == max_iv:
+                    hp_iv += diff
+                elif attack_iv == max_iv:
+                    attack_iv += diff
+                else:
+                    defense_iv += diff
+            return hp_iv, attack_iv, defense_iv
+
+        hp_iv, attack_iv, defense_iv = allocate_iv_points(total_iv_points)
+        return {
+            "IV": iv_percentage,
+            "hp_iv": hp_iv,
+            "attack_iv": attack_iv,
+            "defense_iv": defense_iv,
+            "hp": monster["hp"] + hp_iv,
+            "attack": monster["attack"] + attack_iv,
+            "defense": monster["defense"] + defense_iv,
+        }
+
+    async def _award_egg(self, ctx, conn, monster, rolled: dict) -> None:
+        """Persist a rolled egg and announce it."""
+        # Set hatch time (36 hours from now)
+        egg_hatch_time = datetime.datetime.utcnow() + datetime.timedelta(minutes=2160)
+        iv_percentage = rolled["IV"]
+
+        try:
+            egg_id = await conn.fetchval(
+                """
+                INSERT INTO monster_eggs (
+                    user_id, egg_type, hp, attack, defense, element, url, hatch_time,
+                    "IV", hp_iv, attack_iv, defense_iv
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                RETURNING id;
+                """,
+                ctx.author.id,
+                monster["name"],
+                rolled["hp"],
+                rolled["attack"],
+                rolled["defense"],
+                monster["element"],
+                monster["url"],
+                egg_hatch_time,
+                iv_percentage,
+                rolled["hp_iv"],
+                rolled["attack_iv"],
+                rolled["defense_iv"],
+            )
+
+            await ctx.send(
+                _(f"{ctx.author.mention}! You found a **{monster['name']} Egg** with an IV of {iv_percentage:.2f}%! It will hatch in 36 hours.")
+            )
+            self.bot.dispatch(
+                "frontier_egg_obtained",
+                ctx,
+                dict(monster),
+                int(egg_id) if egg_id is not None else None,
+            )
+
+            # Log high IV eggs
+            if iv_percentage > 95:
+                await self.bot.public_log(
+                    f"**{ctx.author}** obtained a {monster['name']} egg with {iv_percentage:.2f}% IV!"
+                )
         except Exception as e:
-            import traceback
-            error_message = f"Error occurred: {e}\n"
-            error_message += traceback.format_exc()
-            await ctx.send(error_message)
-            print(error_message)
-            await self.bot.reset_cooldown(ctx)
+            await ctx.send(str(e))
+
+    async def _resolve_densetsu_egg_capacity(
+        self, ctx, conn, monster, rolled: dict
+    ) -> bool | None:
+        """Ask Densetsu whether to trade its weakest egg for this drop.
+
+        Returns None when the player is not the AI, so the caller falls through
+        to the ordinary human dropdown. Returns True when room was made and
+        False when Densetsu chose to keep its collection.
+        """
+        ai_cog = self.bot.get_cog("AIPlayer")
+        if ai_cog is None or not hasattr(ai_cog, "resolve_egg_capacity"):
+            return None
+        try:
+            if not await ai_cog.is_active_for(ctx.author.id):
+                return None
+            return await ai_cog.resolve_egg_capacity(
+                ctx, conn, monster=monster, rolled=rolled
+            )
+        except Exception:
+            # A bridge or model failure must never destroy an owned egg or
+            # stall the battle; forfeit this drop and keep the collection.
+            logger.exception("Densetsu egg-capacity decision failed")
+            return False
 
     async def handle_egg_drop(self, ctx, monster, levelchoice):
         """Handle monster egg drops from PVE battles."""
+        rolled = self._roll_egg_stats(monster)
+
         async with self.bot.pool.acquire() as conn:
             # Count pets, unhatched eggs, and pending splice requests
             pet_and_egg_count = await conn.fetchval(
@@ -2055,7 +10587,19 @@ class Battles(commands.Cog):
                 total_allowed = 25
             
             # Check if player has reached the limit
+            densetsu_handled = False
             if pet_and_egg_count >= total_allowed:
+                # Densetsu cannot click a dropdown, so resolve its swap over the
+                # AI bridge before falling back to the human prompt below.
+                densetsu_outcome = await self._resolve_densetsu_egg_capacity(
+                    ctx, conn, monster, rolled
+                )
+                if densetsu_outcome is not None:
+                    if not densetsu_outcome:
+                        return
+                    densetsu_handled = True
+
+            if pet_and_egg_count >= total_allowed and not densetsu_handled:
                 # Get detailed pet and egg information for the dropdown
                 pet_and_egg_list = []
                 
@@ -2113,25 +10657,12 @@ class Battles(commands.Cog):
                     timeout=120.0
                 )
                 
-                # Create an initial embed for the release prompt
-                embed = discord.Embed(
-                    title=_("Release a Pet/Egg"),
-                    description=_("You've reached the maximum number of pets/eggs. Please select one to release to make room for the new egg."),
-                    color=discord.Color.orange()
+                message = await ctx.send(
+                    embed=view.build_current_embed(),
+                    view=view,
                 )
-                
-                # Add a field with instructions
-                embed.add_field(
-                    name="How to proceed",
-                    value="Use the dropdown below to select a pet/egg to release. You'll see its details before confirming.",
-                    inline=False
-                )
-                
-                # Send the message with the view
-                message = await ctx.send(embed=embed, view=view)
-                view.message = message  # Store the message reference in the view
-                
-                # Wait for the user to make a selection
+                view.message = message
+
                 try:
                     await view.wait()
                     if view.value is None:
@@ -2140,124 +10671,55 @@ class Battles(commands.Cog):
                     if view.value == "cancel":
                         await message.edit(content=_("❌ No egg awarded."), embed=None, view=None)
                         return
-                    choice = view.value + 1  # Adjust for 0-based index
                 except asyncio.TimeoutError:
                     await message.edit(content=_("Timed out. No egg awarded."), embed=None, view=None)
                     return
-                
-                if not 1 <= choice <= len(pet_and_egg_list):
-                    await ctx.send(_("That number is not in the list. No egg awarded."))
+
+                record_to_remove = view.value
+                if not isinstance(record_to_remove, dict):
+                    await message.edit(
+                        content=_("❌ No egg awarded."),
+                        embed=None,
+                        view=None,
+                    )
                     return
-                
-                # Identify the record to remove
-                record_to_remove = pet_and_egg_list[choice - 1]
                 
                 # Remove the chosen pet/egg from its table
                 try:
-                    if record_to_remove["type"] == "pet":
-                        await conn.execute("DELETE FROM monster_pets WHERE id = $1;",
-                                          record_to_remove["id"])
-                    else:
-                        await conn.execute("DELETE FROM monster_eggs WHERE id = $1;",
-                                          record_to_remove["id"])
-                    await ctx.send(
-                        _(f"Released {record_to_remove['type']} '{record_to_remove['display_name']}' to make room."))
+                    # Check if the item exists in the user's collection
+                    table = "monster_pets" if record_to_remove["type"] == "pet" else "monster_eggs"
+                    item = await conn.fetchrow(f"SELECT * FROM {table} WHERE user_id = $1 AND id = $2;",
+                                               ctx.author.id, record_to_remove["id"])
+
+                    if not item:
+                        await ctx.send(_("❌ No {type} with ID `{id}` found in your collection.").format(
+                            type=record_to_remove["type"], id=record_to_remove["id"]))
+                        return
+
+                    # Delete the item
+                    await conn.execute(f"DELETE FROM {table} WHERE id = $1;", record_to_remove["id"])
+
+                    await message.edit(
+                        content=_(
+                            f"Released {record_to_remove['type']} "
+                            f"'{record_to_remove['display_name']}' to make room."
+                        ),
+                        embed=None,
+                        view=None,
+                    )
+
                 except Exception as e:
                     await ctx.send(_("An error occurred while releasing the pet/egg: ") + str(e))
                     return
             
-            # Generate random IV percentage
-            iv_percentage = random.uniform(10, 1000)
-            if iv_percentage < 20:
-                iv_percentage = random.uniform(90, 100)
-            elif iv_percentage < 70:
-                iv_percentage = random.uniform(80, 90)
-            elif iv_percentage < 150:
-                iv_percentage = random.uniform(70, 80)
-            elif iv_percentage < 350:
-                iv_percentage = random.uniform(60, 70)
-            elif iv_percentage < 700:
-                iv_percentage = random.uniform(50, 60)
-            else:
-                iv_percentage = random.uniform(30, 50)
-            
-            # Calculate IVs
-            total_iv_points = (iv_percentage / 100) * 200
-            
-            # Allocate IV points
-            def allocate_iv_points(total_points):
-                a = random.random()
-                b = random.random()
-                c = random.random()
-                total = a + b + c
-                hp_iv = int(round(total_points * (a / total)))
-                attack_iv = int(round(total_points * (b / total)))
-                defense_iv = int(round(total_points * (c / total)))
-                
-                # Ensure sum matches total
-                iv_sum = hp_iv + attack_iv + defense_iv
-                if iv_sum != int(round(total_points)):
-                    diff = int(round(total_points)) - iv_sum
-                    max_iv = max(hp_iv, attack_iv, defense_iv)
-                    if hp_iv == max_iv:
-                        hp_iv += diff
-                    elif attack_iv == max_iv:
-                        attack_iv += diff
-                    else:
-                        defense_iv += diff
-                return hp_iv, attack_iv, defense_iv
-            
-            hp_iv, attack_iv, defense_iv = allocate_iv_points(total_iv_points)
-            
-            # Calculate base stats with IVs
-            hp = monster["hp"] + hp_iv
-            attack = monster["attack"] + attack_iv
-            defense = monster["defense"] + defense_iv
-            
-            # Set hatch time (36 hours from now)
-            egg_hatch_time = datetime.datetime.utcnow() + datetime.timedelta(minutes=2160)
-            
-            # Insert egg into database
-            try:
-                await conn.execute(
-                    """
-                    INSERT INTO monster_eggs (
-                        user_id, egg_type, hp, attack, defense, element, url, hatch_time,
-                        "IV", hp_iv, attack_iv, defense_iv
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);
-                    """,
-                    ctx.author.id,
-                    monster["name"],
-                    hp,
-                    attack,
-                    defense,
-                    monster["element"],
-                    monster["url"],
-                    egg_hatch_time,
-                    iv_percentage,
-                    hp_iv,
-                    attack_iv,
-                    defense_iv
-                )
-                
-                await ctx.send(
-                    _(f"{ctx.author.mention}! You found a **{monster['name']} Egg** with an IV of {iv_percentage:.2f}%! It will hatch in 36 hours.")
-                )
-                
-                # Log high IV eggs
-                if iv_percentage > 95:
-                    await self.bot.public_log(
-                        f"**{ctx.author}** obtained a {monster['name']} egg with {iv_percentage:.2f}% IV!"
-                    )
-            except Exception as e:
-                await ctx.send(str(e))
+            await self._award_egg(ctx, conn, monster, rolled)
 
     @commands.command(brief="Scout ahead to see what monster you'll face")
     @has_char()
     @user_cooldown(1800)  # 30 minute cooldown
     async def scout(self, ctx):
         """Scout ahead to see what monster you'll face in PVE."""
+        ctx = self._guard_battle_context(ctx)
         # Element emoji mapping
         element_to_emoji = {
             "Light": "🌟",
@@ -2273,17 +10735,7 @@ class Battles(commands.Cog):
         
         # Load monsters data
         try:
-            if not self.monsters_data:
-                with open("monsters.json", "r") as f:
-                    self.monsters_data = json.load(f)
-            
-            # Convert keys from strings to integers and filter out non-public monsters
-            monsters = {}
-            for level_str, monster_list in self.monsters_data.items():
-                level = int(level_str)
-                # Only keep monsters where ispublic is True (defaulting to True if key is missing)
-                public_monsters = [monster for monster in monster_list if monster.get("ispublic", True)]
-                monsters[level] = public_monsters
+            monsters, _ = await self._get_pve_monster_pool_for_user(ctx.author.id)
         except Exception as e:
             await ctx.send(_("Error loading monsters data. Please contact the admin."))
             await self.bot.reset_cooldown(ctx)
@@ -2344,16 +10796,116 @@ class Battles(commands.Cog):
                 # Get player level for monster selection
                 player_xp = ctx.character_data.get("xp", 0)
                 player_level = rpgtools.xptolevel(player_xp)
+                unlocked_locations = self._get_unlocked_pve_locations(player_level)
+                if not unlocked_locations:
+                    await ctx.send("No PvE locations are unlocked for your level yet.")
+                    await self.bot.reset_cooldown(ctx)
+                    return
+
+                allowed_scout_user_ids = {ctx.author.id}
+                alt_invoker_id = getattr(ctx, "alt_invoker_id", None)
+                if alt_invoker_id is not None:
+                    allowed_scout_user_ids.add(int(alt_invoker_id))
+
+                forced_scout_location = None
+                default_location_id = await self._get_user_pve_default_location_id(
+                    ctx.author.id
+                )
+                if default_location_id:
+                    default_id = default_location_id.lower()
+                    forced_scout_location = next(
+                        (
+                            location
+                            for location in unlocked_locations
+                            if str(location.get("id", "")).lower() == default_id
+                        ),
+                        None,
+                    )
+                    if forced_scout_location is None:
+                        default_exists = self._get_pve_location_by_id(default_location_id)
+                        if default_exists is None:
+                            await self._set_user_pve_default_location_id(
+                                ctx.author.id, None
+                            )
+
+                if forced_scout_location is None:
+                    location_choice_embed = discord.Embed(
+                        title="Choose Scout Location",
+                        description=(
+                            "Pick a specific location to focus your scout rolls, or select "
+                            "**Random Unlocked** to keep randomizing between unlocked zones."
+                        ),
+                        color=self.bot.config.game.primary_colour,
+                    )
+                    location_choice_embed.add_field(
+                        name="Tip",
+                        value=(
+                            "Choosing one location prevents rerolls from landing in zones "
+                            "you don't want."
+                        ),
+                        inline=False,
+                    )
+
+                    location_choice_view = ScoutLocationChoiceView(
+                        author_id=ctx.author.id,
+                        locations=unlocked_locations,
+                        timeout=60.0,
+                        allowed_user_ids=allowed_scout_user_ids,
+                    )
+                    location_choice_message = await ctx.send(
+                        embed=location_choice_embed,
+                        view=location_choice_view,
+                    )
+                    if location_choice_message is None:
+                        await self.bot.reset_cooldown(ctx)
+                        return
+                    location_choice_view.message = location_choice_message
+
+                    await location_choice_view.wait()
+
+                    if location_choice_view.cancelled:
+                        await self.bot.reset_cooldown(ctx)
+                        return
+
+                    if location_choice_view.use_random_location is None:
+                        await ctx.send("⏱️ Scout location selection timed out.")
+                        await self.bot.reset_cooldown(ctx)
+                        return
+
+                    forced_scout_location = (
+                        None
+                        if location_choice_view.use_random_location
+                        else location_choice_view.selected_location
+                    )
+                else:
+                    await ctx.send(
+                        f"Using your default scout location: **{forced_scout_location['name']}**."
+                    )
                 
                 # Create scouting view
                 class ScoutingView(discord.ui.View):
-                    def __init__(self, ctx, monster_data, rerolls_left, max_rerolls):
+                    def __init__(
+                        self,
+                        ctx,
+                        monster_data,
+                        rerolls_left,
+                        max_rerolls,
+                        allowed_user_ids,
+                    ):
                         super().__init__(timeout=30)
                         self.ctx = ctx
                         self.monster = monster_data
                         self.rerolls = rerolls_left
                         self.max_rerolls = max_rerolls
                         self.result = None
+                        if isinstance(allowed_user_ids, int):
+                            self.allowed_user_ids = {int(allowed_user_ids)}
+                        else:
+                            self.allowed_user_ids = {
+                                int(user_id)
+                                for user_id in (allowed_user_ids or [])
+                                if user_id is not None
+                            }
                         
                         # Add buttons
                         self.engage_button = discord.ui.Button(
@@ -2381,9 +10933,12 @@ class Battles(commands.Cog):
                         self.add_item(self.retreat_button)
                         
                         self.update_button_states()
+
+                    def can_interact(self, interaction: discord.Interaction) -> bool:
+                        return interaction.user.id in self.allowed_user_ids
                     
                     async def engage_callback(self, interaction: discord.Interaction):
-                        if interaction.user.id != self.ctx.author.id:
+                        if not self.can_interact(interaction):
                             await interaction.response.send_message("This isn't your battle!", ephemeral=True)
                             return
                         
@@ -2392,7 +10947,7 @@ class Battles(commands.Cog):
                         self.stop()
                     
                     async def reroll_callback(self, interaction: discord.Interaction):
-                        if interaction.user.id != self.ctx.author.id:
+                        if not self.can_interact(interaction):
                             await interaction.response.send_message("This isn't your battle!", ephemeral=True)
                             return
                         
@@ -2403,7 +10958,7 @@ class Battles(commands.Cog):
                             self.stop()
                     
                     async def retreat_callback(self, interaction: discord.Interaction):
-                        if interaction.user.id != self.ctx.author.id:
+                        if not self.can_interact(interaction):
                             await interaction.response.send_message("This isn't your battle!", ephemeral=True)
                             return
                         
@@ -2414,26 +10969,78 @@ class Battles(commands.Cog):
                     def update_button_states(self):
                         self.reroll_button.disabled = self.rerolls <= 0
                 
-                # Function to select monster based on level
-                async def select_monster(level):
-                    return random.choice(monsters[level])
+                frontier_pool_cache = {}
+
+                # Function to select monster based on location and tier
+                async def select_monster(location_data, level):
+                    location_monsters = monsters
+                    if self._is_frontier_location(location_data):
+                        region_id = str(location_data["frontier_region_id"])
+                        if region_id not in frontier_pool_cache:
+                            frontier_pool_cache[region_id], _ = (
+                                await self._get_pve_monster_pool_for_location(
+                                    ctx.author.id,
+                                    location_data,
+                                )
+                            )
+                        location_monsters = frontier_pool_cache[region_id]
+
+                    monster_pool = location_monsters.get(level, [])
+                    if not monster_pool:
+                        return None
+                    base_monster = (
+                        choose_weighted_monster(monster_pool)
+                        if self._is_frontier_location(location_data)
+                        else random.choice(monster_pool)
+                    )
+                    forced_level = (
+                        self.PVE_GOD_ENCOUNTER_LEVEL
+                        if level == self.PVE_GOD_TIER
+                        else None
+                    )
+                    scaled_monster = self._scale_monster_for_encounter(
+                        base_monster,
+                        level,
+                        encounter_level=forced_level,
+                    )
+                    if base_monster.get("pve_pool"):
+                        scaled_monster["pve_pool"] = base_monster["pve_pool"]
+                    scaled_monster["pve_location_id"] = location_data["id"]
+                    scaled_monster["pve_location_name"] = location_data["name"]
+                    self.bot.dispatch(
+                        "frontier_sighting",
+                        ctx,
+                        dict(scaled_monster),
+                        None,
+                    )
+                    return scaled_monster
                 
                 # Function to create monster info embed
-                async def show_monster_info(monster_data, rerolls, max_rerolls):
+                async def show_monster_info(monster_data, location_data, monster_tier, rerolls, max_rerolls):
+                    encounter_level = int(monster_data.get("encounter_level", monster_tier))
                     embed = discord.Embed(
                         title="🔍 Monster Scouting Report",
-                        description=f"You spot a Level {levelchoice} **{monster_data['name']}** ahead!",
+                        description=(
+                            f"Location: **{location_data['name']}**\n"
+                            f"You spot a Level {encounter_level} **{monster_data['name']}** ahead!"
+                        ),
                         color=discord.Color.blue()
                     )
                     
                     element_emoji = element_to_emoji.get(monster_data["element"], "❓")
                     stats_text = (
+                        f"**Tier:** {monster_tier}\n"
                         f"**Element:** {element_emoji} {monster_data['element']}\n"
                         f"**HP:** {monster_data['hp']}\n"
                         f"**Attack:** {monster_data['attack']}\n"
                         f"**Defense:** {monster_data['defense']}"
                     )
                     embed.add_field(name="Stats", value=stats_text, inline=False)
+                    embed.add_field(
+                        name="Location Effects",
+                        value=f"God chance here: **{location_data.get('god_chance', 0)}%**",
+                        inline=False,
+                    )
                     
                     embed.add_field(
                         name="Scouting Options",
@@ -2445,41 +11052,39 @@ class Battles(commands.Cog):
                 
                 # Main scouting loop
                 while True:
-                    # Determine monster level with weighted random (same as pve command)
-                    if player_level <= 4:
-                        levelchoice = random.randint(1, 2)
-                    elif player_level <= 8:
-                        levelchoice = random.randint(1, 3)
-                    elif player_level <= 12:
-                        levelchoice = random.randint(1, 4)
-                    elif player_level <= 15:
-                        levelchoice = random.randint(1, 5)
-                    elif player_level <= 20:
-                        levelchoice = random.randint(1, 6)
-                    elif player_level <= 25:
-                        levelchoice = random.randint(1, 7)
-                    elif player_level <= 30:
-                        levelchoice = random.randint(1, 8)
-                    elif player_level <= 35:
-                        levelchoice = random.randint(1, 9)
-                    elif player_level <= 40:
-                        # For levels 1-40, levels 1-9 have normal chance, level 10 has half chance
-                        level_weights = [10] * 10  # Default weight of 10 for all levels
-                        level_weights[9] = 5  # Level 10 (index 9) gets half weight (5/10)
-                        levelchoice = random.choices(range(1, 11), weights=level_weights, k=1)[0]
-                    else:  # player_level > 40
-                        # For level 41+, levels 1-9 and 11 have normal chance, level 10 has half chance
-                        level_weights = [10] * 11  # Default weight of 10 for all levels
-                        level_weights[9] = 5  # Level 10 (index 9) gets half weight (5/10)
-                        levelchoice = random.choices(range(1, 12), weights=level_weights, k=1)[0]
+                    scout_location = (
+                        forced_scout_location
+                        if forced_scout_location is not None
+                        else random.choice(unlocked_locations)
+                    )
+                    levelchoice = self._roll_pve_tier_for_location(scout_location)
                     
                     # Select and display monster
-                    monster_data = await select_monster(levelchoice)
-                    embed = await show_monster_info(monster_data, rerolls_left, max_rerolls)
+                    monster_data = await select_monster(scout_location, levelchoice)
+                    if not monster_data:
+                        await ctx.send("No public monsters are configured for this tier.")
+                        await self.bot.reset_cooldown(ctx)
+                        return
+                    embed = await show_monster_info(
+                        monster_data,
+                        scout_location,
+                        levelchoice,
+                        rerolls_left,
+                        max_rerolls
+                    )
                     
                     # Show scouting view
-                    view = ScoutingView(ctx, monster_data, rerolls_left, max_rerolls)
+                    view = ScoutingView(
+                        ctx,
+                        monster_data,
+                        rerolls_left,
+                        max_rerolls,
+                        allowed_scout_user_ids,
+                    )
                     message = await ctx.send(embed=embed, view=view)
+                    if message is None:
+                        await ctx.bot.reset_cooldown(ctx)
+                        return
                     
                     await view.wait()
                     
@@ -2509,6 +11114,7 @@ class Battles(commands.Cog):
                         await message.delete()
                         ctx.monster_override = monster_data
                         ctx.levelchoice_override = levelchoice
+                        ctx.locationchoice_override = scout_location["id"]
                         await ctx.invoke(self.bot.get_command("pve"))
                         break
                     elif view.result == "reroll":
@@ -2527,6 +11133,193 @@ class Battles(commands.Cog):
             await ctx.send(f"An error occurred: {e}")
             await self.bot.reset_cooldown(ctx)
 
+    async def _run_training_dummy_turns(self, battle: TrainingDummyBattle):
+        """Run turns until combat, cancellation, or the hard deadline wins."""
+
+        async def turn_loop():
+            while not await battle.is_battle_over():
+                await battle.process_turn()
+                if battle.cancel_event.is_set():
+                    return
+                await asyncio.sleep(1)
+
+        runner = asyncio.create_task(turn_loop())
+        cancel_waiter = asyncio.create_task(battle.cancel_event.wait())
+        remaining = max(
+            0.0,
+            (
+                battle.start_time
+                + TRAINING_DUMMY_DURATION
+                - datetime.datetime.utcnow()
+            ).total_seconds(),
+        )
+
+        try:
+            done, _pending = await asyncio.wait(
+                {runner, cancel_waiter},
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if not done:
+                battle.forced_timeout = True
+                battle.finished = True
+            elif runner in done:
+                # Surface engine failures to the command's normal error handling.
+                await runner
+        finally:
+            tasks_to_stop = {
+                task for task in (runner, cancel_waiter) if not task.done()
+            }
+            for task in tasks_to_stop:
+                task.cancel()
+            if tasks_to_stop:
+                await asyncio.gather(*tasks_to_stop, return_exceptions=True)
+
+    @commands.command(
+        name="battledummy",
+        aliases=["dummybattle", "trainingdummy", "testdummy"],
+        brief=_("Test your build against a configurable training dummy"),
+    )
+    @has_char()
+    async def battle_dummy(
+        self,
+        ctx,
+        attack: int = None,
+        defense: int = None,
+        hp: int = None,
+        pets: str = "off",
+    ):
+        """Run a five-minute, no-reward battle against a custom test dummy.
+
+        Example: `$battledummy 250 100 50000 on`
+        The arguments are dummy attack, defense, HP, then optional pets on/off.
+        """
+        if attack is None or defense is None or hp is None:
+            return await ctx.send(
+                f"Usage: `{ctx.clean_prefix}battledummy <attack> <defense> <hp> "
+                "[pets: on/off]`\n"
+                f"Example: `{ctx.clean_prefix}battledummy 250 100 50000 on`"
+            )
+
+        stat_limits = {
+            "attack": (int(attack), 0, 1_000_000_000),
+            "defense": (int(defense), 0, 1_000_000_000),
+            "hp": (int(hp), 1, 1_000_000_000_000),
+        }
+        for label, (value, minimum, maximum) in stat_limits.items():
+            if not minimum <= value <= maximum:
+                return await ctx.send(
+                    f"Dummy {label} must be between **{minimum:,}** and "
+                    f"**{maximum:,}**."
+                )
+
+        pet_token = str(pets or "off").strip().casefold()
+        if pet_token.startswith("pets="):
+            pet_token = pet_token.split("=", 1)[1]
+        pet_on_values = {"on", "yes", "true", "1", "enabled", "enable", "pets"}
+        pet_off_values = {"off", "no", "false", "0", "disabled", "disable", "nopets"}
+        if pet_token in pet_on_values:
+            pets_enabled = True
+        elif pet_token in pet_off_values:
+            pets_enabled = False
+        else:
+            return await ctx.send(
+                "The pets option must be `on` or `off` "
+                "(for example: `pets=on`)."
+            )
+
+        ctx = self._guard_battle_context(ctx)
+        if self.fighting_players.get(int(ctx.author.id)):
+            return await ctx.send(
+                "You are already in a battle. Finish or cancel it before opening "
+                "a training dummy."
+            )
+
+        player_combatant = await self.battle_factory.create_player_combatant(
+            ctx,
+            ctx.author,
+            include_pet=pets_enabled,
+        )
+        pet_combatant = None
+        if pets_enabled:
+            pet_combatant = await self.battle_factory.pet_ext.get_pet_combatant(
+                ctx,
+                ctx.author,
+            )
+            if pet_combatant is None:
+                return await ctx.send(
+                    "Pets were enabled, but you do not have an available equipped "
+                    "pet. Equip one or run the command with pets `off`."
+                )
+
+        dummy_data = {
+            "name": "Training Dummy",
+            "hp": int(hp),
+            "attack": int(attack),
+            "defense": int(defense),
+            "element": "Unknown",
+        }
+        dummy_combatant = await self.battle_factory.create_monster_combatant(
+            dummy_data,
+            name="Training Dummy",
+        )
+
+        player_team = Team("Player", [player_combatant])
+        if pet_combatant is not None:
+            player_team.add_combatant(pet_combatant)
+        dummy_team = Team("Training Dummy", [dummy_combatant])
+        hp_bar_style = await self._get_user_hp_bar_style(ctx.author.id)
+        battle = TrainingDummyBattle(
+            ctx,
+            [player_team, dummy_team],
+            pets_enabled=pets_enabled,
+            monster_level=1,
+            hp_bar_style=hp_bar_style,
+        )
+
+        if not await self.try_add_player_to_exclusive_fight(ctx.author.id):
+            return await ctx.send(
+                "Another battle started while this dummy was being prepared. "
+                "Finish or cancel it before trying again."
+            )
+        try:
+            await battle.start_battle()
+            await self._run_training_dummy_turns(battle)
+            await battle.end_battle()
+        except Exception:
+            logger.exception(
+                "Training dummy battle failed for user %s",
+                ctx.author.id,
+            )
+            battle.finished = True
+            battle.control_view.disable("Test Failed")
+            battle.control_view.stop()
+            if battle.battle_message is not None:
+                try:
+                    await battle.edit_with_retry(
+                        battle.battle_message,
+                        view=battle.control_view,
+                    )
+                except Exception:
+                    pass
+            await ctx.send(
+                "The training battle encountered an error and was stopped. "
+                "No rewards or progression were granted."
+            )
+        finally:
+            await self.remove_player_from_fight(ctx.author.id)
+
+    @battle_dummy.error
+    async def battle_dummy_error(self, ctx, error):
+        if isinstance(error, commands.BadArgument):
+            return await ctx.send(
+                f"Attack, defense, and HP must be whole numbers.\n"
+                f"Usage: `{ctx.clean_prefix}battledummy <attack> <defense> <hp> "
+                "[pets: on/off]`"
+            )
+        raise error
+
     @commands.command()
     @is_gm()
     @has_char()
@@ -2537,6 +11330,7 @@ class Battles(commands.Cog):
         Options format: key1=value1 key2=value2
         Example: $custom_battle pve pets=true elements=true
         """
+        ctx = self._guard_battle_context(ctx)
         # Parse options from string (format: key1=value1 key2=value2)
         options_dict = {}
         if options:
@@ -2567,7 +11361,7 @@ class Battles(commands.Cog):
                 return await ctx.send("Level must be a number.")
         
         # Convert boolean options
-        for bool_option in ["allow_pets", "class_buffs", "element_effects", "luck_effects", "reflection_damage"]:
+        for bool_option in ["allow_pets", "class_buffs", "element_effects", "luck_effects", "reflection_damage", "emoji_hp_bars"]:
             if bool_option in options_dict:
                 options_dict[bool_option] = options_dict[bool_option].lower() == "true"
         
@@ -2653,12 +11447,14 @@ class Battles(commands.Cog):
         value: The new value (true/false for boolean settings, numbers for numeric settings)
         """
         # Validate battle type
-        valid_battle_types = ["pve", "pvp", "raid", "tower", "team", "global", "dragon"]
+        valid_battle_types = ["pve", "pvp", "raid", "tower", "jurytower", "team", "global", "dragon"]
         if battle_type.lower() not in valid_battle_types:
             return await ctx.send(f"Invalid battle type. Must be one of: {', '.join(valid_battle_types)}")
         
         # Validate setting
-        valid_settings = self.battle_factory.settings.get_configurable_settings()
+        valid_settings = self.battle_factory.settings.get_configurable_settings(
+            battle_type.lower()
+        )
         if setting not in valid_settings:
             return await ctx.send(f"Invalid setting. Must be one of: {', '.join(valid_settings)}")
         
@@ -2692,7 +11488,7 @@ class Battles(commands.Cog):
         setting: The setting to reset (allow_pets, class_buffs, element_effects, etc.)
         """
         # Validate battle type
-        valid_battle_types = ["pve", "pvp", "raid", "tower", "team", "dragon", "global"]
+        valid_battle_types = ["pve", "pvp", "raid", "tower", "jurytower", "team", "dragon", "global"]
         if battle_type.lower() not in valid_battle_types:
             return await ctx.send(f"Invalid battle type. Must be one of: {', '.join(valid_battle_types)}")
         
@@ -2718,8 +11514,11 @@ class Battles(commands.Cog):
         introducing new powerful abilities and passives. Form a party and challenge
         this formidable foe!
         """
-        if ctx.invoked_subcommand is None:
-            await self._show_dragon_status(ctx)
+        try:
+            if ctx.invoked_subcommand is None:
+                await self._show_dragon_status(ctx)
+        except Exception as e:
+            await ctx.send(f"An error occurred: {e}")
     
     async def _show_dragon_status(self, ctx):
         """Show the current status of the Ice Dragon Challenge"""
@@ -2729,7 +11528,7 @@ class Battles(commands.Cog):
         weekly_defeats = dragon_stats.get("weekly_defeats", 0)
         
         # Get dragon stage information
-        stage = await self.battle_factory.dragon_ext.get_dragon_stage(dragon_level)
+        stage = await self.battle_factory.dragon_ext.get_dragon_stage(self.bot, dragon_level)
         stage_name = stage["name"]
         stage_info = stage["info"]
         
@@ -2781,7 +11580,192 @@ class Battles(commands.Cog):
         )
         
         await ctx.send(embed=embed)
-    
+
+    @staticmethod
+    def _format_dragon_party_stat(value):
+        """Format combat values without mixing float and Decimal arithmetic."""
+        return f"{Decimal(str(value)):,.0f}"
+
+    @staticmethod
+    def _dragon_party_class_label(classes):
+        """Return the base class lines represented by a profile's classes."""
+        if not classes:
+            return "Adventurer"
+        if not isinstance(classes, (list, tuple)):
+            classes = [classes]
+
+        class_lines = []
+        for class_name in classes:
+            resolved_class = class_from_string(class_name)
+            if not resolved_class:
+                continue
+            label = resolved_class.get_class_line_name()
+            if label == "SantasHelper":
+                label = "Santa's Helper"
+            if label not in class_lines:
+                class_lines.append(label)
+
+        return " / ".join(class_lines) if class_lines else "Adventurer"
+
+    async def _build_dragon_party_payload(self, ctx, party_members):
+        """Build the rendered party card and its minimal Discord embed."""
+        try:
+            return await self._build_dragon_party_payload_impl(ctx, party_members)
+        except Exception as exc:
+            logger.exception("Ice Dragon party payload failed")
+            embed = discord.Embed(
+                title="Ice Dragon Party Error",
+                description=(
+                    "The party card could not be loaded. The error was logged; "
+                    "try the command again after it is fixed."
+                ),
+                color=discord.Color.red(),
+            )
+            embed.add_field(
+                name="Error",
+                value=f"`{type(exc).__name__}: {str(exc)[:700]}`",
+                inline=False,
+            )
+            return embed, None
+
+    async def _build_dragon_party_payload_impl(self, ctx, party_members):
+        """Build a party payload, allowing the public wrapper to report failures."""
+        progress = await self.battle_factory.dragon_ext.get_dragon_stats_from_database(
+            self.bot
+        )
+        dragon = await self.battle_factory.dragon_ext.calculate_dragon_stats(
+            self.bot,
+            progress.get("level", 1),
+        )
+        member_ids = [member.id for member in party_members]
+
+        async with self.bot.pool.acquire() as conn:
+            profile_rows = await conn.fetch(
+                'SELECT "user", xp, class FROM profile WHERE "user" = ANY($1::bigint[]);',
+                member_ids,
+            )
+            pet_rows = await conn.fetch(
+                """
+                SELECT user_id, level
+                FROM monster_pets
+                WHERE user_id = ANY($1::bigint[])
+                  AND equipped = TRUE
+                  AND daycare_boarding_id IS NULL;
+                """,
+                member_ids,
+            )
+
+        profiles = {row["user"]: row for row in profile_rows}
+        pet_levels = {row["user_id"]: int(row["level"] or 1) for row in pet_rows}
+
+        party_stats = []
+        for member in party_members:
+            player_combatant, pet_combatant = await asyncio.gather(
+                self.battle_factory.create_player_combatant(ctx, member, include_pet=True),
+                self.battle_factory.pet_ext.get_pet_combatant(ctx, member),
+            )
+            profile = profiles.get(member.id)
+            party_stats.append(
+                (
+                    member,
+                    player_combatant,
+                    pet_combatant,
+                    rpgtools.xptolevel(profile["xp"]) if profile else 1,
+                    profile["class"] if profile else [],
+                    pet_levels.get(member.id, 1),
+                )
+            )
+
+        rendered_party = []
+        for stats in party_stats:
+            member, player, pet, level, classes, pet_level = stats
+            rendered_party.append(
+                {
+                    "name": member.display_name,
+                    "leader": member.id == ctx.author.id,
+                    "level": level,
+                    "class": self._dragon_party_class_label(classes),
+                    "attack": player.damage,
+                    "defense": player.armor,
+                    "hp": player.max_hp,
+                    "pet": (
+                        {
+                            "name": pet.name,
+                            "level": pet_level,
+                            "attack": pet.damage,
+                            "defense": pet.armor,
+                            "hp": pet.max_hp,
+                        }
+                        if pet
+                        else None
+                    ),
+                }
+            )
+
+        try:
+            card_buffer = await asyncio.to_thread(
+                render_dragon_party_card,
+                dragon,
+                rendered_party,
+            )
+        except Exception:
+            logger.exception("Failed to render the Ice Dragon party card")
+            embed = discord.Embed(
+                title="Ice Dragon Hunting Party",
+                description=(
+                    f"Dragon Level {dragon['level']} | "
+                    f"{len(party_members)}/4 hunters ready"
+                ),
+                color=0x87CEEB,
+            )
+            return embed, None
+
+        filename = "ice_dragon_party.jpg"
+        embed = discord.Embed(color=0x87CEEB)
+        embed.set_image(url=f"attachment://{filename}")
+        embed.set_footer(text="Party formation closes after 120 seconds")
+        return embed, discord.File(card_buffer, filename=filename)
+
+    async def _report_dragon_party_error(
+        self,
+        ctx,
+        stage,
+        error,
+        interaction=None,
+    ):
+        """Log a party-menu failure and make it visible to Discord users."""
+        logger.error(
+            "Ice Dragon party failed during %s",
+            stage,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        traceback_text = "".join(
+            traceback.format_exception(type(error), error, error.__traceback__)
+        )
+        header = (
+            f"⚠️ Ice Dragon party error during **{stage}**: "
+            f"`{type(error).__name__}: {str(error)[:350]}`"
+        )
+        traceback_budget = max(0, 1900 - len(header))
+        traceback_tail = traceback_text[-traceback_budget:]
+        message = f"{header}\n```py\n{traceback_tail}\n```"
+
+        if interaction is not None:
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(message, ephemeral=True)
+                else:
+                    await interaction.response.send_message(message, ephemeral=True)
+                return
+            except Exception:
+                logger.exception("Failed to report Ice Dragon interaction error")
+
+        send_callable = getattr(ctx, "_battle_original_send", ctx.send)
+        try:
+            await send_callable(message)
+        except Exception:
+            logger.exception("Failed to send Ice Dragon party error to Discord")
+
     @dragon_challenge.command(name="party", aliases=["p"])
     @has_char()
     @user_cooldown(7200)
@@ -2790,212 +11774,414 @@ class Battles(commands.Cog):
         
         **Aliases**: `p`
         """
-        # Check if the user is already in a party
-        if any(view.is_complete is False and ctx.author in view.party_members 
-               for view in self.dragon_party_views):
-            return await ctx.send("You are already in a party formation!")
-            
-        # Create party formation view
-        class DragonPartyView(discord.ui.View):
-            def __init__(self, bot):
-                super().__init__(timeout=60)  # Full 60-second timeout
-                self.bot = bot
-                self.party_members = [ctx.author]  # Author automatically joins
-                self.is_complete = False
-                self._warning_task = None
-                self._warning_sent = False
-                self.message = None  # Will be set after view is sent
-                self.ctx = ctx  # Store context for sending warning message
-                
-            async def update_embed(self):
-                embed = discord.Embed(
-                    title="Ice Dragon Challenge - Party Formation",
-                    description="Form a party to challenge the Ice Dragon!",
-                    color=discord.Color.blue()
-                )
-                
-                # List party members
-                member_list = "\n".join([f"• {member.mention}" for member in self.party_members])
-                embed.add_field(
-                    name=f"Party Members ({len(self.party_members)}/4)",
-                    value=member_list or "No members yet",
-                    inline=False
-                )
-                
-                return embed
-                
-            @discord.ui.button(label="Join Party", style=discord.ButtonStyle.primary, emoji="⚔️")
-            async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
-                # Check if user has a character
-                if not await self.bot.pool.fetchrow('SELECT 1 FROM profile WHERE "user"=$1', interaction.user.id):
-                    return await interaction.response.send_message("You don't have a character to join the party!", ephemeral=True)
-                    
-                # Check if user is already in the party
-                if interaction.user in self.party_members:
-                    return await interaction.response.send_message("You are already in the party!", ephemeral=True)
-                    
-                # Add user to party
-                if len(self.party_members) < 4:
-                    self.party_members.append(interaction.user)
-                    await interaction.response.send_message("You have joined the party!", ephemeral=True)
-                    
-                    # Update the embed
-                    await interaction.message.edit(embed=await self.update_embed())
-                else:
-                    await interaction.response.send_message("The party is already full!", ephemeral=True)
-            
-            @discord.ui.button(label="Leave Party", style=discord.ButtonStyle.danger, emoji="🚪")
-            async def leave(self, interaction: discord.Interaction, button: discord.ui.Button):
-                # Check if user is in the party
-                if interaction.user not in self.party_members:
-                    return await interaction.response.send_message("You are not in the party!", ephemeral=True)
-                    
-                # Don't allow the party leader to leave
-                if interaction.user == ctx.author:
-                    return await interaction.response.send_message("As the party leader, you cannot leave the party!", ephemeral=True)
-                    
-                # Remove user from party
-                self.party_members.remove(interaction.user)
-                await interaction.response.send_message("You have left the party!", ephemeral=True)
-                
-                # Update the embed
-                await interaction.message.edit(embed=await self.update_embed())
-            
-            @discord.ui.button(label="Start Challenge", style=discord.ButtonStyle.success, emoji="🐉")
-            async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
-                # Only the party leader can start the challenge
-                if interaction.user != ctx.author:
-                    return await interaction.response.send_message("Only the party leader can start the challenge!", ephemeral=True)
-                    
-                # At least one member needed to start
-                if not self.party_members:
-                    return await interaction.response.send_message("You need at least one member to start the challenge!", ephemeral=True)
-                
-                # Acknowledge the interaction
-                await interaction.response.defer()
-                
-                # Mark as complete to start the challenge
-                self.is_complete = True
-                self.stop()
-            
-            async def on_timeout(self):
-                # This runs after the full 60 seconds
-                if not self.is_complete:
+        ctx = self._guard_battle_context(ctx)
+        view = None
+        message = None
+        try:
+            # Create party formation view
+            class DragonPartyView(discord.ui.View):
+                def __init__(self, cog):
+                    super().__init__(timeout=120)
+                    self.cog = cog
+                    self.bot = cog.bot
+                    self.party_members = [ctx.author]  # Author automatically joins
                     self.is_complete = False
-                    self.stop()
-            
-            async def start_warning_timer(self):
-                # Schedule the warning for 50 seconds in
-                await asyncio.sleep(50)
-                if not self.is_complete and not self.is_finished():
-                    self._warning_sent = True
-                    warning_embed = discord.Embed(
-                        title="⚠️ Party Formation Expiring Soon",
-                        description="The party formation will time out in 10 seconds. Start the challenge now or the party will be disbanded.",
-                        color=discord.Color.orange()
+                    self._warning_task = None
+                    self._warning_sent = False
+                    self.message = None  # Will be set after view is sent
+                    self.ctx = ctx  # Store context for sending warning message
+
+                async def _is_linked_to_leader(self, user_id: int) -> bool:
+                    leader_id = self.ctx.author.id
+                    if user_id == leader_id:
+                        return True
+                    async with self.bot.pool.acquire() as conn:
+                        linked = await conn.fetchval(
+                            """
+                            SELECT 1
+                            FROM alt_links
+                            WHERE (main = $1 AND alt = $2) OR (main = $2 AND alt = $1)
+                            """,
+                            user_id,
+                            leader_id,
+                        )
+                    return bool(linked)
+                    
+                async def build_payload(self):
+                    return await self.cog._build_dragon_party_payload(
+                        self.ctx,
+                        self.party_members,
                     )
-                    try:
-                        await self.ctx.send(embed=warning_embed, delete_after=10)
-                    except Exception as e:
-                        print(f"Error sending warning message: {e}")
-            
-            async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item):
-                if self._timeout_task:
-                    self._timeout_task.cancel()
-                    self._timeout_task = None
-                await super().on_error(interaction, error, item)
-            
-            def stop(self):
-                # Cancel any pending warning task
-                if hasattr(self, '_warning_task') and self._warning_task:
-                    self._warning_task.cancel()
-                super().stop()
-            
-            async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item):
-                # Cancel warning task on error
-                if hasattr(self, '_warning_task') and self._warning_task:
-                    self._warning_task.cancel()
-                await super().on_error(interaction, error, item)
-        
-        # Create and send the party view
-        view = DragonPartyView(self.bot)
-        message = await ctx.send(embed=await view.update_embed(), view=view)
-        view.message = message  # Store message reference
-        # Start the warning timer
-        view._warning_task = asyncio.create_task(view.start_warning_timer())
-        
-        # Wait for the view to complete
-        await view.wait()
-        
-        # Check if party formation was successful
-        if view.is_complete:
-            await message.edit(content="Party formed! Starting the challenge...", embed=None, view=None)
-            
-            # Add all party members to the fighting players
-            for member in view.party_members:
-                await self.add_player_to_fight(member.id)
-                
-            try:
-                # Create and start the dragon battle
-                try:
-                    battle = await self.battle_factory.create_battle(
-                        "dragon",
-                        ctx,
-                        party_members=view.party_members
-                    )
+
+                async def refresh_message(self, message):
+                    embed, card_file = await self.build_payload()
+                    attachments = [card_file] if card_file else []
+                    await message.edit(embed=embed, attachments=attachments, view=self)
                     
-                    # Start the battle
-                    success = await battle.start_battle()
-                    if not success:
-                        # Remove players from fighting
-                        for member in view.party_members:
-                            await self.remove_player_from_fight(member.id)
-                        return await ctx.send("Failed to start the dragon challenge!")
-                    
-                    # Process battle turns
-                    turn_count = 0
-                    battle_msg = await ctx.send("⚔️ Battle started! Dragons and adventurers clash...")
-                    
-                    while not await battle.is_battle_over():
+                @discord.ui.button(label="Join Party", style=discord.ButtonStyle.primary, emoji="⚔️")
+                async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
+                    # Acknowledge before any database work so Discord's interaction
+                    # token does not expire while waiting for a pooled connection.
+                    await interaction.response.defer(ephemeral=True)
+
+                    # Check if user has a character
+                    if not await self.bot.pool.fetchrow('SELECT 1 FROM profile WHERE "user"=$1', interaction.user.id):
+                        return await interaction.followup.send(
+                            "You don't have a character to join the party!",
+                            ephemeral=True,
+                        )
+
+                    # Check if user is already in the party
+                    if interaction.user in self.party_members:
+                        return await interaction.followup.send("You are already in the party!", ephemeral=True)
+
+                    # Add user to party
+                    if len(self.party_members) < 4:
+                        self.party_members.append(interaction.user)
                         try:
-                            turn_count += 1
-                            result = await battle.process_turn()
-                            
-                            # Only update message every 5 turns to reduce spam
-                            if turn_count % 5 == 0:
-                                await battle_msg.edit(content=f"⚔️ Battle in progress - Turn {turn_count} - The dragon and party continue to battle...")
-                            
-                            await asyncio.sleep(1)  # 1 second delay between turns for faster battles
-                        except Exception as e:
-                            await ctx.send(f"⚠️ Error in turn {turn_count}: {str(e)}\n```{traceback.format_exc()}```")
-                            break
-                    
-                    # Get the battle result
-                    await ctx.send("Battle completed. Processing result...")
-                    victory = await battle.end_battle()
-                    
-                except Exception as e:
-                    await ctx.send(f"⚠️ Error in dragon battle: {str(e)}\n```{traceback.format_exc()}```")
-                    return
+                            await self.refresh_message(interaction.message)
+                        except Exception:
+                            self.party_members.remove(interaction.user)
+                            raise
+                        await interaction.followup.send(
+                            "You have joined the party!",
+                            ephemeral=True,
+                        )
+                    else:
+                        await interaction.followup.send("The party is already full!", ephemeral=True)
+
+                @discord.ui.button(label="Leave Party", style=discord.ButtonStyle.danger, emoji="🚪")
+                async def leave(self, interaction: discord.Interaction, button: discord.ui.Button):
+                    await interaction.response.defer(ephemeral=True)
+
+                    # Check if user is in the party
+                    if interaction.user not in self.party_members:
+                        return await interaction.followup.send("You are not in the party!", ephemeral=True)
+
+                    # Don't allow the party leader to leave
+                    if interaction.user == ctx.author:
+                        return await interaction.followup.send(
+                            "As the party leader, you cannot leave the party!",
+                            ephemeral=True,
+                        )
+
+                    # Remove user from party
+                    member_index = self.party_members.index(interaction.user)
+                    self.party_members.remove(interaction.user)
+                    try:
+                        await self.refresh_message(interaction.message)
+                    except Exception:
+                        self.party_members.insert(member_index, interaction.user)
+                        raise
+                    await interaction.followup.send(
+                        "You have left the party!",
+                        ephemeral=True,
+                    )
+
+                @discord.ui.button(label="Start Challenge", style=discord.ButtonStyle.success, emoji="🐉")
+                async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
+                    await interaction.response.defer()
+
+                    # Only the party leader can start the challenge
+                    if not await self._is_linked_to_leader(interaction.user.id):
+                        return await interaction.followup.send(
+                            "Only the party leader (or their linked main/alt) can start the challenge!",
+                            ephemeral=True,
+                        )
+
+                    # At least one member needed to start
+                    if not self.party_members:
+                        return await interaction.followup.send(
+                            "You need at least one member to start the challenge!",
+                            ephemeral=True,
+                        )
+
+                    # Mark as complete to start the challenge
+                    self.is_complete = True
+                    self.stop()
                 
-                # Handle rewards
-                if victory is True:  # Players won
-                    await self._handle_dragon_victory(ctx, view.party_members)
-                elif victory is False:  # Players lost
-                    await self._handle_dragon_defeat(ctx, view.party_members)
-                else:  # Draw
-                    await ctx.send("The battle ended in a draw!")
-                    
-            finally:
-                # Always remove players from fighting status
+                async def on_timeout(self):
+                    # This runs after the full 60 seconds
+                    if not self.is_complete:
+                        self.is_complete = False
+                        self.stop()
+                
+                async def start_warning_timer(self):
+                    # Schedule the warning for 50 seconds in
+                    await asyncio.sleep(110)
+                    if not self.is_complete and not self.is_finished():
+                        self._warning_sent = True
+                        warning_embed = discord.Embed(
+                            title="⚠️ Party Formation Expiring Soon",
+                            description="The party formation will time out in 10 seconds. Start the challenge now or the party will be disbanded.",
+                            color=discord.Color.orange()
+                        )
+                        try:
+                            await self.ctx.send(embed=warning_embed, delete_after=10)
+                        except Exception:
+                            logger.exception("Failed to send Ice Dragon party warning")
+                
+                def stop(self):
+                    # Cancel any pending warning task
+                    if hasattr(self, '_warning_task') and self._warning_task:
+                        self._warning_task.cancel()
+                    super().stop()
+                
+                async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item):
+                    if hasattr(self, '_warning_task') and self._warning_task:
+                        self._warning_task.cancel()
+                    item_name = getattr(item, "label", None) or type(item).__name__
+                    await self.cog._report_dragon_party_error(
+                        self.ctx,
+                        f"{item_name} button",
+                        error,
+                        interaction=interaction,
+                    )
+            
+            # Create and send the party view
+            view = DragonPartyView(self)
+            self.dragon_party_views.append(view)
+            message = await self._send_with_retry(
+                ctx,
+                content="❄️ Preparing the Ice Dragon party card...",
+            )
+            view.message = message
+
+            party_embed, party_file = await view.build_payload()
+            edit_kwargs = {
+                "content": None,
+                "embed": party_embed,
+                "view": view,
+                "attachments": [party_file] if party_file else [],
+            }
+            await self._edit_message_with_retry(
+                message,
+                **edit_kwargs,
+            )
+            # Start the warning timer
+            view._warning_task = asyncio.create_task(view.start_warning_timer())
+            
+            # Wait for the view to complete
+            await view.wait()
+            
+            # Check if party formation was successful
+            if view.is_complete:
+                dragon_fight_id = f"dragon:{ctx.author.id}:{message.id}"
+                await self._edit_message_with_retry(
+                    message,
+                    content="Party formed! Starting the challenge...",
+                    embed=None,
+                    view=None,
+                    attachments=[],
+                    suppress_failure=True,
+                )
+                
+                # Add all party members to the fighting players
                 for member in view.party_members:
-                    await self.remove_player_from_fight(member.id)
+                    await self.add_player_to_fight(member.id, dragon_fight_id)
                     
-        else:
-            await message.edit(content="Party formation timed out!", embed=None, view=None)
-            await self.bot.reset_cooldown(ctx)
+                try:
+                    # Create and start the dragon battle
+                    try:
+                        battle = await self.battle_factory.create_battle(
+                            "dragon",
+                            ctx,
+                            party_members=view.party_members
+                        )
+                        
+                        # Start the battle
+                        success = await battle.start_battle()
+                        if not success:
+                            # Remove players from fighting
+                            for member in view.party_members:
+                                await self.remove_player_from_fight(
+                                    member.id,
+                                    dragon_fight_id,
+                                )
+                            return await self._send_with_retry(
+                                ctx,
+                                content="Failed to start the dragon challenge!",
+                                suppress_failure=True,
+                            )
+                        
+                        # Process battle turns
+                        turn_count = 0
+                        battle_msg = await self._send_with_retry(
+                            ctx,
+                            content="⚔️ Battle started! Dragons and adventurers clash...",
+                            suppress_failure=True,
+                        )
+                        
+                        while not await battle.is_battle_over():
+                            try:
+                                turn_count += 1
+                                result = await battle.process_turn()
+                                
+                                # Only update message every 5 turns to reduce spam
+                                if turn_count % 5 == 0:
+                                    if battle_msg is not None:
+                                        await self._edit_message_with_retry(
+                                            battle_msg,
+                                            content=f"⚔️ Battle in progress - Turn {turn_count} - The dragon and party continue to battle...",
+                                            suppress_failure=True,
+                                        )
+                                
+                            except Exception as e:
+                                await self._send_with_retry(
+                                    ctx,
+                                    content=f"⚠️ Error in turn {turn_count}: {str(e)}\n```{traceback.format_exc()}```"[:1900],
+                                    suppress_failure=True,
+                                )
+                                break
+                        
+                        # Get the battle result
+                        await self._send_with_retry(
+                            ctx,
+                            content="Battle completed. Processing result...",
+                            suppress_failure=True,
+                        )
+                        victory = await battle.end_battle()
+                        
+                    except Exception as e:
+                        await self._send_with_retry(
+                            ctx,
+                            content=f"⚠️ Error in dragon battle: {str(e)}\n```{traceback.format_exc()}```"[:1900],
+                            suppress_failure=True,
+                        )
+                        return
+                    
+                    # Handle rewards
+                    combat_summary_embed = None
+                    if hasattr(battle, "create_participant_damage_summary_embed"):
+                        combat_summary_embed = battle.create_participant_damage_summary_embed()
+
+                    if victory is True:  # Players won
+                        stage_id = getattr(battle, "dragon_stage_id", None)
+                        await self._handle_dragon_victory(ctx, view.party_members, stage_id=stage_id)
+                    elif victory is False:  # Players lost
+                        await self._handle_dragon_defeat(ctx, view.party_members)
+                    else:  # Draw
+                        await self._send_with_retry(ctx, content="The battle ended in a draw!", suppress_failure=True)
+
+                    if combat_summary_embed is not None:
+                        await self._send_with_retry(ctx, embed=combat_summary_embed, suppress_failure=True)
+                        
+                finally:
+                    # Always remove players from fighting status
+                    for member in view.party_members:
+                        await self.remove_player_from_fight(
+                            member.id,
+                            dragon_fight_id,
+                        )
+                        
+            else:
+                await self._edit_message_with_retry(
+                    message,
+                    content="Party formation timed out!",
+                    embed=None,
+                    view=None,
+                    suppress_failure=True,
+                )
+                await self.bot.reset_cooldown(ctx)
+        except Exception as exc:
+            try:
+                await self.bot.reset_cooldown(ctx)
+            except Exception:
+                logger.exception("Failed to reset cooldown after Ice Dragon party error")
+            await self._report_dragon_party_error(ctx, "party menu", exc)
+            if message is not None:
+                try:
+                    await message.edit(
+                        content="The Ice Dragon party menu crashed. The error was logged.",
+                        embed=None,
+                        attachments=[],
+                        view=None,
+                    )
+                except Exception:
+                    logger.exception("Failed to replace crashed Ice Dragon party menu")
+        finally:
+            if view in self.dragon_party_views:
+                self.dragon_party_views.remove(view)
+
+    @dragon_party.error
+    async def dragon_party_error(self, ctx, error):
+        """Make failures from checks and cooldown decorators visible."""
+        send_callable = getattr(ctx, "_battle_original_send", ctx.send)
+        try:
+            if isinstance(error, commands.CommandOnCooldown):
+                retry_after = max(0, int(error.retry_after))
+                await send_callable(
+                    f"The Ice Dragon party command is on cooldown. "
+                    f"Try again in {datetime.timedelta(seconds=retry_after)}."
+                )
+                return
+
+            if isinstance(error, commands.CheckFailure):
+                if type(error).__name__ == "NoCharacter":
+                    message = "You need a character before creating an Ice Dragon party."
+                else:
+                    message = str(error) or "You cannot create an Ice Dragon party right now."
+                await send_callable(message)
+                return
+
+            actual_error = getattr(error, "original", error)
+            await self._report_dragon_party_error(
+                ctx,
+                "command checks or invocation",
+                actual_error,
+            )
+        except Exception:
+            logger.exception("Ice Dragon party command error handler failed")
     
-    async def _handle_dragon_victory(self, ctx, party_members):
+    async def _get_ice_dragon_drops(self):
+        async with self.bot.pool.acquire() as conn:
+            return await conn.fetch(
+                "SELECT id, name, item_type, min_stat, max_stat, base_chance, max_chance, is_global, dragon_stage_id, "
+                "element, min_level, max_level "
+                "FROM ice_dragon_drops ORDER BY id ASC"
+            )
+
+    async def _check_dragon_world_record(self, ctx, party_members, new_level):
+        """Announce a new all-time dragon level record."""
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dragon_records (
+                    id INTEGER PRIMARY KEY,
+                    record_level INTEGER NOT NULL DEFAULT 0,
+                    record_holder BIGINT,
+                    achieved_at TIMESTAMP
+                );
+                """
+            )
+            record = await conn.fetchrow(
+                "SELECT record_level FROM dragon_records WHERE id = 1"
+            )
+            old_record = int(record["record_level"] or 0) if record else 0
+            if int(new_level) <= old_record:
+                return
+            await conn.execute(
+                """
+                INSERT INTO dragon_records (id, record_level, record_holder, achieved_at)
+                VALUES (1, $1, $2, $3)
+                ON CONFLICT (id) DO UPDATE SET
+                    record_level = EXCLUDED.record_level,
+                    record_holder = EXCLUDED.record_holder,
+                    achieved_at = EXCLUDED.achieved_at;
+                """,
+                int(new_level),
+                ctx.author.id,
+                datetime.datetime.utcnow(),
+            )
+
+        party_mentions = ", ".join(member.mention for member in party_members)
+        await ctx.send(
+            f"🌌 **WORLD FIRST!** The community has pushed the dragon to level **{new_level}** — "
+            f"a new all-time record! The decisive party: {party_mentions}."
+        )
+        self.bot.dispatch("dragon_world_record", ctx, party_members, int(new_level))
+
+    async def _handle_dragon_victory(self, ctx, party_members, stage_id=None):
         """Handle rewards for defeating the dragon"""
         # Get current dragon level
         dragon_stats = await self.battle_factory.dragon_ext.get_dragon_stats_from_database(self.bot)
@@ -3004,6 +12190,7 @@ class Battles(commands.Cog):
         
         # Update dragon progress in database
         level_up = False
+        new_level = old_level
         try:
             updated_stats = await self.battle_factory.dragon_ext.update_dragon_progress(
                 self.bot,
@@ -3033,9 +12220,23 @@ class Battles(commands.Cog):
         if level_up:
             embed.add_field(
                 name="Dragon Level Up",
-                value=f"The Dragon has grown stronger and is now Level {old_level + 1}!",
+                value=f"The Dragon has grown stronger and is now Level {new_level}!",
                 inline=False
             )
+            if new_level == 35:
+                embed.add_field(
+                    name="The Abyssal Maw Awakens",
+                    value=(
+                        "The dragon sheds its final skin. From level 35 onward, "
+                        "the Abyssal Maw scales endlessly."
+                    ),
+                    inline=False
+                )
+            if new_level >= 35:
+                try:
+                    await self._check_dragon_world_record(ctx, party_members, new_level)
+                except Exception:
+                    logger.exception("Failed to update Ice Dragon world record")
         else:
             # Show progress information instead
             # Always 40 defeats needed per level
@@ -3050,8 +12251,48 @@ class Battles(commands.Cog):
         
         # Give rewards to each party member
         reward_text = ""
+        weapon_rewards_text = ""
+        maw_crate_rewards_text = ""
+        level_bonus = min(0.08, (old_level - 1) * 0.003)  # 0.3% bonus per level, max 8%
+        if stage_id is None:
+            try:
+                stage = await self.battle_factory.dragon_ext.get_dragon_stage(self.bot, old_level)
+                stage_id = stage.get("id")
+            except Exception:
+                stage_id = None
+        try:
+            all_drops = await self._get_ice_dragon_drops()
+        except Exception:
+            all_drops = []
+        eligible_drops = []
+        for drop in all_drops:
+            if not drop["is_global"] and stage_id is not None and drop["dragon_stage_id"] != stage_id:
+                continue
+            if not drop["is_global"] and stage_id is None:
+                continue
+            min_level = drop["min_level"]
+            max_level = drop["max_level"]
+            if min_level is not None and old_level < min_level:
+                continue
+            if max_level is not None and old_level > max_level:
+                continue
+            eligible_drops.append(drop)
+        dragon_coin_reward = 0
         try:
             async with self.bot.pool.acquire() as conn:
+                party_member_ids = list(dict.fromkeys(member.id for member in party_members))
+                if (
+                    party_member_ids
+                    and random.randint(1, 100) <= self.DRAGON_COIN_DROP_CHANCE_PERCENT
+                ):
+                    dragon_coin_reward = random.randint(
+                        self.DRAGON_COIN_DROP_MIN, self.DRAGON_COIN_DROP_MAX
+                    )
+                    await conn.execute(
+                        'UPDATE profile SET dragoncoins = dragoncoins + $1 WHERE "user" = ANY($2);',
+                        dragon_coin_reward,
+                        party_member_ids,
+                    )
                 for idx, member in enumerate(party_members):
                     try:
                         # Calculate individual rewards with diminishing returns
@@ -3070,14 +12311,75 @@ class Battles(commands.Cog):
                             'UPDATE profile SET "money"="money"+$1, "xp"="xp"+$2 WHERE "user"=$3;',
                             member_money, member_xp, member.id
                         )
+                        await self.bot.log_xp_watch_event(
+                            ctx=ctx,
+                            user_id=member.id,
+                            delta=int(member_xp),
+                            source="battles.dragon_challenge.victory",
+                            details={
+                                "dragon_level": int(old_level),
+                                "party_size": len(party_members),
+                                "member_money_reward": int(member_money),
+                            },
+                            before_xp=current_xp,
+                            after_xp=current_xp + member_xp,
+                            conn=conn,
+                        )
 
                         # Calculate new level and check for level-up
                         new_level = int(rpgtools.xptolevel(current_xp + member_xp))
+
                         if current_level != new_level:
-                            await self.bot.process_levelup(ctx, new_level, current_level)
+                            await self.bot.process_guildlevelup(ctx, member.id, new_level, current_level)
                         
                         # Record in reward text
                         reward_text += f"• {member.mention}: {member_money} 💰, {member_xp} XP\n"
+
+                        if (
+                            old_level >= 35
+                            and random.random() < self.MAW_DIVINE_CRATE_DROP_CHANCE
+                        ):
+                            await conn.execute(
+                                'UPDATE profile SET crates_divine = crates_divine + 1 WHERE "user"=$1;',
+                                member.id,
+                            )
+                            maw_crate_rewards_text += f"• {member.mention}: Divine Crate\n"
+                        
+                        # ICE DRAGON WEAPON REWARDS (DB-driven)
+                        try:
+                            for drop in eligible_drops:
+                                effective_chance = min(drop["max_chance"], drop["base_chance"] + level_bonus)
+                                if random.random() < effective_chance:
+                                    try:
+                                        stat = random.randint(drop["min_stat"], drop["max_stat"])
+                                        item_type = ItemType.from_string(drop["item_type"])
+                                        if not item_type:
+                                            continue
+                                        hand = item_type.get_hand().value
+                                        element = drop["element"] or "Water"
+                                        
+                                        # Create the weapon
+                                        await self.bot.create_item(
+                                            name=drop["name"],
+                                            value=10000,
+                                            type_=item_type.value,
+                                            damage=stat if item_type != ItemType.Shield else 0,
+                                            armor=stat if item_type == ItemType.Shield else 0,
+                                            hand=hand,
+                                            owner=member,
+                                            element=element,
+                                            conn=conn
+                                        )
+                                        
+                                        weapon_type_display = "2H" if hand == "both" else "1H"
+                                        rarity_emoji = "🌟" if hand == "both" else "⭐"
+                                        weapon_rewards_text += f"{rarity_emoji} **{member.mention}** found **{drop['name']}** ({weapon_type_display}) with {stat} stats!\n"
+                                    except Exception as e:
+                                        print(f"Error creating ice dragon weapon for {member.display_name}: {e}")
+                                        continue
+                        except Exception as e:
+                            await ctx.send(f"Error creating ice dragon weapon for {member.display_name}: {e}")
+                            continue
                         
                         # Update dragon_contributions for this player
                         player_count = await conn.fetchval(
@@ -3100,9 +12402,25 @@ class Battles(commands.Cog):
                     except Exception:
                         # Continue with next member even if this one fails
                         continue
+                if dragon_coin_reward > 0:
+                    reward_text += (
+                        f"🐉 Dragon Coin Bonus: Each party member also received {dragon_coin_reward} <:dragoncoin:1404860657366728788> Dragon Coins\n"
+                    )
         except Exception:
             # Try to continue with embed even if rewards failed
             reward_text = "Error processing rewards."
+
+        stage_name = self._get_dragon_stage_name(old_level)
+
+        await self._progress_custom_quest_source(
+            ctx,
+            party_members,
+            "dragonparty",
+            stage_name,
+            str(stage_id) if stage_id is not None else None,
+            str(old_level),
+            f"level {old_level}",
+        )
         
         # Add rewards to embed
         try:
@@ -3112,11 +12430,60 @@ class Battles(commands.Cog):
                 inline=False
             )
             
+            # Add weapon rewards if any were found
+            if weapon_rewards_text:
+                embed.add_field(
+                    name="❄️ Ice Dragon Weapon Drops",
+                    value=weapon_rewards_text,
+                    inline=False
+                )
+            else:
+                # Add a note about the weapon drop system with drop rate info
+                total_chance_1h = 0.0
+                total_chance_2h = 0.0
+                for drop in eligible_drops:
+                    item_type = ItemType.from_string(drop["item_type"])
+                    if not item_type:
+                        continue
+                    effective_chance = min(drop["max_chance"], drop["base_chance"] + level_bonus)
+                    if item_type.get_hand().value == "both":
+                        total_chance_2h += effective_chance
+                    else:
+                        total_chance_1h += effective_chance
+                embed.add_field(
+                    name="❄️ Ice Dragon Loot",
+                    value=f"No legendary weapons were found this time. Keep challenging the dragon for a chance at rare ice-themed weapons!\n\n**Drop Rates:**\n• 1H Total: {total_chance_1h:.1%}\n• 2H Total: {total_chance_2h:.1%}",
+                    inline=False
+                )
+            if maw_crate_rewards_text:
+                embed.add_field(
+                    name="Abyssal Maw Bonus",
+                    value=maw_crate_rewards_text,
+                    inline=False
+                )
+            
             await ctx.send(embed=embed)
         except Exception:
             # Try a simple text message as fallback
             await ctx.send("Victory! The dragon has been defeated and rewards have been distributed.")
             pass
+
+        self.bot.dispatch("icedragon_victory", ctx, party_members, stage_name, old_level)
+
+    def _get_dragon_stage_name(self, level: int) -> str:
+        """Get the dragon stage name for a given level"""
+        if level <= 5:
+            return "Frostbite Wyrm"
+        elif level <= 10:
+            return "Corrupted Ice Dragon"
+        elif level <= 15:
+            return "Permafrost"
+        elif level <= 20:
+            return "Absolute Zero"
+        elif level <= 34:
+            return "Void Tyrant"
+        else:
+            return "The Abyssal Maw"
 
     
     async def _handle_dragon_defeat(self, ctx, party_members):
@@ -3134,24 +12501,52 @@ class Battles(commands.Cog):
             value="Each party member receives a small amount of XP for their efforts.",
             inline=False
         )
-        
+
         # Get current dragon level
         dragon_stats = await self.battle_factory.dragon_ext.get_dragon_stats_from_database(self.bot)
         dragon_level = dragon_stats.get("level", 1)
-        
+
         # Give small XP reward for trying
         async with self.bot.pool.acquire() as conn:
             for member in party_members:
-                # Small XP consolation
-                consolation_xp = 50 * dragon_level
-                
-                await conn.execute(
-                    'UPDATE profile SET "xp"="xp"+$1 WHERE "user"=$2;',
-                    consolation_xp, member.id
+                # Get current XP and level before update
+                current_data = await conn.fetchrow(
+                    'SELECT "xp" FROM profile WHERE "user"=$1;',
+                    member.id
                 )
-        
+
+                if current_data:
+                    current_xp = current_data["xp"]
+                    current_level = int(rpgtools.xptolevel(current_xp))
+
+                    # Small XP consolation
+                    consolation_xp = 50 * dragon_level
+
+                    await conn.execute(
+                        'UPDATE profile SET "xp"="xp"+$1 WHERE "user"=$2;',
+                        consolation_xp, member.id
+                    )
+                    await self.bot.log_xp_watch_event(
+                        ctx=ctx,
+                        user_id=member.id,
+                        delta=int(consolation_xp),
+                        source="battles.dragon_challenge.defeat_consolation",
+                        details={
+                            "dragon_level": int(dragon_level),
+                            "party_size": len(party_members),
+                        },
+                        before_xp=current_xp,
+                        after_xp=current_xp + consolation_xp,
+                        conn=conn,
+                    )
+
+                    # Calculate new level and check for level-up
+                    new_level = int(rpgtools.xptolevel(current_xp + consolation_xp))
+
+                    if current_level != new_level:
+                        await self.bot.process_guildlevelup(ctx, member.id, new_level, current_level, conn)
+
         await ctx.send(embed=embed)
-    
     
     @dragon_challenge.command(name="leaderboard", aliases=["lb"])
     async def dragon_leaderboard(self, ctx):
@@ -3217,6 +12612,81 @@ class Battles(commands.Cog):
         )
         
         await ctx.send(embed=embed)
+
+    @dragon_challenge.command(
+        name="damageleaderboard",
+        aliases=["damagelb", "dmglb", "damageboard", "dragondamage"],
+    )
+    async def dragon_damage_leaderboard(self, ctx):
+        """View the all-time Ice Dragon damage leaderboard"""
+        await ctx.typing()
+
+        async with self.bot.pool.acquire() as conn:
+            players = await conn.fetch(
+                """
+                SELECT ddl.user_id, ddl.total_damage, p.name
+                FROM dragon_damage_leaderboard ddl
+                LEFT JOIN profile p ON p.user = ddl.user_id
+                ORDER BY ddl.total_damage DESC, ddl.updated_at ASC, ddl.user_id ASC
+                LIMIT 10
+                """
+            )
+
+            user_profile = await conn.fetchrow(
+                """
+                SELECT ddl.total_damage, p.name
+                FROM dragon_damage_leaderboard ddl
+                LEFT JOIN profile p ON p.user = ddl.user_id
+                WHERE ddl.user_id = $1
+                """,
+                ctx.author.id,
+            )
+
+        result = ""
+        top_10_ids = [player["user_id"] for player in players]
+        user_in_top_10 = ctx.author.id in top_10_ids
+
+        for idx, profile in enumerate(players):
+            username = await rpgtools.lookup(self.bot, profile["user_id"])
+            total_damage = Decimal(str(profile["total_damage"] or 0))
+            text = _(
+                "{name}, a character by {username} with **{damage}** dragon damage"
+            ).format(
+                name=escape_markdown(profile["name"] or "Unknown"),
+                username=escape_markdown(username),
+                damage=f"{total_damage:,.2f}",
+            )
+            result += f"{idx + 1}. {text}\n"
+
+        if not result:
+            result = _("No one has dealt damage to the dragon yet.\n")
+
+        if not user_in_top_10:
+            if user_profile:
+                user_damage = Decimal(str(user_profile["total_damage"] or 0))
+                user_rank = await self.bot.pool.fetchval(
+                    "SELECT COUNT(*) FROM dragon_damage_leaderboard WHERE total_damage > $1;",
+                    user_damage,
+                )
+                username = await rpgtools.lookup(self.bot, ctx.author.id)
+                text = _(
+                    "{name}, a character by {username} with **{damage}** dragon damage"
+                ).format(
+                    name=escape_markdown(user_profile["name"] or "Unknown"),
+                    username=escape_markdown(username),
+                    damage=f"{user_damage:,.2f}",
+                )
+                result += _("\n**Your Rank:**\n")
+                result += f"{int(user_rank or 0) + 1}. {text}\n"
+            elif players:
+                result += _("\nYou are not currently ranked.\n")
+
+        embed = discord.Embed(
+            title=_("The Top Dragon Damage Dealers"),
+            description=result,
+            colour=0xE7CA01,
+        )
+        await ctx.send(embed=embed)
     
     @dragon_challenge.command(name="reset")
     @is_gm()
@@ -3254,8 +12724,1272 @@ class Battles(commands.Cog):
         except Exception as e:
             print(f"[ERROR] Failed to check dragon weekly reset: {e}")
 
+    @commands.group(aliases=["cbt"])
+    async def couples_battletower(self, ctx):
+        """Commands for the Couples Battle Tower."""
+        if ctx.invoked_subcommand is None:
+            await ctx.invoke(self.cbt_progress)
+
+    async def reset_couples_cooldown(self, user1_id, user2_id, command_type="both"):
+        """Reset couples battle tower cooldown for both partners."""
+        try:
+            if command_type == "both":
+                # Reset both start and begin cooldowns
+                await self.bot.redis.execute_command("DEL", f"cd:{user1_id}:couples_battletower start")
+                await self.bot.redis.execute_command("DEL", f"cd:{user2_id}:couples_battletower start")
+                await self.bot.redis.execute_command("DEL", f"cd:{user1_id}:couples_battletower begin")
+                await self.bot.redis.execute_command("DEL", f"cd:{user2_id}:couples_battletower begin")
+            else:
+                # Reset specific command cooldown
+                await self.bot.redis.execute_command("DEL", f"cd:{user1_id}:couples_battletower {command_type}")
+                await self.bot.redis.execute_command("DEL", f"cd:{user2_id}:couples_battletower {command_type}")
+        except Exception:
+            pass  # Ignore redis errors
+
+    async def _discord_request_with_retry(self, request, *, action_name: str, attempts: int = 3, suppress_failure: bool = False):
+        for attempt in range(1, attempts + 1):
+            try:
+                return await request()
+            except discord.NotFound:
+                raise
+            except discord.Forbidden:
+                raise
+            except (discord.DiscordServerError, asyncio.TimeoutError, OSError) as exc:
+                if attempt < attempts:
+                    await asyncio.sleep(attempt)
+                    continue
+                logger.warning("Battles %s failed after retries: %s", action_name, exc)
+                if suppress_failure:
+                    return None
+                raise
+            except discord.HTTPException as exc:
+                status = getattr(exc, "status", None)
+                if status is not None and status >= 500 and attempt < attempts:
+                    await asyncio.sleep(attempt)
+                    continue
+                if status is not None and status >= 500:
+                    logger.warning("Battles %s failed after retries: %s", action_name, exc)
+                    if suppress_failure:
+                        return None
+                raise
+
+    async def _send_with_retry(self, ctx, *, suppress_failure: bool = False, **kwargs):
+        send_callable = getattr(ctx, "_battle_original_send", ctx.send)
+        return await self._discord_request_with_retry(
+            lambda: send_callable(**kwargs),
+            action_name="ctx.send",
+            suppress_failure=suppress_failure,
+        )
+
+    async def _edit_message_with_retry(self, message, *, suppress_failure: bool = False, **kwargs):
+        return await self._discord_request_with_retry(
+            lambda: message.edit(**kwargs),
+            action_name="message.edit",
+            suppress_failure=suppress_failure,
+        )
+
+    def _guard_battle_context(self, ctx):
+        if getattr(ctx, "_battle_send_guarded", False):
+            return ctx
+
+        original_send = ctx.send
+
+        async def guarded_send(*args, **kwargs):
+            return await self._discord_request_with_retry(
+                lambda: original_send(*args, **kwargs),
+                action_name="ctx.send",
+                suppress_failure=True,
+            )
+
+        ctx._battle_original_send = original_send
+        ctx.send = guarded_send
+        ctx._battle_send_guarded = True
+        return ctx
+
+    async def _progress_custom_quest_source(self, ctx, users, source: str, *candidate_names: str | None):
+        quests_cog = self.bot.get_cog("Quests")
+        if quests_cog is None:
+            return
+
+        seen_ids = set()
+        unique_users = []
+        for user in users:
+            user_id = getattr(user, "id", None)
+            if user_id is None or user_id in seen_ids:
+                continue
+            seen_ids.add(user_id)
+            unique_users.append(user)
+
+        metadata = {"party_size": len(unique_users)}
+        for user in unique_users:
+            user_id = user.id
+            try:
+                await quests_cog.process_external_source_completion_for_user(
+                    ctx,
+                    user,
+                    source,
+                    candidate_names=candidate_names,
+                    metadata=metadata,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to process custom quest source %s for user %s: %s",
+                    source,
+                    user_id,
+                    exc,
+                )
+
+    async def get_couple_progress(self, user_id, partner_id):
+        """Fetch couple's battle tower progress from the database."""
+        id1, id2 = sorted((user_id, partner_id))
+        query = "SELECT current_level, prestige FROM couples_battle_tower WHERE partner1_id = $1 AND partner2_id = $2"
+        async with self.bot.pool.acquire() as conn:
+            row = await conn.fetchrow(query, id1, id2)
+        if row:
+            return dict(row)
+        return None
+
+    async def update_couple_progress(self, user_id, partner_id, level, prestige_up=False):
+        """Update or insert a couple's battle tower progress."""
+        id1, id2 = sorted((user_id, partner_id))
+        prestige_change = 1 if prestige_up else 0
+        query = """
+            INSERT INTO couples_battle_tower (partner1_id, partner2_id, current_level, prestige, last_attempt_at)
+            VALUES ($1, $2, $3, $4, NOW())
+            ON CONFLICT (partner1_id, partner2_id)
+            DO UPDATE SET
+                current_level = GREATEST(couples_battle_tower.current_level, $3),
+                prestige = couples_battle_tower.prestige + $4,
+                last_attempt_at = NOW();
+        """
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(query, id1, id2, level, prestige_change)
+            
+    @couples_battletower.command(name="start", aliases=["fight"])
+    @has_char()
+    @user_cooldown(3600)
+    async def cbt_start(self, ctx):
+        """Starts a Couples Battle Tower fight."""
+        ctx = self._guard_battle_context(ctx)
+        try:
+            author = ctx.author
+            query = "SELECT marriage FROM profile WHERE profile.user = $1"
+            result = await self.bot.pool.fetchval(query, ctx.author.id)
+            partner_id = result  # This will be the marriage partner's ID, or None if not married
+
+            if not partner_id:
+                await self.bot.reset_cooldown(ctx)
+                return await ctx.send(_("You are not married. This challenge is for couples only!"))
+            
+
+            partner = await self.bot.fetch_user(partner_id)
+
+            
+            # Apply cooldown to both partners at the start
+            await self.bot.redis.execute_command(
+                "SET", f"cd:{ctx.author.id}:couples_battletower start",
+                "couples_battletower start",
+                "EX", 3600
+            )
+            await self.bot.redis.execute_command(
+                "SET", f"cd:{partner_id}:couples_battletower start", 
+                "couples_battletower start",
+                "EX", 3600
+            )
+
+
+
+
+            progress = await self.get_couple_progress(author.id, partner.id)
+            if not progress:
+                progress = {'current_level': 1, 'prestige': 0}
+                await self.update_couple_progress(author.id, partner.id, 1) # Create initial record
+
+            level = progress['current_level']
+
+            if level > len(self.couples_game_levels["levels"]):
+                return await ctx.send(_("You have already conquered the tower!"))
+
+            level_info = self.couples_game_levels["levels"][level - 1]
+
+            embed = discord.Embed(
+                title=f"💕 The Tower of Eternal Bonds - Floor {level} 💕",
+                description=f"**{level_info['title']}**\n\n{level_info['story']}",
+                color=discord.Color.magenta()
+            )
+            embed.add_field(name="💑 Your Partner", value=f"{partner.display_name}, please join the battle!", inline=False)
+            embed.set_footer(text=f"Your love will be tested on this floor...")
+            try:
+                await self._send_with_retry(ctx, content=partner.mention)
+            except:
+                pass
+
+            original_message = await self._send_with_retry(ctx, embed=embed)
+
+            async def on_join():
+                await self._edit_message_with_retry(
+                    original_message,
+                    content=_("💕 Your partner has joined! Preparing for battle..."),
+                    embed=None,
+                    view=None,
+                )
+                
+                # Show couples dialogue
+                await self.display_couples_dialogue(ctx, level, author, partner)
+                
+                await self.add_player_to_fight(author.id)
+                await self.add_player_to_fight(partner.id)
+
+                try:
+                    battle = await self.battle_factory.create_battle(
+                        "couples_tower",
+                        ctx,
+                        player=author,
+                        level=level,
+                        game_levels=self.couples_game_levels,
+                    )
+                    
+                    # Start the battle
+                    await battle.start_battle()
+                    
+                    # Run the battle until completion
+                    while not await battle.is_battle_over():
+                        await battle.process_turn()
+                        await asyncio.sleep(2)  # 2 second delay between turns
+                    
+                    # Get the result (winner team)
+                    result = await battle.end_battle()
+
+                    if result and result.name == "Player":
+                        victory_data = self.couples_battle_tower_data["victories"].get(str(level), {})
+                        vic_embed = discord.Embed(title=f"🏆 Floor {level} Conquered! - {victory_data.get('title', 'Victory!')} 🏆",
+                                                  description=victory_data.get('description', 'You are victorious!'),
+                                                  color=discord.Color.gold())
+                        await self._send_with_retry(ctx, embed=vic_embed, suppress_failure=True)
+                        await self._progress_custom_quest_source(
+                            ctx,
+                            [author, partner],
+                            "cbt",
+                            level_info.get("title"),
+                            str(level),
+                        )
+                        
+                        # Check if this level has chest rewards (every 5 levels)
+                        if victory_data.get('has_chest', False):
+                            # Get emotes for crate display
+                            emotes = {
+                                "common": "<:c_common:1403797578197368923>",
+                                "uncommon": "<:c_uncommon:1403797597532983387>",
+                                "rare": "<:c_rare:1403797594827657247>",
+                                "magic": "<:c_Magic:1403797589169541330>",
+                                "legendary": "<:c_Legendary:1403797587236225044>",
+                                "mystery": "<:c_mystspark:1403797593129222235>",
+                                "fortune": "<:c_money:1403797585411575971>",
+                                "divine": "<:c_divine:1403797579635884202>",
+                            }
+                            await self.handle_couples_chest_rewards(ctx, level, author, partner, emotes)
+                        # Check if this is the finale (level 30)
+                        elif victory_data.get('finale', False):
+                            await self.handle_couples_finale_rewards(ctx, level, author, partner)
+                        else:
+                            # Regular level completion - just update progress
+                            await self.update_couple_progress(author.id, partner.id, level + 1)
+                    else:
+                        await self._send_with_retry(
+                            ctx,
+                            content="💔 You have been defeated. Train harder and try again!",
+                            suppress_failure=True,
+                        )
+
+                finally:
+                    await self.remove_player_from_fight(author.id)
+                    await self.remove_player_from_fight(partner.id)
+
+
+            async def on_cancel():
+                await self._edit_message_with_retry(
+                    original_message,
+                    content=_("💔 The battle was cancelled or your partner did not respond in time."),
+                    embed=None,
+                    view=None,
+                )
+                # Reset cooldown for both partners since battle didn't start
+                await self.reset_couples_cooldown(author.id, partner.id)
+
+            view = CouplesTowerView(author, partner, on_join, on_cancel)
+            await self._edit_message_with_retry(original_message, embed=embed, view=view)
+        except Exception as e:
+            await self._send_with_retry(ctx, content=str(e), suppress_failure=True)
+
+    @couples_battletower.command(name="progress")
+    @has_char()
+    async def cbt_progress(self, ctx):
+        """Shows your Couples Battle Tower progress."""
+        try:
+            author = ctx.author
+            query = "SELECT marriage FROM profile WHERE profile.user = $1"
+            result = await self.bot.pool.fetchval(query, ctx.author.id)
+            partner_id = result
+
+            if not partner_id:
+                return await ctx.send(_("You are not married. This challenge is for couples only!"))
+
+            partner = await self.bot.fetch_user(partner_id)
+            progress = await self.get_couple_progress(author.id, partner.id)
+            
+            if not progress:
+                progress = {'current_level': 1, 'prestige': 0}
+                await self.update_couple_progress(author.id, partner.id, 1)
+
+            level = progress['current_level']
+            prestige = progress['prestige']
+
+            # Get level names from the couples game levels
+            level_names = []
+            for i, level_info in enumerate(self.couples_game_levels["levels"], 1):
+                level_names.append(level_info['title'])
+
+            # Function to generate the formatted level list (similar to regular battle tower)
+            def generate_couples_level_list(levels, start_level=1):
+                result = "```\n"
+                for level_num, level_name in enumerate(levels, start=start_level):
+                    checkbox = "❌" if level_num == level else "✅" if level_num < level else "❌"
+                    result += f"Floor {level_num:<2} {checkbox} {level_name}\n"
+                result += "```"
+                return result
+
+            embed = discord.Embed(
+                title="💕 Couples Battle Tower Progress 💕",
+                description=f"**{author.display_name}** & **{partner.display_name}**\nLevel: {level}\nPrestige Level: {prestige}",
+                color=discord.Color.magenta()
+            )
+            
+            if level <= len(level_names):
+                embed.add_field(
+                    name="Floor Progress", 
+                    value=generate_couples_level_list(level_names), 
+                    inline=False
+                )
+                
+                # Show next challenge info
+                level_info = self.couples_game_levels["levels"][level - 1]
+                embed.add_field(
+                    name="Next Challenge",
+                    value=f"**{level_info['title']}**\n{level_info['story'][:150]}...",
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="Status",
+                    value="🏆 **You have conquered the Tower of Eternal Bonds!** 🏆",
+                    inline=False
+                )
+
+            embed.set_footer(text="💕 **Your love grows stronger with each floor conquered** 💕")
+
+            await ctx.send(embed=embed)
+        except Exception as e:
+            await ctx.send(f"Error: {e}")
+
+    @couples_battletower.command(name="dialogue")
+    @has_char()
+    async def cbt_dialogue(self, ctx, level: int = None):
+        """View the dialogue for a specific level of the Couples Battle Tower."""
+        try:
+            author = ctx.author
+            query = "SELECT marriage FROM profile WHERE profile.user = $1"
+            result = await self.bot.pool.fetchval(query, ctx.author.id)
+            partner_id = result
+
+            if not partner_id:
+                return await ctx.send(_("You are not married. This challenge is for couples only!"))
+
+            partner = await self.bot.fetch_user(partner_id)
+
+            if not partner:
+                return await ctx.send(_("Your partner is not online. Please try again later."))
+
+            # If no level specified, show current level
+            if not level:
+                progress = await self.get_couple_progress(author.id, partner.id)
+                if not progress:
+                    return await ctx.send(_("You haven't started the Couples Battle Tower yet. Use `$couples_battletower begin` to begin!"))
+                level = progress['current_level']
+            
+            # Validate level
+            if level < 1 or level > len(self.couples_game_levels["levels"]):
+                return await ctx.send(_(f"Invalid level. Please choose a level between 1 and {len(self.couples_game_levels['levels'])}."))
+
+            # Show dialogue for the specified level
+            await self.display_couples_dialogue(ctx, level, author, partner, dialogue_only=True)
+            
+        except Exception as e:
+            await ctx.send(f"An error occurred: {e}")
+
+    @couples_battletower.command(name="preview")
+    @has_char()
+    async def cbt_preview(self, ctx, level: int):
+        """Preview the dialogue for a specific level without starting a battle."""
+        try:
+            author = ctx.author
+            query = "SELECT marriage FROM profile WHERE profile.user = $1"
+            result = await self.bot.pool.fetchval(query, ctx.author.id)
+            partner_id = result
+
+            if not partner_id:
+                return await ctx.send(_("You are not married. This challenge is for couples only!"))
+
+            partner = await self.bot.fetch_user(partner_id)
+
+            if not partner:
+                return await ctx.send(_("Your partner is not online. Please try again later."))
+
+            # Validate level
+            if level < 1 or level > len(self.couples_game_levels["levels"]):
+                return await ctx.send(_(f"Invalid level. Please choose a level between 1 and {len(self.couples_game_levels['levels'])}."))
+
+            level_info = self.couples_game_levels["levels"][level - 1]
+            
+            # Get full story text, but limit to embed field limits
+            story_text = level_info['story']
+            if len(story_text) > 900:
+                story_text = story_text[:900] + "..."
+            
+            dialogue_text = level_info['dialogue_start']
+            if len(dialogue_text) > 900:
+                dialogue_text = dialogue_text[:900] + "..."
+            
+            embed = discord.Embed(
+                title=f"💕 Preview: Floor {level} - {level_info['title']} 💕",
+                description=f"**Story Preview:**\n{story_text}",
+                color=discord.Color.magenta()
+            )
+            embed.add_field(name="Challenge", value=dialogue_text, inline=False)
+            
+            # Show mechanics if available
+            mechanics_desc = self.get_level_mechanics_description(level)
+            if len(mechanics_desc) > 1000:
+                mechanics_desc = mechanics_desc[:1000] + "..."
+            embed.add_field(name="⚙️ Floor Mechanics", value=mechanics_desc, inline=False)
+            
+            # Enemy info
+            if "enemies" in level_info:
+                enemy_count = len(level_info['enemies'])
+                enemy_names = [enemy.get('name', 'Unknown') for enemy in level_info['enemies'][:3]]  # Show first 3
+                enemy_text = f"**{enemy_count} enemies await:** {', '.join(enemy_names)}"
+                if enemy_count > 3:
+                    enemy_text += f" and {enemy_count - 3} more..."
+                embed.add_field(name="👹 Enemies", value=enemy_text, inline=False)
+            
+            embed.set_footer(text=f"Use $couples_battletower dialogue {level} to see the full story!")
+            
+            await ctx.send(embed=embed)
+            
+        except Exception as e:
+            await ctx.send(f"An error occurred: {e}")
+
+    @couples_battletower.command(name="begin")
+    @has_char()
+    @user_cooldown(300)
+    async def cbt_begin(self, ctx):
+        """Starts a Couples Battle Tower fight."""
+        ctx = self._guard_battle_context(ctx)
+        try:
+            author = ctx.author
+            query = "SELECT marriage FROM profile WHERE profile.user = $1"
+            result = await self.bot.pool.fetchval(query, ctx.author.id)
+            partner_id = result  # This will be the marriage partner's ID, or None if not married
+
+            if not partner_id:
+                return await ctx.send(_("You are not married. This challenge is for couples only!"))
+
+            partner = await self.bot.fetch_user(partner_id)
+
+            # Check if either partner is already on couples battle tower cooldown (check both commands)
+            author_start_cooldown = await user_cooldown(self.bot, ctx.author.id, "couples_battletower start", 3600)
+            partner_start_cooldown = await user_cooldown(self.bot, partner_id, "couples_battletower start", 3600)
+            author_begin_cooldown = await user_cooldown(self.bot, ctx.author.id, "couples_battletower begin", 300)
+            partner_begin_cooldown = await user_cooldown(self.bot, partner_id, "couples_battletower begin", 300)
+            
+            if author_start_cooldown or partner_start_cooldown or author_begin_cooldown or partner_begin_cooldown:
+                if author_start_cooldown or author_begin_cooldown:
+                    cooldown_partner = "You are"
+                else:
+                    cooldown_partner = f"{partner.display_name} is"
+                return await ctx.send(f"{cooldown_partner} still on cooldown for the couples battle tower. Please wait before starting another challenge.")
+
+            # Check if either is currently in a fight
+            if await self.is_player_in_fight(author.id) or await self.is_player_in_fight(partner.id):
+                 return await ctx.send(_("One of you is already in a fight."))
+
+            # Apply cooldown to both partners at the start
+            await self.bot.redis.execute_command(
+                "SET", f"cd:{ctx.author.id}:couples_battletower begin",
+                "couples_battletower begin",
+                "EX", 300
+            )
+            await self.bot.redis.execute_command(
+                "SET", f"cd:{partner_id}:couples_battletower begin", 
+                "couples_battletower begin",
+                "EX", 300
+            )
+
+            progress = await self.get_couple_progress(author.id, partner.id)
+            if not progress:
+                progress = {'current_level': 1, 'prestige': 0}
+                await self.update_couple_progress(author.id, partner.id, 1) # Create initial record
+
+            level = progress['current_level']
+
+            if level > len(self.couples_game_levels["levels"]):
+                return await ctx.send(_("You have already conquered the tower!"))
+
+            level_info = self.couples_game_levels["levels"][level - 1]
+
+            embed = discord.Embed(
+                title=f"💕 The Tower of Eternal Bonds - Floor {level} 💕",
+                description=f"**{level_info['title']}**\n\n{level_info['story']}",
+                color=discord.Color.magenta()
+            )
+            embed.add_field(name="💑 Your Partner", value=f"{partner.display_name}, please join the battle!", inline=False)
+            embed.set_footer(text=f"Your love will be tested on this floor...")
+            try: 
+                await self._send_with_retry(ctx, content=partner.mention)
+            except:
+                pass
+
+            original_message = await self._send_with_retry(ctx, embed=embed)
+
+            async def on_join():
+                await self._edit_message_with_retry(
+                    original_message,
+                    content=_("💕 Your partner has joined! Preparing for battle..."),
+                    embed=None,
+                    view=None,
+                )
+                
+                # Show couples dialogue
+                await self.display_couples_dialogue(ctx, level, author, partner)
+                
+                await self.add_player_to_fight(author.id)
+                await self.add_player_to_fight(partner.id)
+
+                try:
+                    battle = await self.battle_factory.create_battle(
+                        "couples_tower",
+                        ctx,
+                        player=author,
+                        level=level,
+                        game_levels=self.couples_game_levels,
+                    )
+                    
+                    # Start the battle
+                    await battle.start_battle()
+                    
+                    # Run the battle until completion
+                    while not await battle.is_battle_over():
+                        await battle.process_turn()
+                        await asyncio.sleep(2)  # 2 second delay between turns
+                    
+                    # Get the result (winner team)
+                    result = await battle.end_battle()
+
+                    if result and result.name == "Player":
+                        victory_data = self.couples_battle_tower_data["victories"].get(str(level), {})
+                        vic_embed = discord.Embed(title=f"🏆 Floor {level} Conquered! - {victory_data.get('title', 'Victory!')} 🏆",
+                                                  description=victory_data.get('description', 'You are victorious!'),
+                                                  color=discord.Color.gold())
+                        await self._send_with_retry(ctx, embed=vic_embed, suppress_failure=True)
+                        await self._progress_custom_quest_source(
+                            ctx,
+                            [author, partner],
+                            "cbt",
+                            level_info.get("title"),
+                            str(level),
+                        )
+                        
+                        # Check if this level has chest rewards (every 5 levels)
+                        if victory_data.get('has_chest', False):
+                            # Get emotes for crate display
+                            emotes = {
+                                "common": "<:c_common:1403797578197368923>",
+                                "uncommon": "<:c_uncommon:1403797597532983387>",
+                                "rare": "<:c_rare:1403797594827657247>",
+                                "magic": "<:c_Magic:1403797589169541330>",
+                                "legendary": "<:c_Legendary:1403797587236225044>",
+                                "mystery": "<:c_mystspark:1403797593129222235>",
+                                "fortune": "<:c_money:1403797585411575971>",
+                                "divine": "<:c_divine:1403797579635884202>",
+                            }
+                            await self.handle_couples_chest_rewards(ctx, level, author, partner, emotes)
+                        # Check if this is the finale (level 30)
+                        elif victory_data.get('finale', False):
+                            await self.handle_couples_finale_rewards(ctx, level, author, partner)
+                        else:
+                            # Regular level completion - just update progress
+                            await self.update_couple_progress(author.id, partner.id, level + 1)
+                    else:
+                        await self._send_with_retry(
+                            ctx,
+                            content="💔 You have been defeated. Train harder and try again!",
+                            suppress_failure=True,
+                        )
+
+                finally:
+                    await self.remove_player_from_fight(author.id)
+                    await self.remove_player_from_fight(partner.id)
+
+
+            async def on_cancel():
+                await self._edit_message_with_retry(
+                    original_message,
+                    content=_("💔 The battle was cancelled or your partner did not respond in time."),
+                    embed=None,
+                    view=None,
+                )
+                # Reset cooldown for both partners since battle didn't start
+                await self.reset_couples_cooldown(author.id, partner.id)
+
+            view = CouplesTowerView(author, partner, on_join, on_cancel)
+            await self._edit_message_with_retry(original_message, embed=embed, view=view)
+        except Exception as e:
+            await self._send_with_retry(ctx, content=str(e), suppress_failure=True)
+
+    async def display_couples_dialogue(self, ctx, level, author, partner, dialogue_only=False):
+        """Display dialogue for couples battle tower levels"""
+        try:
+            level_info = self.couples_game_levels["levels"][level - 1]
+            
+            # Create dialogue pages
+            pages = []
+            
+            # Page 1: Level introduction with romantic theme
+            intro_embed = discord.Embed(
+                title=f"💕 Floor {level}: {level_info['title']} 💕",
+                description=f"*The Tower of Eternal Bonds hums with ancient magic as you and your beloved step forward...*\n\n{level_info['story']}",
+                color=discord.Color.magenta()
+            )
+            intro_embed.set_footer(text=f"💑 Together, you face the challenge ahead... 💑")
+            intro_embed.add_field(name="💕 Your Bond", value=f"**{author.display_name}** & **{partner.display_name}**\n*United in love and purpose*", inline=False)
+            pages.append(intro_embed)
+            
+            # Page 2: The challenge with dramatic presentation
+            challenge_embed = discord.Embed(
+                title=f"⚔️ The Challenge That Awaits ⚔️",
+                description=f"*The air crackles with anticipation as the tower's guardians prepare to test your love...*\n\n{level_info['dialogue_start']}",
+                color=discord.Color.dark_red()
+            )
+            challenge_embed.set_footer(text=f"🔥 Your love will be tested... 🔥")
+            challenge_embed.add_field(name="💪 Your Strength", value="*The power of your bond will guide you through this trial*", inline=False)
+            pages.append(challenge_embed)
+            
+            # Page 3: Special Floor Mechanics (NEW!)
+            mechanics_embed = discord.Embed(
+                title=f"⚙️ Floor {level} Special Mechanics ⚙️",
+                description="*The tower's magic imbues this floor with unique challenges...*",
+                color=discord.Color.orange()
+            )
+            
+            # Add level-specific mechanics explanation
+            mechanics_text = self.get_level_mechanics_description(level)
+            mechanics_embed.add_field(name="🎯 How This Floor Works", value=mechanics_text, inline=False)
+            mechanics_embed.set_footer(text=f"⚡ Understanding the mechanics is key to victory! ⚡")
+            pages.append(mechanics_embed)
+            
+            # Page 4: Enemy information with strategic presentation (only if there are enemies)
+            if "enemies" in level_info and level_info.get("type") != "reward":
+                enemy_embed = discord.Embed(
+                    title=f"👹 Your Adversaries 👹",
+                    description="*The tower's guardians emerge from the shadows, ready to challenge your unity...*",
+                    color=discord.Color.dark_purple()
+                )
+                
+                enemy_text = ""
+                for i, enemy in enumerate(level_info['enemies'], 1):
+                    enemy_text += f"**{i}. {enemy['name']}**\n"
+                    enemy_text += f"   ❤️ HP: {enemy['hp']} | ⚔️ Attack: {enemy['attack']} | 🛡️ Defense: {enemy['defense']}\n"
+                    if 'special' in enemy:
+                        enemy_text += f"   ✨ *Special: {enemy['special']}*\n"
+                    enemy_text += "\n"
+                
+                enemy_embed.description += f"\n\n{enemy_text}"
+                enemy_embed.set_footer(text=f"💪 Face them together as one... 💪")
+                enemy_embed.add_field(name="🤝 Strategy", value="*Remember: your love is your greatest weapon. Fight as one, not as two.*", inline=False)
+                pages.append(enemy_embed)
+            else:
+                # For Level 30 and other reward levels, show special reward page instead
+                reward_embed = discord.Embed(
+                    title=f"🌟 The Ultimate Reward 🌟",
+                    description="*At the tower's peak, you find not enemies to fight, but a divine altar surrounded by pure light...*",
+                    color=discord.Color.gold()
+                )
+                reward_embed.add_field(name="✨ Divine Choice", value="*You will be offered three sacred blessings: Power, Wealth, or Youth. But remember - the greatest treasure is what you already possess.*", inline=False)
+                reward_embed.set_footer(text=f"💖 Your love has already conquered all... 💖")
+                pages.append(reward_embed)
+            
+            # Page 4: Final preparation with romantic motivation
+            final_embed = discord.Embed(
+                title=f"💑 Ready to Fight Together 💑",
+                description=f"**{author.display_name}** and **{partner.display_name}**,\n\n"
+                           f"*Your bond has brought you to Floor {level} of the Tower of Eternal Bonds. "
+                           f"Every step you've taken together has strengthened your love, every challenge overcome has deepened your connection.*\n\n"
+                           f"*Now, face this challenge as one. Remember why you're here - "
+                           f"not just to conquer the tower, but to prove that your love can overcome any obstacle, "
+                           f"that together you are stronger than any force that would try to separate you.*\n\n"
+                           f"**💕 When you're ready, begin your battle together. 💕**",
+                color=discord.Color.gold()
+            )
+            final_embed.set_footer(text=f"💖 Your love is your greatest weapon... 💖")
+            final_embed.add_field(name="💕 Final Words", value="*May your love guide you to victory, and may this trial only strengthen the bond you share.*", inline=False)
+            pages.append(final_embed)
+            
+            # Show dialogue with enhanced presentation
+            await self._send_with_retry(
+                ctx,
+                content="💕 **The Tower of Eternal Bonds welcomes you both...** 💕",
+                suppress_failure=True,
+            )
+            
+            # Choose the appropriate view based on the dialogue_only parameter
+            if dialogue_only:
+                view = CouplesDialogueViewOnly(pages, author, partner) 
+            else:
+                view = CouplesDialogueView(pages, author, partner)
+                
+            dialogue_message = await self._send_with_retry(
+                ctx,
+                embed=pages[0],
+                view=view,
+                suppress_failure=True,
+            )
+            if dialogue_message is not None:
+                await view.wait()
+            
+            return True
+            
+        except Exception as e:
+            await self._send_with_retry(
+                ctx,
+                content=f"Error displaying dialogue: {e}",
+                suppress_failure=True,
+            )
+            return False
+    
+    def get_level_mechanics_description(self, level):
+        """Get a description of the special mechanics for each level."""
+        mechanics = {
+            1: "**✨ Standard Combat**: Basic couples combat with coordination bonuses for teamwork!",
+            2: "**🫥 Blind Combat**: HP bars are hidden! Fight by faith and trust, not sight.",
+            3: "**🪞 Twisted Reflections**: Face the demons of false jealousy - they attack with poisonous words!",
+            4: "**🌪️ Storm Push**: Dynamic weather effects that show the fury of doubt battering your love!",
+            5: "**🗡️ Split Combat**: You must fight separate enemies - each partner protects a different target!",
+            6: "**💕 Shared Hearts**: Partners share each other's pain - 25% of damage to one is felt by both!",
+            7: "**💎 Memory Shield**: Generate memory fragments each successful hit, use them to reduce incoming damage by 25% per fragment!",
+            8: "**😠 Friendly Fire**: Your anger has a 15% chance to make you accidentally strike your partner!",
+            9: "**⏰ Patience Test**: All actions take twice as long - test your patience and commitment!",
+            10: "**💪 Unity Mode**: Deal +50% damage when your partner is critically wounded (below 25% HP)!",
+            11: "**💃 Ballroom Dancing**: Combat becomes an elegant dance - all attacks are described as dance moves!",
+            12: "**🧊 Frozen Stiff**: 20% chance each turn to be too frozen to act (Frost Giants are immune)!",
+            13: "**🗣️ Miscommunication**: Fight 5 enemies at once with 30% chance to hit wrong targets due to confusion!",
+            14: "**📊 Pride Tracking**: Your damage dealt is tracked and displayed - beware competitive feelings!",
+            15: "**💔 Betrayal Illusions**: 25% chance to see false visions of betrayal, reducing your damage by 25%!",
+            16: "**😠 Grudge Mechanics**: Taking damage builds grudges (+1 per hit), each grudge gives +10% damage but 5% friendly fire chance!",
+            17: "**🤐 Hidden Secrets**: All damage numbers are hidden in the battle log - fight without knowing the impact!",
+            18: "**😈 Temptation**: 30% chance to be charmed each turn, reducing your damage by half when distracted!",
+            19: "**💥 Exposed Vulnerabilities**: 25% chance for critical hits that deal double damage by exploiting insecurities!",
+            20: "**🛡️ Guardian's Test**: Every 5 turns, pause for coordination challenges to test your unity!",
+            21: "**🔥 Heat Shield Sacrifice**: Every round, forge heat damages both partners (starts at 50, increases by 8). Each partner can 'shield' the other by taking 2.5x damage to protect them completely. Mutual sacrifice = normal damage, one-sided sacrifice = full protection + 2.5x damage to shielder, mutual selfishness = 1.5x damage to both!",
+            22: "**😞 Valley of Despair**: Taking damage, missing attacks, and Despair Wraith strikes build despair stacks. Each stack reduces your damage by 8% and accuracy by 5% (max 80%/50%). Partners can encourage each other (20% chance when despair ≥5) to remove 2-4 stacks. Successful attacks have a 20% chance to reduce despair by 1!",
+            23: "**🪞 Mirror of Truth**: One partner gets randomly possessed by a Truth Demon and attacks the other! The defender must survive 20 turns without killing their possessed partner. **Strategy Tip**: Consider unequipping weapons to reduce damage and avoid accidentally killing your beloved!",
+            24: "**⚡ Storm of Chaos**: Environmental chaos every round! Damage variance becomes extreme (-150 to +250 for attacks, -200 to +300 for fireballs). Partners can anchor each other (25% chance per turn) for stable damage. Turn order randomizes every 3 rounds. Chaos intensity escalates over time. Chaos Elementals use reality-warping special attacks!",
+            25: "**😨 Paralyzing Fear**: 30% chance each turn to be too terrified to act!",
+            26: "**💢 Pain Fury**: Taking damage builds pain bonuses that increase your damage output! Each 25 damage taken = +1% damage bonus (capped at 50%). The more you suffer, the stronger you become! Pain bonuses apply to all attacks and show milestone messages at 10%, 25%, and 40% fury!",
+            27: "**⏳ Aging Effect**: You age rapidly - all stats reduce by 3% each turn as time accelerates! Only affects partners, not pets or enemies. Milestone aging messages at turns 5, 10, and 15!",
+            28: "**🌱 Growth Requirement**: You must heal each other before the final enemy becomes vulnerable!",
+            29: "**👻 Spirit Healing**: Dead partners become spirits that can heal their living partner! Battle only ends when BOTH partners are dead. 80% chance for successful spirit healing (15-25% of target's max HP). Spirits provide emotional support and can keep fights going longer!",
+            30: "**🌟 Divine Ceremony**: No combat - pure reward ceremony at the tower's peak!"
+        }
+        return mechanics.get(level, "**⚔️ Standard Combat**: No special mechanics - pure skill and teamwork!")
+
+    async def handle_couples_chest_rewards(self, ctx, level, author, partner, emotes):
+        """Handle chest rewards for couples battle tower victories."""
+        try:
+            level_str = str(level)
+            victory_data = self.couples_battle_tower_data["victories"][level_str]
+            chest_rewards = victory_data["chest_rewards"]
+            
+            # Create an embed for the treasure chest options
+            chest_embed = discord.Embed(
+                title="💕 Choose Your Treasure Together 💕",
+                description=(
+                    "Before you lie two treasure chests, each shimmering with an otherworldly aura. "
+                    "The left chest appears ancient and ornate, while the right chest is smaller but radiates a faint magical glow.\n\n"
+                    f"**{author.display_name}** and **{partner.display_name}**, you must decide together which chest to open. "
+                    f"**Both of you must type the same choice** (`left` or `right`) to proceed. You have 60 seconds to agree!"
+                ),
+                color=0xff69b4  # Pink color for couples
+            )
+            chest_embed.set_footer(text=f"💑 Both partners must choose the same option... 💑")
+            await ctx.send(embed=chest_embed)
+            
+
+            
+            # Get prestige level for the couple
+            async with self.bot.pool.acquire() as connection:
+                prestige_level = await connection.fetchval('SELECT prestige FROM couples_battle_tower WHERE (partner1_id = $1 AND partner2_id = $2) OR (partner1_id = $2 AND partner2_id = $1)', author.id, partner.id)
+                
+            # Track both partners' choices
+            author_choice = None
+            partner_choice = None
+            choices_made = set()
+            
+            # Define check function for user response - either partner can respond
+            def check(m):
+                # Simple check without async calls
+                return (m.author == author or m.author == partner) and m.content.lower() in ['left', 'right']
+            
+            # Collect choices from both partners
+            start_time = asyncio.get_event_loop().time()
+            timeout = 120.0
+            
+
+            
+            while asyncio.get_event_loop().time() - start_time < timeout:
+                try:
+                    remaining_time = timeout - (asyncio.get_event_loop().time() - start_time)
+
+                    
+                    msg = await asyncio.wait_for(self.bot.wait_for('message', check=check), timeout=remaining_time)
+                    choice = msg.content.lower()
+                    
+
+                    
+                    if msg.author == author:
+                        if author_choice is None:
+                            author_choice = choice
+                            choices_made.add(author.id)
+                            await ctx.send(f"💕 **{author.display_name}** chose: **{choice}**")
+                        else:
+                            await ctx.send(f"💭 **{author.display_name}**, you already chose **{author_choice}**. You cannot change your choice!")
+                            
+                    elif msg.author == partner:
+                        if partner_choice is None:
+                            partner_choice = choice
+                            choices_made.add(partner.id)
+                            await ctx.send(f"💕 **{partner.display_name}** chose: **{choice}**")
+                        else:
+                            await ctx.send(f"💭 **{partner.display_name}**, you already chose **{partner_choice}**. You cannot change your choice!")
+                    
+                    # Check if both partners have made their choices
+                    if author_choice is not None and partner_choice is not None:
+                        if author_choice == partner_choice:
+                            # They agree! Process the reward
+                            await ctx.send(f"💕 **Perfect!** You both chose **{author_choice}**! Opening the chest...")
+                            break
+                        else:
+                            # They disagree - show current choices and ask them to try again
+                            await ctx.send(f"💔 **You disagree!** {author.display_name} chose **{author_choice}** and {partner.display_name} chose **{partner_choice}**. Please try to agree on the same choice!")
+                            # Reset choices to allow them to try again
+                            author_choice = None
+                            partner_choice = None
+                            choices_made.clear()
+                            continue
+                            
+                except asyncio.TimeoutError:
+                    break
+        
+            # Handle timeout or no agreement
+            if author_choice != partner_choice:
+                choice = random.choice(["left", "right"])
+                chooser = "The tower"
+                await ctx.send('💔 You could not agree on a choice in time. The tower will choose randomly for you.')
+            else:
+                choice = author_choice
+                chooser = f"{author.display_name} & {partner.display_name}"
+            
+            
+            # Generate rewards based on prestige level
+            if prestige_level and prestige_level >= 1:
+                await self.handle_couples_prestige_chest_rewards(ctx, level, author, partner, emotes, choice, chooser)
+            else:
+                await self.handle_couples_default_chest_rewards(ctx, level, chest_rewards["default"], author, partner, emotes, choice, chooser)
+        except Exception as e:
+            await ctx.send(f"An error occurred while handling chest rewards: {e}")
+    
+    async def handle_couples_prestige_chest_rewards(self, ctx, level, author, partner, emotes, choice, chooser):
+        """Handle randomized rewards for prestige couples in battle tower."""
+        async with self.bot.pool.acquire() as connection:
+            # Generate random rewards for both chests
+            left_reward_type = random.choice(['crate', 'money'])
+            right_reward_type = random.choice(['crate', 'money'])
+            
+            # Get options from config
+            chest_options = self.couples_battle_tower_data["chest_options"]["random"]
+            
+            # Generate the specific rewards
+            if left_reward_type == 'crate':
+                left_options = [opt["value"] for opt in chest_options["crate_options"]]
+                left_weights = [opt["weight"] for opt in chest_options["crate_options"]]
+                left_crate_type = random.choices(left_options, left_weights)[0]
+            else:
+                left_money_amount = random.choice(chest_options["money_options"])
+                
+            if right_reward_type == 'crate':
+                right_options = [opt["value"] for opt in chest_options["crate_options"]]
+                right_weights = [opt["weight"] for opt in chest_options["crate_options"]]
+                right_crate_type = random.choices(right_options, right_weights)[0]
+            else:
+                right_money_amount = random.choice(chest_options["money_options"])
+            
+            # Process the reward based on choice
+            new_level = level + 1
+            if choice == 'left':
+                if left_reward_type == 'crate':
+                    await ctx.send(f'💕 **{chooser}** chose the left chest! You both find {emotes[left_crate_type]} crates!')
+                    await connection.execute(
+                        f'UPDATE profile SET crates_{left_crate_type} = crates_{left_crate_type} + 1 WHERE "user" = $1',
+                        author.id)
+                    await connection.execute(
+                        f'UPDATE profile SET crates_{left_crate_type} = crates_{left_crate_type} + 1 WHERE "user" = $1',
+                        partner.id)
+                    
+                    # Show what they missed
+                    if right_reward_type == 'crate':
+                        await ctx.send(f'💭 You could have both gotten {emotes[right_crate_type]} crates if you chose the right chest.')
+                    else:
+                        await ctx.send(f'💭 You could have both gotten **${right_money_amount}** if you chose the right chest.')
+                else:
+                    await ctx.send(f'💕 **{chooser}** chose the left chest! You both find **${left_money_amount}**!')
+                    await connection.execute('UPDATE profile SET money = money + $1 WHERE "user" = $2',
+                                            left_money_amount, author.id)
+                    await connection.execute('UPDATE profile SET money = money + $1 WHERE "user" = $2',
+                                            left_money_amount, partner.id)
+                    
+                    # Show what they missed
+                    if right_reward_type == 'crate':
+                        await ctx.send(f'💭 You could have both gotten {emotes[right_crate_type]} crates if you chose the right chest.')
+                    else:
+                        await ctx.send(f'💭 You could have both gotten **${right_money_amount}** if you chose the right chest.')
+            else:  # right choice
+                if right_reward_type == 'crate':
+                    await ctx.send(f'💕 **{chooser}** chose the right chest! You both find {emotes[right_crate_type]} crates!')
+                    await connection.execute(
+                        f'UPDATE profile SET crates_{right_crate_type} = crates_{right_crate_type} + 1 WHERE "user" = $1',
+                        author.id)
+                    await connection.execute(
+                        f'UPDATE profile SET crates_{right_crate_type} = crates_{right_crate_type} + 1 WHERE "user" = $1',
+                        partner.id)
+                    
+                    # Show what they missed
+                    if left_reward_type == 'crate':
+                        await ctx.send(f'💭 You could have both gotten {emotes[left_crate_type]} crates if you chose the left chest.')
+                    else:
+                        await ctx.send(f'💭 You could have both gotten **${left_money_amount}** if you chose the left chest.')
+                else:
+                    await ctx.send(f'💕 **{chooser}** chose the right chest! You both find **${right_money_amount}**!')
+                    await connection.execute('UPDATE profile SET money = money + $1 WHERE "user" = $2',
+                                            right_money_amount, author.id)
+                    await connection.execute('UPDATE profile SET money = money + $1 WHERE "user" = $2',
+                                            right_money_amount, partner.id)
+                    
+                    # Show what they missed
+                    if left_reward_type == 'crate':
+                        await ctx.send(f'💭 You could have both gotten {emotes[left_crate_type]} crates if you chose the left chest.')
+                    else:
+                        await ctx.send(f'💭 You could have both gotten **${left_money_amount}** if you chose the left chest.')
+            
+            # Update level and clean up
+            await ctx.send(f'💕 You have both advanced to floor: {new_level}')
+            await connection.execute('UPDATE couples_battle_tower SET current_level = current_level + 1 WHERE (partner1_id = $1 AND partner2_id = $2) OR (partner1_id = $2 AND partner2_id = $1)', author.id, partner.id)
+            try:
+                await self.remove_player_from_fight(author.id)
+                await self.remove_player_from_fight(partner.id)
+            except Exception as e:
+                pass
+
+    @couples_battletower.command(name="help")
+    @has_char()
+    async def cbt_help(self, ctx):
+        """Get comprehensive help about the Couples Battle Tower system"""
+        # Check if user is married
+        query = "SELECT marriage FROM profile WHERE profile.user = $1"
+        result = await self.bot.pool.fetchval(query, ctx.author.id)
+        partner_id = result
+
+        if partner_id:
+            partner = await self.bot.fetch_user(partner_id)
+            partner_name = partner.display_name
+        else:
+            partner_name = "your beloved"
+
+        embed = discord.Embed(
+            title="💕 Couples Battle Tower 💕",
+            description="**The Tower of Eternal Bonds**\n30-floor challenge for married couples!",
+            color=discord.Color.magenta()
+        )
+        
+        # Requirements & Commands - merged for mobile
+        embed.add_field(
+            name="📋 Basics",
+            value=(
+                "**Requirements:** Must be married, both participate\n"
+                "**Cooldown:** 5 minutes between attempts\n\n"
+                "**Commands:**\n"
+                "`$cbt start` - Begin battle\n"
+                "`$cbt progress` - View progress\n"
+                "`$cbt preview <level>` - Preview level"
+            ),
+            inline=False
+        )
+        
+        # Tower & Rewards - merged for mobile
+        embed.add_field(
+            name="🏗️ Tower & Rewards",
+            value=(
+                "**30 Floors** - Each floor is unique!\n"
+                "• Floors 1-29: Combat + special mechanics\n"
+                "• Floor 30: Divine ceremony (no combat)\n"
+                "• Rewards every 5 floors\n"
+                "• Partners choose rewards together\n"
+                "• Prestige system for multiple completions"
+            ),
+            inline=False
+        )
+        
+        # Important info - more prominent
+        embed.add_field(
+            name="⚠️ IMPORTANT: Pre-Battle Dialogue",
+            value=(
+                "**LAST PAGE shows floor mechanics!**\n"
+                "• Read dialogue pages carefully\n"
+                "• Mechanics are crucial for victory\n"
+                "• Use `$cbt preview <level>` to review"
+            ),
+            inline=False
+        )
+        
+        # Getting Started - compact
+        if not partner_id:
+            getting_started = (
+                "1. Get married first! 💒\n"
+                "2. `$cbt start` to begin\n"
+                "3. Partner joins battle\n"
+                "4. Conquer all floors! 🏆"
+            )
+        else:
+            getting_started = (
+                f"1. `$cbt start` with **{partner_name}** 💕\n"
+                "2. Wait for partner to join\n"
+                "3. Face unique mechanics together\n"
+                "4. Reach divine ceremony! 🌟"
+            )
+        embed.add_field(name="🚀 Quick Start", value=getting_started, inline=False)
+        
+        # Love Quote - shorter
+        if partner_id:
+            embed.add_field(
+                name="💕 Remember",
+                value=f"*\"{ctx.author.display_name} and {partner_name}, your love has already conquered the greatest challenge - finding each other. The tower simply celebrates that bond.\"*",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="💕 Remember", 
+                value="*\"Love is not about finding someone to live with, it's about finding someone you can't live without. Find your partner and face the tower together.\"*",
+                inline=False
+            )
+        
+        embed.set_footer(text="💖 May your love guide you to victory! 💖")
+        
+        await ctx.send(embed=embed)
+    
+    async def handle_couples_default_chest_rewards(self, ctx, level, rewards, author, partner, emotes, choice, chooser):
+        """Handle fixed rewards for non-prestige couples in battle tower."""
+        # Process the reward based on choice
+        newlevel = level + 1
+        if choice == 'left':
+            left_reward = rewards["left"]
+            if left_reward["type"] == "crate":
+                message = f'💕 **{chooser}** chose the left chest! You both find: {emotes[left_reward["value"]]} '
+                if left_reward["amount"] > 1:
+                    message += f'{left_reward["amount"]} {left_reward["value"].capitalize()} Crates!'
+                else:
+                    message += f'A {left_reward["value"].capitalize()} Crate!'
+                
+                await ctx.send(message)
+                await ctx.send(f'💕 You have both advanced to floor: {newlevel}')
+                
+                async with self.bot.pool.acquire() as connection:
+                    await connection.execute(
+                        f'UPDATE profile SET crates_{left_reward["value"]} = crates_{left_reward["value"]} + {left_reward["amount"]} WHERE "user" = $1',
+                        author.id)
+                    await connection.execute(
+                        f'UPDATE profile SET crates_{left_reward["value"]} = crates_{left_reward["value"]} + {left_reward["amount"]} WHERE "user" = $1',
+                        partner.id)
+                    await connection.execute('UPDATE couples_battle_tower SET current_level = current_level + 1 WHERE (partner1_id = $1 AND partner2_id = $2) OR (partner1_id = $2 AND partner2_id = $1)', author.id, partner.id)
+            elif left_reward["type"] == "money":
+                extra_msg = f" {left_reward.get('message', '')}" if "message" in left_reward else ""
+                await ctx.send(f'💕 **{chooser}** chose the left chest! You both find: **${left_reward["value"]}**!{extra_msg}')
+                await ctx.send(f'💕 You have both advanced to floor: {newlevel}')
+                
+                async with self.bot.pool.acquire() as connection:
+                    await connection.execute(
+                        f'UPDATE profile SET money = money + {left_reward["value"]} WHERE "user" = $1',
+                        author.id)
+                    await connection.execute(
+                        f'UPDATE profile SET money = money + {left_reward["value"]} WHERE "user" = $1',
+                        partner.id)
+                    await connection.execute('UPDATE couples_battle_tower SET current_level = current_level + 1 WHERE (partner1_id = $1 AND partner2_id = $2) OR (partner1_id = $2 AND partner2_id = $1)', author.id, partner.id)
+            elif left_reward["type"] == "nothing":
+                await ctx.send(f'💔 **{chooser}** chose the left chest! You both find: Nothing, bad luck!')
+                await ctx.send(f'💕 You have both advanced to floor: {newlevel}')
+                
+                async with self.bot.pool.acquire() as connection:
+                    await connection.execute('UPDATE couples_battle_tower SET current_level = current_level + 1 WHERE (partner1_id = $1 AND partner2_id = $2) OR (partner1_id = $2 AND partner2_id = $1)', author.id, partner.id)
+            elif left_reward["type"] == "random":
+                # Handle special random case for level 15
+                legran = random.randint(1, 2)
+                if legran == 1:
+                    await ctx.send(f'💔 **{chooser}** chose the left chest! You both find: Nothing, bad luck!')
+                    await ctx.send(f'💕 You have both advanced to floor: {newlevel}')
+                    async with self.bot.pool.acquire() as connection:
+                        await connection.execute('UPDATE couples_battle_tower SET current_level = current_level + 1 WHERE (partner1_id = $1 AND partner2_id = $2) OR (partner1_id = $2 AND partner2_id = $1)', author.id, partner.id)
+                else:
+                    await ctx.send(f'💕 **{chooser}** chose the left chest! You both find: <:F_Legendary:1139514868400132116> A Legendary Crate!')
+                    await ctx.send(f'💕 You have both advanced to floor: {newlevel}')
+                    async with self.bot.pool.acquire() as connection:
+                        await connection.execute(
+                            'UPDATE profile SET crates_legendary = crates_legendary + 1 WHERE "user" = $1',
+                            author.id)
+                        await connection.execute(
+                            'UPDATE profile SET crates_legendary = crates_legendary + 1 WHERE "user" = $1',
+                            partner.id)
+                        await connection.execute('UPDATE couples_battle_tower SET current_level = current_level + 1 WHERE (partner1_id = $1 AND partner2_id = $2) OR (partner1_id = $2 AND partner2_id = $1)', author.id, partner.id)
+        else:  # right choice
+            right_reward = rewards["right"]
+            if right_reward["type"] == "crate":
+                message = f'💕 **{chooser}** chose the right chest! You both find: {emotes[right_reward["value"]]} '
+                if right_reward["amount"] > 1:
+                    message += f'{right_reward["amount"]} {right_reward["value"].capitalize()} Crates!'
+                else:
+                    message += f'A {right_reward["value"].capitalize()} Crate!'
+                
+                await ctx.send(message)
+                await ctx.send(f'💕 You have both advanced to floor: {newlevel}')
+                
+                async with self.bot.pool.acquire() as connection:
+                    await connection.execute(
+                        f'UPDATE profile SET crates_{right_reward["value"]} = crates_{right_reward["value"]} + {right_reward["amount"]} WHERE "user" = $1',
+                        author.id)
+                    await connection.execute(
+                        f'UPDATE profile SET crates_{right_reward["value"]} = crates_{right_reward["value"]} + {right_reward["amount"]} WHERE "user" = $1',
+                        partner.id)
+                    await connection.execute('UPDATE couples_battle_tower SET current_level = current_level + 1 WHERE (partner1_id = $1 AND partner2_id = $2) OR (partner1_id = $2 AND partner2_id = $1)', author.id, partner.id)
+            elif right_reward["type"] == "money":
+                extra_msg = f" {right_reward.get('message', '')}" if "message" in right_reward else ""
+                await ctx.send(f'💕 **{chooser}** chose the right chest! You both find: **${right_reward["value"]}**!{extra_msg}')
+                await ctx.send(f'💕 You have both advanced to floor: {newlevel}')
+                
+                async with self.bot.pool.acquire() as connection:
+                    await connection.execute(
+                        f'UPDATE profile SET money = money + {right_reward["value"]} WHERE "user" = $1',
+                        author.id)
+                    await connection.execute(
+                        f'UPDATE profile SET money = money + {right_reward["value"]} WHERE "user" = $1',
+                        partner.id)
+                    await connection.execute('UPDATE couples_battle_tower SET current_level = current_level + 1 WHERE (partner1_id = $1 AND partner2_id = $2) OR (partner1_id = $2 AND partner2_id = $1)', author.id, partner.id)
+            elif right_reward["type"] == "nothing":
+                await ctx.send(f'💔 **{chooser}** chose the right chest! You both find: Nothing, bad luck!')
+                await ctx.send(f'💕 You have both advanced to floor: {newlevel}')
+                
+                async with self.bot.pool.acquire() as connection:
+                    await connection.execute('UPDATE couples_battle_tower SET current_level = current_level + 1 WHERE (partner1_id = $1 AND partner2_id = $2) OR (partner1_id = $2 AND partner2_id = $1)', author.id, partner.id)
+            elif right_reward["type"] == "random":
+                # Handle special random case for level 15
+                legran = random.randint(1, 2)
+                if legran == 1:
+                    await ctx.send(f'💔 **{chooser}** chose the right chest! You both find: Nothing, bad luck!')
+                    await ctx.send(f'💕 You have both advanced to floor: {newlevel}')
+                    async with self.bot.pool.acquire() as connection:
+                        await connection.execute('UPDATE couples_battle_tower SET current_level = current_level + 1 WHERE (partner1_id = $1 AND partner2_id = $2) OR (partner1_id = $2 AND partner2_id = $1)', author.id, partner.id)
+                else:
+                    await ctx.send(f'💕 **{chooser}** chose the right chest! You both find: <:F_Legendary:1139514868400132116> A Legendary Crate!')
+                    await ctx.send(f'💕 You have both advanced to floor: {newlevel}')
+                    async with self.bot.pool.acquire() as connection:
+                        await connection.execute(
+                            'UPDATE profile SET crates_legendary = crates_legendary + 1 WHERE "user" = $1',
+                            author.id)
+                        await connection.execute(
+                            'UPDATE profile SET crates_legendary = crates_legendary + 1 WHERE "user" = $1',
+                            partner.id)
+                        await connection.execute('UPDATE couples_battle_tower SET current_level = current_level + 1 WHERE (partner1_id = $1 AND partner2_id = $2) OR (partner1_id = $2 AND partner2_id = $1)', author.id, partner.id)
+
+    async def handle_couples_finale_rewards(self, ctx, level, author, partner):
+        """Handle finale rewards for couples battle tower completion."""
+        async with self.bot.pool.acquire() as connection:
+            # Get prestige level
+            prestige_level = await connection.fetchval('SELECT prestige FROM couples_battle_tower WHERE (user_id = $1 AND partner_id = $2) OR (user_id = $2 AND partner_id = $1)', author.id, partner.id)
+            
+            # Get reward configuration
+            victory_data = self.couples_battle_tower_data["victories"][str(level)]
+            rewards = victory_data["rewards"]
+            
+            if prestige_level and prestige_level >= 1:
+                # Prestige rewards
+                if rewards["prestige"]["type"] == "random_premium":
+                    chest_options = self.couples_battle_tower_data["chest_options"]["random_premium"]
+                    reward_type = random.choices(chest_options["types"], chest_options["weights"])[0]
+                    reward_amount = 1
+                else:
+                    reward_type = rewards["prestige"]["type"]
+                    reward_amount = rewards["prestige"]["amount"]
+            else:
+                # Default rewards
+                reward_type = rewards["default"]["type"]
+                reward_amount = rewards["default"]["amount"]
+            
+            # Apply rewards to both partners
+            if reward_type == "crate":
+                crate_type = rewards["default"]["value"]
+                await ctx.send(f'💕 **Congratulations!** You both receive {reward_amount} {crate_type.capitalize()} Crate(s)!')
+                await connection.execute(
+                    f'UPDATE profile SET crates_{crate_type} = crates_{crate_type} + {reward_amount} WHERE "user" = $1',
+                    author.id)
+                await connection.execute(
+                    f'UPDATE profile SET crates_{crate_type} = crates_{crate_type} + {reward_amount} WHERE "user" = $1',
+                    partner.id)
+            elif reward_type == "divine":
+                await ctx.send(f'💕 **Congratulations!** You both receive {reward_amount} Divine Crate(s)!')
+                await connection.execute(
+                    f'UPDATE profile SET crates_divine = crates_divine + {reward_amount} WHERE "user" = $1',
+                    author.id)
+                await connection.execute(
+                    f'UPDATE profile SET crates_divine = crates_divine + {reward_amount} WHERE "user" = $1',
+                    partner.id)
+            elif reward_type == "legendary":
+                await ctx.send(f'💕 **Congratulations!** You both receive {reward_amount} Legendary Crate(s)!')
+                await connection.execute(
+                    f'UPDATE profile SET crates_legendary = crates_legendary + {reward_amount} WHERE "user" = $1',
+                    author.id)
+                await connection.execute(
+                    f'UPDATE profile SET crates_legendary = crates_legendary + {reward_amount} WHERE "user" = $1',
+                    partner.id)
+            elif reward_type == "fortune":
+                await ctx.send(f'💕 **Congratulations!** You both receive {reward_amount} Fortune Crate(s)!')
+                await connection.execute(
+                    f'UPDATE profile SET crates_fortune = crates_fortune + {reward_amount} WHERE "user" = $1',
+                    author.id)
+                await connection.execute(
+                    f'UPDATE profile SET crates_fortune = crates_fortune + {reward_amount} WHERE "user" = $1',
+                    partner.id)
+            
+            # Update prestige and reset level
+            await connection.execute('UPDATE couples_battle_tower SET prestige = prestige + 1, current_level = 1 WHERE (partner1_id = $1 AND partner2_id = $2) OR (partner1_id = $2 AND partner2_id = $1)', author.id, partner.id)
+            await ctx.send(f'💕 **You have both achieved Prestige {prestige_level + 1 if prestige_level else 1}!** The tower resets to Floor 1 with increased difficulty.')
 
 async def setup(bot):
+    await bot.add_cog(BattleSettings(bot))
+    
     battles = Battles(bot)
     await battles.battle_factory.initialize()
     await bot.add_cog(battles)

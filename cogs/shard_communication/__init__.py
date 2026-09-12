@@ -23,10 +23,9 @@ from datetime import datetime, timedelta
 from time import time
 from typing import Any
 from uuid import uuid4
-from datetime import timedelta
 
+import asyncpg
 import discord
-import textwrap
 from discord.ext import commands
 
 from cogs.scheduler import Timer
@@ -384,147 +383,618 @@ class Sharding(commands.Cog):
             json.dumps(payload),
         )
 
+    async def _get_timers_view_preference(self, user_id: int) -> bool:
+        try:
+            preference = await self.bot.pool.fetchval(
+                'SELECT "timers_v2" FROM profile WHERE "user"=$1;',
+                user_id,
+            )
+        except asyncpg.UndefinedColumnError:
+            return True
+        return True if preference is None else bool(preference)
+
+    async def _set_timers_view_preference(
+        self,
+        user_id: int,
+        use_new_view: bool,
+    ) -> str:
+        try:
+            updated = await self.bot.pool.fetchval(
+                'UPDATE profile SET "timers_v2"=$1 WHERE "user"=$2 RETURNING 1;',
+                use_new_view,
+                user_id,
+            )
+        except asyncpg.UndefinedColumnError:
+            return "missing_column"
+        return "updated" if updated else "missing_profile"
+
     @commands.command(
         aliases=["cooldowns", "t", "cds"], brief=_("Lists all your cooldowns")
     )
     @locale_doc
-    async def timers(self, ctx):
-        _("""Lists all your cooldowns, including your adventure timer.""")
-        try:
-            cooldowns = await self.bot.redis.execute_command(
-                "KEYS", f"cd:{ctx.author.id}:*"
-            )
-            adv = await self.bot.get_adventure(ctx.author)
+    async def timers(self, ctx, view: str = None):
+        _(
+            """Lists all your cooldowns, including your adventure timer.
 
-            # Create dictionaries to map commands to emojis for different categories
-            emoji_map = {
-                "battle": "⚔️",  # Sword emoji for Battle cooldowns
-                "raidbattle": "⚔️",  # Sword emoji for Battle cooldowns
-                "child": "❤️",  # Heart emoji for Family cooldowns
-                "familyevent": "❤️",  # Heart emoji for Family cooldowns
-                "steal": "🔒",  # Lock emoji for Thief cooldown
-                "class": "🛡️",  # Pet paw emoji for Class cooldowns
-                "fun": "🐾",  # Pet paw emoji for Fun cooldowns
-                "activeadventure": "🏞️",  # Park emoji for Active Adventure
-                "activebattle": "⚔️",  # Sword emoji for Active Battle
-                "date": "❤️",  # Heart emoji for Family Date
-                "tournament": "🏆",  # Trophy emoji for Tournament
-                "raidtournament": "🏆",  # Trophy emoji for Raid Tournament
-                "bless": "🙏",
+            Use `{prefix}timers old`, `{prefix}timers new`, or `{prefix}timers toggle`
+            to save your preferred layout."""
+        )
+
+        if view is not None:
+            normalized_view = view.strip().lower()
+            valid_views = {"old", "legacy", "new", "modern", "toggle"}
+            if normalized_view not in valid_views:
+                return await ctx.send(
+                    _(
+                        "Use `{prefix}timers`, `{prefix}timers old`,"
+                        " `{prefix}timers new`, or `{prefix}timers toggle`."
+                    ).format(prefix=ctx.clean_prefix)
+                )
+
+            current_preference = await self._get_timers_view_preference(ctx.author.id)
+            use_new_view = (
+                not current_preference
+                if normalized_view == "toggle"
+                else normalized_view in {"new", "modern"}
+            )
+            save_status = await self._set_timers_view_preference(
+                ctx.author.id,
+                use_new_view,
+            )
+            if save_status == "missing_column":
+                return await ctx.send(
+                    _(
+                        "The timers preference column is missing. Run the shard"
+                        " communication migration first."
+                    )
+                )
+            if save_status == "missing_profile":
+                return await ctx.send(
+                    _(
+                        "You need a character before you can save a timers layout"
+                        " preference."
+                    )
+                )
+            return await ctx.send(
+                _("Your timers view is now set to **{style}**.").format(
+                    style=_("new") if use_new_view else _("old")
+                )
+            )
+
+        def normalize_cmd_id(raw_cmd: str) -> str:
+            cmd = " ".join(raw_cmd.strip().lower().split())
+            legacy_aliases = {
+                "cbt_begin": "couples_battletower begin",
+                "cbt_start": "couples_battletower start",
+                "dragon_party": "dragonchallenge party",
+                "jurytower_fight": "jurytower fight",
+                "petstournament": "pets tournament",
+                "process_splice": "process splice",
+            }
+            cmd = legacy_aliases.get(cmd, cmd)
+            while cmd.startswith("pets pets "):
+                cmd = f"pets {cmd[len('pets pets '):]}"
+            if cmd.startswith("pet "):
+                cmd = f"pets {cmd[4:]}"
+            bare_pet_commands = {
+                "alias",
+                "feed",
+                "pet",
+                "play",
+                "rename",
+                "sell",
+                "trade",
+                "train",
+                "treat",
+            }
+            if cmd in bare_pet_commands:
+                cmd = f"pets {cmd}"
+            return cmd
+
+        def format_duration(total_seconds: int) -> str:
+            total_seconds = max(0, int(total_seconds))
+            days, remainder = divmod(total_seconds, 86400)
+            hours, remainder = divmod(remainder, 3600)
+            minutes, seconds = divmod(remainder, 60)
+
+            parts = []
+            if days:
+                parts.append(f"{days}d")
+            if hours or days:
+                parts.append(f"{hours}h")
+            if minutes or hours or days:
+                parts.append(f"{minutes}m")
+            if seconds and not days:
+                parts.append(f"{seconds}s")
+            return " ".join(parts) if parts else "0s"
+
+        def format_delta(delta: timedelta) -> str:
+            return format_duration(int(delta.total_seconds()))
+
+        def display_name(cmd: str) -> str:
+            names = {
+                "adventure": _("Adventure"),
+                "activeadventure": _("Active Adventure"),
+                "activebattle": _("Active Battle"),
+                "all": _("All Dailies"),
+                "battle": _("Battle"),
+                "bless": _("Bless"),
+                "boosterdaily": _("Booster Daily"),
+                "brackettournament": _("Bracket Tournament"),
+                "channel": _("Challenge Channel"),
+                "consume": _("Consume"),
+                "couples_battletower begin": _("Couples Battle Tower Begin"),
+                "couples_battletower start": _("Couples Battle Tower Start"),
+                "create_party": _("Create Party"),
+                "cratesdaily": _("Crates Daily"),
+                "daily": _("Daily"),
+                "defendforge": _("Defend Forge"),
+                "dragonchallenge party": _("Dragon Challenge Party"),
+                "eidolithmask": _("Eidolith Mask"),
+                "familyevent": _("Family Event"),
+                "follow": _("Follow God"),
+                "forgegodpet": _("Forge God Pet"),
+                "forgestatus": _("Forge Status"),
+                "gmsign": _("GM Sign"),
+                "godlocks": _("God Locks"),
+                "highfive": _("High Five"),
+                "increase": _("Raid Increase"),
+                "juggernaut": _("Juggernaut"),
+                "juggernaut2": _("Juggernaut II"),
+                "jurytower fight": _("Jury Tower Fight"),
+                "merchall": _("Merch All"),
+                "mydefenders": _("My Defenders"),
+                "offercrate": _("Offer Crate"),
+                "pets alias": _("Alias"),
+                "pets feed": _("Feed"),
+                "pets pet": _("Pet"),
+                "pets play": _("Play"),
+                "pets rename": _("Rename"),
+                "pets sell": _("Sell"),
+                "pets trade": _("Trade"),
+                "pets train": _("Train"),
+                "pets treat": _("Treat"),
+                "pets tournament": _("Pets Tournament"),
+                "process splice": _("Process Splice"),
+                "pve": _("PvE"),
+                "raidbattle": _("Raid Battle"),
+                "raidbattle2v1": _("Raid Battle 2v1"),
+                "raidbattle2v2": _("Raid Battle 2v2"),
+                "raidtournament": _("Raid Tournament"),
+                "redeemdc": _("Redeem Dragon Coins"),
+                "redeemweapontokens": _("Redeem Weapon Tokens"),
+                "recruitdefender": _("Recruit Defender"),
+                "sacrificeexchange": _("Sacrifice Exchange"),
+                "sell_resources": _("Sell Resources"),
+                "shotgunroulette": _("Shotgun Roulette"),
+                "soulforge": _("Soulforge"),
+                "soulforgeguide": _("Soulforge Guide"),
+                "soullorebook": _("Soul Lorebook"),
+                "speaktomorrigan": _("Speak to Morrigan"),
+                "splice": _("Splice"),
+                "splicestatus": _("Splice Status"),
+                "statpointsredeem": _("Redeem Stat Points"),
+                "takeseat": _("Take Seat"),
+                "trickortreat": _("Trick or Treat"),
+                "upgradeweapon": _("Upgrade Weapon"),
+                "weaponlock": _("Weapon Lock"),
+                "weaponunlock": _("Weapon Unlock"),
+                "_buy": _("Seasonal Buy"),
+                "_class": _("Class"),
+                "_open": _("Seasonal Open"),
+                "child": _("Child"),
+                "class": _("Class"),
+                "collect": _("Collect"),
+                "create": _("Create"),
+                "date": _("Date"),
+                "fight": _("Fight"),
+                "fun": _("Fun"),
+                "gift": _("Gift"),
+                "hunt": _("Hunt"),
+                "pray": _("Pray"),
+                "race": _("Race"),
+                "sacrifice": _("Sacrifice"),
+                "scout": _("Scout"),
+                "steal": _("Steal"),
+                "tournament": _("Tournament"),
+                "valentine": _("Valentine"),
+                "vote": _("Vote"),
+            }
+            return names.get(cmd, cmd.replace("_", " ").title())
+
+        def category_for(cmd: str) -> str:
+            challenge_commands = {
+                "adventure",
+                "activeadventure",
+                "activebattle",
+                "battle",
+                "brackettournament",
+                "channel",
+                "couples_battletower begin",
+                "couples_battletower start",
+                "create_party",
+                "dragonchallenge party",
+                "fight",
+                "godlocks",
+                "increase",
+                "juggernaut",
+                "juggernaut2",
+                "jurytower fight",
+                "pets tournament",
+                "pve",
+                "raidbattle",
+                "raidbattle2v1",
+                "raidbattle2v2",
+                "raidtournament",
+                "scout",
+                "shotgunroulette",
+                "tournament",
+            }
+            social_commands = {
+                "bite",
+                "bonk",
+                "child",
+                "cuddle",
+                "date",
+                "familyevent",
+                "highfive",
+                "hug",
+                "kiss",
+                "lick",
+                "nuzzle",
+                "pat",
+                "poke",
+                "punch",
+                "slap",
+                "tickle",
+                "wave",
+            }
+            economy_commands = {
+                "gift",
+                "merchant",
+                "merchall",
+                "offer",
+                "offercrate",
+                "redeemdc",
+                "redeemweapontokens",
+                "sell_resources",
+                "sellcrate",
+                "slots",
+                "takeseat",
+                "trader",
+                "weaponlock",
+                "weaponunlock",
+            }
+            progression_commands = {
+                "_class",
+                "alias",
+                "bless",
+                "class",
+                "consume",
+                "create",
+                "defendforge",
+                "eidolithmask",
+                "equip",
+                "follow",
+                "forgegodpet",
+                "forgestatus",
+                "gmsign",
+                "merge",
+                "message",
+                "mydefenders",
+                "process splice",
+                "race",
+                "recruitdefender",
+                "repairforge",
+                "soulforge",
+                "soulforgeguide",
+                "soullorebook",
+                "speaktomorrigan",
+                "splice",
+                "splicestatus",
+                "statpointsredeem",
+                "upgradeweapon",
+            }
+            daily_event_commands = {
+                "_buy",
+                "_open",
+                "all",
+                "boosterdaily",
+                "collect",
+                "cratesdaily",
+                "daily",
+                "pray",
+                "sacrifice",
+                "sacrificeexchange",
+                "trickortreat",
+                "valentine",
+                "vote",
             }
 
-            # Create empty lists to store formatted cooldowns for different categories
+            if cmd in {
+                "activeadventure",
+                "activebattle",
+            } or cmd in challenge_commands:
+                return "challenges"
+            if cmd in social_commands:
+                return "social"
+            if cmd.startswith("pets "):
+                return "pets"
+            if cmd in economy_commands:
+                return "economy"
+            if cmd in progression_commands or cmd in {"fun", "hunt", "steal"}:
+                return "progression"
+            if cmd in daily_event_commands:
+                return "daily_events"
+            return "other"
+
+        def chunk_lines(lines: list[str], max_length: int = 1024) -> list[str]:
+            chunks = []
+            current_chunk = []
+            current_length = 0
+
+            for line in lines:
+                line_length = len(line) + 1
+                if current_chunk and current_length + line_length > max_length:
+                    chunks.append("\n".join(current_chunk))
+                    current_chunk = [line]
+                    current_length = line_length
+                    continue
+                current_chunk.append(line)
+                current_length += line_length
+
+            if current_chunk:
+                chunks.append("\n".join(current_chunk))
+            return chunks
+
+        cooldowns = await self.bot.redis.execute_command("KEYS", f"cd:{ctx.author.id}:*")
+        adv = await self.bot.get_adventure(ctx.author)
+        use_new_view = await self._get_timers_view_preference(ctx.author.id)
+
+        if not use_new_view:
+            emoji_map = {
+                "battle": "⚔️",
+                "raidbattle": "⚔️",
+                "child": "❤️",
+                "familyevent": "❤️",
+                "steal": "🔒",
+                "class": "🛡️",
+                "fun": "🐾",
+                "activeadventure": "🏞️",
+                "activebattle": "⚔️",
+                "date": "❤️",
+                "tournament": "🏆",
+                "raidtournament": "🏆",
+                "bless": "🙏",
+                "pve": "⚔️",
+                "scout": "🐾",
+                "dragonchallenge party": "❄️",
+                "pets feed": "🐾",
+                "pets train": "🐾",
+                "pets play": "🐾",
+                "pets trade": "💰",
+                "pets treat": "🐾",
+                "pets pet": "🐾",
+            }
+
             general_cooldowns = []
             battle_cooldowns = []
-            family_cooldowns = []  # New list for family cooldowns
-            class_cooldowns = []  # New list for class cooldowns
-            adventure_cooldowns = []  # New list for adventure cooldowns
+            family_cooldowns = []
+            class_cooldowns = []
+            adventure_cooldowns = []
+            pets_cooldowns = []
 
             if not cooldowns and (not adv or adv[2]):
                 embed = discord.Embed(
                     title=_("Cooldowns"),
                     description=_("You don't have any active cooldowns at the moment. 🕒"),
-                    color=discord.Color.green()
+                    color=discord.Color.green(),
                 )
-                await ctx.send(embed=embed)
+                return await ctx.send(embed=embed)
+
+            max_length = 0
+            message_lengths = []
+            for key in cooldowns:
+                key = key.decode()
+                cooldown = await self.bot.redis.execute_command("TTL", key)
+                cmd = key.replace(f"cd:{ctx.author.id}:", "").lower()
+                formatted_time = timedelta(seconds=int(cooldown))
+
+                if cmd in ["battle", "raidbattle", "tournament", "raidtournament"]:
+                    category_cooldowns = battle_cooldowns
+                elif cmd in ["child", "familyevent", "date"]:
+                    category_cooldowns = family_cooldowns
+                elif cmd in ["pets feed", "pets train", "pets play", "pets trade", "pets treat", "pets pet"]:
+                    category_cooldowns = pets_cooldowns
+                elif cmd in ["class", "fun", "hunt", "steal", "bless", "gift", "scout"]:
+                    category_cooldowns = class_cooldowns
+                elif cmd in ["adventure", "activebattle", "pve", "dragonchallenge party", "activeadventure", "battletower fight"]:
+                    category_cooldowns = adventure_cooldowns
+                else:
+                    category_cooldowns = general_cooldowns
+
+                emoji = emoji_map.get(cmd, "⏳")
+                cooldown_message = f"{emoji} • **`{cmd.capitalize()}`** is on cooldown and will be available after {formatted_time}"
+                category_cooldowns.append(cooldown_message)
+                message_lengths.append(len(cooldown_message))
+                max_message_length = max(message_lengths)
+
+            embed = discord.Embed(
+                title=_("Cooldowns"),
+                color=discord.Color.purple(),
+            )
+
+            def add_category_fields(embed, category_list, category_name):
+                if not category_list:
+                    return
+
+                chunks = chunk_lines(category_list)
+                for index, chunk in enumerate(chunks):
+                    field_name = category_name if index == 0 else f"{category_name} (cont.)"
+                    embed.add_field(name=field_name, value=chunk, inline=False)
+                return len(chunks) > 0
+
+            has_content = False
+
+            if general_cooldowns:
+                add_category_fields(embed, general_cooldowns, _("General Cooldowns"))
+                has_content = True
+
+            if battle_cooldowns:
+                if has_content:
+                    embed.add_field(name="\u200B", value="\n", inline=False)
+                add_category_fields(embed, battle_cooldowns, _("Battle Cooldowns"))
+                has_content = True
+
+            if family_cooldowns:
+                if has_content:
+                    embed.add_field(name="\u200B", value="\n", inline=False)
+                add_category_fields(embed, family_cooldowns, _("Family Cooldowns"))
+                has_content = True
+
+            if pets_cooldowns:
+                if has_content:
+                    embed.add_field(name="\u200B", value="\n", inline=False)
+                add_category_fields(embed, pets_cooldowns, _("Pets Cooldowns"))
+                has_content = True
+
+            if class_cooldowns:
+                if has_content:
+                    embed.add_field(name="\u200B", value="\n", inline=False)
+                add_category_fields(embed, class_cooldowns, _("Class Cooldowns"))
+                has_content = True
+
+            if adventure_cooldowns:
+                if has_content:
+                    embed.add_field(name="\u200B", value="\n", inline=False)
+                add_category_fields(embed, adventure_cooldowns, _("Adventure Cooldowns"))
+                has_content = True
+
+            if adv and not adv[2]:
+                if has_content:
+                    embed.add_field(name="\u200B", value="\n", inline=False)
+                adventure_message = _("⏳ Adventure is running and will be done after {time}").format(
+                    time=adv[1]
+                )
+                embed.add_field(
+                    name=_("Adventure Status"),
+                    value=adventure_message,
+                    inline=False,
+                )
+
+            return await ctx.send(embed=embed)
+
+        normalized_cooldowns: dict[str, int] = {}
+        for key in cooldowns:
+            key = key.decode()
+            cooldown = await self.bot.redis.execute_command("TTL", key)
+            try:
+                cooldown_seconds = int(cooldown)
+            except (TypeError, ValueError):
+                continue
+            if cooldown_seconds <= 0:
+                continue
+
+            raw_cmd = key.replace(f"cd:{ctx.author.id}:", "")
+            cmd = normalize_cmd_id(raw_cmd)
+            previous = normalized_cooldowns.get(cmd)
+            if previous is None or cooldown_seconds > previous:
+                normalized_cooldowns[cmd] = cooldown_seconds
+
+        has_ready_adventure = bool(adv and adv[2])
+        if not normalized_cooldowns and not adv:
+            return await ctx.send(
+                _("You don't have any active cooldown at the moment.")
+            )
+
+        sections = {
+            "challenges": [],
+            "social": [],
+            "pets": [],
+            "economy": [],
+            "progression": [],
+            "daily_events": [],
+            "other": [],
+        }
+
+        for cmd, cooldown_seconds in normalized_cooldowns.items():
+            section = category_for(cmd)
+            sections[section].append(
+                (
+                    cooldown_seconds,
+                    _("• **{name}**: `{time}`").format(
+                        name=display_name(cmd),
+                        time=format_duration(cooldown_seconds),
+                    ),
+                )
+            )
+
+        if adv:
+            if has_ready_adventure:
+                sections["challenges"].append(
+                    (-1, _("• **Adventure Ready**: claim it whenever you want"))
+                )
             else:
-                max_length = 0  # Initialize the maximum length
-                message_lengths = []
-                for key in cooldowns:
-                    key = key.decode()
-                    cooldown = await self.bot.redis.execute_command("TTL", key)
-                    cmd = key.replace(f"cd:{ctx.author.id}:", "").lower()  # Use lowercase for comparison
-                    formatted_time = timedelta(seconds=int(cooldown))
-
-                    # Check the category of the cooldown and add it to the respective list
-                    if cmd in ["battle", "raidbattle"]:
-                        category_cooldowns = battle_cooldowns
-                    elif cmd in ["child", "familyevent", "date"]:
-                        category_cooldowns = family_cooldowns
-                    elif cmd in ["class", "fun", "hunt", "steal", "bless", "gift"]:
-                        category_cooldowns = class_cooldowns
-                    elif cmd in ["adventure", "activebattle"]:
-                        category_cooldowns = adventure_cooldowns
-                    else:
-                        category_cooldowns = general_cooldowns
-
-                    # Get the emoji for the command category
-                    emoji = emoji_map.get(cmd, "⏳")
-
-                    # Format each cooldown message with an emoji and the command name
-                    cooldown_message = f"{emoji} • **`{cmd.capitalize()}`** is on cooldown and will be available after {formatted_time}"
-                    category_cooldowns.append(cooldown_message)
-
-                    # Append the length of the current message to the message_lengths list
-                    message_lengths.append(len(cooldown_message))
-
-                    max_message_length = max(message_lengths)
-
-                # ... (previous code)
-
-                embed = discord.Embed(
-                    title=_("Cooldowns"),
-                    color=discord.Color.purple()
+                sections["challenges"].append(
+                    (
+                        int(adv[1].total_seconds()),
+                        _("• **Current Adventure**: `{time}` remaining").format(
+                            time=format_delta(adv[1])
+                        ),
+                    )
                 )
 
-                if general_cooldowns:
-                    embed.add_field(
-                        name=_("General Cooldowns"),
-                        value="\n".join(general_cooldowns),
-                        inline=False
-                    )
-                    # Add a blank field with a single line of space if there are more fields to follow
-                    if battle_cooldowns or family_cooldowns or class_cooldowns or adventure_cooldowns:
-                        embed.add_field(name="\u200B", value="\n", inline=False)
+        total_entries = sum(len(section_lines) for section_lines in sections.values())
+        embed = discord.Embed(
+            title=_("Your Cooldowns"),
+            colour=self.bot.config.game.primary_colour,
+        )
+        embed.set_author(
+            name=str(ctx.author),
+            icon_url=ctx.author.display_avatar.url,
+        )
 
-                if battle_cooldowns:
-                    embed.add_field(
-                        name=_("Battle Cooldowns"),
-                        value="\n".join(battle_cooldowns),
-                        inline=False
-                    )
-                    # Add a blank field with a single line of space if there are more fields to follow
-                    if family_cooldowns or class_cooldowns or adventure_cooldowns:
-                        embed.add_field(name="\u200B", value="\n", inline=False)
+        if total_entries == 0:
+            embed.description = _("You don't have any active cooldowns right now.")
+            embed.set_footer(text=_("Everything is ready to use."))
+            return await ctx.send(embed=embed)
 
-                if family_cooldowns:
-                    embed.add_field(
-                        name=_("Family Cooldowns"),
-                        value="\n".join(family_cooldowns),
-                        inline=False
-                    )
-                    # Add a blank field with a single line of space if there are more fields to follow
-                    if class_cooldowns or adventure_cooldowns:
-                        embed.add_field(name="\u200B", value="\n", inline=False)
+        section_meta = [
+            ("challenges", "🗺️", _("Adventures & Challenges")),
+            ("social", "❤️", _("Family & Social")),
+            ("pets", "🐾", _("Pets & Companions")),
+            ("economy", "💰", _("Economy & Trading")),
+            ("progression", "🛠️", _("Progression & Forge")),
+            ("daily_events", "📅", _("Dailies, Faith & Events")),
+            ("other", "⏳", _("Other")),
+        ]
 
-                if class_cooldowns:
-                    embed.add_field(
-                        name=_("Class Cooldowns"),
-                        value="\n".join(class_cooldowns),
-                        inline=False
-                    )
-                    # Add a blank field with a single line of space if there are more fields to follow
-                    if adventure_cooldowns or adv:
-                        embed.add_field(name="\u200B", value="\n", inline=False)
+        rendered_sections = []
+        for key, emoji, title in section_meta:
+            entries = sorted(sections[key], key=lambda entry: entry[0])
+            if not entries:
+                continue
+            lines = [line for _, line in entries]
+            heading = f"{emoji} {title} ({len(lines)})"
+            rendered_sections.append((heading, lines))
 
+        section_blocks = [
+            f"**{heading}**\n" + "\n".join(lines)
+            for heading, lines in rendered_sections
+        ]
+        description = "\n\n".join(section_blocks)
 
-                # ... (continue adding a space between other fields as needed)
+        if len(description) <= 4096:
+            embed.description = description
+        else:
+            for heading, lines in rendered_sections:
+                chunks = chunk_lines(lines)
+                for index, chunk in enumerate(chunks):
+                    field_name = heading if index == 0 else _("{} (cont.)").format(heading)
+                    embed.add_field(name=field_name, value=chunk, inline=False)
 
-                if adv and not adv[2]:
-                    adventure_message = _("⏳ Adventure is running and will be done after {time}").format(
-                        time=adv[1]
-                    )
-                    embed.add_field(
-                        name=_("Adventure Status"),
-                        value=adventure_message,
-                        inline=False
-                    )
-
-
-                # Send the embed
-                await ctx.send(embed=embed)
-        except Exception as e:
-            await ctx.send(e)
+        embed.set_footer(text=_("Sorted by time remaining"))
+        await ctx.send(embed=embed)
 
     @commands.command(aliases=["botstatus", "shards"], brief=_("Show the clusters"))
     @locale_doc

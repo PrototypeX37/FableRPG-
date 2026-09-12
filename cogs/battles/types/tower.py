@@ -7,12 +7,14 @@ import datetime
 
 from ..core.battle import Battle
 from ..core.team import Team
+from ..extensions.specs import SpecExtension
 
 class TowerBattle(Battle):
     """Battle tower battle implementation"""
-    
+
     def __init__(self, ctx, teams, **kwargs):
         super().__init__(ctx, teams, **kwargs)
+        self.spec_ext = SpecExtension()
         self.level = kwargs.get("level", 1)
         self.level_data = kwargs.get("level_data", {})
         self.current_turn = 0
@@ -32,6 +34,11 @@ class TowerBattle(Battle):
         
         # Load all battle settings
         settings_cog = self.ctx.bot.get_cog("BattleSettings")
+        hp_bar_style = kwargs.get(
+            "hp_bar_style",
+            "colorful" if kwargs.get("emoji_hp_bars", False) else "normal",
+        )
+        normalized_hp_bar_style = self.normalize_hp_bar_style(hp_bar_style)
         if settings_cog:
             # Ensure all settings are loaded, with defaults if not found
             self.config = {
@@ -40,6 +47,8 @@ class TowerBattle(Battle):
                 "element_effects": settings_cog.get_setting("tower", "element_effects", default=True),
                 "luck_effects": settings_cog.get_setting("tower", "luck_effects", default=True),
                 "reflection_damage": settings_cog.get_setting("tower", "reflection_damage", default=True),
+                "hp_bar_style": normalized_hp_bar_style,
+                "emoji_hp_bars": normalized_hp_bar_style != self.HP_BAR_STYLE_NORMAL,
                 "fireball_chance": settings_cog.get_setting("tower", "fireball_chance", default=0.3),
                 "cheat_death": settings_cog.get_setting("tower", "cheat_death", default=True),
                 "tripping": settings_cog.get_setting("tower", "tripping", default=True),
@@ -54,6 +63,8 @@ class TowerBattle(Battle):
                 "element_effects": True,
                 "luck_effects": True,
                 "reflection_damage": True,
+                "hp_bar_style": normalized_hp_bar_style,
+                "emoji_hp_bars": normalized_hp_bar_style != self.HP_BAR_STYLE_NORMAL,
                 "fireball_chance": 0.3,
                 "cheat_death": True,
                 "tripping": True,
@@ -79,11 +90,17 @@ class TowerBattle(Battle):
             # Add to the most recent action
             action_count, old_message = self.log[-1]
             self.log[-1] = (action_count, f"{old_message}\n{message}")
+        
+        # IMPORTANT: Call parent method to capture turn state for replay
+        await self.capture_turn_state(message)
 
     async def start_battle(self):
         """Initialize and start the battle"""
         self.started = True
         self.start_time = datetime.datetime.utcnow()
+        
+        # Save initial battle data to database for replay
+        await self.save_battle_to_database()
         
         # Build initial turn order with player team and first enemy
         self.update_turn_order()
@@ -94,10 +111,17 @@ class TowerBattle(Battle):
         
         # First action: Introduction
         await self.add_to_log(intro_message, force_new_action=True)
+        for opening_message in await self.trigger_ascension_openings():
+            await self.add_to_log(opening_message, force_new_action=True)
+
+        # Spec hook: opening party effects (Bulwark shields, Warchanter damage)
+        if self.config.get("class_buffs", True):
+            for opening_message in self.spec_ext.battle_start_effects(self.player_team):
+                await self.add_to_log(opening_message, force_new_action=True)
         
         # Create and send initial embed
         embed = await self.create_battle_embed()
-        self.battle_message = await self.ctx.send(embed=embed)
+        self.battle_message = await self.publish_battle_message(embed=embed)
         
         # Add a 3-second pause after the intro message for dramatic effect
         await asyncio.sleep(3)
@@ -125,15 +149,160 @@ class TowerBattle(Battle):
         
         # Shuffle to randomize initial order
         random.shuffle(self.turn_order)
+        self.turn_order = self.prioritize_turn_order(self.turn_order)
+
+    @staticmethod
+    def apply_rift_target_hp_pressure(attacker, target, raw_damage):
+        """Keep Ascendant Rift pressure meaningful against owner or pet."""
+        pressure = Decimal(
+            str(getattr(attacker, "rift_target_hp_pressure", 0) or 0)
+        )
+        if pressure <= 0:
+            return raw_damage
+
+        target_armor = Decimal(str(getattr(target, "armor", 0) or 0))
+        target_max_hp = Decimal(str(getattr(target, "max_hp", 0) or 0))
+        pressure_bonus = Decimal(
+            str(getattr(attacker, "rift_pressure_bonus", 0) or 0)
+        )
+        pressure_damage = target_armor + (
+            target_max_hp * pressure * (Decimal("1") + pressure_bonus)
+        )
+        return max(Decimal(str(raw_damage)), pressure_damage)
+
+    @staticmethod
+    def rift_healing_threat(combatant, allies):
+        """Estimate how much sustain a combatant can supply each action."""
+        if combatant is None:
+            return Decimal("0")
+
+        def number(value):
+            try:
+                return max(Decimal("0"), Decimal(str(value or 0)))
+            except Exception:
+                return Decimal("0")
+
+        max_hp = number(getattr(combatant, "max_hp", 0))
+        damage = number(getattr(combatant, "damage", 0))
+        team_max_hp = sum(
+            (number(getattr(ally, "max_hp", 0)) for ally in allies),
+            Decimal("0"),
+        )
+        threat = Decimal("0")
+
+        if getattr(combatant, "is_pet", False):
+            for effect in (getattr(combatant, "skill_effects", None) or {}).values():
+                if not isinstance(effect, dict):
+                    continue
+                effect_type = str(effect.get("type", "")).lower()
+                for field in (
+                    "heal_percent",
+                    "team_heal_percent",
+                    "heal_per_turn",
+                    "lifesteal_percent",
+                    "lifesteal",
+                    "team_lifesteal",
+                ):
+                    amount = number(effect.get(field))
+                    if amount <= 0:
+                        continue
+                    if "lifesteal" in field or "lifesteal" in effect_type:
+                        base = damage
+                    elif field.startswith("team_") or "team_heal" in effect_type:
+                        base = team_max_hp
+                    else:
+                        base = max_hp
+                    threat += base * amount
+                if effect.get("heal_to_full"):
+                    threat += team_max_hp
+            return threat
+
+        threat += damage * number(getattr(combatant, "lifesteal_percent", 0)) / 100
+        threat += damage * number(getattr(combatant, "bonus_lifesteal", 0))
+        threat += damage * number(getattr(combatant, "dark_ritual_lifesteal", 0))
+        threat += team_max_hp * Decimal("0.005") * number(
+            getattr(combatant, "bard_evolution", 0)
+        )
+
+        spec_effects = getattr(combatant, "spec_effects", None) or {}
+        for key, base in (
+            ("party_round_heal_pct", team_max_hp),
+            ("second_wind_heal_pct", max_hp),
+            ("soul_ward_lifesteal_pct", damage),
+            ("christmas_miracle_pct", max_hp),
+        ):
+            effect = spec_effects.get(key)
+            if isinstance(effect, dict):
+                threat += base * number(effect.get("value")) / 100
+        return threat
+
+    @classmethod
+    def select_rift_smart_target(cls, attacker, alive_targets):
+        """Focus the living combatant with the greatest healing threat."""
+        if not getattr(attacker, "rift_smart_targeting", False):
+            return None
+        scored = [
+            (cls.rift_healing_threat(target, alive_targets), index, target)
+            for index, target in enumerate(alive_targets)
+        ]
+        if not scored or max(score for score, _index, _target in scored) <= 0:
+            return None
+        return max(scored, key=lambda item: (item[0], -item[1]))[2]
+
+    @staticmethod
+    def advance_rift_attack_pressure(attacker):
+        """Increase an Ascendant enemy's future damage by a random 3-5%."""
+        growth_range = getattr(attacker, "rift_pressure_growth_range", None)
+        if not growth_range or not getattr(attacker, "is_alive", lambda: True)():
+            return None
+        low, high = growth_range
+        growth = Decimal(str(random.uniform(float(low), float(high))))
+        bonus = Decimal(str(getattr(attacker, "rift_pressure_bonus", 0) or 0))
+        bonus += growth
+        attacker.rift_pressure_bonus = bonus
+        return bonus
+
+    @staticmethod
+    def reset_rift_attack_pressure(attacker):
+        if hasattr(attacker, "rift_pressure_bonus"):
+            attacker.rift_pressure_bonus = Decimal("0")
+        if hasattr(attacker, "rift_last_smart_target"):
+            delattr(attacker, "rift_last_smart_target")
     
+    def find_next_opponent_index(self):
+        """Return the index of the next enemy that can still be fought.
+
+        Scans forward from the current opponent and wraps around to the start,
+        so an enemy that is back on its feet after we already moved past it
+        (Guardian Angel, Cyclebreaker, an ally's revive) is faced again instead
+        of being stranded alive at an index we can never return to. Returns
+        None only when every enemy is down, which keeps this in agreement with
+        `is_battle_over`.
+        """
+        combatants = self.enemy_team.combatants
+        total = len(combatants)
+        for offset in range(1, total + 1):
+            index = (self.current_opponent_index + offset) % total
+            if combatants[index].is_alive():
+                return index
+        return None
+
     async def handle_enemy_transition(self):
         """Handle transition to the next enemy as a combined action"""
         # This function is called as a separate process_turn action
-        
+
         # Move to the next enemy and show both transition messages in the same action
-        self.current_opponent_index += 1
+        next_index = self.find_next_opponent_index()
+        if next_index is None:
+            # Every enemy went down before the transition ran
+            self.pending_enemy_transition = False
+            self.transition_state = 0
+            return False
+
+        self.current_opponent_index = next_index
         current_enemy = self.enemy_team.combatants[self.current_opponent_index]
-        
+        self.reset_rift_attack_pressure(current_enemy)
+
         # Show "Prepare to face" message
         await self.add_to_log(f"Prepare to face {current_enemy.name}!", force_new_action=True)
         await self.update_display()  # Show message with previous enemy HP at 0
@@ -168,7 +337,23 @@ class TowerBattle(Battle):
         # Skip dead combatants
         if not current_combatant.is_alive():
             return True
+
+        silenced_message = self.consume_ascension_action_lock(current_combatant)
+        if silenced_message:
+            await self.add_to_log(silenced_message, force_new_action=True)
+            await self.update_display()
+            await asyncio.sleep(1)
+            return True
+
+        locked_message = self.consume_pet_skill_action_lock(current_combatant)
+        if locked_message:
+            await self.add_to_log(locked_message, force_new_action=True)
+            await self.update_display()
+            await asyncio.sleep(1)
+            return True
             
+        smart_target_message = None
+
         # Determine which team the combatant belongs to
         if current_combatant in self.player_team.combatants:
             # Player's turn, target the current enemy
@@ -176,11 +361,11 @@ class TowerBattle(Battle):
             current_enemy = self.enemy_team.combatants[self.current_opponent_index]
             
             if not current_enemy.is_alive():
-                # Current enemy is defeated, move to next one
-                if self.current_opponent_index < len(self.enemy_team.combatants) - 1:
+                # Current enemy is defeated, move to the next one that is still standing
+                if self.find_next_opponent_index() is not None:
                     # First just update the display to show the defeated enemy with 0 HP
                     await self.update_display()
-                    
+
                     # Schedule the transition to next enemy as a separate action
                     self.pending_enemy_transition = True
                     self.transition_state = 1  # Start at phase 1 (intro)
@@ -198,23 +383,19 @@ class TowerBattle(Battle):
             if not alive_players:
                 return False  # All players are defeated
             
-            # Target selection logic - pets have different weighting
-            weighted_targets = []
-            weights = []
-            
-            for player in alive_players:
-                if player.is_pet:
-                    weighted_targets.append(player)
-                    weights.append(0.4)  # 40% chance to target pets
-                else:
-                    weighted_targets.append(player)
-                    weights.append(0.6)  # 60% chance to target players
-            
-            # Normalize weights
-            total_weight = sum(weights)
-            weights = [w/total_weight for w in weights]
-            
-            target = random.choices(weighted_targets, weights=weights)[0]
+            target = self.select_rift_smart_target(current_combatant, alive_players)
+            if target is not None:
+                marker = id(target)
+                if getattr(current_combatant, "rift_last_smart_target", None) != marker:
+                    current_combatant.rift_last_smart_target = marker
+                    smart_target_message = (
+                        f"🧠 {current_combatant.name} identifies **{target.name}** "
+                        "as the greatest healing threat!"
+                    )
+            else:
+                # Standard targeting retains the original player/pet weighting.
+                weights = [0.4 if player.is_pet else 0.6 for player in alive_players]
+                target = random.choices(alive_players, weights=weights)[0]
         
         # Process attack based on luck
         luck_roll = random.randint(1, 100)
@@ -223,35 +404,79 @@ class TowerBattle(Battle):
         if current_combatant in self.enemy_team.combatants:
             hit_success = random.random() > 0.10  # 10% chance to miss
         else:
-            hit_success = luck_roll <= current_combatant.luck
+            # Check for perfect accuracy from Night Vision skill
+            has_perfect_accuracy = getattr(current_combatant, 'perfect_accuracy', False)
+            hit_success = has_perfect_accuracy or (luck_roll <= current_combatant.luck)
             
+        # Initialize message variable
+        message = ""
+
+        guard_source = None
+
         if hit_success:
             # Attack hits
+            blocked_damage = Decimal("0")
+            ignore_reflection_this_hit = False
+            mage_charge_state = self.advance_mage_fireball_charge(current_combatant)
             
-            # Special case for mage fireball
             used_fireball = False
-            if (current_combatant.mage_evolution and 
-                not current_combatant.is_pet and 
-                self.config["class_buffs"] and
-                random.random() < self.config["fireball_chance"]):
-                
-                # Calculate fireball damage
-                evolution_level = current_combatant.mage_evolution
-                damage_multiplier = {
-                    1: 1.10,  # 110%
-                    2: 1.20,  # 120%
-                    3: 1.30,  # 130%
-                    4: 1.50,  # 150%
-                    5: 1.75,  # 175%
-                    6: 2.00,  # 200%
-                }.get(evolution_level, 1.0)
-                
-                damage = (current_combatant.damage + Decimal(random.randint(0, 100)) - target.armor) * Decimal(str(damage_multiplier))
-                damage = max(damage, Decimal('1'))
-                
+            if mage_charge_state and mage_charge_state["fireball_ready"]:
+                damage = self.calculate_mage_fireball_damage(
+                    current_combatant,
+                    target,
+                    damage_variance=100,
+                    minimum_damage=Decimal("1"),
+                    apply_armor=False,
+                )
+                ignore_reflection_this_hit = True
+
+                fireball_spec_messages = []
+                if self.config.get("class_buffs", True):
+                    damage, fireball_spec_messages = self.spec_ext.modify_outgoing_damage(
+                        current_combatant,
+                        target,
+                        damage,
+                        include_overload=False,
+                    )
+
+                # Overload: the Fireball detonates any banked Arcane charges.
+                overload_messages = []
+                if self.config.get("class_buffs", True):
+                    damage, overload_messages = self.spec_ext.consume_overload_fireball(
+                        current_combatant, damage
+                    )
+
+                damage, blocked_damage, fireball_barrier_messages = (
+                    self.resolve_damage_after_pet_barriers(
+                        target,
+                        damage,
+                        minimum_damage=Decimal("1"),
+                    )
+                )
+
+                damage, guard_messages, guard_source = self.apply_pet_owner_guard(
+                    current_combatant,
+                    target,
+                    damage,
+                )
                 target.take_damage(damage)
-                
                 message = f"{current_combatant.name} casts Fireball! {target.name} takes **{self.format_number(damage)} HP** damage."
+                if fireball_barrier_messages:
+                    message += "\n" + "\n".join(fireball_barrier_messages)
+                if fireball_spec_messages:
+                    message += "\n" + "\n".join(fireball_spec_messages)
+                if overload_messages:
+                    message += "\n" + "\n".join(overload_messages)
+                if self.config.get("class_buffs", True):
+                    spec_after_messages = self.spec_ext.after_attack_damage(
+                        current_combatant,
+                        target,
+                        self,
+                    )
+                    if spec_after_messages:
+                        message += "\n" + "\n".join(spec_after_messages)
+                if guard_messages:
+                    message += "\n" + "\n".join(guard_messages)
                 used_fireball = True
             else:
                 # Regular attack
@@ -259,25 +484,149 @@ class TowerBattle(Battle):
                 
                 # Start with base damage
                 raw_damage = current_combatant.damage
-                
-                # Apply element effects to base damage if enabled
-                if self.config["element_effects"] and hasattr(self.ctx.bot.cogs["Battles"], "element_ext"):
-                    element_mod = self.ctx.bot.cogs["Battles"].element_ext.calculate_damage_modifier(
-                        self.ctx,
-                        current_combatant.element, 
-                        target.element
+                raw_damage = self.apply_rift_target_hp_pressure(
+                    current_combatant,
+                    target,
+                    raw_damage,
+                )
+
+                # Spec hook A: attacker-side bonuses (may set one-hit flags on target)
+                spec_attack_messages = []
+                if self.config.get("class_buffs", True):
+                    raw_damage, spec_attack_messages = self.spec_ext.modify_outgoing_damage(
+                        current_combatant, target, raw_damage
                     )
-                    if element_mod != 0:
-                        raw_damage = raw_damage * (1 + Decimal(str(element_mod)))
-                
-                # Add variance and apply armor
-                raw_damage += Decimal(damage_variance)
-                blocked_damage = min(raw_damage, target.armor)  # Can't block more than the armor value
-                damage = max(raw_damage - target.armor, Decimal('10'))  # Minimum 10 damage
-                
+
+                outcome = self.resolve_pet_attack_outcome(
+                    current_combatant,
+                    target,
+                    raw_damage,
+                    apply_element_mod=self.config["element_effects"],
+                    damage_variance=damage_variance,
+                    minimum_damage=Decimal("10"),
+                )
+                damage = outcome.final_damage
+                blocked_damage = outcome.blocked_damage
+                skill_messages = outcome.skill_messages
+                defender_messages = outcome.defender_messages
+                ignore_reflection_this_hit = bool(outcome.metadata.get("ignore_reflection_this_hit", False))
+
+                damage, guard_messages, guard_source = self.apply_pet_owner_guard(
+                    current_combatant,
+                    target,
+                    damage,
+                )
+
+                # Spec hook B: defender-side avoidance and mitigation
+                spec_defense_messages = []
+                if self.config.get("class_buffs", True):
+                    damage, spec_defense_messages = self.spec_ext.modify_incoming_damage(
+                        current_combatant,
+                        target,
+                        damage,
+                        self.get_team_for_combatant(target),
+                    )
+
                 target.take_damage(damage)
-                
                 message = f"{current_combatant.name} attacks! {target.name} takes **{self.format_number(damage)} HP** damage."
+                if getattr(target, "bloodpact_triggered", False):
+                    target.bloodpact_triggered = False
+                    message += f"\n🩸 **{target.name}**'s Blood Pact shatters — they cling to life!"
+                if spec_attack_messages:
+                    message += "\n" + "\n".join(spec_attack_messages)
+                if spec_defense_messages:
+                    message += "\n" + "\n".join(spec_defense_messages)
+
+                # Spec hook D: on-damage triggers (Second Wind)
+                if self.config.get("class_buffs", True):
+                    spec_after_messages = self.spec_ext.after_attack_damage(
+                        current_combatant,
+                        target,
+                        self,
+                    )
+                    if spec_after_messages:
+                        message += "\n" + "\n".join(spec_after_messages)
+                    spec_trigger_messages = self.spec_ext.post_damage_triggers(target)
+                    if spec_trigger_messages:
+                        message += "\n" + "\n".join(spec_trigger_messages)
+
+                if guard_messages:
+                    message += "\n" + "\n".join(guard_messages)
+
+                charge_message = self.format_mage_charge_message(mage_charge_state)
+                if charge_message:
+                    message += "\n" + charge_message
+                
+                # Add skill effect messages
+                if skill_messages:
+                    message += "\n" + "\n".join(skill_messages)
+                if defender_messages:
+                    message += "\n" + "\n".join(defender_messages)
+                
+                # Check for skeleton summoning after skill processing
+                queued_summons = getattr(current_combatant, 'summon_skeleton_queue', None)
+                if not queued_summons and hasattr(current_combatant, 'summon_skeleton'):
+                    queued_summons = [current_combatant.summon_skeleton]
+                if queued_summons:
+                    from cogs.battles.core.combatant import Combatant
+
+                    for skeleton_data in list(queued_summons):
+                        skeleton_serial = skeleton_data.get(
+                            'serial',
+                            getattr(current_combatant, 'skeleton_count', 1),
+                        )
+                        skeleton = Combatant(
+                            user=f"Skeleton Warrior #{skeleton_serial}",
+                            hp=skeleton_data['hp'],
+                            max_hp=skeleton_data['hp'],
+                            damage=skeleton_data['damage'],
+                            armor=skeleton_data['armor'],
+                            element=skeleton_data['element'],
+                            luck=skeleton_data.get('luck', 50),
+                            is_pet=True,
+                            name=f"Skeleton Warrior #{skeleton_serial}"
+                        )
+                        skeleton.is_summoned = True
+
+                        if current_combatant in self.player_team.combatants:
+                            self.register_summoned_combatant(
+                                skeleton,
+                                team=self.player_team,
+                                summoner=current_combatant,
+                            )
+                            self.player_team.combatants.append(skeleton)
+                            self.turn_order.append(skeleton)
+                            message += f"\n💀 Skeleton Warrior #{skeleton_serial} joins your side!"
+                        else:
+                            self.register_summoned_combatant(
+                                skeleton,
+                                team=self.enemy_team,
+                                summoner=current_combatant,
+                            )
+                            self.enemy_team.combatants.append(skeleton)
+                            self.turn_order.append(skeleton)
+                            message += f"\n💀 Skeleton Warrior #{skeleton_serial} joins the enemy side!"
+
+                    self.turn_order = self.prioritize_turn_order(self.turn_order)
+
+                    if hasattr(current_combatant, 'summon_skeleton_queue'):
+                        delattr(current_combatant, 'summon_skeleton_queue')
+                    if hasattr(current_combatant, 'summon_skeleton'):
+                        delattr(current_combatant, 'summon_skeleton')
+
+            grave_message = await self.maybe_trigger_grave_sovereign(
+                current_combatant,
+                target,
+            )
+            if grave_message:
+                message += "\n" + grave_message
+
+            cycle_message = await self.maybe_trigger_cyclebreaker(
+                target,
+                current_combatant,
+            )
+            if cycle_message:
+                message += "\n" + cycle_message
             
             # Handle lifesteal if applicable
             if (self.config["class_buffs"] and 
@@ -287,34 +636,55 @@ class TowerBattle(Battle):
                 lifesteal_amount = (float(damage) * float(current_combatant.lifesteal_percent) / 100.0)
                 current_combatant.heal(lifesteal_amount)
                 message += f" Lifesteals: **{self.format_number(lifesteal_amount)} HP**"
+
+            bonus_lifesteal = self.apply_bonus_lifesteal(current_combatant, damage)
+            if bonus_lifesteal > 0:
+                message += (
+                    f"\n{current_combatant.name} siphons **{self.format_number(bonus_lifesteal)} HP** "
+                    "from bonus lifesteal!"
+                )
             
             # Handle damage reflection if applicable
             # Apply tank evolution reflection multiplier if applicable
-            reflection_value = target.damage_reflection
-            
-            # Apply tank evolution-based reflection if target has tank evolution
-            if self.config["class_buffs"] and target.tank_evolution and not target.is_pet:
-                # Use the standard tank evolution reflection multiplier from classes.py
-                tank_reflection = 0.03 * target.tank_evolution  # 3% per level, so 21% at level 7
-                reflection_value = max(reflection_value, tank_reflection)  # Use higher of item reflection or tank reflection
-            
+            # Best of gear/innate Tank plating, plus Juggernaut's Retaliation
+            reflection_value = self.resolve_damage_reflection(target)
+
+
             if (self.config["reflection_damage"] and 
                 reflection_value > 0 and 
-                blocked_damage > 0):
+                blocked_damage > 0 and
+                not ignore_reflection_this_hit):
                 
                 # Calculate reflection as percentage of raw damage, capped at defender's armor
                 reflection_base = min(raw_damage, target.armor)
                 reflected = reflection_base * Decimal(str(reflection_value))
-                current_combatant.take_damage(reflected)
-                message += f"\n{target.name}'s armor reflects **{self.format_number(reflected)} HP** damage back!"
+                reflected, plate_message = self.apply_reflection_plate(target, reflected, reflection_value)
+                if reflected > 0:
+                    current_combatant.take_damage(reflected)
+                    message += f"\n{target.name}'s armor reflects **{self.format_number(reflected)} HP** damage back!"
+                if plate_message:
+                    message += f"\n{plate_message}"
                 
                 if not current_combatant.is_alive():
                     message += f" {current_combatant.name} has been defeated by reflected damage!"
+
+            class_messages = self.resolve_post_hit_class_effects(current_combatant, target)
+            if class_messages:
+                message += "\n" + "\n".join(class_messages)
             
             # Check if target is defeated
             if not target.is_alive():
+                guardian_message = self.maybe_trigger_guardian_angel(target)
+                if guardian_message:
+                    message += f"\n{guardian_message}"
+                # Check for water immortality first
+                if target.is_alive():
+                    pass
+                elif getattr(target, 'water_immortality', False):
+                    target.hp = Decimal('1')  # Stay at 1 HP
+                    message += f"\n💧 {target.name} is protected by Immortal Waters and refuses to fall!"
                 # Check for cheat death ability for players
-                if (self.config["class_buffs"] and 
+                elif (self.config["class_buffs"] and 
                     self.config["cheat_death"] and
                     not target.is_pet and 
                     target in self.player_team.combatants and  # Only player can cheat death
@@ -323,9 +693,12 @@ class TowerBattle(Battle):
                     
                     cheat_roll = random.randint(1, 100)
                     if cheat_roll <= target.death_cheat_chance:
-                        target.hp = Decimal('75')
+                        target.hp = self.get_cheat_death_recovery_hp(target)
                         target.has_cheated_death = True
-                        message += f"\n{target.name} cheats death and survives with **75 HP**!"
+                        message += (
+                            f"\n{target.name} cheats death and survives with "
+                            f"**{self.format_number(target.hp)} HP**!"
+                        )
                     else:
                         message += f" {target.name} has been defeated!"
                 else:
@@ -335,8 +708,8 @@ class TowerBattle(Battle):
                     if target in self.enemy_team.combatants:
                         if target == self.enemy_team.combatants[self.current_opponent_index]:
                             # Schedule the transition to next enemy as a separate action
-                            # (but don't increment the index here as that's done in handle_enemy_transition)
-                            if self.current_opponent_index < len(self.enemy_team.combatants) - 1:
+                            # (but don't pick the index here as that's done in handle_enemy_transition)
+                            if self.find_next_opponent_index() is not None:
                                 self.pending_enemy_transition = True
                                 self.transition_state = 1  # Start at phase 1 (intro)
         else:
@@ -344,16 +717,65 @@ class TowerBattle(Battle):
             if self.config.get("tripping", False):
                 damage = Decimal('10')
                 current_combatant.take_damage(damage)
-                message = f"{current_combatant.name} tripped and took **{damage} HP** damage. Bad luck!"
+                message = f"{current_combatant.name} tripped and took **{self.format_number(damage)} HP** damage. Bad luck!"
             else:
                 message = f"{current_combatant.name}'s attack missed!"
         
+        if smart_target_message:
+            message += f"\n{smart_target_message}"
+
+        if current_combatant in self.enemy_team.combatants:
+            pressure_bonus = self.advance_rift_attack_pressure(current_combatant)
+            if pressure_bonus is not None:
+                message += (
+                    "\n🌀 Rift pressure intensifies: the enemy's next attack gains "
+                    f"**+{float(pressure_bonus) * 100:.1f}%** damage."
+                )
+
+        if target in self.enemy_team.combatants and not target.is_alive():
+            self.reset_rift_attack_pressure(target)
+
         # Add message to battle log - use a new action number for each combat action
         await self.add_to_log(message, force_new_action=True)
-        
+
+        if current_combatant.is_pet and not target.is_alive():
+            setattr(current_combatant, 'killed_enemy_this_turn', True)
+
+        for combatant in (target, current_combatant, guard_source):
+            if combatant is None or not getattr(combatant, "is_pet", False) or combatant.is_alive():
+                continue
+            for death_msg in self.process_pet_death_effects(combatant):
+                await self.add_to_log(death_msg, force_new_action=True)
+
+        if current_combatant.is_pet and current_combatant.is_alive():
+            for turn_msg in self.process_pet_turn_effects(current_combatant):
+                await self.add_to_log(turn_msg, force_new_action=True)
+
+        # Spec hook E: turn-end party heal (Winterlight's Gift of Cheer)
+        if (
+            self.config.get("class_buffs", True)
+            and current_combatant in self.player_team.combatants
+        ):
+            for heal_msg in self.spec_ext.turn_end_party_heal(current_combatant, self.player_team):
+                await self.add_to_log(heal_msg, force_new_action=True)
+            bard_grade = getattr(current_combatant, "bard_evolution", None)
+            if bard_grade and not getattr(current_combatant, "is_pet", False) and current_combatant.is_alive():
+                healed_any = False
+                heal_pct = Decimal(str(0.005 * int(bard_grade)))
+                for member in self.player_team.combatants:
+                    if member.is_alive() and member.hp < member.max_hp:
+                        member.heal(Decimal(str(member.max_hp)) * heal_pct)
+                        healed_any = True
+                if healed_any:
+                    await self.add_to_log(
+                        f"🎶 **{current_combatant.name}**'s bardic refrain restores the party!",
+                        force_new_action=True,
+                    )
+
         # Update the battle display
         await self.update_display()
-        
+        await asyncio.sleep(1)
+
         return True
     
     async def create_battle_embed(self):
@@ -373,7 +795,7 @@ class TowerBattle(Battle):
         for combatant in self.player_team.combatants:
             current_hp = max(0, float(combatant.hp))
             max_hp = float(combatant.max_hp)
-            hp_bar = self.create_hp_bar(current_hp, max_hp)
+            hp_bar = self.create_hp_bar(current_hp, max_hp, combatant=combatant)
             
             # Get element emoji
             element_emoji = "❌"
@@ -386,22 +808,42 @@ class TowerBattle(Battle):
             if combatant.is_pet:
                 field_name = f"{combatant.name} {element_emoji}"
             else:
-                field_name = f"**[TEAM A]** \n{combatant.display_name} {element_emoji}"
+                birthday_marker = (
+                    " 🎂" if getattr(combatant, "is_birthday_assistant", False) else ""
+                )
+                field_name = (
+                    f"**[TEAM A]** \n{combatant.display_name} "
+                    f"{element_emoji}{birthday_marker}"
+                )
                 
             # Create field value with HP bar
             field_value = f"HP: {current_hp:.1f}/{max_hp:.1f}\n{hp_bar}"
+            if hasattr(combatant, "shield") and Decimal(str(combatant.shield)) > 0:
+                field_value += f"\nShield: {self.format_number(combatant.shield)}"
             
             # Add reflection info if applicable
             if combatant.damage_reflection > 0:
                 reflection_percent = float(combatant.damage_reflection) * 100
                 field_value += f"\nDamage Reflection: {reflection_percent:.1f}%"
+                if self._uses_reflection_plate(combatant):
+                    plate_max = Decimal(str(getattr(combatant, "reflection_plate_max", 0) or 0))
+                    if plate_max <= 0:
+                        plate_max = Decimal(str(combatant.max_hp)) * Decimal(str(combatant.damage_reflection))
+                    plate_left = Decimal(str(getattr(combatant, "reflection_plate", plate_max) or 0))
+                    if getattr(combatant, "reflection_plate_broken", False):
+                        field_value += "\nReflect Plate: broken"
+                    else:
+                        field_value += (
+                            f"\nReflect Plate: {self.format_number(plate_left)}/"
+                            f"{self.format_number(plate_max)}"
+                        )
                 
             embed.add_field(name=field_name, value=field_value, inline=False)
         
         # Add current enemy info
         current_hp = max(0, float(current_enemy.hp))
         max_hp = float(current_enemy.max_hp)
-        hp_bar = self.create_hp_bar(current_hp, max_hp)
+        hp_bar = self.create_hp_bar(current_hp, max_hp, combatant=current_enemy)
         
         # Get element emoji
         element_emoji = "❌"
@@ -412,51 +854,67 @@ class TowerBattle(Battle):
         
         field_name = f"**[TEAM B]** \n{current_enemy.name} {element_emoji}"
         field_value = f"HP: {current_hp:.1f}/{max_hp:.1f}\n{hp_bar}"
+        if hasattr(current_enemy, "shield") and Decimal(str(current_enemy.shield)) > 0:
+            field_value += f"\nShield: {self.format_number(current_enemy.shield)}"
         embed.add_field(name=field_name, value=field_value, inline=False)
         
         # Add battle log
-        log_text = "\n\n".join([f"**Action #{i}**\n{msg}" for i, msg in self.log])
-        embed.add_field(name="Battle Log", value=log_text or "Battle starting...", inline=False)
+        log_text = self.format_battle_log_field()
+        embed.add_field(name="Battle Log", value=log_text, inline=False)
+        
+        # Add battle ID to footer for GM replay functionality
+        embed.set_footer(text=f"Battle ID: {self.battle_id}")
         
         return embed
     
     async def update_display(self):
         """Update the battle display"""
         embed = await self.create_battle_embed()
-        if self.battle_message:
-            await self.battle_message.edit(embed=embed)
-        else:
-            self.battle_message = await self.ctx.send(embed=embed)
+        await self.publish_battle_message(embed=embed)
     
     async def end_battle(self):
         """End the battle and determine outcome"""
         self.finished = True
         
-        # Check if it's a timeout
-        if await self.is_timed_out():
-            # Special case for timeout
-            self.battle_timed_out = True
-            return None
-            
+        # Check victory/defeat conditions BEFORE timeout
+        # This ensures that if enemies are defeated on the last turn before timeout, it's still a victory
+        
         # Check if the player character (non-pet) is defeated when pets_continue_battle is false
         player_char_defeated = not any(not c.is_pet and c.is_alive() for c in self.player_team.combatants)
         if player_char_defeated and not self.config.get("pets_continue_battle", False):
             # Player lost if character is dead and pets can't continue
+            # Save final battle state to database for replay
+            await self.save_battle_to_database()
             return self.enemy_team
         
         # Check if player team is completely defeated
         if self.player_team.is_defeated():
             # Player lost - return the enemy team as winner
+            # Save final battle state to database for replay
+            await self.save_battle_to_database()
             return self.enemy_team
         
-        # Check if all enemies are defeated
+        # Check if all enemies are defeated (VICTORY)
         if all(not enemy.is_alive() for enemy in self.enemy_team.combatants):
             # Player only wins if the character is still alive or pets_continue_battle is true
             if not player_char_defeated or self.config.get("pets_continue_battle", False):
+                # Save final battle state to database for replay
+                await self.save_battle_to_database()
                 return self.player_team
             else:
                 # Both player and enemies are defeated - draw or enemy wins
+                # Save final battle state to database for replay
+                await self.save_battle_to_database()
                 return self.enemy_team
+        
+        # Only check timeout AFTER victory/defeat conditions
+        # This prevents timeout from overriding a legitimate victory/defeat
+        if await self.is_timed_out():
+            # Special case for timeout
+            self.battle_timed_out = True
+            # Save final battle state to database for replay
+            await self.save_battle_to_database()
+            return None
         
         # Compare remaining HP percentages - only if player character still alive or pets can continue
         if not player_char_defeated or self.config.get("pets_continue_battle", False):
@@ -464,9 +922,13 @@ class TowerBattle(Battle):
             enemy_health_percent = sum(c.hp / c.max_hp for c in self.enemy_team.combatants) / len(self.enemy_team.combatants)
             
             if player_health_percent > enemy_health_percent:
+                # Save final battle state to database for replay
+                await self.save_battle_to_database()
                 return self.player_team
         
         # Default to enemy win if no other condition is met
+        # Save final battle state to database for replay
+        await self.save_battle_to_database()
         return self.enemy_team
     
     async def is_battle_over(self):
@@ -478,17 +940,15 @@ class TowerBattle(Battle):
         if self.finished:
             return True
         
-        # Check if battle timed out
-        if await self.is_timed_out():
-            self.battle_timed_out = True
-            return True
+        # Check victory/defeat conditions BEFORE timeout
+        # This ensures that if enemies are defeated on the last turn before timeout, it's still a victory
         
-        # Check if all enemies are defeated
+        # Check if all enemies are defeated (VICTORY)
         enemy_defeated = all(not c.is_alive() for c in self.enemy_team.combatants)
         if enemy_defeated:
             return True
             
-        # Check if player team is defeated based on settings
+        # Check if player team is defeated based on settings (DEFEAT)
         player_char_defeated = not any(not c.is_pet and c.is_alive() for c in self.player_team.combatants)
         
         # If player character is defeated but pets should continue battle
@@ -497,9 +957,16 @@ class TowerBattle(Battle):
             if self.config.get("pets_continue_battle", False) and self.config.get("allow_pets", True):
                 # Only end battle if all pets are also defeated
                 all_defeated = all(not c.is_alive() for c in self.player_team.combatants)
-                return all_defeated
+                if all_defeated:
+                    return True
             else:
                 # Default behavior: end battle if player character is defeated
                 return True
+        
+        # Only check timeout AFTER victory/defeat conditions
+        # This prevents timeout from overriding a legitimate victory/defeat
+        if await self.is_timed_out():
+            self.battle_timed_out = True
+            return True
                 
         return False

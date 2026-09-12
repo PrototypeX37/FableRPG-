@@ -3,9 +3,907 @@ import discord
 from discord.ext import commands
 from discord.ui import Button, View
 import asyncio
+from typing import Optional, List, Dict, Tuple, Union, Any, Set
+from discord import ButtonStyle, SelectOption, ui
+from discord.ui import Button, View, Select
+import firebase_admin
+from firebase_admin import credentials, storage
 import random
+import json
+import aiohttp
 from cogs.shard_communication import user_on_cooldown as user_cooldown
+from cogs.splice_identity import (
+    canonical_parent_pair_key,
+    ensure_splice_identity_schema,
+)
 from utils.checks import has_char, is_gm, is_patreon
+
+SPLICE_ARCHIVE_USER_ID = 0
+SPLICE_ALIAS_MAX_LENGTH = 20
+
+SPLICE_ELEMENT_ORDER = [
+    "Fire",
+    "Water",
+    "Earth",
+    "Wind",
+    "Nature",
+    "Electric",
+    "Light",
+    "Dark",
+    "Corrupted",
+    "Ice",
+]
+
+SPLICE_ELEMENT_EMOJIS = {
+    "fire": "🔥",
+    "water": "💧",
+    "earth": "🪨",
+    "wind": "💨",
+    "nature": "🌿",
+    "electric": "⚡",
+    "light": "✨",
+    "dark": "🌑",
+    "corrupted": "☠️",
+    "ice": "❄️",
+}
+
+SPLICE_ELEMENT_COLORS = {
+    "fire": 0xFF5733,
+    "water": 0x3498DB,
+    "earth": 0x8B4513,
+    "wind": 0x7FFF00,
+    "nature": 0x228B22,
+    "electric": 0xFFFF00,
+    "light": 0xFFD700,
+    "dark": 0x36454F,
+    "corrupted": 0x800080,
+    "ice": 0xADD8E6,
+}
+
+SPLICE_SORT_OPTIONS = [
+    ("name", "Name A-Z", "Alphabetical by splice name"),
+    ("newest", "Newest", "Most recently discovered first"),
+    ("oldest", "Oldest", "Earliest discovered first"),
+    ("element", "Element", "Grouped by element"),
+    ("hp", "HP", "Highest HP first"),
+    ("attack", "Attack", "Highest attack first"),
+    ("defense", "Defense", "Highest defense first"),
+    ("total", "Total Power", "Highest total stats first"),
+]
+
+SPLICE_SCOPE_OPTIONS = [
+    ("all", "All Splices", "Browse every discovered splice"),
+    ("mine", "My Splices", "Only splices you currently own"),
+    ("favorites", "Favorites", "Only your bookmarked splices"),
+    ("mine_favorites", "My Favorites", "Your owned bookmarked splices"),
+]
+
+SPLICE_BACKGROUND_OPTIONS = [
+    ("auto", "Forge's Choice", "Let the forge choose a fitting backdrop"),
+    ("wildlands", "Wildlands", "Primal terrain, cliffs, and open untamed land"),
+    ("ruins", "Ancient Ruins", "Broken stonework, relics, and overgrowth"),
+    ("astral", "Astral", "Cosmic sky, nebula light, and floating fragments"),
+    ("storm", "Stormfront", "Dark clouds, charged air, and distant lightning"),
+    ("volcanic", "Volcanic", "Obsidian, lava glow, and heat shimmer"),
+    ("glacial", "Frozen", "Snow haze, frost, and blue glacial light"),
+    ("abyssal", "Abyssal", "Void-dark depth, eerie mist, and dim bioluminescence"),
+    ("verdant", "Verdant", "Lush roots, giant flora, and filtered forest light"),
+    ("ossuary", "Crimson Ossuary", "Bloodied remains, broken bones, and red-soaked ground"),
+    ("bioluminescent_forest", "Bioluminescent Forest", "Glowing flora, mist, and luminous woodland"),
+    ("cute_clouds", "Cute Clouds", "Soft pastel clouds, warm sky, and dreamy charm"),
+    ("hell", "Hellscape", "Infernal fire, ash, sulfur, and demonic atmosphere"),
+    ("desert", "Desert Expanse", "Dunes, heat haze, and ancient sand-worn stone"),
+    ("cathedral", "Grand Cathedral", "Towering arches, stained light, and sacred scale"),
+    ("crystal_cavern", "Crystal Cavern", "Reflective crystals, cave glow, and refracted light"),
+    ("moonlit_marsh", "Moonlit Marsh", "Wetland fog, still water, and pale moonlight"),
+    ("sunken_temple", "Sunken Temple", "Flooded ruins, mossy stone, and submerged relics"),
+    ("arcane_lab", "Arcane Laboratory", "Runic machinery, alchemical glow, and magical apparatus"),
+    ("fungal_grove", "Fungal Grove", "Towering mushrooms, spores, and strange organic growth"),
+    ("industrial_forge", "Industrial Forge", "Chains, furnaces, sparks, and metal catwalks"),
+    ("royal_garden", "Royal Garden", "Manicured hedges, ornate fountains, and noble grandeur"),
+    ("graveyard", "Graveyard", "Crooked tombstones, dead trees, and drifting fog"),
+    ("coral_reef", "Coral Reef", "Vivid coral, drifting particles, and aquatic depth"),
+    ("dreamscape", "Dreamscape", "Impossible shapes, surreal color, and floating fragments"),
+]
+
+SPLICE_BACKGROUND_LABELS = {
+    key: label for key, label, _description in SPLICE_BACKGROUND_OPTIONS
+}
+
+SPLICE_STYLE_OPTIONS = [
+    ("auto", "Forge's Choice", "Let the forge decide the most fitting visual style"),
+    ("anime", "Anime", "Bold fantasy action, expressive energy, and stylized clarity"),
+    ("manga", "Manga", "Monochrome comic intensity, dramatic ink work, and sharp motion"),
+    ("chibi", "Chibi", "Cute exaggerated proportions with playful fantasy charm"),
+    ("vintage", "Vintage Illustration", "Old-world fantasy print mood with aged dramatic character"),
+    ("horror", "Horror", "Nightmarish anatomy, oppressive mood, and unsettling detail"),
+    ("dark_fantasy", "Dark Fantasy", "Bleak epic fantasy with grim atmosphere and weight"),
+    ("gothic", "Gothic", "Cathedral gloom, ornate darkness, and severe elegance"),
+    ("noir", "Noir", "Heavy shadows, stark contrast, and moody cinematic menace"),
+    ("storybook", "Storybook", "Illustrated folklore tone with whimsical mythical charm"),
+    ("comic", "Comic Splash", "Graphic contrast, crisp outlines, and splash-panel impact"),
+    ("watercolor", "Watercolor", "Soft pigment washes and painterly fantasy softness"),
+    ("oil_painting", "Oil Painting", "Rich brushwork, layered paint, and classical drama"),
+    ("ink_wash", "Ink Wash", "Expressive ink flow, brush rhythm, and atmospheric restraint"),
+    ("stained_glass", "Stained Glass", "Luminous panes, leaded lines, and sacred color blocks"),
+    ("art_nouveau", "Art Nouveau", "Elegant curves, decorative framing, and organic ornament"),
+    ("baroque", "Baroque", "Grand opulence, theatrical light, and lavish ornament"),
+    ("surreal", "Surreal", "Dream logic, uncanny forms, and impossible visual poetry"),
+    ("cel_shaded", "Cel-Shaded", "Clean shapes, strong edges, and stylized game-art finish"),
+    ("pixel", "Pixel Art", "Retro pixel-crafted creature styling with readable silhouette"),
+    ("retro_rpg", "Retro RPG", "SNES-era creature portrait energy and classic fantasy game feel"),
+    ("low_poly", "Low Poly", "Faceted forms, simple geometry, and stylized 3D abstraction"),
+    ("stop_motion", "Stop-Motion", "Handcrafted miniature feel with tactile sculpted presence"),
+    ("biomechanical", "Biomechanical", "Organic flesh fused with engineered forms and machinery"),
+    ("cyberpunk", "Cyberpunk", "Neon tech-noir energy, chrome detail, and electric atmosphere"),
+]
+
+SPLICE_STYLE_LABELS = {
+    key: label for key, label, _description in SPLICE_STYLE_OPTIONS
+}
+
+
+class SpliceSearchModal(discord.ui.Modal, title="Search Splices"):
+    def __init__(self, browser_view: "SpliceBrowserView"):
+        super().__init__()
+        self.browser_view = browser_view
+        self.query_input = discord.ui.TextInput(
+            label="Search by splice or parent name",
+            placeholder="Leave blank to clear search",
+            required=False,
+            default=browser_view.search_query or "",
+            max_length=100,
+        )
+        self.add_item(self.query_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.browser_view.search_query = str(self.query_input.value).strip() or None
+        self.browser_view.current_page = 0
+        self.browser_view.selected_splice_id = None
+        await self.browser_view.refresh(interaction)
+
+
+class SpliceBrowserSortSelect(discord.ui.Select):
+    def __init__(self, browser_view: "SpliceBrowserView"):
+        self.browser_view = browser_view
+        options = [
+            discord.SelectOption(
+                label=label,
+                value=value,
+                description=description,
+                default=browser_view.sort_key == value,
+            )
+            for value, label, description in SPLICE_SORT_OPTIONS
+        ]
+        super().__init__(
+            placeholder="Sort splices...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.browser_view.sort_key = self.values[0]
+        self.browser_view.current_page = 0
+        self.browser_view.selected_splice_id = None
+        await self.browser_view.refresh(interaction)
+
+
+class SpliceBrowserScopeSelect(discord.ui.Select):
+    def __init__(self, browser_view: "SpliceBrowserView"):
+        self.browser_view = browser_view
+        options = [
+            discord.SelectOption(
+                label=label,
+                value=value,
+                description=description,
+                default=browser_view.scope_key == value,
+            )
+            for value, label, description in SPLICE_SCOPE_OPTIONS
+        ]
+        super().__init__(
+            placeholder="Choose a splice scope...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.browser_view.scope_key = self.values[0]
+        self.browser_view.current_page = 0
+        self.browser_view.selected_splice_id = None
+        await self.browser_view.refresh(interaction)
+
+
+class SpliceBrowserElementSelect(discord.ui.Select):
+    def __init__(self, browser_view: "SpliceBrowserView"):
+        self.browser_view = browser_view
+        options = [
+            discord.SelectOption(
+                label="All Elements",
+                value="all",
+                description="Show every element",
+                default=browser_view.element_filter == "all",
+            )
+        ]
+
+        for element in SPLICE_ELEMENT_ORDER:
+            emoji = SPLICE_ELEMENT_EMOJIS.get(element.lower(), "🧬")
+            options.append(
+                discord.SelectOption(
+                    label=element,
+                    value=element.lower(),
+                    description=f"{emoji} Filter to {element} splices",
+                    default=browser_view.element_filter == element.lower(),
+                )
+            )
+
+        super().__init__(
+            placeholder="Filter by element...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.browser_view.element_filter = self.values[0]
+        self.browser_view.current_page = 0
+        self.browser_view.selected_splice_id = None
+        await self.browser_view.refresh(interaction)
+
+
+class SpliceBrowserEntrySelect(discord.ui.Select):
+    def __init__(self, browser_view: "SpliceBrowserView", page_rows: List[Dict[str, Any]]):
+        self.browser_view = browser_view
+        options = []
+        for row in page_rows[:25]:
+            name_prefix = "⭐ " if row["is_favorite"] else ""
+            owned_suffix = f" • Own {row['owned_count']}" if row["owned_count"] else ""
+            description = (
+                f"{row['element']} • HP {row['hp']} ATK {row['attack']} DEF {row['defense']}"
+            )
+            if row["pending_count"]:
+                description += f" • Pending {row['pending_count']}"
+            elif row["completed_count"]:
+                description += f" • Done {row['completed_count']}"
+            elif owned_suffix:
+                description += owned_suffix
+            options.append(
+                discord.SelectOption(
+                    label=f"{name_prefix}{row['result_name']}"[:100],
+                    value=str(row["id"]),
+                    description=description[:100],
+                )
+            )
+
+        super().__init__(
+            placeholder="Select a splice for details...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=3,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.browser_view.selected_splice_id = int(self.values[0])
+        await self.browser_view.refresh(interaction)
+
+
+class SpliceBrowserView(discord.ui.View):
+    def __init__(
+        self,
+        cog: "Soulforge",
+        ctx: commands.Context,
+        initial_query: Optional[str] = None,
+        page_size: int = 6,
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.ctx = ctx
+        self.page_size = page_size
+        self.current_page = 0
+        self.sort_key = "name"
+        self.scope_key = "all"
+        self.element_filter = "all"
+        self.search_query = initial_query.strip() if initial_query else None
+        self.selected_splice_id: Optional[int] = None
+        self.message: Optional[discord.Message] = None
+        self.all_rows: List[Dict[str, Any]] = []
+        self.filtered_rows: List[Dict[str, Any]] = []
+
+    async def start(self):
+        await self.refresh()
+        return self.message
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "This splice browser belongs to someone else.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        if self.message:
+            for child in self.children:
+                child.disabled = True
+            await self.message.edit(view=self)
+
+    async def refresh(self, interaction: Optional[discord.Interaction] = None):
+        self.all_rows = await self.cog.get_splice_browser_rows(self.ctx.author.id)
+        self.filtered_rows = self._apply_filters(self.all_rows)
+
+        if self.selected_splice_id and not any(
+            row["id"] == self.selected_splice_id for row in self.filtered_rows
+        ):
+            self.selected_splice_id = None
+
+        max_pages = max(1, (len(self.filtered_rows) + self.page_size - 1) // self.page_size)
+        self.current_page = max(0, min(self.current_page, max_pages - 1))
+
+        self._rebuild_components()
+        embed = self._build_embed()
+
+        if interaction is None:
+            if self.message is None:
+                self.message = await self.ctx.send(embed=embed, view=self)
+            else:
+                await self.message.edit(embed=embed, view=self)
+            return
+
+        if interaction.response.is_done():
+            if self.message:
+                await self.message.edit(embed=embed, view=self)
+            else:
+                self.message = await self.ctx.send(embed=embed, view=self)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    def _apply_filters(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        filtered = list(rows)
+
+        if self.scope_key == "mine":
+            filtered = [row for row in filtered if row["is_mine"]]
+        elif self.scope_key == "favorites":
+            filtered = [row for row in filtered if row["is_favorite"]]
+        elif self.scope_key == "mine_favorites":
+            filtered = [
+                row
+                for row in filtered
+                if row["is_favorite"] and row["is_mine"]
+            ]
+
+        if self.element_filter != "all":
+            filtered = [
+                row
+                for row in filtered
+                if str(row.get("element", "")).lower() == self.element_filter
+            ]
+
+        if self.search_query:
+            lowered = self.search_query.lower()
+            filtered = [
+                row
+                for row in filtered
+                if lowered in row["result_name"].lower()
+                or lowered in row["pet1_default"].lower()
+                or lowered in row["pet2_default"].lower()
+            ]
+
+        def name_key(row: Dict[str, Any]):
+            return row["result_name"].lower()
+
+        sort_map = {
+            "name": lambda row: (name_key(row), row["id"]),
+            "newest": lambda row: (row["created_at"] or datetime.datetime.min, row["id"]),
+            "oldest": lambda row: (row["created_at"] or datetime.datetime.min, row["id"]),
+            "element": lambda row: (
+                str(row.get("element", "")).lower(),
+                name_key(row),
+                row["id"],
+            ),
+            "hp": lambda row: (row["hp"], name_key(row), row["id"]),
+            "attack": lambda row: (row["attack"], name_key(row), row["id"]),
+            "defense": lambda row: (row["defense"], name_key(row), row["id"]),
+            "total": lambda row: (row["total_power"], name_key(row), row["id"]),
+        }
+
+        reverse = self.sort_key in {"newest", "hp", "attack", "defense", "total"}
+        filtered.sort(key=sort_map.get(self.sort_key, sort_map["name"]), reverse=reverse)
+        return filtered
+
+    def _get_page_rows(self) -> List[Dict[str, Any]]:
+        start = self.current_page * self.page_size
+        end = start + self.page_size
+        return self.filtered_rows[start:end]
+
+    def _get_selected_row(self) -> Optional[Dict[str, Any]]:
+        if self.selected_splice_id is None:
+            return None
+        for row in self.filtered_rows:
+            if row["id"] == self.selected_splice_id:
+                return row
+        return None
+
+    def _rebuild_components(self):
+        self.clear_items()
+        self.add_item(SpliceBrowserSortSelect(self))
+        self.add_item(SpliceBrowserScopeSelect(self))
+        self.add_item(SpliceBrowserElementSelect(self))
+
+        page_rows = self._get_page_rows()
+        if page_rows:
+            self.add_item(SpliceBrowserEntrySelect(self, page_rows))
+
+        search_button = discord.ui.Button(
+            label="Search",
+            style=discord.ButtonStyle.secondary,
+            row=4,
+        )
+        search_button.callback = self.open_search_modal
+        self.add_item(search_button)
+
+        list_button = discord.ui.Button(
+            label="Back to List",
+            style=discord.ButtonStyle.secondary,
+            disabled=self.selected_splice_id is None,
+            row=4,
+        )
+        list_button.callback = self.clear_selection
+        self.add_item(list_button)
+
+        favorite_label = "Favorite"
+        selected_row = self._get_selected_row()
+        if selected_row and selected_row["is_favorite"]:
+            favorite_label = "Unfavorite"
+
+        favorite_button = discord.ui.Button(
+            label=favorite_label,
+            style=discord.ButtonStyle.primary,
+            disabled=selected_row is None,
+            row=4,
+        )
+        favorite_button.callback = self.toggle_favorite
+        self.add_item(favorite_button)
+
+        max_pages = max(1, (len(self.filtered_rows) + self.page_size - 1) // self.page_size)
+        prev_button = discord.ui.Button(
+            emoji="◀️",
+            style=discord.ButtonStyle.primary,
+            disabled=self.current_page <= 0,
+            row=4,
+        )
+        prev_button.callback = self.prev_page
+        self.add_item(prev_button)
+
+        next_button = discord.ui.Button(
+            emoji="▶️",
+            style=discord.ButtonStyle.primary,
+            disabled=self.current_page >= max_pages - 1,
+            row=4,
+        )
+        next_button.callback = self.next_page
+        self.add_item(next_button)
+
+    def _build_embed(self) -> discord.Embed:
+        selected_row = self._get_selected_row()
+        if selected_row:
+            return self._build_detail_embed(selected_row)
+        return self._build_list_embed()
+
+    def _build_list_embed(self) -> discord.Embed:
+        color = 0x9C44DC
+        if self.element_filter != "all":
+            color = SPLICE_ELEMENT_COLORS.get(self.element_filter, color)
+
+        embed = discord.Embed(
+            title="🧬 Splice Index",
+            description=(
+                f"Browsing **{len(self.filtered_rows)}** splice"
+                f"{'' if len(self.filtered_rows) == 1 else 's'}."
+            ),
+            color=color,
+        )
+
+        sort_label = next(
+            label for value, label, _ in SPLICE_SORT_OPTIONS if value == self.sort_key
+        )
+        scope_label = next(
+            label for value, label, _ in SPLICE_SCOPE_OPTIONS if value == self.scope_key
+        )
+        element_label = (
+            "All Elements"
+            if self.element_filter == "all"
+            else self.element_filter.capitalize()
+        )
+        search_label = self.search_query or "None"
+
+        embed.add_field(
+            name="Filters",
+            value=(
+                f"**Sort:** {sort_label}\n"
+                f"**Scope:** {scope_label}\n"
+                f"**Element:** {element_label}\n"
+                f"**Search:** {search_label}"
+            ),
+            inline=False,
+        )
+
+        page_rows = self._get_page_rows()
+        if not page_rows:
+            empty_message = "No splices match the current filters."
+            if not self.all_rows:
+                empty_message = "No splice combinations have been discovered yet."
+            embed.add_field(
+                name="Splices",
+                value=empty_message,
+                inline=False,
+            )
+        else:
+            lines = []
+            for row in page_rows:
+                favorite_marker = "⭐ " if row["is_favorite"] else ""
+                owned_marker = f"📦x{row['owned_count']} " if row["owned_count"] else ""
+                result_name = row["result_name"]
+                if len(result_name) > 50:
+                    result_name = f"{result_name[:47]}..."
+                parent_summary = f"{row['pet1_default']} + {row['pet2_default']}"
+                if len(parent_summary) > 58:
+                    parent_summary = f"{parent_summary[:55]}..."
+                element_emoji = SPLICE_ELEMENT_EMOJIS.get(
+                    str(row.get("element", "")).lower(),
+                    "🧬",
+                )
+                lines.append(
+                    f"`#{row['id']}` {favorite_marker}{owned_marker}"
+                    f"**{result_name}** {element_emoji}\n"
+                    f"`HP {row['hp']} ATK {row['attack']} DEF {row['defense']} TOT {row['total_power']}`"
+                    f" • {parent_summary}"
+                )
+
+            embed.add_field(
+                name="Splices",
+                value="\n\n".join(lines),
+                inline=False,
+            )
+
+        max_pages = max(1, (len(self.filtered_rows) + self.page_size - 1) // self.page_size)
+        embed.set_footer(
+            text=(
+                f"Page {self.current_page + 1}/{max_pages} • "
+                "Use the splice dropdown for details • Search supports splice and parent names"
+            )
+        )
+        return embed
+
+    def _build_detail_embed(self, row: Dict[str, Any]) -> discord.Embed:
+        element_key = str(row.get("element", "")).lower()
+        color = SPLICE_ELEMENT_COLORS.get(element_key, 0x9C44DC)
+        favorite_prefix = "⭐ " if row["is_favorite"] else ""
+        embed = discord.Embed(
+            title=f"{favorite_prefix}{row['result_name']}",
+            description=(
+                f"`#{row['id']}` • {row['element']} splice\n"
+                f"Parents: **{row['pet1_default']}** + **{row['pet2_default']}**"
+            ),
+            color=color,
+        )
+        embed.add_field(name="HP", value=str(row["hp"]), inline=True)
+        embed.add_field(name="Attack", value=str(row["attack"]), inline=True)
+        embed.add_field(name="Defense", value=str(row["defense"]), inline=True)
+        embed.add_field(name="Total Power", value=str(row["total_power"]), inline=True)
+        embed.add_field(name="Owned Copies", value=str(row["owned_count"]), inline=True)
+        embed.add_field(name="Requests", value=str(row["request_count"]), inline=True)
+        embed.add_field(
+            name="Favorited",
+            value="Yes" if row["is_favorite"] else "No",
+            inline=True,
+        )
+        embed.add_field(name="Pending", value=str(row["pending_count"]), inline=True)
+        embed.add_field(name="Completed", value=str(row["completed_count"]), inline=True)
+        embed.add_field(
+            name="Counts As Mine",
+            value="Yes" if row["is_mine"] else "No",
+            inline=True,
+        )
+
+        created_at = row.get("created_at")
+        if isinstance(created_at, datetime.datetime):
+            created_display = created_at.strftime("%Y-%m-%d %H:%M")
+        else:
+            created_display = "Unknown"
+        embed.add_field(name="Discovered", value=created_display, inline=False)
+
+        if row.get("url"):
+            embed.set_thumbnail(url=row["url"])
+
+        embed.set_footer(
+            text="Use Favorite to bookmark this splice • Back to List returns to the current page"
+        )
+        return embed
+
+    async def open_search_modal(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(SpliceSearchModal(self))
+
+    async def clear_selection(self, interaction: discord.Interaction):
+        self.selected_splice_id = None
+        await self.refresh(interaction)
+
+    async def toggle_favorite(self, interaction: discord.Interaction):
+        selected_row = self._get_selected_row()
+        if selected_row is None:
+            await interaction.response.send_message(
+                "Pick a splice first.",
+                ephemeral=True,
+            )
+            return
+
+        is_now_favorite = await self.cog.toggle_splice_favorite(
+            self.ctx.author.id,
+            selected_row["id"],
+        )
+        if not is_now_favorite and self.scope_key in {"favorites", "mine_favorites"}:
+            self.selected_splice_id = None
+        await self.refresh(interaction)
+
+    async def prev_page(self, interaction: discord.Interaction):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.selected_splice_id = None
+        await self.refresh(interaction)
+
+    async def next_page(self, interaction: discord.Interaction):
+        max_pages = max(1, (len(self.filtered_rows) + self.page_size - 1) // self.page_size)
+        if self.current_page < max_pages - 1:
+            self.current_page += 1
+            self.selected_splice_id = None
+        await self.refresh(interaction)
+
+class SpliceStatusPaginator(discord.ui.View):
+    """A paginator for splice status entries using a dropdown menu for navigation"""
+    
+    def __init__(self, ctx, splices, splices_per_page=8):
+        super().__init__(timeout=60)
+        self.ctx = ctx
+        self.splices = splices
+        self.splices_per_page = splices_per_page
+        self.current_page = 0
+        self.total_pages = max(1, (len(splices) + splices_per_page - 1) // splices_per_page)
+        self.message = None
+        
+        # Add page select dropdown if multiple pages
+        if self.total_pages > 1:
+            self.add_page_selector()
+            
+    def add_page_selector(self):
+        """Add a dropdown menu for page selection"""
+        select = discord.ui.Select(placeholder=f"Page Selection (1-{self.total_pages})")
+        
+        for i in range(self.total_pages):
+            page_num = i + 1
+            start_idx = i * self.splices_per_page
+            end_idx = min((i + 1) * self.splices_per_page - 1, len(self.splices) - 1)
+            select.add_option(
+                label=f"Page {page_num}", 
+                value=str(i),
+                description=f"Splices {start_idx + 1}-{end_idx + 1}"
+            )
+            
+        async def select_callback(interaction):
+            if interaction.user.id != self.ctx.author.id:
+                return await interaction.response.send_message("This isn't your splice status menu.", ephemeral=True)
+            
+            self.current_page = int(interaction.data["values"][0])
+            await interaction.response.defer()
+            await self.update_page()
+            
+        select.callback = select_callback
+        self.add_item(select)
+    
+    def get_current_page_embed(self):
+        """Generate the embed for the current page"""
+        start_idx = self.current_page * self.splices_per_page
+        end_idx = min((self.current_page + 1) * self.splices_per_page, len(self.splices))
+        current_splices = self.splices[start_idx:end_idx]
+        
+        embed = discord.Embed(
+            title="Your Splice Requests",
+            description="Here are your recent splice requests:",
+            color=0x00ff00
+        )
+        
+        if self.total_pages > 1:
+            embed.set_footer(text=f"Page {self.current_page + 1}/{self.total_pages}")
+            
+        for splice in current_splices:
+            status_emoji = "🕒" if splice["status"] == "pending" else "✅"
+            background_label = SPLICE_BACKGROUND_LABELS.get(
+                str(
+                    splice["background_theme"] if "background_theme" in splice else "auto"
+                ).strip().lower(),
+                "Forge's Choice",
+            )
+            style_label = SPLICE_STYLE_LABELS.get(
+                str(splice["splice_style"] if "splice_style" in splice else "auto").strip().lower(),
+                "Forge's Choice",
+            )
+            embed.add_field(
+                name=f"ID: {splice['id']} {status_emoji}",
+                value=(
+                    f"{splice['pet1_name']} + {splice['pet2_name']}\n"
+                    f"Status: {splice['status'].capitalize()}\n"
+                    f"Visuals: {background_label} / {style_label}\n"
+                    f"Requested: {splice['created_at'].strftime('%Y-%m-%d %H:%M')}\n"
+                ),
+                inline=False
+            )
+            
+        return embed
+    
+    async def start(self):
+        """Send the initial paginator message"""
+        self.message = await self.ctx.send(embed=self.get_current_page_embed(), view=self)
+        return self.message
+    
+    async def update_page(self):
+        """Update the message with the current page"""
+        await self.message.edit(embed=self.get_current_page_embed(), view=self)
+    
+    async def interaction_check(self, interaction):
+        """Ensure only the command author can interact with the paginator"""
+        return interaction.user.id == self.ctx.author.id
+    
+    async def on_timeout(self):
+        """When the view times out, remove all interactable components"""
+        if self.message:
+            for child in self.children:
+                child.disabled = True
+            await self.message.edit(view=self)
+
+
+class SpliceRequestPaginator(View):
+    """A paginator for viewing pending splice requests"""
+    def __init__(self, ctx, splices, per_page=8):
+        super().__init__(timeout=180)
+        self.ctx = ctx
+        self.splices = splices
+        self.per_page = per_page
+        self.current_page = 0
+        self.total_pages = (len(splices) + per_page - 1) // per_page
+        self.message = None
+        self.current_time = datetime.datetime.now(datetime.timezone.utc)
+        self.prev_button = None
+        self.next_button = None
+        
+        # Add navigation buttons
+        self.add_buttons()
+        self._sync_navigation_buttons()
+    
+    def add_buttons(self):
+        """Add navigation buttons to the view"""
+        # Previous button
+        self.prev_button = Button(style=ButtonStyle.primary, emoji="⬅️", disabled=self.current_page == 0)
+        self.prev_button.callback = self.previous_page
+        self.add_item(self.prev_button)
+        
+        # Next button
+        self.next_button = Button(style=ButtonStyle.primary, emoji="➡️", disabled=self.current_page == self.total_pages - 1)
+        self.next_button.callback = self.next_page
+        self.add_item(self.next_button)
+        
+        # Close button
+        close_button = Button(style=ButtonStyle.danger, emoji="❌")
+        close_button.callback = self.close_view
+        self.add_item(close_button)
+
+    def _sync_navigation_buttons(self):
+        """Keep button states in sync with the current page."""
+        if self.prev_button:
+            self.prev_button.disabled = self.current_page <= 0
+        if self.next_button:
+            self.next_button.disabled = self.current_page >= self.total_pages - 1
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("This paginator is not for you.", ephemeral=True)
+            return False
+        return True
+    
+    def get_current_page_embed(self):
+        """Generate the embed for the current page"""
+        start_idx = self.current_page * self.per_page
+        end_idx = start_idx + self.per_page
+        current_splices = self.splices[start_idx:end_idx]
+        
+        embed = discord.Embed(
+            title="🧬 Pending Splice Requests",
+            description=(
+                f"Page {self.current_page + 1}/{self.total_pages} • "
+                f"{len(self.splices)} total request{'s' if len(self.splices) != 1 else ''}"
+            ),
+            color=0x9C44DC
+        )
+        
+        for splice in current_splices:
+            user = self.ctx.bot.get_user(splice["user_id"]) or f"Unknown User ({splice['user_id']})"
+            
+            # Handle time difference
+            created_at = splice["created_at"]
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=datetime.timezone.utc)
+                
+            time_diff = self.current_time - created_at
+            hours_ago = time_diff.total_seconds() / 3600
+            
+            if hours_ago < 1:
+                time_str = f"{int(hours_ago * 60)}m ago"
+            elif hours_ago < 24:
+                time_str = f"{int(hours_ago)}h ago"
+            else:
+                days = int(hours_ago / 24)
+                time_str = f"{days}d ago"
+            
+            embed.add_field(
+                name=f"#{splice['id']} • {user} • {time_str}",
+                value=(
+                    f"🐾 **{splice['pet1_name']}** (`{splice['pet1_default']}`) + "
+                    f"**{splice['pet2_name']}** (`{splice['pet2_default']}`)\n"
+                    f"🔗 [Pet 1]({splice['pet1_url']}) • [Pet 2]({splice['pet2_url']})"
+                ),
+                inline=False
+            )
+        
+        # Add a field with all suggested names for the current page if they exist
+        suggested_names = [
+            s['temp_name']
+            for s in current_splices 
+            if s.get('temp_name')
+        ]
+        
+        if suggested_names:
+            embed.add_field(
+                name="Suggested Names",
+                value=", ".join(suggested_names),
+                inline=False
+            )
+        
+        return embed
+    
+    async def update_message(self, interaction: discord.Interaction):
+        """Update the message with current page"""
+        self._sync_navigation_buttons()
+        embed = self.get_current_page_embed()
+        if interaction.response.is_done():
+            await self.message.edit(embed=embed, view=self)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def previous_page(self, interaction):
+        """Go to the previous page"""
+        if self.current_page > 0:
+            self.current_page -= 1
+        await self.update_message(interaction)
+    
+    async def next_page(self, interaction):
+        """Go to the next page"""
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+        await self.update_message(interaction)
+    
+    async def close_view(self, interaction):
+        """Close the paginator"""
+        await interaction.response.defer()
+        await interaction.message.delete()
+        self.stop()
+    
+    async def start(self):
+        """Start the paginator"""
+        self.message = await self.ctx.send(embed=self.get_current_page_embed(), view=self)
+        return self.message
 
 
 class LoreView(View):
@@ -40,6 +938,300 @@ class LoreView(View):
         self.current_page += 1
         self.update_buttons()
         await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+
+
+class SoulforgeCommandSectionSelect(discord.ui.Select):
+    def __init__(self, help_view: "SoulforgeCommandHelpView"):
+        self.help_view = help_view
+        current_section = self.help_view.get_current_section_index()
+        options = [
+            discord.SelectOption(
+                label=section["label"],
+                value=str(index),
+                description=section["description"],
+                default=index == current_section,
+            )
+            for index, section in enumerate(self.help_view.sections)
+        ]
+        super().__init__(
+            placeholder=f"Jump to section... ({self.help_view.sections[current_section]['label']})",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.help_view.current_page = self.help_view.sections[int(self.values[0])]["page_index"]
+        self.help_view.rebuild_items()
+        await interaction.response.edit_message(
+            embed=self.help_view.pages[self.help_view.current_page],
+            view=self.help_view,
+        )
+
+
+class SoulforgeCommandHelpView(View):
+    def __init__(self, ctx, pages, sections):
+        super().__init__(timeout=300)
+        self.ctx = ctx
+        self.pages = pages
+        self.sections = sections
+        self.current_page = 0
+        self.message = None
+        self.rebuild_items()
+
+    def get_current_section_index(self) -> int:
+        current_index = 0
+        for index, section in enumerate(self.sections):
+            if self.current_page >= section["page_index"]:
+                current_index = index
+        return current_index
+
+    def rebuild_items(self):
+        self.clear_items()
+        self.add_item(SoulforgeCommandSectionSelect(self))
+
+        prev_button = Button(
+            style=discord.ButtonStyle.secondary,
+            emoji="◀️",
+            disabled=self.current_page == 0,
+            row=1,
+        )
+        prev_button.callback = self.prev_callback
+        self.add_item(prev_button)
+
+        self.add_item(
+            Button(
+                style=discord.ButtonStyle.gray,
+                label=f"{self.current_page + 1}/{len(self.pages)}",
+                disabled=True,
+                row=1,
+            )
+        )
+
+        next_button = Button(
+            style=discord.ButtonStyle.secondary,
+            emoji="▶️",
+            disabled=self.current_page >= len(self.pages) - 1,
+            row=1,
+        )
+        next_button.callback = self.next_callback
+        self.add_item(next_button)
+
+        close_button = Button(
+            style=discord.ButtonStyle.danger,
+            label="Close",
+            row=1,
+        )
+        close_button.callback = self.close_callback
+        self.add_item(close_button)
+
+    async def start(self):
+        self.message = await self.ctx.send(embed=self.pages[0], view=self)
+        return self.message
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "This Soulforge help menu belongs to someone else.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        if self.message:
+            for child in self.children:
+                child.disabled = True
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    async def prev_callback(self, interaction):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.rebuild_items()
+        await interaction.response.edit_message(
+            embed=self.pages[self.current_page],
+            view=self,
+        )
+
+    async def next_callback(self, interaction):
+        if self.current_page < len(self.pages) - 1:
+            self.current_page += 1
+            self.rebuild_items()
+        await interaction.response.edit_message(
+            embed=self.pages[self.current_page],
+            view=self,
+        )
+
+    async def close_callback(self, interaction):
+        await interaction.response.defer()
+        try:
+            await interaction.message.delete()
+        except discord.HTTPException:
+            for child in self.children:
+                child.disabled = True
+            if self.message:
+                await self.message.edit(view=self)
+        self.stop()
+
+
+class SpliceAppearancePreferenceView(View):
+    def __init__(self, ctx, pet1_name: str, pet2_name: str):
+        super().__init__(timeout=120)
+        self.ctx = ctx
+        self.pet1_name = pet1_name
+        self.pet2_name = pet2_name
+        self.selected_theme = "auto"
+        self.selected_style = "auto"
+        self.confirmed = False
+        self.message = None
+
+        self.theme_select = Select(
+            placeholder="Choose a background influence",
+            min_values=1,
+            max_values=1,
+            options=self._build_background_options(),
+            row=0,
+        )
+        self.theme_select.callback = self.theme_select_callback
+        self.add_item(self.theme_select)
+
+        self.style_select = Select(
+            placeholder="Choose an art style",
+            min_values=1,
+            max_values=1,
+            options=self._build_style_options(),
+            row=1,
+        )
+        self.style_select.callback = self.style_select_callback
+        self.add_item(self.style_select)
+
+    def _build_background_options(self) -> List[SelectOption]:
+        return [
+            SelectOption(
+                label=label,
+                value=key,
+                description=description,
+                default=key == self.selected_theme,
+            )
+            for key, label, description in SPLICE_BACKGROUND_OPTIONS
+        ]
+
+    def _build_style_options(self) -> List[SelectOption]:
+        return [
+            SelectOption(
+                label=label,
+                value=key,
+                description=description,
+                default=key == self.selected_style,
+            )
+            for key, label, description in SPLICE_STYLE_OPTIONS
+        ]
+
+    def _build_embed(self) -> discord.Embed:
+        background_label = SPLICE_BACKGROUND_LABELS.get(
+            self.selected_theme, "Forge's Choice"
+        )
+        style_label = SPLICE_STYLE_LABELS.get(self.selected_style, "Forge's Choice")
+        embed = discord.Embed(
+            title="Choose Splice Art Preferences",
+            description=(
+                f"Your splice between **{self.pet1_name}** and **{self.pet2_name}** is a new combination.\n"
+                "Pick a background direction and art style to influence the generated result. "
+                "The creature will still remain the main focus."
+            ),
+            color=0x9d4edd,
+        )
+        embed.add_field(name="Background", value=background_label, inline=False)
+        embed.add_field(name="Art Style", value=style_label, inline=False)
+        embed.set_footer(text="These only affect newly generated art for this splice request.")
+        return embed
+
+    async def start(self):
+        self.message = await self.ctx.send(embed=self._build_embed(), view=self)
+        return self.message
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "This splice selection belongs to someone else.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        if self.message:
+            for child in self.children:
+                child.disabled = True
+            try:
+                await self.message.edit(
+                    content="⏰ Splice art preference selection timed out.",
+                    embed=self._build_embed(),
+                    view=self,
+                )
+            except discord.HTTPException:
+                pass
+
+    async def theme_select_callback(self, interaction: discord.Interaction):
+        self.selected_theme = self.theme_select.values[0]
+        self.theme_select.options = self._build_background_options()
+        await interaction.response.edit_message(embed=self._build_embed(), view=self)
+
+    async def style_select_callback(self, interaction: discord.Interaction):
+        self.selected_style = self.style_select.values[0]
+        self.style_select.options = self._build_style_options()
+        await interaction.response.edit_message(embed=self._build_embed(), view=self)
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, row=2)
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.confirmed = True
+        selected_background = SPLICE_BACKGROUND_LABELS.get(
+            self.selected_theme, "Forge's Choice"
+        )
+        selected_style = SPLICE_STYLE_LABELS.get(
+            self.selected_style, "Forge's Choice"
+        )
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=(
+                f"✅ Art preferences locked to **{selected_background}** background and "
+                f"**{selected_style}** styling."
+            ),
+            embed=self._build_embed(),
+            view=self,
+        )
+        self.stop()
+
+    @discord.ui.button(label="Skip", style=discord.ButtonStyle.secondary, row=2)
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.selected_theme = "auto"
+        self.selected_style = "auto"
+        self.confirmed = True
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content="✅ Background and styling left to the forge.",
+            embed=self._build_embed(),
+            view=self,
+        )
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, row=2)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content="❌ Splice cancelled before the ritual began.",
+            embed=self._build_embed(),
+            view=self,
+        )
+        self.stop()
+
 
 class MorriganConversationView(View):
     def __init__(self, cog, ctx, player_data):
@@ -117,8 +1309,624 @@ class MorriganConversationView(View):
         await interaction.followup.send("*Morrigan's eyes gleam one final time before she dissolves into shadow, her voice lingering in the air: \"The ancient knowledge awaits when you are ready to seek it again...\"*")
 
 class Soulforge(commands.Cog):
+    GOD_PET_FORGE_RECIPES = {
+        "Elysia": {
+            "aliases": ("elysia", "astraea", "asterea"),
+            "alignment": "Good",
+            "shards": (
+                "Dawnheart Shard",
+                "Mercy Prism Shard",
+                "Sunveil Shard",
+                "Lifebloom Shard",
+                "Aegis Grace Shard",
+                "Seraphic Echo Shard",
+            ),
+            "stats": {
+                "hp": 18000,
+                "attack": 3500,
+                "defense": 2500,
+                "element": "Light",
+                "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_5z90r962trs71_1-Photoroom.png",
+            },
+        },
+        "Sepulchure": {
+            "aliases": ("sepulchure",),
+            "alignment": "Evil",
+            "shards": (
+                "Deathmark Shard",
+                "Gravebone Shard",
+                "Nightveil Shard",
+                "Bloodcurse Shard",
+                "Ruin Sigil Shard",
+                "Voidmourne Shard",
+            ),
+            "stats": {
+                "hp": 16000,
+                "attack": 3000,
+                "defense": 3000,
+                "element": "Dark",
+                "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_wakai-quketsuki-sepulchuredoomknightdoomblade-Photoroom.png",
+            },
+        },
+        "Drakath": {
+            "aliases": ("drakath",),
+            "alignment": "Chaos",
+            "shards": (
+                "Entropy Shard",
+                "Wildspark Shard",
+                "Riftlash Shard",
+                "Discord Shard",
+                "Paradox Shard",
+                "Tempest Fracture Shard",
+            ),
+            "stats": {
+                "hp": 15000,
+                "attack": 4000,
+                "defense": 2500,
+                "element": "Corrupted",
+                "url": "https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_Pngtreelightning_source_lightning_effect_purple_3916970.png",
+            },
+        },
+    }
+
     def __init__(self, bot):
         self.bot = bot
+        ids_section = getattr(self.bot.config, "ids", None)
+        soulforge_ids = getattr(ids_section, "soulforge", {}) if ids_section else {}
+        if not isinstance(soulforge_ids, dict):
+            soulforge_ids = {}
+        self.splice_admin_user_id = soulforge_ids.get("splice_admin_user_id")
+        self.splice_request_channel_id = (
+            soulforge_ids.get("splice_request_channel_id") or 1472207997051605184
+        )
+        pets_ids = getattr(ids_section, "pets", {}) if ids_section else {}
+        if not isinstance(pets_ids, dict):
+            pets_ids = {}
+        game_section = getattr(self.bot.config, "game", None)
+        support_server_id = getattr(game_section, "support_server_id", None)
+        self.booster_guild_id = pets_ids.get("booster_guild_id") or support_server_id
+
+    def _canonical_god_recipe_name(self, raw_name: Optional[str]) -> Optional[str]:
+        if not raw_name:
+            return None
+
+        cleaned = str(raw_name).strip().lower()
+        if not cleaned:
+            return None
+
+        for god_name, recipe in self.GOD_PET_FORGE_RECIPES.items():
+            aliases = recipe.get("aliases", ())
+            if cleaned == god_name.lower() or cleaned in aliases:
+                return god_name
+        return None
+
+    def _calculate_max_pet_slots_for_user(self, ctx, tier) -> int:
+        max_slots = 10
+
+        if (
+            getattr(ctx, "guild", None)
+            and self.booster_guild_id
+            and ctx.guild.id == self.booster_guild_id
+        ):
+            guild_member = ctx.guild.get_member(ctx.author.id)
+            if guild_member and guild_member.premium_since is not None:
+                max_slots = max(max_slots, 12)
+
+        if tier == 1:
+            max_slots = max(max_slots, 12)
+        elif tier == 2:
+            max_slots = 14
+        elif tier == 3:
+            max_slots = 17
+        elif tier == 4:
+            max_slots = 25
+
+        return max_slots
+
+    @staticmethod
+    def _normalize_splice_background_theme(theme_key: Optional[str]) -> str:
+        key = str(theme_key or "auto").strip().lower()
+        if key not in SPLICE_BACKGROUND_LABELS:
+            return "auto"
+        return key
+
+    def _get_splice_background_label(self, theme_key: Optional[str]) -> str:
+        return SPLICE_BACKGROUND_LABELS[self._normalize_splice_background_theme(theme_key)]
+
+    @staticmethod
+    def _normalize_splice_style(style_key: Optional[str]) -> str:
+        key = str(style_key or "auto").strip().lower()
+        if key not in SPLICE_STYLE_LABELS:
+            return "auto"
+        return key
+
+    def _get_splice_style_label(self, style_key: Optional[str]) -> str:
+        return SPLICE_STYLE_LABELS[self._normalize_splice_style(style_key)]
+
+    @staticmethod
+    def _build_archive_alias_candidate(alias: str, suffix_number: int) -> str:
+        base_alias = str(alias or "").strip()
+        if not base_alias:
+            return ""
+        if suffix_number <= 0:
+            return base_alias[:SPLICE_ALIAS_MAX_LENGTH]
+
+        suffix = str(suffix_number)
+        available = SPLICE_ALIAS_MAX_LENGTH - len(suffix)
+        if available <= 0:
+            return suffix[-SPLICE_ALIAS_MAX_LENGTH:]
+        return f"{base_alias[:available]}{suffix}"
+
+    async def _get_unique_archive_alias(
+        self,
+        conn,
+        alias: Optional[str],
+        *,
+        reserved_aliases: Set[str],
+        exclude_pet_ids: List[int],
+    ) -> Optional[str]:
+        base_alias = str(alias or "").strip()
+        if not base_alias:
+            return None
+
+        suffix_number = 0
+        while True:
+            candidate = self._build_archive_alias_candidate(base_alias, suffix_number)
+            candidate_key = candidate.lower()
+            if candidate_key in reserved_aliases:
+                suffix_number += 1
+                continue
+
+            exists = await conn.fetchval(
+                """
+                SELECT 1
+                FROM monster_pets
+                WHERE user_id = $1
+                  AND alt_name IS NOT NULL
+                  AND lower(alt_name) = lower($2)
+                  AND NOT (id = ANY($3::int[]))
+                LIMIT 1;
+                """,
+                SPLICE_ARCHIVE_USER_ID,
+                candidate,
+                exclude_pet_ids,
+            )
+            if not exists:
+                reserved_aliases.add(candidate_key)
+                return candidate
+            suffix_number += 1
+
+    async def _archive_splice_source_pets(self, conn, pet_ids: List[int]) -> None:
+        archive_pet_ids: List[int] = []
+        seen_pet_ids: Set[int] = set()
+        for pet_id in pet_ids:
+            if pet_id is None:
+                continue
+            pet_id = int(pet_id)
+            if pet_id in seen_pet_ids:
+                continue
+            seen_pet_ids.add(pet_id)
+            archive_pet_ids.append(pet_id)
+
+        if not archive_pet_ids:
+            return
+
+        pet_rows = await conn.fetch(
+            """
+            SELECT id, alt_name, daycare_boarding_id
+            FROM monster_pets
+            WHERE id = ANY($1::int[])
+            FOR UPDATE;
+            """,
+            archive_pet_ids,
+        )
+        rows_by_id = {int(row["id"]): row for row in pet_rows}
+        reserved_aliases: Set[str] = set()
+
+        for pet_id in archive_pet_ids:
+            row = rows_by_id.get(pet_id)
+            if row is None:
+                continue
+            if row["daycare_boarding_id"] is not None:
+                raise ValueError("You cannot splice a pet that is currently boarded in daycare.")
+
+            archive_alias = await self._get_unique_archive_alias(
+                conn,
+                row["alt_name"],
+                reserved_aliases=reserved_aliases,
+                exclude_pet_ids=archive_pet_ids,
+            )
+            await conn.execute(
+                """
+                UPDATE monster_pets
+                SET user_id = $1,
+                    alt_name = $2
+                WHERE id = $3;
+                """,
+                SPLICE_ARCHIVE_USER_ID,
+                archive_alias,
+                pet_id,
+            )
+
+    async def _ensure_splice_request_schema(self, conn) -> None:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS splice_requests (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                pet1_id INTEGER,
+                pet2_id INTEGER,
+                pet1_name TEXT,
+                pet2_name TEXT,
+                pet1_default TEXT,
+                pet2_default TEXT,
+                temp_name TEXT,
+                pet1_hp INTEGER,
+                pet1_attack INTEGER,
+                pet1_defense INTEGER,
+                pet1_element TEXT,
+                pet1_url TEXT,
+                pet2_hp INTEGER,
+                pet2_attack INTEGER,
+                pet2_defense INTEGER,
+                pet2_element TEXT,
+                pet2_url TEXT,
+                background_theme TEXT NOT NULL DEFAULT 'auto',
+                splice_style TEXT NOT NULL DEFAULT 'auto',
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """
+        )
+        await conn.execute(
+            "ALTER TABLE splice_requests ADD COLUMN IF NOT EXISTS background_theme TEXT NOT NULL DEFAULT 'auto';"
+        )
+        await conn.execute(
+            "ALTER TABLE splice_requests ADD COLUMN IF NOT EXISTS splice_style TEXT NOT NULL DEFAULT 'auto';"
+        )
+        await ensure_splice_identity_schema(conn)
+
+    async def _count_user_pet_capacity_items(self, conn, user_id: int) -> int:
+        pet_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM monster_pets WHERE user_id = $1;",
+            user_id,
+        )
+
+        monster_eggs_exists = await conn.fetchval(
+            "SELECT to_regclass('public.monster_eggs') IS NOT NULL;"
+        )
+        egg_count = 0
+        if monster_eggs_exists:
+            egg_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM monster_eggs WHERE user_id = $1 AND hatched = FALSE;",
+                user_id,
+            )
+
+        splice_requests_exists = await conn.fetchval(
+            "SELECT to_regclass('public.splice_requests') IS NOT NULL;"
+        )
+        pending_splice_count = 0
+        if splice_requests_exists:
+            pending_splice_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM splice_requests WHERE user_id = $1 AND status = 'pending';",
+                user_id,
+            )
+
+        return int((pet_count or 0) + (egg_count or 0) + (pending_splice_count or 0))
+
+    async def _has_ambiguous_legacy_splice_identity(self, conn, pet) -> bool:
+        """Return true when an unlinked legacy pet name maps to several recipes."""
+        if pet["splice_combination_id"] is not None:
+            return False
+        recipe_count = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM splice_combinations
+            WHERE lower(btrim(COALESCE(base_result_name, result_name))) =
+                  lower(btrim($1));
+            """,
+            pet["default_name"],
+        )
+        return int(recipe_count or 0) > 1
+
+    async def ensure_splice_browser_tables(self, conn) -> None:
+        await ensure_splice_identity_schema(conn)
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS splice_favorites (
+                user_id BIGINT NOT NULL,
+                splice_id INTEGER NOT NULL REFERENCES splice_combinations(id) ON DELETE CASCADE,
+                created_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (user_id, splice_id)
+            )
+            """
+        )
+
+    async def get_splice_browser_rows(self, user_id: int) -> List[Dict[str, Any]]:
+        async with self.bot.pool.acquire() as conn:
+            await self.ensure_splice_browser_tables(conn)
+            splice_requests_exists = await conn.fetchval(
+                "SELECT to_regclass('public.splice_requests') IS NOT NULL"
+            )
+            history_join = ""
+            history_select = (
+                "0::INTEGER AS request_count,"
+                " 0::INTEGER AS pending_count,"
+                " 0::INTEGER AS completed_count,"
+            )
+
+            if splice_requests_exists:
+                history_select = (
+                    "COALESCE(my_history.request_count, 0) AS request_count,"
+                    " COALESCE(my_history.pending_count, 0) AS pending_count,"
+                    " COALESCE(my_history.completed_count, 0) AS completed_count,"
+                )
+                history_join = """
+                LEFT JOIN (
+                    SELECT
+                        pet1_default,
+                        pet2_default,
+                        COUNT(*)::INTEGER AS request_count,
+                        COUNT(*) FILTER (WHERE status = 'pending')::INTEGER AS pending_count,
+                        COUNT(*) FILTER (WHERE status = 'completed')::INTEGER AS completed_count
+                    FROM splice_requests
+                    WHERE user_id = $1
+                    GROUP BY pet1_default, pet2_default
+                ) my_history
+                    ON (
+                        (my_history.pet1_default = sc.pet1_default AND my_history.pet2_default = sc.pet2_default)
+                        OR
+                        (my_history.pet1_default = sc.pet2_default AND my_history.pet2_default = sc.pet1_default)
+                    )
+                """
+
+            query = f"""
+                SELECT
+                    sc.id,
+                    sc.pet1_default,
+                    sc.pet2_default,
+                    sc.result_name,
+                    sc.hp,
+                    sc.attack,
+                    sc.defense,
+                    sc.element,
+                    sc.url,
+                    sc.created_at,
+                    COALESCE(owned.owned_count, 0) AS owned_count,
+                    {history_select}
+                    (sf.splice_id IS NOT NULL) AS is_favorite
+                FROM splice_combinations sc
+                LEFT JOIN (
+                    SELECT default_name, COUNT(*)::INTEGER AS owned_count
+                    FROM monster_pets
+                    WHERE user_id = $1
+                    GROUP BY default_name
+                ) owned
+                    ON owned.default_name = sc.result_name
+                {history_join}
+                LEFT JOIN splice_favorites sf
+                    ON sf.user_id = $1 AND sf.splice_id = sc.id
+            """
+            rows = await conn.fetch(query, user_id)
+
+        parsed_rows: List[Dict[str, Any]] = []
+        for row in rows:
+            parsed = dict(row)
+            parsed["pet1_default"] = str(parsed.get("pet1_default") or "Unknown")
+            parsed["pet2_default"] = str(parsed.get("pet2_default") or "Unknown")
+            parsed["result_name"] = str(parsed.get("result_name") or "Unknown Splice")
+            parsed["element"] = str(parsed.get("element") or "Unknown")
+            parsed["owned_count"] = int(parsed.get("owned_count") or 0)
+            parsed["request_count"] = int(parsed.get("request_count") or 0)
+            parsed["pending_count"] = int(parsed.get("pending_count") or 0)
+            parsed["completed_count"] = int(parsed.get("completed_count") or 0)
+            parsed["is_favorite"] = bool(parsed.get("is_favorite"))
+            parsed["is_mine"] = bool(parsed["request_count"] > 0 or parsed["owned_count"] > 0)
+            parsed["total_power"] = int(
+                (parsed.get("hp") or 0)
+                + (parsed.get("attack") or 0)
+                + (parsed.get("defense") or 0)
+            )
+            parsed_rows.append(parsed)
+        return parsed_rows
+
+    async def toggle_splice_favorite(self, user_id: int, splice_id: int) -> bool:
+        async with self.bot.pool.acquire() as conn:
+            await self.ensure_splice_browser_tables(conn)
+            existing = await conn.fetchval(
+                "SELECT 1 FROM splice_favorites WHERE user_id = $1 AND splice_id = $2",
+                user_id,
+                splice_id,
+            )
+            if existing:
+                await conn.execute(
+                    "DELETE FROM splice_favorites WHERE user_id = $1 AND splice_id = $2",
+                    user_id,
+                    splice_id,
+                )
+                return False
+
+            await conn.execute(
+                """
+                INSERT INTO splice_favorites (user_id, splice_id)
+                VALUES ($1, $2)
+                ON CONFLICT (user_id, splice_id) DO NOTHING
+                """,
+                user_id,
+                splice_id,
+            )
+            return True
+
+    def create_god_forging_pages(
+        self,
+        player_data,
+        canonical_god: str,
+        recipe: Dict[str, Union[str, Dict[str, Union[int, str]], Tuple[str, ...]]],
+        iv_percentage: float,
+        hp_iv: int,
+        attack_iv: int,
+        defense_iv: int,
+        forged_hp: int,
+        forged_attack: int,
+        forged_defense: int,
+        new_pet_id: int,
+    ):
+        pages = []
+
+        god_profiles = {
+            "Elysia": {
+                "color": 0xE8C547,
+                "epithet": "The Dawnbound Arbiter",
+                "invocation": (
+                    "*\"Light does not ask permission to exist,\"* Morrigan whispers, wings spread over the basin. "
+                    "*\"It simply reveals what was hidden. These six fragments remember mercy, oath, and judgment. "
+                    "Hold steady, and the forge will return their oldest shape.\"*"
+                ),
+                "manifest": (
+                    "Golden filaments arc between the shards, weaving a lattice of sunlit sigils. "
+                    "The quicksilver rises like a tide at dawn, and from its surface steps a figure of radiant poise, "
+                    "eyes bright with impossible memory."
+                ),
+                "charge": (
+                    "*\"Elysia is not summoned,\"* Morrigan says softly. *\"She is acknowledged. "
+                    "Treat this reborn will as covenant, not ornament.\"*"
+                ),
+            },
+            "Sepulchure": {
+                "color": 0x4A0D1F,
+                "epithet": "The Gravebound Sovereign",
+                "invocation": (
+                    "*\"Darkness is not absence,\"* Morrigan croaks, voice low as funeral bells. "
+                    "*\"It is pressure, memory, and the promise that all debts are paid. "
+                    "These six shards remember ruin and rule. Feed them to the crucible and do not flinch.\"*"
+                ),
+                "manifest": (
+                    "Black vapor coils from the runes, thick as velvet smoke. "
+                    "One by one the shards extinguish their own light, then flare together in a single void-bright pulse. "
+                    "A mailed silhouette rises from the basin, shadow clinging to every edge."
+                ),
+                "charge": (
+                    "*\"Sepulchure answers strength, not prayer,\"* Morrigan warns. "
+                    "*\"Command with certainty, or be measured by your own fear.\"*"
+                ),
+            },
+            "Drakath": {
+                "color": 0x7B2CBF,
+                "epithet": "The Fractured Crown of Chaos",
+                "invocation": (
+                    "*\"Chaos is the first language,\"* Morrigan hisses, pupils narrowing to knives of gold. "
+                    "*\"Before law, before creed, there was the storm of becoming. "
+                    "These six fragments remember contradiction. Speak no rigid intent now.\"*"
+                ),
+                "manifest": (
+                    "The forge stutters through colors that have no names. "
+                    "Time lurches, doubles, and snaps back as the shards spin in impossible geometry. "
+                    "When the tremor settles, a warlike presence stands where the turbulence broke."
+                ),
+                "charge": (
+                    "*\"Drakath is possibility armed,\"* Morrigan says, feathers bristling. "
+                    "*\"He will break patterns - yours included - if you grow complacent.\"*"
+                ),
+            },
+        }
+
+        profile = god_profiles.get(
+            canonical_god,
+            {
+                "color": 0x4CC9F0,
+                "epithet": "The Reforged Divine",
+                "invocation": (
+                    "*\"Six shards, one will,\"* Morrigan murmurs. "
+                    "*\"The forge remembers what the ages tried to erase.\"*"
+                ),
+                "manifest": "The crucible blooms with ancient light as a divine form rematerializes from essence and oath.",
+                "charge": "*\"Power reforged is still power. Wield it with intent.\"*",
+            },
+        )
+
+        player_name = player_data.get("name", "Wyrdweaver")
+        player_god = (player_data.get("god") or "the old powers")
+        alignment = recipe.get("alignment", "Unknown")
+        stats = recipe.get("stats", {})
+        element = stats.get("element", "Unknown")
+        shard_lines = "\n".join(
+            f"• Shard {idx}: {shard_name}"
+            for idx, shard_name in enumerate(recipe.get("shards", ()), start=1)
+        )
+
+        embed = discord.Embed(
+            title=f"🧪 The Sixfold Rite: {canonical_god} 🧪",
+            description=(
+                f"You place six aligned shards into the Soulforge's ring, and each one answers with a different note. "
+                f"The air tightens around {player_name} as the crucible locks onto a singular pattern."
+            ),
+            color=profile["color"],
+        )
+        embed.add_field(
+            name="Shard Resonance Matrix",
+            value=shard_lines,
+            inline=False,
+        )
+        embed.add_field(
+            name="Morrigan's Invocation",
+            value=profile["invocation"],
+            inline=False,
+        )
+        pages.append(embed)
+
+        embed = discord.Embed(
+            title=f"⚡ {profile['epithet']} ⚡",
+            description=(
+                f"The sigils etched into the forge wall ignite in sequence, translating alignment into form: **{alignment}**."
+            ),
+            color=profile["color"],
+        )
+        embed.add_field(
+            name="Manifestation",
+            value=profile["manifest"],
+            inline=False,
+        )
+        embed.add_field(
+            name="Divine Friction",
+            value=(
+                f"*\"Your patron, {player_god}, feels this rite,\"* Morrigan notes. "
+                "*\"Some gods call it trespass. We call it remembrance.\"*"
+            ),
+            inline=False,
+        )
+        pages.append(embed)
+
+        embed = discord.Embed(
+            title=f"✨ {canonical_god} Reforged ✨",
+            description=(
+                f"The ritual resolves. Essence condenses. A divine companion stands bound to your mark, "
+                "not by chain, but by chosen pattern."
+            ),
+            color=profile["color"],
+        )
+        embed.add_field(
+            name="Morrigan's Charge",
+            value=profile["charge"],
+            inline=False,
+        )
+        embed.add_field(
+            name="Forged Pet Record",
+            value=(
+                f"ID: `{new_pet_id}`\n"
+                f"Alignment: **{alignment}**\n"
+                f"Element: **{element}**\n"
+                f"IV: **{iv_percentage:.2f}%**\n"
+                f"HP: **{forged_hp}** (+{hp_iv})\n"
+                f"ATK: **{forged_attack}** (+{attack_iv})\n"
+                f"DEF: **{forged_defense}** (+{defense_iv})"
+            ),
+            inline=False,
+        )
+        if stats.get("url"):
+            embed.set_thumbnail(url=stats["url"])
+        pages.append(embed)
+
+        return pages
         
     async def get_player_data(self, user_id):
         """Get player's quest progress and character data"""
@@ -154,7 +1962,6 @@ class Soulforge(commands.Cog):
                 "forge_built": quest_data["crucible_built"]
             }
 
-    @is_patreon(min_tier=1)
     @commands.command()
     @user_cooldown(30)
     async def soulforge(self, ctx):
@@ -166,7 +1973,7 @@ class Soulforge(commands.Cog):
                 return await ctx.send("You must create a character first!")
             
             player_name = player_data["name"]
-            player_god = player_data["god"]
+            player_god = player_data.get("god") or "mysterious god"  # Fixed to handle None values
             
             if not player_data["quest_started"]:
                 # First encounter with the mysterious Raven
@@ -192,7 +1999,11 @@ class Soulforge(commands.Cog):
             await self.display_quest_status(ctx, player_data)
 
         except Exception as e:
-            await ctx.send(f"An error occurred: {e}")
+            import traceback
+            error_message = f"Error occurred: {e}\n"
+            error_message += traceback.format_exc()
+            await ctx.send(error_message)
+            print(error_message)
 
     async def display_quest_status(self, ctx, player_data):
         """Shows current quest progress and offers to speak with Morrigan"""
@@ -238,6 +2049,530 @@ class Soulforge(commands.Cog):
         )
         
         await ctx.send(embed=embed)
+
+
+    @commands.command(name="soulforgeguide", aliases=["sfguide", "forgeguide"])
+    @user_cooldown(30)
+    async def soulforgeguide(self, ctx):
+        """Step-by-step guide for the full Soulforge flow."""
+        pages = self.create_soulforge_guide_pages(ctx.clean_prefix)
+        view = LoreView(pages, ctx.author.id)
+        await ctx.send(embed=pages[0], view=view)
+
+    @commands.command(
+        name="soulforgecommands",
+        aliases=["soulforgehelp", "sfhelp", "sfcommands"],
+        brief="Browse all player Soulforge commands",
+    )
+    @user_cooldown(15)
+    async def soulforgecommands(self, ctx):
+        """Interactive command reference for the full Soulforge system."""
+        pages, sections = self.create_soulforge_command_pages(ctx.clean_prefix)
+        view = SoulforgeCommandHelpView(ctx, pages, sections)
+        await view.start()
+
+    def create_soulforge_command_pages(self, prefix: str):
+        pages = []
+        p = prefix or "$"
+
+        def add_page(
+            title: str,
+            description: str,
+            color: int,
+            fields: List[Tuple[str, str]],
+            section_name: str,
+        ) -> None:
+            embed = discord.Embed(
+                title=title,
+                description=description,
+                color=color,
+            )
+            for field_name, field_value in fields:
+                embed.add_field(name=field_name, value=field_value, inline=False)
+            embed.set_footer(
+                text=f"Soulforge Commands • {section_name} • Player commands only"
+            )
+            pages.append(embed)
+
+        add_page(
+            title="🧪 Soulforge Command Hub",
+            description=(
+                "A player-facing reference for the full Soulforge system. "
+                "Use the dropdown to jump between sections and the arrows to move page by page."
+            ),
+            color=0x6e4799,
+            fields=[
+                (
+                    "What This Covers",
+                    (
+                        "Quest setup, lore, building the forge, splicing, upkeep, "
+                        "defense, and god-pet endgame."
+                    ),
+                ),
+                (
+                    "Quick Openers",
+                    (
+                        f"`{p}soulforgecommands` Open this command hub\n"
+                        f"`{p}soulforgeguide` Full start-to-finish walkthrough\n"
+                        f"`{p}soulforge` Start the quest or view your active forge"
+                    ),
+                ),
+                (
+                    "Excluded On Purpose",
+                    "GM, owner, and testing commands are intentionally not listed here.",
+                ),
+            ],
+            section_name="Overview",
+        )
+
+        add_page(
+            title="1) Start the Soulforge Path",
+            description="Use these before the forge is built.",
+            color=0x7d2aad,
+            fields=[
+                (
+                    "Core Setup Commands",
+                    (
+                        f"`{p}soulforge` Start the Wyrdweaver quest or check Soulforge progress\n"
+                        f"`{p}eshards` Check how many Eidolith Shards you have\n"
+                        f"`{p}soulforgeguide` Open the full guided walkthrough"
+                    ),
+                ),
+                (
+                    "Useful Aliases",
+                    (
+                        f"`{p}eshards` also works as `{p}myshards` or `{p}eidolith`\n"
+                        f"`{p}soulforgeguide` also works as `{p}sfguide` or `{p}forgeguide`"
+                    ),
+                ),
+                (
+                    "Build Checklist",
+                    "You need 10 Eidolith Shards, the Alchemist's Primer, and 2,500,000 gold.",
+                ),
+            ],
+            section_name="Setup",
+        )
+
+        add_page(
+            title="2) Lore and Forge Unlock",
+            description="Use these when you want story context or you are ready to activate the forge.",
+            color=0x4cc9f0,
+            fields=[
+                (
+                    "Lore and Unlock Commands",
+                    (
+                        f"`{p}speaktomorrigan` Ask Morrigan about the Wyrdweavers, gods, and Soulforge lore\n"
+                        f"`{p}soullorebook` Read deeper Primer lore after you have found it\n"
+                        f"`{p}forgesoulforge` Build the forge once your checklist is complete"
+                    ),
+                ),
+                (
+                    "When To Use Them",
+                    (
+                        "`speaktomorrigan` when you want explanations and story context\n"
+                        "`soullorebook` after the Primer is unlocked\n"
+                        "`forgesoulforge` only after shards, Primer, and gold are ready"
+                    ),
+                ),
+            ],
+            section_name="Setup",
+        )
+
+        add_page(
+            title="3) Splicing: Create and Track",
+            description="These are the core commands once your forge is active.",
+            color=0x9d4edd,
+            fields=[
+                (
+                    "Core Splicing Commands",
+                    (
+                        f"`{p}splice <pet1_id> <pet2_id>` Start a splice using two pet IDs\n"
+                        f"`{p}splicestatus` List your splice requests\n"
+                        f"`{p}splicestatus <id>` Check one specific splice request"
+                    ),
+                ),
+                (
+                    "Important Rules",
+                    (
+                        "Your forge must be built and usable.\n"
+                        "If forge condition drops too low, splicing is blocked until repaired.\n"
+                        "Some mythical or final-form pets cannot be spliced."
+                    ),
+                ),
+            ],
+            section_name="Splicing",
+        )
+
+        add_page(
+            title="4) Splicing: Research and Planning",
+            description="Use the discovered splice index to plan better combinations.",
+            color=0xc77dff,
+            fields=[
+                (
+                    "Discovery Command",
+                    (
+                        f"`{p}splices [query]` Browse discovered combinations with sorting, "
+                        "filters, and favorites"
+                    ),
+                ),
+                (
+                    "Useful Aliases",
+                    f"`{p}splices` also works as `{p}splicedex` or `{p}spliceindex`",
+                ),
+                (
+                    "Simple Player Flow",
+                    (
+                        f"`{p}pets` to find pet IDs\n"
+                        f"`{p}splice <pet1_id> <pet2_id>` to submit the splice\n"
+                        f"`{p}splicestatus` to track it\n"
+                        f"`{p}splices` to browse known results"
+                    ),
+                ),
+            ],
+            section_name="Splicing",
+        )
+
+        add_page(
+            title="5) Maintenance and Divine Stealth",
+            description="Keep the forge operational and keep divine attention under control.",
+            color=0xff9f1c,
+            fields=[
+                (
+                    "Maintenance Commands",
+                    (
+                        f"`{p}forgestatus` Check forge condition and divine attention\n"
+                        f"`{p}repairforge` Repair forge condition with gold\n"
+                        f"`{p}eidolithmask [shards]` Spend Eidolith Shards to reduce divine attention"
+                    ),
+                ),
+                (
+                    "Read The Two Main Stats",
+                    (
+                        "Forge Condition = how damaged the forge is.\n"
+                        "Divine Attention = how likely divine forces are to notice and pressure you."
+                    ),
+                ),
+                (
+                    "Easy Rule",
+                    "Low condition stops progress. High attention creates danger.",
+                ),
+            ],
+            section_name="Maintenance",
+        )
+
+        add_page(
+            title="6) Defense and Hired Defenders",
+            description="Use these when divine pressure starts turning into real attacks.",
+            color=0xf72585,
+            fields=[
+                (
+                    "Defense Commands",
+                    (
+                        f"`{p}defendforge` Defend the forge when divine intervention is pending\n"
+                        f"`{p}recruitdefender` Hire temporary defenders for the forge\n"
+                        f"`{p}mydefenders` View active defenders and remaining contract time"
+                    ),
+                ),
+                (
+                    "What Matters Most",
+                    (
+                        "`defendforge` is for the actual attack event.\n"
+                        "`recruitdefender` is your prep tool.\n"
+                        "You can keep up to 3 active defenders at once."
+                    ),
+                ),
+                (
+                    "Best Practice",
+                    f"If scrutiny climbs hard, use `{p}eidolithmask` early and keep defenders ready.",
+                ),
+            ],
+            section_name="Defense",
+        )
+
+        add_page(
+            title="7) Endgame: God Shards and God Pets",
+            description="These commands handle the last Soulforge progression layer.",
+            color=0x2ec4b6,
+            fields=[
+                (
+                    "Endgame Commands",
+                    (
+                        f"`{p}godlocks` Check your god shard collection progress\n"
+                        f"`{p}forgegodpet <Elysia|Sepulchure|Drakath>` Consume one full shard set to forge that god pet"
+                    ),
+                ),
+                (
+                    "Useful Aliases",
+                    (
+                        f"`{p}godlocks` also works as `{p}godlock`\n"
+                        f"`{p}forgegodpet` also works as `{p}forgegod`, `{p}godforge`, or `{p}godpetforge`"
+                    ),
+                ),
+                (
+                    "Before You Forge",
+                    (
+                        "You need all 6 unique shard numbers for the same god, "
+                        "an active Soulforge, and enough free pet capacity."
+                    ),
+                ),
+            ],
+            section_name="Endgame",
+        )
+
+        sections = [
+            {
+                "label": "Overview",
+                "description": "Hub and quick navigation",
+                "page_index": 0,
+            },
+            {
+                "label": "Setup",
+                "description": "Quest start, lore, and forge unlock",
+                "page_index": 1,
+            },
+            {
+                "label": "Splicing",
+                "description": "Create, track, and browse splices",
+                "page_index": 3,
+            },
+            {
+                "label": "Maintenance",
+                "description": "Status, repairs, and masking fog",
+                "page_index": 5,
+            },
+            {
+                "label": "Defense",
+                "description": "Divine attacks and hired defenders",
+                "page_index": 6,
+            },
+            {
+                "label": "Endgame",
+                "description": "God shards and god pets",
+                "page_index": 7,
+            },
+        ]
+
+        return pages, sections
+
+    def create_soulforge_guide_pages(self, prefix: str):
+        """Create beginner-friendly Soulforge guide pages from start to finish."""
+        pages = []
+        p = prefix or "$"
+
+        # Page 1: Overview
+        embed = discord.Embed(
+            title="🧭 Soulforge Guide (Start to Finish)",
+            description="A full walkthrough of how the Soulforge system works.",
+            color=0x6e4799,
+        )
+        embed.add_field(
+            name="Flow Overview",
+            value=(
+                f"1) Start quest with `{p}soulforge`\n"
+                "2) Gather 10 Eidolith Shards\n"
+                "3) Find Alchemist's Primer\n"
+                "4) Have 2,500,000 gold\n"
+                f"5) Build forge with `{p}forgesoulforge`\n"
+                f"6) Splice pets with `{p}splice`\n"
+                "7) Maintain forge and manage divine attention\n"
+                "8) Endgame: collect God Shards and forge god pets"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Who Should Use This",
+            value=(
+                "New players, returning players, and anyone confused about "
+                "where shard/primer/god progression fits."
+            ),
+            inline=False,
+        )
+        pages.append(embed)
+
+        # Page 2: Quest start
+        embed = discord.Embed(
+            title="1) Start the Wyrdweaver Quest",
+            description="This initializes your Soulforge progression data.",
+            color=0x7d2aad,
+        )
+        embed.add_field(
+            name="Command",
+            value=f"`{p}soulforge`",
+            inline=False,
+        )
+        embed.add_field(
+            name="What It Does",
+            value=(
+                "Starts your quest (if first time), shows lore/progress, "
+                "and tracks your requirements in `splicing_quest`."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Main Requirements",
+            value="10 Eidolith Shards, Alchemist's Primer, and 2,500,000 gold.",
+            inline=False,
+        )
+        pages.append(embed)
+
+        # Page 3: Requirements and drops
+        embed = discord.Embed(
+            title="2) Gather Soulforge Requirements",
+            description="How you actually get each requirement right now.",
+            color=0x57068c,
+        )
+        embed.add_field(
+            name="Eidolith Shards (0/10)",
+            value=(
+                "From successful PvE completion while quest is active.\n"
+                "Current chance: 20% per successful PvE."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Alchemist's Primer",
+            value=(
+                "Can drop from eligible completions while your Soulforge quest is active:\n"
+                "• Adventure clears at character level 15+ (any adventure tier)\n"
+                "• Guild Adventure completion (rolls for one random participating member)\n"
+                "• Battle Tower floor 30 finale clear (the run that advances to floor 31)\n"
+                "• Raid event completions\n"
+                "Current chance: 5% per eligible completion if you do not already have it."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Useful Check Commands",
+            value=(
+                f"`{p}soulforge` for progress\n"
+                f"`{p}eshards` for quick Eidolith shard count"
+            ),
+            inline=False,
+        )
+        pages.append(embed)
+
+        # Page 4: Build forge
+        embed = discord.Embed(
+            title="3) Build the Soulforge",
+            description="Unlocks actual splicing and forge systems.",
+            color=0x4cc9f0,
+        )
+        embed.add_field(
+            name="Command",
+            value=f"`{p}forgesoulforge`",
+            inline=False,
+        )
+        embed.add_field(
+            name="Checks Before Build",
+            value=(
+                "Requires all 3: 10 Eidolith Shards, Primer found, and "
+                "2,500,000 gold available."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="On Success",
+            value=(
+                "Consumes the gold, marks forge as built, and unlocks active "
+                "forge gameplay commands."
+            ),
+            inline=False,
+        )
+        pages.append(embed)
+
+        # Page 5: Splicing loop
+        embed = discord.Embed(
+            title="4) Splicing Loop",
+            description="Create new creatures from two pets.",
+            color=0x9d4edd,
+        )
+        embed.add_field(
+            name="Core Command",
+            value=f"`{p}splice <pet1_id> <pet2_id>`",
+            inline=False,
+        )
+        embed.add_field(
+            name="What Happens",
+            value=(
+                "Your request is saved to `splice_requests` as `pending`, then "
+                "processed by staff/automation. When complete, your new pet is created."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Tracking",
+            value=(
+                f"`{p}splicestatus` lists your requests\n"
+                f"`{p}splicestatus <id>` shows one request"
+            ),
+            inline=False,
+        )
+        pages.append(embed)
+
+        # Page 6: Maintenance and defense
+        embed = discord.Embed(
+            title="5) Keep the Forge Operational",
+            description="Ignoring forge upkeep will block progress.",
+            color=0xff9f1c,
+        )
+        embed.add_field(
+            name="Important Rule",
+            value="If forge condition is too low, splicing is blocked until repaired.",
+            inline=False,
+        )
+        embed.add_field(
+            name="Maintenance Commands",
+            value=(
+                f"`{p}forgestatus` • `{p}repairforge` • `{p}eidolithmask`\n"
+                f"`{p}defendforge` • `{p}recruitdefender` • `{p}mydefenders`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Concepts",
+            value=(
+                "Forge Condition = durability.\n"
+                "Divine Attention = threat level; higher values increase pressure."
+            ),
+            inline=False,
+        )
+        pages.append(embed)
+
+        # Page 7: God shards (last page)
+        embed = discord.Embed(
+            title="6) God Shards and God Pets (Endgame)",
+            description="Final progression layer after your forge journey is stable.",
+            color=0x2ec4b6,
+        )
+        embed.add_field(
+            name="How God Shards Drop",
+            value=(
+                "From PvE fights against god monsters.\n"
+                "Each fight rolls each shard once with rates:\n"
+                "1: 15% • 2: 40% • 3: 10% • 4: 15% • 5: 10% • 6: 10%."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Rules",
+            value=(
+                "Shards are account-bound and unique per god/shard number.\n"
+                "No duplicates for the same shard number.\n"
+                "Use `godlocks` to view your god shard progress."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Forge God Pet",
+            value=(
+                f"`{p}forgegodpet <Elysia|Sepulchure|Drakath>`\n"
+                "Consumes all 6 shards for that god and creates the god pet."
+            ),
+            inline=False,
+        )
+        pages.append(embed)
+
+        return pages
 
 
     @commands.command()
@@ -446,7 +2781,7 @@ class Soulforge(commands.Cog):
     async def display_active_forge(self, ctx, player_data):
         """Displays interface for players who have built the Soulforge"""
         name = player_data["name"]
-        god = player_data["god"]
+        god = player_data.get("god") or "mysterious god"  # Fixed to handle None values
         
         # Divine commentary based on player's god
         if "drakath" in god.lower() or "chaos" in god.lower():
@@ -470,7 +2805,7 @@ class Soulforge(commands.Cog):
         )
         embed.add_field(
             name="Available Commands",
-            value="• `$splice [pet1] [pet2]` - Combine two of your pets into a new form\n• `$soullorebook` - Review the ancient knowledge of soul manipulation\n• `$speaktomorrigan` - Learn deeper secrets of Fable's past\n•",
+            value="• `$splice [pet1] [pet2]` - Combine two of your pets into a new form\n• `$soullorebook` - Review the ancient knowledge of soul manipulation\n• `$speaktomorrigan` - Learn deeper secrets of Fable's past\n",
             inline=False
         )
         await ctx.send(embed=embed)
@@ -625,14 +2960,17 @@ class Soulforge(commands.Cog):
         )
         embed.add_field(
             name="Basic Commands",
-            value="• `$splice [pet1] [pet2]` - Combine two creatures into a new form\n"
-                "• `$forgestatus` - Check your forge's condition and divine scrutiny level",
+            value="• `$soulforgecommands` - Open the interactive Soulforge command hub\n"
+                "• `$splice [pet1] [pet2]` - Combine two creatures into a new form\n"
+                "• `$splicestatus [id]` - Check one splice or list all of yours\n"
+                "• `$splices [query]` - Browse discovered splice combinations",
             inline=False
         )
         embed.add_field(
             name="Maintenance",
             value="• `$repairforge` - Restore your forge's condition (costs gold)\n"
-                "• `$diversion` - Perform a ritual to reduce divine attention (costs gold)",
+                "• `$forgestatus` - Check forge condition and divine scrutiny level\n"
+                "• `$eidolithmask [shards]` - Reduce divine attention with Eidolith Shards",
             inline=False
         )
         embed.add_field(
@@ -1140,7 +3478,7 @@ class Soulforge(commands.Cog):
 
 
     @commands.command()
-    @user_cooldown(86400)
+    @user_cooldown(432000)
     async def splice(self, ctx, pet1_id: int = None, pet2_id: int = None):
         try:
             """Splice two pets together to create a new being"""
@@ -1175,6 +3513,7 @@ class Soulforge(commands.Cog):
             
             # Check if player owns both pets
             async with self.bot.pool.acquire() as conn:
+                await ensure_splice_identity_schema(conn)
                 pet1_data = await conn.fetchrow(
                     "SELECT * FROM monster_pets WHERE id = $1 AND user_id = $2",
                     pet1_id, ctx.author.id
@@ -1185,21 +3524,45 @@ class Soulforge(commands.Cog):
                     pet2_id, ctx.author.id
                 )
 
-            unspliceable_pets = ["Sepulchure", "Astraea", "Drakath", "Ultra Sepulchure", "Ultra Astraea", "Ultra Drakath"]
+                ambiguous_pet_ids = []
+                for pet_data in (pet1_data, pet2_data):
+                    if pet_data and await self._has_ambiguous_legacy_splice_identity(
+                        conn, pet_data
+                    ):
+                        ambiguous_pet_ids.append(int(pet_data["id"]))
+
+            unspliceable_pets = ["Sepulchure", "Elysia", "Drakath", "Ultra Sepulchure", "Ultra Elysia",
+                                 "Ultra Drakath"]
 
             if not pet1_data:
                 await self.bot.reset_cooldown(ctx)
                 return await ctx.send(f"You don't own a pet with ID {pet1_id}.")
-            
+
             if not pet2_data:
                 await self.bot.reset_cooldown(ctx)
                 return await ctx.send(f"You don't own a pet with ID {pet2_id}.")
 
-            if pet1_data["default_name"] in unspliceable_pets:
+            if ambiguous_pet_ids:
+                await self.bot.reset_cooldown(ctx)
+                return await ctx.send(
+                    "This splice was stopped because the legacy identity for pet ID(s) "
+                    f"**{', '.join(map(str, ambiguous_pet_ids))}** matches multiple recipes. "
+                    "A GM must resolve the pet's recipe link before it can be used as a parent."
+                )
+
+            if pet1_data["daycare_boarding_id"] is not None:
+                await self.bot.reset_cooldown(ctx)
+                return await ctx.send(f"**{pet1_data['name']}** is currently boarded in daycare and cannot be spliced.")
+
+            if pet2_data["daycare_boarding_id"] is not None:
+                await self.bot.reset_cooldown(ctx)
+                return await ctx.send(f"**{pet2_data['name']}** is currently boarded in daycare and cannot be spliced.")
+
+            if pet1_data["default_name"] in unspliceable_pets or "[FINAL]" in pet1_data["default_name"]:
                 await self.bot.reset_cooldown(ctx)
                 return await ctx.send(f"**{pet1_data['default_name']}** cannot be spliced due to its mythical nature.")
-            
-            if pet2_data["default_name"] in unspliceable_pets:
+
+            if pet2_data["default_name"] in unspliceable_pets or "[FINAL]" in pet2_data["default_name"]:
                 await self.bot.reset_cooldown(ctx)
                 return await ctx.send(f"**{pet2_data['default_name']}** cannot be spliced due to its mythical nature.")
 
@@ -1256,36 +3619,87 @@ class Soulforge(commands.Cog):
             
             # Check if this combination has been spliced before
             async with self.bot.pool.acquire() as conn:
-                # Create table if it doesn't exist
-                await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS splice_combinations (
-                        id SERIAL PRIMARY KEY,
-                        pet1_default TEXT,
-                        pet2_default TEXT,
-                        result_name TEXT,
-                        hp INTEGER,
-                        attack INTEGER,
-                        defense INTEGER,
-                        element TEXT,
-                        url TEXT,
-                        created_at TIMESTAMP DEFAULT NOW()
-                    )
-                """)
+                await ensure_splice_identity_schema(conn)
+                parent_pair_key = canonical_parent_pair_key(
+                    pet1_data["default_name"],
+                    pet2_data["default_name"],
+                )
                 
                 existing_splice = await conn.fetchrow(
                     """
-                    SELECT * FROM splice_combinations 
-                    WHERE (pet1_default = $1 AND pet2_default = $2) OR (pet1_default = $2 AND pet2_default = $1)
+                    SELECT * FROM splice_combinations
+                    WHERE parent_pair_key = $3
+                       OR ((pet1_default = $1 AND pet2_default = $2)
+                           OR (pet1_default = $2 AND pet2_default = $1))
+                    ORDER BY id ASC
+                    LIMIT 1
                     """,
-                    pet1_data["default_name"], pet2_data["default_name"]
+                    pet1_data["default_name"],
+                    pet2_data["default_name"],
+                    parent_pair_key,
+                )
+            if existing_splice and "[FINAL]" in existing_splice["result_name"]:
+                await self.bot.reset_cooldown(ctx)
+                return await ctx.send(
+                    "The Crucible shudders violently, its mercurial surface hardening into impenetrable obsidian. "
+                    "Morrigan's voice echoes with finality: \"This union has already birthed a [FINAL] form. "
+                    "The forge refuses to reweave what has been perfected.\""
+                )
+            if existing_splice and "[Event]" in existing_splice["result_name"]:
+                await self.bot.reset_cooldown(ctx)
+                return await ctx.send(
+                    "The Crucible shudders violently, its mercurial surface hardening into impenetrable obsidian. "
+                    "Morrigan's voice echoes with finality: \"This union has already birthed a [Event] form. "
+                    "The forge refuses to reweave what has been perfected.\""
                 )
             
             # Ask for confirmation
-            confirm_msg = f"Are you sure you want to splice {pet1_data['name']} and {pet2_data['name']} together into a new beast? This action cannot be undone."
+            known_combination = existing_splice is not None
+            if known_combination:
+                confirm_msg = (
+                    f"Are you sure you want to splice {pet1_data['name']} and {pet2_data['name']} together into a new beast? "
+                    "This action cannot be undone.\n\n"
+                    "Known combination: **Yes**\n"
+                    "This splice has been discovered before, so it will use a **1 day cooldown** instead of 5 days.\n"
+                    "Known combinations use the discovered stat pattern and do not inherit parent-level creation bonuses."
+                )
+            else:
+                confirm_msg = (
+                    f"Are you sure you want to splice {pet1_data['name']} and {pet2_data['name']} together into a new beast? "
+                    "This action cannot be undone.\n\n"
+                    "Known combination: **No**\n"
+                    "This splice is new, so it will keep the normal **5 day cooldown**."
+                )
             confirmed = await ctx.confirm(confirm_msg)
             
             if not confirmed:
+                await self.bot.reset_cooldown(ctx)
                 return await ctx.send("Splice canceled.")
+
+            background_theme = "auto"
+            splice_style = "auto"
+            if not known_combination:
+                appearance_view = SpliceAppearancePreferenceView(
+                    ctx,
+                    pet1_data["name"],
+                    pet2_data["name"],
+                )
+                await appearance_view.start()
+                timed_out = await appearance_view.wait()
+                if not appearance_view.confirmed:
+                    await self.bot.reset_cooldown(ctx)
+                    if timed_out:
+                        return await ctx.send("Splice canceled because art preference selection timed out.")
+                    return await ctx.send("Splice canceled.")
+                background_theme = self._normalize_splice_background_theme(
+                    appearance_view.selected_theme
+                )
+                splice_style = self._normalize_splice_style(
+                    appearance_view.selected_style
+                )
+
+            if known_combination:
+                await self.bot.set_cooldown(ctx, 86400)
             
             # Generate narrative sequence
             name = player_data["name"]
@@ -1304,7 +3718,7 @@ class Soulforge(commands.Cog):
             stat_multiplier = baby_stage["stat_multiplier"]
             growth_time_interval = datetime.timedelta(days=baby_stage["growth_time"])
             growth_time = datetime.datetime.utcnow() + growth_time_interval
-            
+
             # Create sequence of splicing ritual
             pages = []
             
@@ -1372,21 +3786,19 @@ class Soulforge(commands.Cog):
             )
             pages.append(embed)
             
-            # First, set pets to user_id 0 to prevent trading while request is processed
+            # First, archive the source pets so they cannot be traded while the splice resolves.
             async with self.bot.pool.acquire() as conn:
-                await conn.execute(
-                    "UPDATE monster_pets SET user_id = 0 WHERE id IN ($1, $2)",
-                    pet1_id, pet2_id
-                )
-                
-                # NEW: Update forge condition and divine attention
-                new_condition = max(0, forge_condition - condition_reduction)
-                await conn.execute("""
-                    UPDATE splicing_quest 
-                    SET forge_condition = $1,
-                        divine_attention = $2
-                    WHERE user_id = $3 AND crucible_built = TRUE
-                """, new_condition, new_divine_attention, ctx.author.id)
+                async with conn.transaction():
+                    await self._archive_splice_source_pets(conn, [pet1_id, pet2_id])
+
+                    # NEW: Update forge condition and divine attention
+                    new_condition = max(0, forge_condition - condition_reduction)
+                    await conn.execute("""
+                        UPDATE splicing_quest 
+                        SET forge_condition = $1,
+                            divine_attention = $2
+                        WHERE user_id = $3 AND crucible_built = TRUE
+                    """, new_condition, new_divine_attention, ctx.author.id)
             
             if existing_splice:
                 # If this combination has been spliced before, use the existing data
@@ -1469,9 +3881,11 @@ class Soulforge(commands.Cog):
                     base_hp = existing_splice["hp"]
                     base_attack = existing_splice["attack"]
                     base_defense = existing_splice["defense"]
-                    baby_hp = base_hp * stat_multiplier
-                    baby_attack = base_attack * stat_multiplier
-                    baby_defense = base_defense * stat_multiplier
+                    # Known recipes reuse the discovered stat pattern. Parent levels must not
+                    # permanently inflate copied splice stats.
+                    baby_hp = int(round(base_hp * stat_multiplier))
+                    baby_attack = int(round(base_attack * stat_multiplier))
+                    baby_defense = int(round(base_defense * stat_multiplier))
 
                     baby_hp = baby_hp + hp_iv
                     baby_attack = baby_attack + attack_iv
@@ -1481,8 +3895,9 @@ class Soulforge(commands.Cog):
                     new_pet_id = await conn.fetchval(
                         """
                         INSERT INTO monster_pets 
-                        (user_id, name, hp, attack, defense, element, default_name, url, growth_stage, growth_time, "IV") 
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) 
+                        (user_id, name, hp, attack, defense, element, default_name, url,
+                         growth_stage, growth_time, "IV", splice_combination_id)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                         RETURNING id
                         """,
                         ctx.author.id, 
@@ -1495,10 +3910,19 @@ class Soulforge(commands.Cog):
                         existing_splice["url"], 
                         'baby',
                         growth_time,
-                        total_iv_points
+                        total_iv_points,
+                        int(existing_splice["id"]),
                     )
-                    
-                
+
+                self.bot.dispatch(
+                    "frontier_splice_created",
+                    ctx,
+                    new_pet_name,
+                    int(existing_splice["id"]),
+                    None,
+                    int(new_pet_id),
+                )
+
                 # Send success message
                 await ctx.author.send(f"You have successfully spliced your pets into a {new_pet_name}! Check your pets with `$pets`. Your forge's condition is now at {new_condition}% and divine scrutiny is at {new_divine_attention}%.")
                 
@@ -1536,40 +3960,15 @@ class Soulforge(commands.Cog):
                 
                 # Store the splice request
                 async with self.bot.pool.acquire() as conn:
-                    # Create table if it doesn't exist
-                    await conn.execute("""
-                        CREATE TABLE IF NOT EXISTS splice_requests (
-                            id SERIAL PRIMARY KEY,
-                            user_id BIGINT,
-                            pet1_id INTEGER,
-                            pet2_id INTEGER,
-                            pet1_name TEXT,
-                            pet2_name TEXT,
-                            pet1_default TEXT,
-                            pet2_default TEXT,
-                            temp_name TEXT,
-                            pet1_hp INTEGER,
-                            pet1_attack INTEGER,
-                            pet1_defense INTEGER,
-                            pet1_element TEXT,
-                            pet1_url TEXT,
-                            pet2_hp INTEGER,
-                            pet2_attack INTEGER,
-                            pet2_defense INTEGER,
-                            pet2_element TEXT,
-                            pet2_url TEXT,
-                            status TEXT DEFAULT 'pending',
-                            created_at TIMESTAMP DEFAULT NOW()
-                        )
-                    """)
+                    await self._ensure_splice_request_schema(conn)
                     
                     splice_id = await conn.fetchval(
                         """
                         INSERT INTO splice_requests 
                         (user_id, pet1_id, pet2_id, pet1_name, pet2_name, pet1_default, pet2_default, temp_name,
                         pet1_hp, pet1_attack, pet1_defense, pet1_element, pet1_url,
-                        pet2_hp, pet2_attack, pet2_defense, pet2_element, pet2_url) 
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) 
+                        pet2_hp, pet2_attack, pet2_defense, pet2_element, pet2_url, background_theme, splice_style)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
                         RETURNING id
                         """,
                         ctx.author.id,
@@ -1589,12 +3988,25 @@ class Soulforge(commands.Cog):
                         pet2_data["attack"],
                         pet2_data["defense"],
                         pet2_data["element"],
-                        pet2_data["url"]
+                        pet2_data["url"],
+                        background_theme,
+                        splice_style,
                     )
                 
-                # Notify the admin
-                admin = self.bot.get_user(295173706496475136)
-                if admin:
+                # Notify the splice request channel
+                splice_channel = (
+                    self.bot.get_channel(self.splice_request_channel_id)
+                    if self.splice_request_channel_id
+                    else None
+                )
+                if splice_channel is None and self.splice_request_channel_id:
+                    try:
+                        splice_channel = await self.bot.fetch_channel(
+                            self.splice_request_channel_id
+                        )
+                    except Exception:
+                        splice_channel = None
+                if splice_channel:
                     embed = discord.Embed(
                         title="New Splice Request",
                         description=f"User {ctx.author.name} (ID: {ctx.author.id}) has requested a splice.",
@@ -1604,58 +4016,273 @@ class Soulforge(commands.Cog):
                     embed.add_field(name="Pet 1", value=f"{pet1_data['name']} (Default: {pet1_data['default_name']})", inline=True)
                     embed.add_field(name="Pet 2", value=f"{pet2_data['name']} (Default: {pet2_data['default_name']})", inline=True)
                     embed.add_field(name="Temporary Name", value=temp_name, inline=False)
+                    embed.add_field(
+                        name="Background Preference",
+                        value=self._get_splice_background_label(background_theme),
+                        inline=False,
+                    )
+                    embed.add_field(
+                        name="Art Style",
+                        value=self._get_splice_style_label(splice_style),
+                        inline=False,
+                    )
                     embed.add_field(name="Pet 1 Stats", value=f"HP: {pet1_data['hp']}, ATK: {pet1_data['attack']}, DEF: {pet1_data['defense']}, Element: {pet1_data['element']}\nURL: {pet1_data['url']}", inline=True)
                     embed.add_field(name="Pet 2 Stats", value=f"HP: {pet2_data['hp']}, ATK: {pet2_data['attack']}, DEF: {pet2_data['defense']}, Element: {pet2_data['element']}\nURL: {pet2_data['url']}", inline=True)
                     embed.add_field(name="Command", value=f"Splice ID {splice_id}`", inline=False)
                     embed.add_field(name="Forge Impact", value=f"Splice Rarity: {splice_rarity}\nForge Condition: {forge_condition}% → {new_condition}%\nDivine Attention: {current_divine_attention}% → {new_divine_attention}%", inline=False)
                     
-                    await admin.send(embed=embed)
+                    await splice_channel.send(embed=embed)
                 
                 # Let the player know they can check status
                 await ctx.send(
                     f"*The Soulforge begins pulsing with purple and blue energies as primordial forces embrace your offering. The essence of your creatures slowly dissolves into the ancient crucible, where Eidolith fragments commence their delicate dance of transformation.*\n\n"
                     f"As Vaedrith's ancient texts warn: soul-binding cannot be rushed. The patterns must align naturally, following rhythms older than the gods themselves.\n\n"
+                    f"Requested background influence: **{self._get_splice_background_label(background_theme)}**\n\n"
+                    f"Requested art style: **{self._get_splice_style_label(splice_style)}**\n\n"
                     f"Check your creation's progress: `$splicestatus {splice_id}`\n\n"
                     f"*Note: This splicing has reduced your forge's condition to {new_condition}% and increased divine scrutiny to {new_divine_attention}%.*"
                 )
-        
+
+                await ctx.send("Splicing might take up to 2 days currently as we await support from the provider. ETA Monday")
+
+        except ValueError as e:
+            await self.bot.reset_cooldown(ctx)
+            await ctx.send(str(e))
         except Exception as e:
             await ctx.send(e)
+
+    @commands.command(aliases=["forgegod", "godforge", "godpetforge"])
+    @user_cooldown(60)
+    async def forgegodpet(self, ctx, *, god_name: str = None):
+        """Forge a god pet by consuming all 6 shards for that god."""
+        player_data = await self.get_player_data(ctx.author.id)
+
+        if not player_data:
+            await self.bot.reset_cooldown(ctx)
+            return await ctx.send("You must create a character first!")
+
+        if not player_data["forge_built"]:
+            await self.bot.reset_cooldown(ctx)
+            return await ctx.send("You need an active Soulforge first. Use `$soulforge` and then `$forgesoulforge`.")
+
+        canonical_god = self._canonical_god_recipe_name(god_name)
+        if canonical_god is None:
+            await self.bot.reset_cooldown(ctx)
+            return await ctx.send(
+                "Usage: `$forgegodpet <Elysia|Sepulchure|Drakath>`\n"
+                "Note: `Astraea` and `Asterea` are treated as `Elysia`."
+            )
+
+        recipe = self.GOD_PET_FORGE_RECIPES[canonical_god]
+        required_shards = {1, 2, 3, 4, 5, 6}
+
+        async with self.bot.pool.acquire() as conn:
+            shard_rows = await conn.fetch(
+                """
+                SELECT shard_number
+                FROM god_pve_shards
+                WHERE user_id = $1 AND god_name = $2
+                ORDER BY shard_number
+                """,
+                ctx.author.id,
+                canonical_god,
+            )
+
+        owned_shards = {int(row["shard_number"]) for row in shard_rows}
+        missing = [idx for idx in sorted(required_shards) if idx not in owned_shards]
+        if missing:
+            await self.bot.reset_cooldown(ctx)
+            missing_text = ", ".join(
+                f"{idx} ({recipe['shards'][idx - 1]})" for idx in missing
+            )
+            return await ctx.send(
+                f"You are missing **{canonical_god}** shards: {missing_text}.\n"
+                "Collect all 6 shard numbers before forging."
+            )
+
+        async with self.bot.pool.acquire() as conn:
+            tier = await conn.fetchval(
+                "SELECT tier FROM profile WHERE profile.user = $1",
+                ctx.author.id,
+            )
+            current_slot_usage = await self._count_user_pet_capacity_items(conn, ctx.author.id)
+
+        max_slots = self._calculate_max_pet_slots_for_user(ctx, tier)
+        if current_slot_usage + 1 > max_slots:
+            await self.bot.reset_cooldown(ctx)
+            return await ctx.send(
+                f"❌ You cannot have more than {max_slots} pets or eggs (including pending splices). "
+                f"You currently have {current_slot_usage} occupied slots and would exceed the limit."
+            )
+
+        confirmed = await ctx.confirm(
+            f"Forge **{canonical_god}** by consuming all 6 of its shards? This cannot be undone."
+        )
+        if not confirmed:
+            await self.bot.reset_cooldown(ctx)
+            return await ctx.send("God forging canceled.")
+
+        stats = recipe["stats"]
+        iv_percentage = random.uniform(10, 1000)
+        if iv_percentage < 20:
+            iv_percentage = random.uniform(90, 100)
+        elif iv_percentage < 70:
+            iv_percentage = random.uniform(80, 90)
+        elif iv_percentage < 150:
+            iv_percentage = random.uniform(70, 80)
+        elif iv_percentage < 350:
+            iv_percentage = random.uniform(60, 70)
+        elif iv_percentage < 700:
+            iv_percentage = random.uniform(50, 60)
+        else:
+            iv_percentage = random.uniform(30, 50)
+        total_iv_points = int(round((iv_percentage / 100) * 100))
+        hp_iv, attack_iv, defense_iv = await self.allocate_iv_points(total_iv_points)
+        forged_hp = int(stats["hp"]) + hp_iv
+        forged_attack = int(stats["attack"]) + attack_iv
+        forged_defense = int(stats["defense"]) + defense_iv
+
+        try:
+            async with self.bot.pool.acquire() as conn:
+                async with conn.transaction():
+                    locked_rows = await conn.fetch(
+                        """
+                        SELECT shard_number
+                        FROM god_pve_shards
+                        WHERE user_id = $1 AND god_name = $2
+                        FOR UPDATE
+                        """,
+                        ctx.author.id,
+                        canonical_god,
+                    )
+                    locked_owned = {int(row["shard_number"]) for row in locked_rows}
+                    locked_missing = [idx for idx in sorted(required_shards) if idx not in locked_owned]
+                    if locked_missing:
+                        missing_text = ", ".join(
+                            f"{idx} ({recipe['shards'][idx - 1]})" for idx in locked_missing
+                        )
+                        await self.bot.reset_cooldown(ctx)
+                        return await ctx.send(
+                            f"Forge interrupted: missing shards during transaction: {missing_text}."
+                        )
+
+                    current_slot_usage = await self._count_user_pet_capacity_items(conn, ctx.author.id)
+                    if current_slot_usage + 1 > max_slots:
+                        await self.bot.reset_cooldown(ctx)
+                        return await ctx.send(
+                            f"❌ You cannot have more than {max_slots} pets or eggs (including pending splices). "
+                            f"You currently have {current_slot_usage} occupied slots and would exceed the limit."
+                        )
+
+                    consumed = await conn.fetch(
+                        """
+                        DELETE FROM god_pve_shards
+                        WHERE user_id = $1
+                          AND god_name = $2
+                          AND shard_number = ANY($3::smallint[])
+                        RETURNING shard_number
+                        """,
+                        ctx.author.id,
+                        canonical_god,
+                        [1, 2, 3, 4, 5, 6],
+                    )
+                    if len(consumed) != 6:
+                        raise RuntimeError("Failed to consume all required shards.")
+
+                    new_pet_id = await conn.fetchval(
+                        """
+                        INSERT INTO monster_pets
+                        (
+                            user_id,
+                            name,
+                            default_name,
+                            hp,
+                            attack,
+                            defense,
+                            element,
+                            url,
+                            growth_stage,
+                            growth_index,
+                            growth_time,
+                            "IV"
+                        )
+                        VALUES
+                        (
+                            $1, $2, $3, $4, $5, $6, $7, $8, 'adult', 4, NULL, $9
+                        )
+                        RETURNING id
+                        """,
+                        ctx.author.id,
+                        canonical_god,
+                        canonical_god,
+                        forged_hp,
+                        forged_attack,
+                        forged_defense,
+                        stats["element"],
+                        stats["url"],
+                        iv_percentage,
+                    )
+
+                    lock_table_exists = await conn.fetchval(
+                        "SELECT to_regclass('public.god_pet_ownership_locks') IS NOT NULL;"
+                    )
+                    if lock_table_exists:
+                        await conn.execute(
+                            """
+                            INSERT INTO god_pet_ownership_locks (user_id, god_name, source_pet_id)
+                            VALUES ($1, $2, $3)
+                            ON CONFLICT (user_id, god_name) DO NOTHING
+                            """,
+                            ctx.author.id,
+                            canonical_god,
+                            new_pet_id,
+                        )
+        except Exception as e:
+            await self.bot.reset_cooldown(ctx)
+            return await ctx.send(f"An error occurred while forging your god pet: {e}")
+
+        lore_pages = self.create_god_forging_pages(
+            player_data=player_data,
+            canonical_god=canonical_god,
+            recipe=recipe,
+            iv_percentage=iv_percentage,
+            hp_iv=hp_iv,
+            attack_iv=attack_iv,
+            defense_iv=defense_iv,
+            forged_hp=forged_hp,
+            forged_attack=forged_attack,
+            forged_defense=forged_defense,
+            new_pet_id=new_pet_id,
+        )
+        lore_view = LoreView(lore_pages, ctx.author.id)
+        await ctx.send(embed=lore_pages[0], view=lore_view)
 
 
     @commands.command()
     @user_cooldown(30)
     async def splicestatus(self, ctx, splice_id: int = None):
         """Check the status of your splice request"""
+        await ctx.send("Splicing might take up to 2 days currently as we await support from the provider. ETA Monday")
         if not splice_id:
             # If no ID provided, list all pending splices for the user
             async with self.bot.pool.acquire() as conn:
+                await self._ensure_splice_request_schema(conn)
                 splices = await conn.fetch(
-                    "SELECT id, pet1_name, pet2_name, status, created_at FROM splice_requests WHERE user_id = $1 ORDER BY created_at DESC",
+                    "SELECT id, pet1_name, pet2_name, status, created_at, background_theme, splice_style FROM splice_requests WHERE user_id = $1 ORDER BY created_at DESC",
                     ctx.author.id
                 )
             
             if not splices:
                 return await ctx.send("You don't have any splice requests.")
             
-            embed = discord.Embed(
-                title="Your Splice Requests",
-                description="Here are your recent splice requests:",
-                color=0x00ff00
-            )
-            
-            for splice in splices:
-                status_emoji = "🕒" if splice["status"] == "pending" else "✅"
-                embed.add_field(
-                    name=f"ID: {splice['id']} {status_emoji}",
-                    value=f"{splice['pet1_name']} + {splice['pet2_name']}\nStatus: {splice['status'].capitalize()}\nRequested: {splice['created_at'].strftime('%Y-%m-%d %H:%M')}\n",
-                    inline=False
-                )
-            
-            return await ctx.send(embed=embed)
+            # Use the paginator when there are splices to display
+            paginator = SpliceStatusPaginator(ctx, splices)
+            await paginator.start()
+            return
         
         # Check specific splice status
         async with self.bot.pool.acquire() as conn:
+            await self._ensure_splice_request_schema(conn)
             splice = await conn.fetchrow(
                 "SELECT * FROM splice_requests WHERE id = $1 AND user_id = $2",
                 splice_id, ctx.author.id
@@ -1672,6 +4299,20 @@ class Soulforge(commands.Cog):
         
         embed.add_field(name="Pets Being Spliced", value=f"{splice['pet1_name']} + {splice['pet2_name']}", inline=False)
         embed.add_field(name="Requested", value=splice["created_at"].strftime("%Y-%m-%d %H:%M"), inline=False)
+        embed.add_field(
+            name="Background Preference",
+            value=self._get_splice_background_label(
+                splice["background_theme"] if "background_theme" in splice else None
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Art Style",
+            value=self._get_splice_style_label(
+                splice["splice_style"] if "splice_style" in splice else None
+            ),
+            inline=False,
+        )
         
         
         if splice["status"] == "pending":
@@ -1686,11 +4327,81 @@ class Soulforge(commands.Cog):
                 value="*\"Your creation has stabilized and emerged from the Soulforge. It awaits your guidance in this new existence. Every such being represents a unique pattern in the tapestry of life - nurture it well.\"*",
                 inline=False
             )
-        
+
         await ctx.send(embed=embed)
 
+    @commands.command(name="splices", aliases=["splicedex", "spliceindex"], brief="Browse discovered splices")
+    async def splices(self, ctx, *, query: str = None):
+        """Browse discovered splice combinations with sorting, filters, and favorites."""
+        browser = SpliceBrowserView(self, ctx, initial_query=query)
+        await browser.start()
 
+
+    async def suggest_element(self, element1, element2):
+        """Suggest an element for the spliced pet based on parent elements"""
+        # Normalize elements to consistent case
+        e1 = element1.title() if element1 else "Unknown"
+        e2 = element2.title() if element2 else "Unknown"
         
+        # List of standard elements
+        standard_elements = [
+            "Fire", "Water", "Wind", "Earth", "Nature", 
+            "Electric", "Corrupted", "Dark", "Light", "Ice"
+        ]
+        
+        # If both parents have valid elements, just pick one of them
+        if e1 != "Unknown" and e2 != "Unknown":
+            # If both have the same element, always keep it
+            if e1 == e2:
+                return e1
+            # Otherwise randomly choose one of the parent elements
+            return random.choice([e1, e2])
+        
+        # If one parent has an unknown element, use the known one
+        if e1 != "Unknown":
+            return e1
+        if e2 != "Unknown":
+            return e2
+        
+        # If both are unknown, pick a random standard element
+        return random.choice(standard_elements)
+    
+    async def allocate_iv_points(self, total_points):
+        """Distribute IV points between HP, Attack, and Defense
+        
+        Args:
+            total_points: Total IV points to distribute
+            
+        Returns:
+            Tuple of (hp_iv, attack_iv, defense_iv)
+        """
+        # Get three random values that sum to total_points
+        # Use a weighted approach to avoid extremely unbalanced stats
+        
+        # First get 3 random values between 0 and 1
+        r1 = random.random()
+        r2 = random.random()
+        r3 = random.random()
+        
+        # Normalize so they sum to 1
+        total = r1 + r2 + r3
+        if total == 0:  # Avoid division by zero
+            r1, r2, r3 = 0.33, 0.33, 0.34
+        else:
+            r1, r2, r3 = r1/total, r2/total, r3/total
+        
+        # Distribute points according to normalized values
+        hp_iv = int(r1 * total_points)
+        attack_iv = int(r2 * total_points)
+        defense_iv = int(r3 * total_points)
+        
+        # Ensure all points are allocated by assigning any remainder to HP
+        remainder = total_points - (hp_iv + attack_iv + defense_iv)
+        hp_iv += remainder
+        
+        return hp_iv, attack_iv, defense_iv
+    
+            
     def get_shard_discovery_dialogue(self, player_name, shard_count, crucible_built):
         """Returns varied dialogue for shard discovery based on progress"""
         dialogue_data = {}
@@ -2158,5 +4869,6 @@ class Soulforge(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(Soulforge(bot))
+    
 
     

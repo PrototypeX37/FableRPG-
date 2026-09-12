@@ -19,6 +19,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import datetime
 import time
 import datetime as dt
+import logging
 import random
 import uuid
 from contextlib import suppress
@@ -41,10 +42,272 @@ from utils.checks import has_char, has_money, is_gm
 from utils.i18n import _, locale_doc
 
 
+logger = logging.getLogger(__name__)
+
+
+class MarketFilterModal(discord.ui.Modal, title="Filter Player Market"):
+    item_type = discord.ui.TextInput(label="Item type", default="All", max_length=30)
+    minimum_stat = discord.ui.TextInput(label="Minimum damage or armor", default="0", max_length=6)
+    maximum_price = discord.ui.TextInput(label="Maximum price", default="1000000000", max_length=12)
+
+    def __init__(self, market_view: "MarketBrowserView"):
+        super().__init__()
+        self.market_view = market_view
+
+    async def on_submit(self, interaction):
+        try:
+            minimum = float(str(self.minimum_stat.value))
+            maximum = int(str(self.maximum_price.value))
+        except ValueError:
+            return await interaction.response.send_message("Stat and price filters must be numeric.", ephemeral=True)
+        if minimum < 0 or maximum < 0:
+            return await interaction.response.send_message("Filters cannot be negative.", ephemeral=True)
+        await interaction.response.defer()
+        await self.market_view.ctx.invoke(
+            self.market_view.cog.shop,
+            itemtype=str(self.item_type.value).strip() or "All",
+            minstat=minimum,
+            highestprice=maximum,
+        )
+
+
+class MarketItemSelect(discord.ui.Select):
+    def __init__(self, market_view: "MarketBrowserView"):
+        page_items = market_view.page_items()
+        options = [
+            discord.SelectOption(
+                label=f"{item['name']} — ${int(item['price']):,}"[:100],
+                value=str(index + market_view.page_start),
+                description=f"{item['type']} • DMG {item['damage']} • ARM {item['armor']} • ID {item['item']}"[:100],
+                default=(index + market_view.page_start) == market_view.index,
+            )
+            for index, item in enumerate(page_items)
+        ]
+        super().__init__(placeholder="Choose a market item", options=options, row=0)
+        self.market_view = market_view
+
+    async def callback(self, interaction):
+        self.market_view.index = int(self.values[0])
+        self.market_view.rebuild_components()
+        await interaction.response.edit_message(embed=self.market_view.build_embed(), view=self.market_view)
+
+
+class MarketSortSelect(discord.ui.Select):
+    def __init__(self, market_view: "MarketBrowserView"):
+        options = [
+            discord.SelectOption(label="Lowest Price", value="price", default=market_view.sort_mode == "price"),
+            discord.SelectOption(label="Highest Stat", value="stat", default=market_view.sort_mode == "stat"),
+            discord.SelectOption(label="Best Stat per Gold", value="efficiency", default=market_view.sort_mode == "efficiency"),
+            discord.SelectOption(label="Newest Listing", value="newest", default=market_view.sort_mode == "newest"),
+        ]
+        super().__init__(placeholder="Sort market results", options=options, row=1)
+        self.market_view = market_view
+
+    async def callback(self, interaction):
+        self.market_view.apply_sort(self.values[0])
+        self.market_view.rebuild_components()
+        await interaction.response.edit_message(embed=self.market_view.build_embed(), view=self.market_view)
+
+
+class MarketBuyConfirmView(discord.ui.View):
+    def __init__(self, market_view: "MarketBrowserView", item):
+        super().__init__(timeout=45)
+        self.market_view = market_view
+        self.item = item
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.market_view.ctx.author.id:
+            await interaction.response.send_message("This purchase is not yours.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm Purchase", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction, button):
+        await interaction.response.defer()
+        ok, message = await self.market_view.invoke_command(
+            self.market_view.cog.buy,
+            itemid=int(self.item["item"]),
+        )
+        still_listed = await self.market_view.cog.bot.pool.fetchval(
+            "SELECT 1 FROM market WHERE item=$1;", int(self.item["item"])
+        )
+        if not still_listed:
+            self.market_view.items = [
+                item for item in self.market_view.items if int(item["item"]) != int(self.item["item"])
+            ]
+            self.market_view.index = min(self.market_view.index, max(0, len(self.market_view.items) - 1))
+            if self.market_view.items and self.market_view.message:
+                self.market_view.rebuild_components()
+                await self.market_view.message.edit(embed=self.market_view.build_embed(), view=self.market_view)
+        await interaction.edit_original_response(
+            content=("Purchase processed. Check the channel for the result." if ok else message),
+            embed=None,
+            view=None,
+        )
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        await interaction.response.edit_message(content="Purchase cancelled.", embed=None, view=None)
+        self.stop()
+
+
+class MarketBrowserView(discord.ui.View):
+    PAGE_SIZE = 25
+
+    def __init__(self, cog, ctx, items):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.ctx = ctx
+        self.items = [dict(item) for item in items]
+        self.index = 0
+        self.sort_mode = "price"
+        self.page_start = 0
+        self.message = None
+        self.apply_sort("price")
+        self.rebuild_components()
+
+    def current_item(self):
+        return self.items[self.index] if self.items else None
+
+    def page_items(self):
+        self.page_start = (self.index // self.PAGE_SIZE) * self.PAGE_SIZE
+        return self.items[self.page_start:self.page_start + self.PAGE_SIZE]
+
+    def apply_sort(self, mode):
+        self.sort_mode = mode
+        if mode == "stat":
+            self.items.sort(key=lambda item: (-(float(item["damage"]) + float(item["armor"])), int(item["price"])))
+        elif mode == "efficiency":
+            self.items.sort(key=lambda item: -(float(item["damage"] + item["armor"]) / max(1, int(item["price"]))))
+        elif mode == "newest":
+            self.items.sort(key=lambda item: -int(item.get("id", item["item"])))
+        else:
+            self.items.sort(key=lambda item: (int(item["price"]), -(float(item["damage"]) + float(item["armor"]))))
+        self.index = 0
+
+    def build_embed(self):
+        item = self.current_item()
+        if not item:
+            return discord.Embed(title="Player Market", description="No listings remain.", color=discord.Color.blurple())
+        tax = round(int(item["price"]) * 0.05)
+        total = int(item["price"]) + tax
+        money = int(self.ctx.character_data.get("money", 0) or 0)
+        embed = discord.Embed(
+            title=f"🏪 {item['name']}",
+            description=f"Listing **{self.index + 1}/{len(self.items)}** • Item ID `{item['item']}`",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(name="Type", value=str(item["type"]), inline=True)
+        embed.add_field(name="Damage", value=str(item["damage"]), inline=True)
+        embed.add_field(name="Armor", value=str(item["armor"]), inline=True)
+        embed.add_field(name="Price", value=f"${int(item['price']):,}", inline=True)
+        embed.add_field(name="Tax", value=f"${tax:,}", inline=True)
+        embed.add_field(name="Total", value=f"${total:,}", inline=True)
+        embed.add_field(
+            name="Money Preview",
+            value=f"Current: **${money:,}**\nAfter purchase: **${money - total:,}**",
+            inline=False,
+        )
+        embed.set_footer(text=f"Sorted by {self.sort_mode}. Filters open a new result set.")
+        return embed
+
+    def rebuild_components(self):
+        self.clear_items()
+        if self.items:
+            self.add_item(MarketItemSelect(self))
+            self.add_item(MarketSortSelect(self))
+        for label, style, callback, disabled in [
+            ("Previous", discord.ButtonStyle.secondary, self.previous, self.index <= 0),
+            ("Next", discord.ButtonStyle.secondary, self.next, self.index >= len(self.items) - 1),
+            ("Filters", discord.ButtonStyle.primary, self.filters, False),
+            ("Compare", discord.ButtonStyle.primary, self.compare, not self.items),
+            ("Buy", discord.ButtonStyle.success, self.buy_selected, not self.items),
+            ("Close", discord.ButtonStyle.danger, self.close, False),
+        ]:
+            button = discord.ui.Button(label=label, style=style, disabled=disabled, row=2 if label in {"Previous", "Next"} else 3)
+            button.callback = callback
+            self.add_item(button)
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("This market browser is not yours.", ephemeral=True)
+            return False
+        return True
+
+    async def invoke_command(self, command, *args, **kwargs):
+        previous = self.ctx.command
+        self.ctx.command = command
+        try:
+            try:
+                allowed = await command.can_run(self.ctx)
+            except commands.CommandOnCooldown as exc:
+                return False, f"That action is ready again in {max(1, int(exc.retry_after))} second(s)."
+            except commands.CheckFailure as exc:
+                return False, str(exc).strip() or "You cannot use that market action."
+            if not allowed:
+                return False, "You cannot use that market action."
+            await command.callback(command.cog, self.ctx, *args, **kwargs)
+            return True, "Market action completed."
+        except Exception as exc:
+            return False, f"Market action failed: {exc}"
+        finally:
+            self.ctx.command = previous
+
+    async def previous(self, interaction):
+        self.index = max(0, self.index - 1)
+        self.rebuild_components()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def next(self, interaction):
+        self.index = min(len(self.items) - 1, self.index + 1)
+        self.rebuild_components()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def filters(self, interaction):
+        await interaction.response.send_modal(MarketFilterModal(self))
+
+    async def compare(self, interaction):
+        item = self.current_item()
+        equipped = await self.cog.bot.pool.fetchrow(
+            """
+            SELECT ai.* FROM allitems ai JOIN inventory i ON i.item=ai.id
+            WHERE ai.owner=$1 AND i.equipped=TRUE
+            ORDER BY (ai.damage+ai.armor) DESC LIMIT 1;
+            """,
+            self.ctx.author.id,
+        )
+        stat = float(item["damage"]) + float(item["armor"])
+        text = f"Selected total stat: **{stat:g}**"
+        if equipped:
+            equipped_stat = float(equipped["damage"]) + float(equipped["armor"])
+            text += f"\nEquipped **{equipped['name']}**: **{equipped_stat:g}**\nDifference: **{stat - equipped_stat:+g}**"
+        await interaction.response.send_message(text, ephemeral=True)
+
+    async def buy_selected(self, interaction):
+        item = self.current_item()
+        tax = round(int(item["price"]) * 0.05)
+        embed = discord.Embed(
+            title="Confirm Market Purchase",
+            description=f"Buy **{item['name']}** for **${int(item['price']) + tax:,}** including tax?",
+            color=discord.Color.gold(),
+        )
+        await interaction.response.send_message(embed=embed, view=MarketBuyConfirmView(self, item), ephemeral=True)
+
+    async def close(self, interaction):
+        await interaction.response.edit_message(view=None)
+        self.stop()
+
+
 class Trading(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.markdown_escaper = commands.clean_content(escape_markdown=True)
+        ids_section = getattr(self.bot.config, "ids", None)
+        trading_ids = getattr(ids_section, "trading", {}) if ids_section else {}
+        if not isinstance(trading_ids, dict):
+            trading_ids = {}
+        self.restock_source_user_id = trading_ids.get("restock_source_user_id")
 
         # Add a list to track sold-out items
         self.sold_out_items = []
@@ -57,13 +320,363 @@ class Trading(commands.Cog):
 
         self.player_item_cache = {}
 
-
+    async def _check_trader_access(
+        self,
+        user_id: int,
+        *,
+        offer_type: str | None = None,
+        conn=None,
+    ) -> tuple[bool, str | None]:
+        """Evaluate shared shop gates for the NPC Trader."""
+        factions = self.bot.get_cog("Factions")
+        if factions is None:
+            return True, None
+        checker = getattr(factions, "check_content_access", None)
+        if not callable(checker):
+            logger.error("Factions cog does not expose check_content_access")
+            return False, "Faction access rules are temporarily unavailable."
+        try:
+            return await checker(
+                int(user_id),
+                scope="shop",
+                target_key="trader",
+                subtarget_key=offer_type,
+                conn=conn,
+            )
+        except Exception:
+            logger.exception(
+                "Could not check Trader access for user %s and offer type %s",
+                user_id,
+                offer_type,
+            )
+            return False, "The Trader could not verify your faction standing. Please try again."
 
     def get_current_time(self):
         return datetime.datetime.utcnow()
 
     def is_item_expired(self, timestamp, expiry_duration_hours):
         return (self.get_current_time() - timestamp).total_seconds() > expiry_duration_hours * 3600
+
+    def _build_trader_offer(self, offer_type, name, price, data=None):
+        return {
+            "id": str(uuid.uuid4()),
+            "offer_type": offer_type,
+            "name": name,
+            "price": price,
+            "timestamp": self.get_current_time(),
+            "data": data or {},
+        }
+
+    def _choose_weighted_entry(self, entries):
+        total_weight = sum(entry["weight"] for entry in entries)
+        roll = random.random() * total_weight
+        cumulative = 0
+        for entry in entries:
+            cumulative += entry["weight"]
+            if roll <= cumulative:
+                return entry
+        return entries[-1]
+
+    def _format_offer_components(self, mapping, label_map=None):
+        label_map = label_map or {}
+        parts = []
+        for key, amount in mapping.items():
+            if amount <= 0:
+                continue
+            label = label_map.get(key, key.replace("_", " ").title())
+            parts.append(f"{amount}x {label}")
+        return ", ".join(parts) if parts else "N/A"
+
+    def _format_price(self, price):
+        return f"${int(price):,}"
+
+    def _get_offer_display_name(self, offer):
+        if offer["name"] == "Resetpotion":
+            return "Reset Potion"
+        if offer["name"] == "Weapontoken":
+            return "Weapon Token"
+        return offer["name"]
+
+    def _truncate_choice_label(self, label, max_length=95):
+        if len(label) <= max_length:
+            return label
+        return f"{label[: max_length - 3]}..."
+
+    def _get_item_stat_text(self, item):
+        stat = self._get_item_display_stat(item)
+        suffix = "ARM" if item["type_"] == "Shield" else "DMG"
+        return f"{stat} {suffix}"
+
+    def _get_trader_offer_priority(self, offer):
+        if offer["offer_type"] == "item" and offer["data"].get("featured"):
+            return 0
+
+        priority_map = {
+            "item": 1,
+            "consumable": 2,
+            "crate": 3,
+            "crate_bundle": 4,
+            "booster_bundle": 5,
+        }
+        return priority_map.get(offer["offer_type"], 99)
+
+    def _build_trader_choice_label(self, offer, index):
+        offer_type = offer["offer_type"]
+        data = offer["data"]
+        number = f"#{index}"
+
+        if offer_type == "item":
+            item = data["item"]
+            tag = "FEATURED DEAL" if data.get("featured") else "Item"
+            label = f"{number} {tag} | {item.get('element', 'Unknown')} {item['type_']} | {self._get_item_display_stat(item)}"
+        elif offer_type == "crate":
+            label = f"{number} Crate | {data['crate_rarity'].capitalize()}"
+        elif offer_type == "crate_bundle":
+            if data.get("hidden_preview"):
+                label = f"{number} Gatcha | {int(data.get('crate_count', 5))} hidden crates"
+            else:
+                label = f"{number} Bundle | {self._get_offer_display_name(offer)}"
+        elif offer_type == "booster_bundle":
+            label = f"{number} Boost | {self._get_offer_display_name(offer)}"
+        else:
+            label = f"{number} Consumable | {self._get_offer_display_name(offer)}"
+
+        return self._truncate_choice_label(label)
+
+    def _format_trader_offer_entry(self, offer):
+        offer_type = offer["offer_type"]
+        price = offer["price"]
+        data = offer["data"]
+        display_name = self._get_offer_display_name(offer)
+
+        if offer_type == "item":
+            item = data["item"]
+            element = item.get("element", "Unknown")
+            tag = "FEATURED DEAL" if data.get("featured") else "ITEM"
+            details = f"{element} {item['type_']} | {self._get_item_stat_text(item)} | {self._format_price(price)}"
+            if data.get("featured"):
+                return f"**[{tag}] {display_name}**\n- {details}\n- Limited elemental highlight"
+            return f"**[{tag}] {display_name}**\n- {details}"
+
+        if offer_type == "crate":
+            rarity = data["crate_rarity"]
+            return f"**[CRATE] {rarity.capitalize()} Crate**\n- {self._format_price(price)}"
+
+        if offer_type == "crate_bundle":
+            if data.get("hidden_preview"):
+                crate_count = int(data.get("crate_count", 5))
+                return (
+                    f"**[GATCHA] {display_name}**\n"
+                    f"- {crate_count} hidden random crates | {self._format_price(price)}"
+                )
+
+            contents = self._format_offer_components(
+                data["crates"],
+                {
+                    "common": "Common",
+                    "uncommon": "Uncommon",
+                    "rare": "Rare",
+                    "magic": "Magic",
+                    "legendary": "Legendary",
+                    "fortune": "Fortune",
+                    "divine": "Divine",
+                },
+            )
+            return f"**[BUNDLE] {display_name}**\n- {contents} | {self._format_price(price)}"
+
+        if offer_type == "booster_bundle":
+            contents = self._format_offer_components(
+                data["boosters"],
+                {
+                    "time": "Time",
+                    "luck": "Luck",
+                    "money": "Money",
+                },
+            )
+            return f"**[BOOST] {display_name}**\n- {contents} | {self._format_price(price)}"
+
+        return f"**[CONSUMABLE] {display_name}**\n- {self._format_price(price)}"
+
+    def _get_item_display_stat(self, item):
+        if item["type_"] == "Shield":
+            return int(item.get("armor", 0))
+        return int(item.get("damage", 0))
+
+    def _get_item_base_stat(self, item):
+        if item["type_"] == "Shield":
+            return int(item.get("armor", 0))
+
+        damage = int(item.get("damage", 0))
+        if item.get("hand") == "both":
+            return (damage + 1) // 2
+        return damage
+
+    def _price_featured_item(self, item):
+        stat = max(40, min(99, self._get_item_base_stat(item)))
+
+        if stat <= 80:
+            low_anchor = 50_000
+            high_anchor = 100_000
+            progress = (stat - 40) / 40
+            return int(round(low_anchor + (high_anchor - low_anchor) * progress))
+
+        progress = (stat - 80) / 19
+        return int(round(100_000 + (6_000_000 - 100_000) * (progress ** 2)))
+
+    async def _generate_featured_elemental_offer(self):
+        featured_stat_ranges = [
+            {"weight": 0.196, "min": 60, "max": 70},
+            {"weight": 0.539, "min": 50, "max": 60},
+            {"weight": 0.245, "min": 40, "max": 50},
+            {"weight": 0.02, "min": 80, "max": 99},
+        ]
+        elements = [
+            "Light",
+            "Dark",
+            "Corrupted",
+            "Fire",
+            "Water",
+            "Electric",
+            "Nature",
+            "Wind",
+        ]
+
+        stat_entry = self._choose_weighted_entry(featured_stat_ranges)
+        item = await self.bot.create_random_item(
+            minstat=stat_entry["min"],
+            maxstat=stat_entry["max"],
+            minvalue=1,
+            maxvalue=500,
+            owner=None,
+            insert=False,
+        )
+        item["element"] = random.choice(elements)
+        price = self._price_featured_item(item)
+        return self._build_trader_offer(
+            "item",
+            item["name"],
+            price,
+            {"item": item, "featured": True},
+        )
+
+    def _generate_crate_bundle_offers(self):
+        standard_bundles = [
+            {
+                "name": "Adventurer's Pack",
+                "crates": {"uncommon": 2, "rare": 1},
+                "price": (6500, 11000),
+            },
+            {
+                "name": "Raider's Cache",
+                "crates": {"rare": 3, "magic": 1},
+                "price": (90000, 120000),
+            },
+        ]
+
+        gatcha_base_weights = [
+            {"rarity": "common", "weight": 44.4737},
+            {"rarity": "uncommon", "weight": 20.5263},
+            {"rarity": "rare", "weight": 15.0},
+            {"rarity": "magic", "weight": 10.0},
+        ]
+        gatcha_special_rolls = [
+            {"rarity": "divine", "chance": 0.025},
+            {"rarity": "fortune", "chance": 0.025},
+            {"rarity": "legendary", "chance": 0.05},
+        ]
+
+        offers = []
+        for bundle in standard_bundles:
+            offers.append(
+                self._build_trader_offer(
+                    "crate_bundle",
+                    bundle["name"],
+                    random.randint(*bundle["price"]),
+                    {"crates": bundle["crates"]},
+                )
+            )
+
+        gatcha_crates = {
+            "common": 0,
+            "uncommon": 0,
+            "rare": 0,
+            "magic": 0,
+            "legendary": 0,
+            "fortune": 0,
+            "divine": 0,
+        }
+
+        guaranteed_special = None
+        special_roll = random.random()
+        cumulative_special = 0
+        for entry in gatcha_special_rolls:
+            cumulative_special += entry["chance"]
+            if special_roll < cumulative_special:
+                guaranteed_special = entry["rarity"]
+                break
+
+        base_roll_count = 4 if guaranteed_special else 5
+        for _ in range(base_roll_count):
+            chosen = self._choose_weighted_entry(gatcha_base_weights)
+            gatcha_crates[chosen["rarity"]] += 1
+        if guaranteed_special:
+            gatcha_crates[guaranteed_special] += 1
+
+        offers.append(
+            self._build_trader_offer(
+                "crate_bundle",
+                "Gatcha Crate Bundle",
+                random.randint(35000, 55000),
+                {"crates": gatcha_crates, "hidden_preview": True, "crate_count": 5},
+            )
+        )
+        return offers
+
+    def _generate_booster_bundle_offer(self):
+        booster_bundles = [
+            {
+                "name": "Lucky Day Bundle",
+                "boosters": {"luck": 5},
+                "price": (1700, 2100),
+            },
+            {
+                "name": "Adventure Kit",
+                "boosters": {"time": 1, "luck": 2, "money": 1},
+                "price": (2200, 2600),
+            },
+            {
+                "name": "Full Boost Pack",
+                "boosters": {"time": 2, "luck": 2, "money": 2},
+                "price": (4200, 4700),
+            },
+        ]
+
+        chosen = random.choice(booster_bundles)
+        return self._build_trader_offer(
+            "booster_bundle",
+            chosen["name"],
+            random.randint(*chosen["price"]),
+            {"boosters": chosen["boosters"]},
+        )
+
+    def _generate_trader_pet_consumable_offer(self):
+        pet_consumables = [
+            {
+                "name": "Pet Mind Wipe",
+                "consumable_type": "pet_mind_wipe",
+            },
+            {
+                "name": "Pet Element Scroll",
+                "consumable_type": "pet_element_scroll",
+            },
+        ]
+        chosen = random.choice(pet_consumables)
+        return self._build_trader_offer(
+            "consumable",
+            chosen["name"],
+            random.randint(400000, 1000000),
+            {"consumable_type": chosen["consumable_type"], "amount": 1},
+        )
 
     async def generate_items_and_crates(self, ctx):
         # Define stat ranges and price ranges with weights
@@ -85,11 +698,10 @@ class Trading(commands.Cog):
                     return min_stat, max_stat, price_range
             return 1, 20, (1000, 20000)  # Default case (should not be reached)
 
-        items = []
-        import random
-        for _ in range(5):  # Generate 5 items (weapons)
+        offers = []
+        # Generate 5 random weapons
+        for _ in range(5):
             min_stat, max_stat, price_range = choose_stat_range(stat_ranges)
-            stat = random.randint(min_stat, max_stat)
             price = random.randint(price_range[0], price_range[1])
 
             item = await self.bot.create_random_item(
@@ -100,11 +712,18 @@ class Trading(commands.Cog):
                 owner=None,  # Owner is not required here
                 insert=False,
             )
-            items.append((item, price))
+            offers.append(
+                self._build_trader_offer(
+                    "item",
+                    item["name"],
+                    price,
+                    {"item": item, "featured": False},
+                )
+            )
+
+        offers.append(await self._generate_featured_elemental_offer())
 
         # Define crate rarity and price ranges
-        import random
-
         crate_weights = [
             ("divine", 0.000169, (900000, 2000000)),
             ("legendary", 0.000338, (900000, 1500000)),
@@ -116,8 +735,10 @@ class Trading(commands.Cog):
 
         def choose_crate_rarity(crate_weights):
             total_weight = sum(weight for _, weight, _ in crate_weights)
-            normalized_weights = [(rarity, weight / total_weight, price_range) for rarity, weight, price_range in
-                                  crate_weights]
+            normalized_weights = [
+                (rarity, weight / total_weight, price_range)
+                for rarity, weight, price_range in crate_weights
+            ]
 
             rand_val = random.random()
             cumulative_weight = 0
@@ -127,28 +748,53 @@ class Trading(commands.Cog):
                     return rarity, price_range
             return "common", (700, 2000)  # Default case (should not be reached)
 
-        crates = []
-        for _ in range(3):  # Generate 3 crates
+        # Generate 3 crates
+        for _ in range(3):
             rarity, price_range = choose_crate_rarity(crate_weights)
             price = random.randint(price_range[0], price_range[1])
-
-            crate = await self.bot.create_random_item(
-                minstat=1,
-                maxstat=1,
-                minvalue=1,
-                maxvalue=1,
-                owner=None,
-                insert=False,
+            offers.append(
+                self._build_trader_offer(
+                    "crate",
+                    f"{rarity.capitalize()} Crate",
+                    price,
+                    {"crate_rarity": rarity},
+                )
             )
-            crates.append((crate, price, rarity))
+
+        offers.extend(self._generate_crate_bundle_offers())
+        offers.append(self._generate_booster_bundle_offer())
+
+        # Add a dedicated pet consumable slot with a 50% chance to appear.
+        if random.random() < 0.5:
+            offers.append(self._generate_trader_pet_consumable_offer())
 
         # Add Weapon Token with a 7% chance
-        if random.random() < 0.07:  # 7% chance
+        if random.random() < 0.07:
             token_price = random.randint(250000, 750000)
-            token_item = {'name': 'Weapontoken', 'type_': 'Token', 'armor': 'N/A', 'damage': 'N/A', 'value': 'N/A'}
-            items.append((token_item, token_price))
+            offers.append(
+                self._build_trader_offer(
+                    "consumable",
+                    "Weapontoken",
+                    token_price,
+                    {"profile_column": "weapontoken", "amount": 1},
+                )
+            )
 
-        return items, crates
+        # Add Resetpotion with a 15% chance
+        # It will only be generated if the shop is "fresh" (cache is empty),
+        # so it effectively limits it to one per 12-hour refresh for that user.
+        if random.random() < 0.15:
+            potion_price = random.randint(1400000, 4300000)
+            offers.append(
+                self._build_trader_offer(
+                    "consumable",
+                    "Resetpotion",
+                    potion_price,
+                    {"profile_column": "resetpotion", "amount": 1},
+                )
+            )
+
+        return offers
 
     @tasks.loop(minutes=999999)  # Adjust the interval as needed (e.g., minutes=10 means it runs every 10 minutes)
     async def decrease_hunger_task(self):
@@ -207,10 +853,6 @@ class Trading(commands.Cog):
         except Exception as e:
             print(f"An error occurred in decrease_happy_task: {e}")
 
-
-        except Exception as e:
-            print(f"An error occurred in decrease_hunger_task: {e}")
-
     @has_char()
     @commands.command(brief=_("Put an item in the market"))
     @locale_doc
@@ -265,16 +907,17 @@ class Trading(commands.Cog):
                 tax = 0
             else:
                 tax = round(price * 0.05)
-            if ctx.character_data["money"] < tax:
-                return await ctx.send(
-                    _("You cannot afford the tax of 5% (${amount}).").format(amount=tax)
-                )
             if tax:
-                await conn.execute(
-                    'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
+                deducted = await conn.fetchval(
+                    'UPDATE profile SET "money"="money"-$1 '
+                    'WHERE "user"=$2 AND "money">=$1 RETURNING "money";',
                     tax,
                     ctx.author.id,
                 )
+                if deducted is None:
+                    return await ctx.send(
+                        _("You cannot afford the tax of 5% (${amount}).").format(amount=tax)
+                    )
                 await self.bot.log_transaction(
                     ctx,
                     from_=ctx.author.id,
@@ -318,78 +961,97 @@ class Trading(commands.Cog):
             Buying your own items is impossible. You can find the item's ID in `{prefix}shop`."""
         )
         async with self.bot.pool.acquire() as conn:
-            item = await conn.fetchrow(
-                'SELECT *, m."id" AS "offer" FROM market m JOIN allitems ai ON'
-                ' (m."item"=ai."id") WHERE ai."id"=$1;',
-                itemid,
-            )
-            if not item:
-                await ctx.send(
-                    _("There is no item in the shop with the ID: {itemid}").format(
-                        itemid=itemid
-                    )
+            async with conn.transaction():
+                # Lock the market listing so two concurrent buyers (or a
+                # buy racing a remove) cannot both proceed on the same offer.
+                item = await conn.fetchrow(
+                    'SELECT *, m."id" AS "offer" FROM market m JOIN allitems ai ON'
+                    ' (m."item"=ai."id") WHERE ai."id"=$1 FOR UPDATE OF m;',
+                    itemid,
                 )
-                return False
-            if item["owner"] == ctx.author.id:
-                await ctx.send(_("You may not buy your own items."))
-                return False
-            if await self.bot.get_city_buildings(ctx.character_data["guild"]):
-                tax = 0
-            else:
-                tax = round(item["price"] * 0.05)
-            if ctx.character_data["money"] < item["price"] + tax:
-                await ctx.send(_("You're too poor to buy this item."))
-                return False
-            await conn.execute(
-                "DELETE FROM market m USING allitems ai WHERE m.item=ai.id AND ai.id=$1"
-                " RETURNING *;",
-                itemid,
-            )
-            await conn.execute(
-                "UPDATE allitems SET owner=$1 WHERE id=$2;",
-                ctx.author.id,
-                item["id"],
-            )
-            await conn.execute(
-                'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
-                item["price"],
-                item["owner"],
-            )
-            await conn.execute(
-                'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
-                item["price"] + tax,
-                ctx.author.id,
-            )
-            await conn.execute(
-                "INSERT INTO inventory (item, equipped) VALUES ($1, $2);",
-                item["id"],
-                False,
-            )
-            if tax:
+                if not item:
+                    await ctx.send(
+                        _("There is no item in the shop with the ID: {itemid}").format(
+                            itemid=itemid
+                        )
+                    )
+                    return False
+                if item["owner"] == ctx.author.id:
+                    await ctx.send(_("You may not buy your own items."))
+                    return False
+                if await self.bot.get_city_buildings(ctx.character_data["guild"]):
+                    tax = 0
+                else:
+                    tax = round(item["price"] * 0.05)
+                # Fresh, locked read of the buyer's balance; the cached value can
+                # be stale under concurrent buys and allow overspending.
+                buyer_money = await conn.fetchval(
+                    'SELECT money FROM profile WHERE "user"=$1 FOR UPDATE;',
+                    ctx.author.id,
+                )
+                if buyer_money is None or buyer_money < item["price"] + tax:
+                    await ctx.send(_("You're too poor to buy this item."))
+                    return False
+                # Authoritatively remove the listing; if it is already gone the
+                # sale is aborted instead of duplicating the item.
+                removed = await conn.fetchrow(
+                    "DELETE FROM market m USING allitems ai WHERE m.item=ai.id AND"
+                    " ai.id=$1 RETURNING m.id;",
+                    itemid,
+                )
+                if removed is None:
+                    await ctx.send(_("This item is no longer available."))
+                    return False
+                await conn.execute(
+                    "UPDATE allitems SET owner=$1 WHERE id=$2;",
+                    ctx.author.id,
+                    item["id"],
+                )
+                await conn.execute(
+                    'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                    item["price"],
+                    item["owner"],
+                )
+                await conn.execute(
+                    'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
+                    item["price"] + tax,
+                    ctx.author.id,
+                )
+                await conn.execute(
+                    "INSERT INTO inventory (item, equipped) VALUES ($1, $2);",
+                    item["id"],
+                    False,
+                )
+                if tax:
+                    await self.bot.log_transaction(
+                        ctx,
+                        from_=ctx.author.id,
+                        to=2,
+                        subject="shop buy - bot give",
+                        data={"Gold": item["price"] + tax},
+                        conn=conn,
+                    )
                 await self.bot.log_transaction(
                     ctx,
                     from_=ctx.author.id,
-                    to=2,
-                    subject="shop buy - bot give",
-                    data={"Gold": item["price"] + tax},
+                    to=item["owner"],
+                    subject="shop buy",
+                    data={"Gold": item["price"]},
                     conn=conn,
                 )
-            await self.bot.log_transaction(
-                ctx,
-                from_=ctx.author.id,
-                to=item["owner"],
-                subject="shop buy",
-                data={"Gold": item["price"]},
-                conn=conn,
-            )
-            await self.bot.log_transaction(
-                ctx,
-                from_=item["owner"],
-                to=ctx.author,
-                subject="shop",
-                data=item,
-                conn=conn,
-            )
+                await self.bot.log_transaction(
+                    ctx,
+                    from_=item["owner"],
+                    to=ctx.author,
+                    subject="shop",
+                    data=item,
+                    conn=conn,
+                )
+                profile_cog = self.bot.get_cog("Profile")
+                if profile_cog is not None:
+                    await profile_cog.sanitize_presets_for_user(
+                        item["owner"], conn=conn
+                    )
         await ctx.send(
             _(
                 "Successfully bought item `{id}`. Use `{prefix}inventory` to view your"
@@ -411,20 +1073,22 @@ class Trading(commands.Cog):
 
     @has_char()
     @is_gm()
-    @commands.command(brief=_("Restock all items from 1144898209144127589 in the market"))
+    @commands.command(brief=_("Restock all items from configured user in the market"))
     @locale_doc
     async def restock(self, ctx):
         _(
             """
-            This command restocks all the items owned by 1144898209144127589 to the shop based on their stats.
+            This command restocks all the items owned by the configured source user to the shop based on their stats.
             The pricing will be done based on the item's stats, and rounded to the nearest 1000.
             Note: Bows, maces, and scythes will have their stats halved for pricing.
             """
         )
+        if not self.restock_source_user_id:
+            return await ctx.send(_("Restock source user is not configured."))
         async with self.bot.pool.acquire() as conn:
             items = await conn.fetch(
                 "SELECT * FROM inventory i JOIN allitems ai ON (i.item=ai.id) WHERE ai.owner=$1;",
-                1144898209144127589,
+                self.restock_source_user_id,
             )
 
             for item in items:
@@ -464,12 +1128,12 @@ class Trading(commands.Cog):
                     await conn.execute(
                         "DELETE FROM inventory i USING allitems ai WHERE i.item=ai.id AND ai.id=$1 AND ai.owner=$2;",
                         item["id"],
-                        1144898209144127589,
+                        self.restock_source_user_id,
                     )
 
         await ctx.send(
             _(
-                "Successfully restocked items from 1144898209144127589 to the shop! Use `{prefix}shop` to view them in the market!"
+                "Successfully restocked configured source items to the shop! Use `{prefix}shop` to view them in the market!"
             ).format(prefix=ctx.clean_prefix)
         )
 
@@ -485,30 +1149,41 @@ class Trading(commands.Cog):
             You can check your items on the shop with `{prefix}pending`. Paid tax money will not be returned."""
         )
         async with self.bot.pool.acquire() as conn:
-            item = await conn.fetchrow(
-                "SELECT * FROM market m JOIN allitems ai ON (m.item=ai.id) WHERE"
-                " ai.id=$1 AND ai.owner=$2;",
-                itemid,
-                ctx.author.id,
-            )
-            if not item:
-                return await ctx.send(
-                    _(
-                        "You don't have an item of yours in the shop with the ID"
-                        " `{itemid}`."
-                    ).format(itemid=itemid)
+            async with conn.transaction():
+                item = await conn.fetchrow(
+                    "SELECT * FROM market m JOIN allitems ai ON (m.item=ai.id) WHERE"
+                    " ai.id=$1 AND ai.owner=$2 FOR UPDATE OF m;",
+                    itemid,
+                    ctx.author.id,
                 )
-            await conn.execute(
-                "DELETE FROM market m USING allitems ai WHERE m.item=ai.id AND ai.id=$1"
-                " AND ai.owner=$2;",
-                itemid,
-                ctx.author.id,
-            )
-            await conn.execute(
-                "INSERT INTO inventory (item, equipped) VALUES ($1, $2);",
-                itemid,
-                False,
-            )
+                if not item:
+                    return await ctx.send(
+                        _(
+                            "You don't have an item of yours in the shop with the ID"
+                            " `{itemid}`."
+                        ).format(itemid=itemid)
+                    )
+                # Only return the item to the inventory if this call is the one
+                # that actually removed the listing (prevents a buy+remove race
+                # from creating a duplicate inventory row).
+                removed = await conn.fetchrow(
+                    "DELETE FROM market m USING allitems ai WHERE m.item=ai.id AND"
+                    " ai.id=$1 AND ai.owner=$2 RETURNING m.id;",
+                    itemid,
+                    ctx.author.id,
+                )
+                if removed is None:
+                    return await ctx.send(
+                        _(
+                            "You don't have an item of yours in the shop with the ID"
+                            " `{itemid}`."
+                        ).format(itemid=itemid)
+                    )
+                await conn.execute(
+                    "INSERT INTO inventory (item, equipped) VALUES ($1, $2);",
+                    itemid,
+                    False,
+                )
         await ctx.send(
             _(
                 "Successfully removed item `{itemid}` from the shop and put it in your"
@@ -517,7 +1192,7 @@ class Trading(commands.Cog):
         )
 
     @commands.command(
-        aliases=["mh", "markethistory"],
+        aliases=["markethistory"],
         brief=_("View sale history for the item market"),
     )
     @locale_doc
@@ -576,7 +1251,7 @@ class Trading(commands.Cog):
 
         items = [
             discord.Embed(
-                title=_("IdleRPG Shop History"),
+                title=_("FableRPG Shop History"),
                 colour=discord.Colour.blurple(),
             )
             .add_field(name=_("Name"), value=item["name"])
@@ -621,7 +1296,7 @@ class Trading(commands.Cog):
             ctx,
             itemtype: str = "All",
             minstat: float = 0.00,
-            highestprice: IntGreaterThan(-1) = 1_000_000,
+            highestprice: IntGreaterThan(-1) = 1_000_000_000,
     ):
         _(
             """`[itemtype]` - The type of item to filter; defaults to all item types
@@ -674,35 +1349,8 @@ class Trading(commands.Cog):
         if not items:
             return await ctx.send(_("No results."))
 
-        entries = [
-            (
-                discord.Embed(
-                    title=_("Fable Shop"),
-                    description=_("Use `{prefix}buy {item}` to buy this.").format(
-                        prefix=ctx.clean_prefix, item=item["item"]
-                    ),
-                    colour=discord.Colour.blurple(),
-                )
-                .add_field(name=_("Name"), value=item["name"])
-                .add_field(name=_("Type"), value=item["type"])
-                .add_field(name=_("Damage"), value=item["damage"])
-                .add_field(name=_("Armor"), value=item["armor"])
-                .add_field(name=_("Value"), value=f"${item['value']}")
-                .add_field(
-                    name=_("Price"),
-                    value=f"${item['price']} (+${round(item['price'] * 0.05)} (5%) tax)",
-                )
-                .set_footer(
-                    text=_("Item {num} of {total}").format(
-                        num=idx + 1, total=len(items)
-                    )
-                ),
-                item["item"],
-            )
-            for idx, item in enumerate(items)
-        ]
-
-        await self.bot.paginator.ShopPaginator(entries=entries).paginate(ctx)
+        view = MarketBrowserView(self, ctx, items)
+        view.message = await ctx.send(embed=view.build_embed(), view=view)
 
     @has_char()
     @user_cooldown(180)
@@ -732,6 +1380,7 @@ class Trading(commands.Cog):
             ctx.author.id,
         )
         if not item:
+            await self.bot.reset_cooldown(ctx)
             return await ctx.send(
                 _("You don't have an item with the ID `{itemid}`.").format(
                     itemid=itemid
@@ -739,6 +1388,7 @@ class Trading(commands.Cog):
             )
 
         if item["original_name"] or item["original_type"]:
+            await self.bot.reset_cooldown(ctx)
             return await ctx.send(_("You may not sell donator-modified items."))
 
         if item["equipped"]:
@@ -747,7 +1397,9 @@ class Trading(commands.Cog):
                         item=item["name"]
                     )
             ):
+                await self.bot.reset_cooldown(ctx)
                 return await ctx.send(_("Item selling cancelled."))
+
 
         if not await ctx.confirm(
                 _(
@@ -764,6 +1416,7 @@ class Trading(commands.Cog):
                 user=user,
                 timeout=120,
         ):
+            await self.bot.reset_cooldown(ctx)
             return await ctx.send(_("They didn't want it."))
 
         async with self.bot.pool.acquire() as conn:
@@ -787,6 +1440,7 @@ class Trading(commands.Cog):
                     ).format(itemid=itemid)
                 )
             if item["original_name"] or item["original_type"]:
+                await self.bot.reset_cooldown(ctx)
                 return await ctx.send(_("You may not sell donator-modified items."))
             await conn.execute(
                 "UPDATE allitems SET owner=$1 WHERE id=$2;", user.id, itemid
@@ -822,6 +1476,9 @@ class Trading(commands.Cog):
                 data=item,
                 conn=conn,
             )
+            profile_cog = self.bot.get_cog("Profile")
+            if profile_cog is not None:
+                await profile_cog.sanitize_presets_for_user(ctx.author.id, conn=conn)
         await ctx.send(
             _(
                 "Successfully bought item `{itemid}`. Use `{prefix}inventory` to view"
@@ -868,20 +1525,68 @@ class Trading(commands.Cog):
                     )
                 )
 
-            if equipped:
-                if not await ctx.confirm(
-                        _(
-                            "You are about to sell {amount} equipped items. Are you sure?"
-                        ).format(amount=equipped),
-                        timeout=6,
-                ):
-                    return await ctx.send(_("Cancelled."))
-            if buildings := await self.bot.get_city_buildings(
-                    ctx.character_data["guild"]
+            buildings = await self.bot.get_city_buildings(
+                ctx.character_data["guild"]
+            )
+            estimated_value = value
+            if buildings:
+                estimated_value = int(
+                    estimated_value * (1 + buildings["trade_building"] / 2)
+                )
+            visible_ids = ", ".join(str(item["id"]) for item in allitems[:10])
+            hidden_count = max(0, amount - 10)
+            equipped_warning = (
+                _("\n⚔️ **Warning:** {amount} of these items are currently equipped.").format(
+                    amount=equipped
+                )
+                if equipped
+                else ""
+            )
+            more_items = (
+                _(" and {amount} more").format(amount=hidden_count)
+                if hidden_count
+                else ""
+            )
+            if not await ctx.confirm(
+                _(
+                    "💰 Sell **{amount} item(s)** to the merchant for **${value:,}**?\n"
+                    "Item IDs: `{itemids}`{more_items}{equipped_warning}\n\n"
+                    "⚠️ **This permanently destroys the items and cannot be undone.**"
+                ).format(
+                    amount=amount,
+                    value=estimated_value,
+                    itemids=visible_ids,
+                    more_items=more_items,
+                    equipped_warning=equipped_warning,
+                ),
+                timeout=30,
             ):
-                value = int(value * (1 + buildings["trade_building"] / 2))
+                return await ctx.send(_("Cancelled. No items were sold."))
             async with conn.transaction():
-                await self.bot.delete_items([i["id"] for i in allitems], conn=conn)
+                # Re-select the items WITH A LOCK inside the transaction and
+                # compute the payout from the rows we actually delete. This stops
+                # concurrent invocations from being paid multiple times for the
+                # same item (the previous code paid `value` unconditionally,
+                # regardless of whether the delete removed anything).
+                locked = await conn.fetch(
+                    "SELECT ai.id, ai.value FROM inventory i JOIN allitems ai ON"
+                    " (i.item=ai.id) WHERE ai.id=ANY($1) AND ai.owner=$2"
+                    " FOR UPDATE OF ai;",
+                    itemids,
+                    ctx.author.id,
+                )
+                if not locked:
+                    await self.bot.reset_cooldown(ctx)
+                    return await ctx.send(
+                        _("You don't own any items with the IDs: {itemids}").format(
+                            itemids=", ".join([str(itemid) for itemid in itemids])
+                        )
+                    )
+                amount = len(locked)
+                value = sum(i["value"] for i in locked)
+                if buildings:
+                    value = int(value * (1 + buildings["trade_building"] / 2))
+                await self.bot.delete_items([i["id"] for i in locked], conn=conn)
                 await conn.execute(
                     'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
                     value,
@@ -1056,53 +1761,82 @@ class Trading(commands.Cog):
     async def merchall(
             self,
             ctx,
-            maxstat: IntFromTo(0, 100) = 200,
+            hand_type: str = None,
+            maxstat: IntFromTo(0, 200) = 200,
             minstat: IntFromTo(0, 100) = 0,
     ):
         _(
             # xgettext: no-python-format
-            """`[maxstat]` - The highest damage/defense to include; defaults to 100
+            """`[hand_type]` - Optional filter for '1h', '2h', or 'all' items; defaults to all
+            `[maxstat]` - The highest damage/defense to include; defaults to 100
             `[minstat]` - The lowest damage/defense to include; defaults to 0
-
             Sells all your non-equipped items for their value. A convenient way to sell a large amount of items at once.
+            You can specify '1h' for one-handed items, '2h' for two-handed items, or 'all'/'none' for all items.
             If you are in an alliance which owns a trade building, your earnings will be increased by 50% for each level.
-
             (This command has a cooldown of 30 minutes.)"""
         )
+
+        # Validate hand_type if provided
+        if hand_type and hand_type.lower() not in ['1h', '2h', 'all']:
+            await self.bot.reset_cooldown(ctx)
+            return await ctx.send(
+                _("Invalid hand type. Please use '1h', '2h', or 'all' if you want to filter by hands."))
+
+        # Convert 'all' to None to simplify logic
+        if hand_type and hand_type.lower() == 'all':
+            hand_type = None
+
         async with self.bot.pool.acquire() as conn:
-            allitems = await conn.fetch(
-                "SELECT ai.id, value FROM inventory i JOIN allitems ai ON"
-                " (i.item = ai.id) WHERE ai.owner = $1 AND i.equipped IS FALSE"
-                " AND i.locked IS FALSE AND ai.armor + ai.damage BETWEEN $2 AND $3;",
-                ctx.author.id,
-                minstat,
-                maxstat,
-            )
+            # Modified query to include hand filtering
+            base_query = """
+                SELECT ai.id, value 
+                FROM inventory i 
+                JOIN allitems ai ON (i.item = ai.id) 
+                WHERE ai.owner = $1 
+                AND i.equipped IS FALSE 
+                AND i.locked IS FALSE 
+                AND ai.armor + ai.damage BETWEEN $2 AND $3
+            """
+
+            # Add hand type filtering if specified
+            if hand_type:
+                if hand_type.lower() == '1h':
+                    base_query += " AND (ai.hand = 'any' OR ai.hand = 'left' OR ai.hand = 'right')"
+                else:  # 2h
+                    base_query += " AND ai.hand = 'both'"
+
+            # Fetch items with the constructed query
+            query_params = [ctx.author.id, minstat, maxstat]
+            allitems = await conn.fetch(base_query, *query_params)
 
             count, money = len(allitems), sum(i["value"] for i in allitems)
             if count == 0:
                 await self.bot.reset_cooldown(ctx)
                 return await ctx.send(_("Nothing to merch."))
+
             if buildings := await self.bot.get_city_buildings(
                     ctx.character_data["guild"]
             ):
                 money = int(money * (1 + buildings["trade_building"] / 2))
+
+            # Format the hand type string for display
+            hand_display = ""
+            if hand_type:
+                hand_display = " 2 handed" if hand_type.lower() == "2h" else " 1 handed"
+
             if not await ctx.confirm(
                     _(
-                        "You are about to sell **{count} items for ${money}!**\nAre you"
+                        "You are about to sell **{count}**{hand_type} items for **${money}**!\nAre you"
                         " sure you want to do this?"
-                    ).format(count=count, money=money)
+                    ).format(count=count, hand_type=hand_display, money=money)
             ):
                 await self.bot.reset_cooldown(ctx)
                 return await ctx.send(_("Cancelled selling your items."))
-            newcount = await conn.fetchval(
-                "SELECT count(value) FROM inventory i JOIN allitems ai ON"
-                " (i.item=ai.id) WHERE ai.owner=$1 AND i.equipped IS FALSE AND i.locked IS FALSE AND"
-                " ai.armor+ai.damage BETWEEN $2 AND $3;",
-                ctx.author.id,
-                minstat,
-                maxstat,
-            )
+
+            # Verify count hasn't changed (with same hand type filter)
+            check_query = base_query.replace("SELECT ai.id, value", "SELECT count(value)")
+            newcount = await conn.fetchval(check_query, *query_params)
+
             if newcount != count:
                 await ctx.send(
                     _(
@@ -1111,6 +1845,7 @@ class Trading(commands.Cog):
                     )
                 )
                 return await self.bot.reset_cooldown(ctx)
+
             async with conn.transaction():
                 await self.bot.delete_items([i["id"] for i in allitems], conn=conn)
                 await conn.execute(
@@ -1118,17 +1853,19 @@ class Trading(commands.Cog):
                     money,
                     ctx.author.id,
                 )
+
             await self.bot.log_transaction(
                 ctx,
                 from_=1,
                 to=ctx.author.id,
                 subject="merch",
-                data={"Gold": f"{count} items", "Value": money},
+                data={"Gold": f"{count}{hand_display} items", "Value": money},
                 conn=conn,
             )
+
         await ctx.send(
-            _("Merched **{count}** items for **${money}**.").format(
-                count=count, money=money
+            _("Merched **{count}**{hand_type} items for **${money}**.").format(
+                count=count, hand_type=hand_display, money=money
             )
         )
 
@@ -1182,16 +1919,16 @@ class Trading(commands.Cog):
         return f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
 
     @has_char()
-    @commands.cooldown(1, 300, commands.BucketType.user)
-    @commands.command(brief=_("Buys an item or crate from the trader"))
+    @user_cooldown(500)
+    @commands.command(brief=_("Buys an offer from the trader"))
     @locale_doc
     async def trader(self, ctx):
         _(
-            """Purchase items or crates from the trader.
+            """Purchase offers from the trader.
 
-            Use this command to buy items or crates from the trader's current offers. The trader's offers refresh every 12 hours.
+            Use this command to buy items, crates, bundles or consumables from the trader's current offers. The trader's offers refresh every 12 hours.
 
-            You will be presented with a list of available items and crates. Select the one you wish to purchase. Ensure you have enough money to make the purchase.
+            You will be presented with a list of available offers. Select the one you wish to purchase. Ensure you have enough money to make the purchase.
 
             **Note:** This command has a cooldown of 5 minutes per user.
             """
@@ -1199,204 +1936,273 @@ class Trading(commands.Cog):
 
         try:
             player_id = ctx.author.id
+            shop_allowed, shop_reason = await self._check_trader_access(player_id)
+            if not shop_allowed:
+                return await ctx.send(
+                    f"🔒 The **Trader** is unavailable.\n"
+                    f"{shop_reason or 'Your faction standing does not grant access.'}"
+                )
 
-            # Refresh player shop cache
-            if player_id not in self.player_item_cache:
-                self.player_item_cache[player_id] = {}
+            cached_offers = self.player_item_cache.get(player_id, [])
+            if isinstance(cached_offers, dict):
+                cached_offers = []
 
-            # Remove expired items and crates
-            self.player_item_cache[player_id] = {
-                name: (item, price, timestamp, rarity)
-                for name, (item, price, timestamp, rarity) in self.player_item_cache[player_id].items()
-                if not self.is_item_expired(timestamp, 12)
-            }
+            self.player_item_cache[player_id] = [
+                offer
+                for offer in cached_offers
+                if not self.is_item_expired(offer["timestamp"], 12)
+            ]
 
-            # Generate new items and crates if cache is empty
             if not self.player_item_cache[player_id]:
-                items, crates = await self.generate_items_and_crates(ctx)
-                for item, price in items:
-                    self.player_item_cache[player_id][item['name']] = (item, price, self.get_current_time(), None)
-                for crate, price, rarity in crates:
-                    self.player_item_cache[player_id][crate['name']] = (crate, price, self.get_current_time(), rarity)
+                self.player_item_cache[player_id] = await self.generate_items_and_crates(ctx)
 
-            # Separate items and crates for offers
-            items_offers = [(item, price) for item, price, timestamp, rarity in
-                            self.player_item_cache[player_id].values() if rarity is None]
-            crates_offers = [(item, price, rarity) for item, price, timestamp, rarity in
-                             self.player_item_cache[player_id].values() if rarity]
+            offers = sorted(
+                self.player_item_cache[player_id],
+                key=self._get_trader_offer_priority,
+            )
+            visible_offers = []
+            first_lock_reason = None
+            for offer in offers:
+                allowed, reason = await self._check_trader_access(
+                    player_id,
+                    offer_type=offer.get("offer_type"),
+                )
+                if allowed:
+                    visible_offers.append(offer)
+                elif first_lock_reason is None:
+                    first_lock_reason = reason
+            offers = visible_offers
+            if not offers:
+                message = "There are no trader offers available at the moment."
+                if first_lock_reason:
+                    message += f"\n🔒 {first_lock_reason}"
+                return await ctx.send(message)
 
-            if not items_offers and not crates_offers:
-                return await ctx.send("There are no items or crates available at the moment.")
-
-            first_item_timestamp = next(iter(self.player_item_cache[player_id].values()))[2]
-
-            # Calculate the remaining time until expiry
+            first_item_timestamp = offers[0]["timestamp"]
             time_left = self.get_time_until_expiry(first_item_timestamp, 12)
             await ctx.send(f"All items will expire in {time_left}.")
-            # Combine offers for paginator
-            all_offers = items_offers + crates_offers
+
+            offer_entries = []
+            offer_choices = []
+            for idx, offer in enumerate(offers, start=1):
+                offer_entries.append(f"{self._format_trader_offer_entry(offer)}\n")
+                offer_choices.append(self._build_trader_choice_label(offer, idx))
 
             try:
-                offer_entries = [
-                    f"**{i[0]['name']}** ({i[0]['type_']}) - {i[0]['armor'] if i[0]['type_'] == 'Shield' else i[0]['damage']} - **${i[1]}**"
-                    if len(i) == 2 else  # Item
-                    f"**{i[2].capitalize()} Crate** - **${i[1]}**"  # Crate
-                    for i in all_offers
-                ]
-
-                offer_choices = [
-                    i[0]['name'] if len(i) == 2 else f'{i[2].capitalize()} Crate'
-                    for i in all_offers
-                ]
-
                 offerid = await self.bot.paginator.Choose(
                     title=("The Trader"),
-                    placeholder=("Select an item or crate to purchase"),
+                    placeholder=("Select an offer to purchase"),
                     return_index=True,
                     entries=offer_entries,
                     choices=offer_choices,
                 ).paginate(ctx)
-            except NoChoice:  # prevent cooldown reset
+            except NoChoice:
+                
+                await self.bot.reset_cooldown(ctx)
                 return await ctx.send("You did not choose anything.")
 
-            # Ensure offerid is within the bounds of all_offers
-            if offerid < 0 or offerid >= len(all_offers):
+            if offerid < 0 or offerid >= len(offers):
                 return await ctx.send("Invalid choice.")
 
-            selected_offer = all_offers[offerid]
+            selected_offer = offers[offerid]
+            offer_type = selected_offer["offer_type"]
+            price = selected_offer["price"]
+            data = selected_offer["data"]
 
-            # Determine if the selected offer is a crate or item
-            if len(selected_offer) == 2:  # If tuple length is 2, it's an item
-                item, price = selected_offer
-                rarity = None
-                item_name = item['name']
-                item_data = item
+            if offer_type == "item":
+                item = data["item"]
+                stat = self._get_item_display_stat(item)
+                element = item.get("element", "Unknown")
                 embed = discord.Embed(
-                    title="Weapon Purchased",
-                    description=f"**Name:** {item_name}",
-                    color=discord.Color.blue()
+                    title="Featured Item Purchased" if data.get("featured") else "Item Purchased",
+                    description=f"**Name:** {item['name']}",
+                    color=discord.Color.blue(),
                 )
-                embed.add_field(name="Type", value=item['type_'])
-                embed.add_field(name="Stat", value=item['armor'] if item['type_'] == 'Shield' else item['damage'])
-                embed.add_field(name="Price", value=f"${price}")
-
-            elif selected_offer[0]['name'] == 'Weapontoken':  # If the selected offer is the token
-                token, price = selected_offer
-                item_name = 'Weapontoken'
-                embed = discord.Embed(
-                    title="Weapontoken Purchased",
-                    description=f"**Name:** {item_name}",
-                    color=discord.Color.green()
-                )
-                embed.add_field(name="Price", value=f"${price}")
-
-            else:  # It's a crate
-                item, price, rarity = selected_offer
-                item_name = f'{rarity.capitalize()} Crate'
-                item_data = None
+                embed.add_field(name="Type", value=item["type_"])
+                embed.add_field(name="Element", value=element)
+                embed.add_field(name="Stat", value=stat)
+                embed.add_field(name="Price", value=self._format_price(price))
+                item_name = item["name"]
+            elif offer_type == "crate":
+                rarity = data["crate_rarity"]
+                item_name = f"{rarity.capitalize()} Crate"
                 embed = discord.Embed(
                     title="Crate Purchased",
                     description=f"**Name:** {item_name}",
-                    color=discord.Color.gold()
+                    color=discord.Color.gold(),
                 )
-                embed.add_field(name="Price", value=f"${price}")
-
-            # Debug information to verify embed details
-            print(f"Embed Title: {embed.title}")
-            print(f"Embed Description: {embed.description}")
-            print(f"Embed Fields: {embed.fields}")
+                embed.add_field(name="Price", value=self._format_price(price))
+            elif offer_type == "crate_bundle":
+                item_name = selected_offer["name"]
+                contents = self._format_offer_components(
+                    data["crates"],
+                    {
+                        "common": "Common Crate",
+                        "uncommon": "Uncommon Crate",
+                        "rare": "Rare Crate",
+                        "magic": "Magic Crate",
+                        "legendary": "Legendary Crate",
+                        "fortune": "Fortune Crate",
+                        "divine": "Divine Crate",
+                    },
+                )
+                embed = discord.Embed(
+                    title="Crate Bundle Purchased",
+                    description=f"**Name:** {item_name}",
+                    color=discord.Color.gold(),
+                )
+                embed.add_field(name="Contents", value=contents, inline=False)
+                embed.add_field(name="Price", value=self._format_price(price))
+            elif offer_type == "booster_bundle":
+                item_name = selected_offer["name"]
+                contents = self._format_offer_components(
+                    data["boosters"],
+                    {
+                        "time": "Time Booster",
+                        "luck": "Luck Booster",
+                        "money": "Money Booster",
+                    },
+                )
+                embed = discord.Embed(
+                    title="Booster Bundle Purchased",
+                    description=f"**Name:** {item_name}",
+                    color=discord.Color.green(),
+                )
+                embed.add_field(name="Contents", value=contents, inline=False)
+                embed.add_field(name="Price", value=self._format_price(price))
+            else:
+                item_name = self._get_offer_display_name(selected_offer)
+                embed = discord.Embed(
+                    title=f"{item_name} Purchased",
+                    description=f"**Name:** {item_name}",
+                    color=discord.Color.green(),
+                )
+                embed.add_field(name="Price", value=self._format_price(price))
 
             async with self.bot.pool.acquire() as conn:
-                if not await has_money(self.bot, ctx.author.id, price, conn=conn):
-                    return await ctx.send("You are too poor to buy this item/crate.")
-
-                await conn.execute(
-                    'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
-                    price,
-                    ctx.author.id,
-                )
-
-                await self.bot.log_transaction(
-                    ctx,
-                    from_=1,
-                    to=ctx.author.id,
-                    subject="trader ITEM/CRATE",
-                    data={
-                        "Name": item_name,
-                        "Value": item_data["value"] if item_data else 'N/A',
-                        "Price": price,
-                        "Rarity": rarity.capitalize() if rarity else 'Item',
-                    },
-                    conn=conn,
-                )
-
-                expected_price = price
-
-                # Only create items if it's not a token
-                if item_data and item_data['name'] != 'Weapontoken':  # Ensure item_data is not None and not a token
-                    try:
-                        # Prepare required arguments
-                        name = item_data['name']
-                        value = item_data.get('value', 0)  # Use a default value if not provided
-                        type_ = item_data.get('type_', 'Unknown')  # Default if not provided
-                        damage = item_data.get('damage', 0)  # Default if not provided
-                        armor = item_data.get('armor', 0)  # Default if not provided
-                        hand = item_data.get('hand', None)  # Optional
-                        element = item_data.get('element', None)  # Optional
-                        owner = ctx.author.id
-
-                        # Call create_item with explicit arguments
-                        await self.bot.create_item(
-                            name=name,
-                            value=value,
-                            type_=type_,
-                            damage=damage,
-                            armor=armor,
-                            owner=owner,
-                            hand=hand,
-                            element=element
+                async with conn.transaction():
+                    purchase_allowed, purchase_reason = await self._check_trader_access(
+                        ctx.author.id,
+                        offer_type=offer_type,
+                        conn=conn,
+                    )
+                    if not purchase_allowed:
+                        return await ctx.send(
+                            f"🔒 This Trader offer is locked.\n"
+                            f"{purchase_reason or 'Your faction standing no longer grants access.'}"
                         )
-                    except Exception as e:
-                        import traceback
-                        error_message = f"Error occurred: {e}\n"
-                        error_message += traceback.format_exc()
-                        await ctx.send(error_message)
-                        print(error_message)
-
-                # Update crate count in player's profile if applicable
-                if rarity:  # If rarity is not None, it's a crate
+                    money = await conn.fetchval(
+                        'SELECT money FROM profile WHERE "user"=$1 FOR UPDATE;',
+                        ctx.author.id,
+                    )
+                    if money is None or int(money) < int(price):
+                        return await ctx.send("You are too poor to buy this offer.")
                     await conn.execute(
-                        f'UPDATE profile SET "crates_{rarity}"="crates_{rarity}"+1 WHERE "user"=$1;',
+                        'UPDATE profile SET "money" = "money" - $1 WHERE "user" = $2;',
+                        price,
                         ctx.author.id,
                     )
 
-                    # Find the first item with the specified rarity and remove it
-                    for name, (item, price, timestamp, item_rarity) in list(self.player_item_cache[player_id].items()):
-                        if item_rarity == rarity and price == expected_price:
-                            del self.player_item_cache[player_id][name]
-                            print(f"Removed {name} with rarity {rarity} and price {price} from cache.")
-                            break  # Exit after removing the first match
+                    if offer_type == "item":
+                        item = data["item"]
+                        await self.bot.create_item(
+                            name=item["name"],
+                            value=item.get("value", 0),
+                            type_=item.get("type_", "Unknown"),
+                            damage=item.get("damage", 0),
+                            armor=item.get("armor", 0),
+                            owner=ctx.author.id,
+                            hand=item.get("hand"),
+                            element=item.get("element"),
+                            conn=conn,
+                        )
+                    elif offer_type == "crate":
+                        rarity = data["crate_rarity"]
+                        await conn.execute(
+                            f'UPDATE profile SET "crates_{rarity}" = "crates_{rarity}" + 1 WHERE "user" = $1;',
+                            ctx.author.id,
+                        )
+                    elif offer_type == "crate_bundle":
+                        for rarity, amount in data["crates"].items():
+                            if amount <= 0:
+                                continue
+                            await conn.execute(
+                                f'UPDATE profile SET "crates_{rarity}" = "crates_{rarity}" + $1 WHERE "user" = $2;',
+                                amount,
+                                ctx.author.id,
+                            )
+                    elif offer_type == "booster_bundle":
+                        for booster_type, amount in data["boosters"].items():
+                            if amount <= 0:
+                                continue
+                            await conn.execute(
+                                f'UPDATE profile SET "{booster_type}_booster" = "{booster_type}_booster" + $1 WHERE "user" = $2;',
+                                amount,
+                                ctx.author.id,
+                            )
+                    elif offer_type == "consumable":
+                        if consumable_type := data.get("consumable_type"):
+                            existing = await conn.fetchrow(
+                                'SELECT id, quantity FROM user_consumables WHERE user_id = $1 AND consumable_type = $2;',
+                                ctx.author.id,
+                                consumable_type,
+                            )
+                            if existing:
+                                await conn.execute(
+                                    'UPDATE user_consumables SET quantity = quantity + $1 WHERE id = $2;',
+                                    data.get("amount", 1),
+                                    existing["id"],
+                                )
+                            else:
+                                await conn.execute(
+                                    'INSERT INTO user_consumables (user_id, consumable_type, quantity) VALUES ($1, $2, $3);',
+                                    ctx.author.id,
+                                    consumable_type,
+                                    data.get("amount", 1),
+                                )
+                        else:
+                            await conn.execute(
+                                f'UPDATE profile SET "{data["profile_column"]}" = "{data["profile_column"]}" + $1 WHERE "user" = $2;',
+                                data.get("amount", 1),
+                                ctx.author.id,
+                            )
 
-                # Handle weapontoken purchase
-                if item_name == 'Weapontoken':
-                    new_value = await conn.fetchval('SELECT weapontoken FROM profile WHERE "user"=$1;', ctx.author.id)
-                    new_value = (new_value or 0) + 1
-                    await conn.execute(
-                        'UPDATE profile SET weapontoken=$1 WHERE "user"=$2;',
-                        new_value, ctx.author.id
+                    log_data = {
+                        "Name": item_name,
+                        "Price": price,
+                        "Type": offer_type,
+                    }
+                    if offer_type == "item":
+                        log_data["Value"] = data["item"].get("value", 0)
+                        log_data["Element"] = data["item"].get("element", "Unknown")
+                    elif offer_type == "crate":
+                        log_data["Rarity"] = data["crate_rarity"]
+                    elif offer_type == "crate_bundle":
+                        log_data["Contents"] = self._format_offer_components(data["crates"])
+                    elif offer_type == "booster_bundle":
+                        log_data["Contents"] = self._format_offer_components(data["boosters"])
+                    elif offer_type == "consumable" and data.get("consumable_type"):
+                        log_data["ConsumableType"] = data["consumable_type"]
+
+                    await self.bot.log_transaction(
+                        ctx,
+                        from_=1,
+                        to=ctx.author.id,
+                        subject="trader OFFER",
+                        data=log_data,
+                        conn=conn,
                     )
-                    del self.player_item_cache[player_id][item_name]
 
-                # Remove the purchased item/crate from player's cache
-                if item_data and item_data['name'] != 'Weapontoken':  # Ensure it's not a token
-                    if item_data['name'] in self.player_item_cache[player_id]:
-                        del self.player_item_cache[player_id][item_data['name']]
+            self.player_item_cache[player_id] = [
+                offer for offer in self.player_item_cache[player_id]
+                if offer["id"] != selected_offer["id"]
+            ]
 
             await ctx.send(embed=embed)
+
         except Exception as e:
             import traceback
-            error_message = f"Error occurred: {e}\n"
-            error_message += traceback.format_exc()
+            error_message = f"Error occurred: {e}\n" + traceback.format_exc()
             await ctx.send(error_message)
             print(error_message)
 
@@ -1407,130 +2213,6 @@ class Trading(commands.Cog):
             user_id,
             egg_name,
         )
-
-    @is_gm()
-    @commands.command(brief=_("Buys an egg from the trader"))
-    async def petshop(self, ctx):
-        try:
-            current_time = time.time()
-
-            # Check if 24 hours have passed since the last refresh
-            if current_time - self.last_refresh_time >= 24 * 60 * 60:
-                self.last_refresh_time = current_time  # Update the last refresh time
-                self.sold_out_items = []  # Reset sold-out items
-
-                # Refresh eggs and prices
-                egg_rarities = [
-                    {"name": "Common Egg", "emoji": "<:common_egg:1200370597239201822>", "weight": 56.5},
-                    {"name": "Uncommon Egg", "emoji": "<:uncommon_egg:1200372201359147018>", "weight": 30},
-                    {"name": "Rare Egg", "emoji": "<:rare_egg:1200371479490076702>", "weight": 10},
-                    {"name": "Very Rare Egg", "emoji": "<:veryrare_egg:1200371709560229979>", "weight": 3},
-                    {"name": "Legendary Egg", "emoji": "<:legendary_egg:1200370906552352848>", "weight": 0.5}
-                ]
-
-                offers = []
-                for i in range(10):  # Display 10 items in the shop
-                    egg_rarity = random.choices(
-                        egg_rarities,
-                        weights=[entry['weight'] / sum(entry['weight'] for entry in egg_rarities) for entry in
-                                 egg_rarities]
-                    )[0]
-
-                    if egg_rarity['name'] == 'Common Egg':
-                        price = random.randint(130000, 180000)
-                    # ... (rest of the code remains unchanged)
-                    elif egg_rarity['name'] == 'Uncommon Egg':
-                        price = random.randint(200000, 300000)
-                    elif egg_rarity['name'] == 'Rare Egg':
-                        price = random.randint(300000, 750000)
-                    elif egg_rarity['name'] == 'Very Rare Egg':
-                        price = random.randint(750000, 1250000)
-                    elif egg_rarity['name'] == 'Legendary Egg':
-                        price = random.randint(2000000, 5000000)
-                    else:
-                        # Handle the case where the rarity is not recognized
-                        price = 0  # You may want to set a default value or handle this differently
-
-                    offers.append((egg_rarity, price))
-            else:
-                # If not yet 24 hours, use the existing offers
-                offers = getattr(self, "offers", [])
-
-            # Save the offers for future use
-            self.offers = offers
-
-            entries = [
-                f"{index + 1}. {i[0]['emoji']} ({i[0]['name']}) - **${i[1]}{' (Sold Out)' if index in self.sold_out_items else ''}**"
-                for index, i in enumerate(offers) if i[0] is not None
-            ]
-
-            choices = [egg[0]['name'] for egg in offers]
-
-            try:
-                offerid = await self.bot.paginator.Choose(
-                    title=_("The Trader"),
-                    placeholder=_("Select an egg to purchase"),
-                    return_index=True,
-                    entries=entries,
-                    choices=choices,
-                ).paginate(ctx)
-
-                # Check if the selected item is sold out
-                if offerid in self.sold_out_items:
-                    return await ctx.send(_("This egg is sold out. Please choose another one."))
-
-            except NoChoice:  # prevent cooldown reset
-                return await ctx.send(_("You did not choose anything."))
-
-            selected_egg = offers[offerid][0]
-            self.sold_out_items.append(offerid)  # Mark the selected item as sold
-
-            async with self.bot.pool.acquire() as conn:
-                user_eggs = await conn.fetch(
-                    'SELECT * FROM user_eggs WHERE user_id=$1;',
-                    ctx.author.id,
-                )
-
-                if len(user_eggs) >= 3:
-                    return await ctx.send(_("You already have the maximum limit of 3 eggs. You cannot buy more."))
-
-            embed = discord.Embed(
-                title=_("Successfully bought egg"),
-                description=(
-                    f"{selected_egg['emoji']} ({selected_egg['name']}) - **${offers[offerid][1]}**"
-                ),
-                color=discord.Color.green(),
-            )
-
-            async with self.bot.pool.acquire() as conn:
-                if not await has_money(self.bot, ctx.author.id, offers[offerid][1], conn=conn):
-                    return await ctx.send(_("You are too poor to buy this egg."))
-
-                await conn.execute(
-                    'UPDATE profile SET "money"="money"-$1 WHERE "user"=$2;',
-                    offers[offerid][1],
-                    ctx.author.id,
-                )
-
-                await self.update_user_eggs(ctx.author.id, selected_egg['name'], conn=conn)
-
-                await self.bot.log_transaction(
-                    ctx,
-                    from_=1,
-                    to=ctx.author.id,
-                    subject="trader EGG",
-                    data={
-                        "Egg": selected_egg['name'],
-                        "Price": offers[offerid][1],
-                    },
-                    conn=conn,
-                )
-
-            await ctx.send(embed=embed)
-
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            await ctx.send(_(f"An error occurred while processing your request. {e}"))
 
     async def get_incubation_time(self, rarity):
         # Implement the logic to calculate incubation time based on egg rarity
@@ -1547,57 +2229,6 @@ class Trading(commands.Cog):
         else:
             # Default to 1 hour if the rarity is not recognized
             return dt.timedelta(hours=1)
-
-    async def start_incubation(self, user_id, egg_id, egg_name, ctx):
-        try:
-            async with self.bot.pool.acquire() as conn:
-                # Check if the user_id exists in user_eggs
-                user_owns_egg = await conn.fetchval(
-                    'SELECT COUNT(*) FROM user_eggs WHERE user_id = $1 AND id = $2;',
-                    user_id, egg_id
-                )
-
-                if not user_owns_egg:
-                    return await ctx.send(_("Invalid user ID or egg ID."))
-
-                # Check if the egg is already incubating
-                is_incubating = await conn.fetchval(
-                    'SELECT COUNT(*) FROM incubating_eggs WHERE user_id = $1 AND egg_id = $2;',
-                    user_id, egg_id
-                )
-
-                if is_incubating:
-                    return await ctx.send(_("This egg is already incubating."))
-
-                # Get incubation time based on egg rarity
-                incubation_time = await self.get_incubation_time(egg_name)
-
-                # Insert into incubating_eggs
-                await conn.execute(
-                    'INSERT INTO incubating_eggs (user_id, egg_id, egg_name, start_time) VALUES ($1, $2, $3, $4);',
-                    user_id, egg_id, egg_name, dt.datetime.now(dt.timezone.utc)
-                )
-
-                await ctx.send(_("Egg incubated successfully!"))
-
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            await ctx.send(_(f"An error occurred while processing your request. {e}"))
-
-    async def get_incubation_status(self, user_id, egg_name, unique_identifier, ctx):
-        # Get the remaining time and other details from Redis
-        incubation_key = f'incubation:{user_id}:{unique_identifier}'
-        incubation_details = await self.bot.redis.hgetall(incubation_key)
-        await ctx.send("Checking Key..")
-
-        if incubation_details:
-            await ctx.send("Found a key!..")
-            # Extract remaining time from the hash
-            remaining_time = int(incubation_details.get('remaining_time', 0))
-            return remaining_time if remaining_time > 0 else None
-        else:
-            await ctx.send("I did not find a key!..")
-            return None
 
     async def update_incubation_status(self, user_id, egg_name, unique_identifier, time_delta, hp_change):
         # Update remaining time and HP in the Redis hash
@@ -1616,37 +2247,53 @@ class Trading(commands.Cog):
 
     async def start_incubation(self, user_id, egg_id, egg_name, ctx):
         try:
-            # Check if the user_id exists in user_eggs
             async with self.bot.pool.acquire() as conn:
-                user_exists = await conn.fetchval('SELECT COUNT(*) FROM user_eggs WHERE user_id = $1 AND id = $2;',
-                                                  user_id, egg_id)
+                async with conn.transaction():
+                    egg = await conn.fetchrow(
+                        """
+                        SELECT egg_name
+                        FROM user_eggs
+                        WHERE user_id = $1 AND id = $2
+                        FOR UPDATE
+                        """,
+                        user_id,
+                        egg_id,
+                    )
+                    if egg is None:
+                        message = _("Invalid user ID or egg ID.")
+                    else:
+                        egg_name = egg["egg_name"]
+                        is_incubating = await conn.fetchval(
+                            """
+                            SELECT EXISTS (
+                                SELECT 1 FROM incubating_eggs
+                                WHERE user_id = $1 AND egg_id = $2
+                            )
+                            """,
+                            user_id,
+                            egg_id,
+                        )
+                        if is_incubating:
+                            message = _("This egg is already incubating.")
+                        else:
+                            incubation_time = await self.get_incubation_time(egg_name)
+                            incubation_end_time = (
+                                dt.datetime.now(dt.timezone.utc) + incubation_time
+                            )
+                            await conn.execute(
+                                """
+                                INSERT INTO incubating_eggs
+                                    (user_id, egg_id, egg_name, incubation_end_time)
+                                VALUES ($1, $2, $3, $4)
+                                """,
+                                user_id,
+                                egg_id,
+                                egg_name,
+                                incubation_end_time,
+                            )
+                            message = _("Egg incubated successfully!")
 
-            if not user_exists:
-                return await ctx.send(_("Invalid user ID."))
-
-            # Get incubation time based on egg rarity
-            incubation_time = await self.get_incubation_time(egg_name)
-
-            # Set the current time in UTC
-            current_time = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
-
-            # Set the incubation end time as an offset-aware datetime
-            incubation_end_time = current_time + incubation_time
-
-            # Use the egg ID for each egg in the incubation key
-            incubation_key = f'incubation:{user_id}:{egg_id}'
-
-            # Insert into incubating_eggs with the incubation end time
-            async with self.bot.pool.acquire() as conn:
-                await conn.execute(
-                    'INSERT INTO incubating_eggs (user_id, egg_id, egg_name, incubation_end_time) VALUES ($1, $2, $3, $4);',
-                    user_id,
-                    egg_id,
-                    egg_name,
-                    incubation_end_time,
-                )
-
-            await ctx.send(_("Egg incubated successfully!"))
+            await ctx.send(message)
 
         except Exception as e:
             print(f"An error occurred: {e}")
@@ -1682,37 +2329,7 @@ class Trading(commands.Cog):
     @is_gm()
     @commands.command(brief=_("Incubates a purchased egg"))
     async def incubate(self, ctx, egg_id: int):
-        try:
-            async with self.bot.pool.acquire() as conn:
-                # Check if the user owns the selected egg
-                user_owns_egg = await conn.fetchval(
-                    'SELECT COUNT(*) FROM user_eggs WHERE user_id=$1 AND id=$2;',
-                    ctx.author.id,
-                    egg_id,
-                )
-
-                if user_owns_egg:
-                    # Retrieve the selected egg's details
-                    selected_egg = await conn.fetchrow(
-                        'SELECT egg_name FROM user_eggs WHERE id=$1;',
-                        egg_id,
-                    )
-
-                    if selected_egg:
-                        egg_name = selected_egg['egg_name']
-
-                        # Start incubation using the dedicated method
-                        await self.start_incubation(ctx.author.id, egg_id, egg_name, ctx)
-
-                        await ctx.send(_("Egg incubated successfully!"))
-                    else:
-                        await ctx.send(_("Invalid egg ID."))
-                else:
-                    await ctx.send(_("You don't own the selected egg."))
-
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            await ctx.send(_(f"An error occurred while processing your request. {e}"))
+        await self.start_incubation(ctx.author.id, egg_id, None, ctx)
 
     async def choose_pet(self, rarity):
         if rarity == "Common Egg":

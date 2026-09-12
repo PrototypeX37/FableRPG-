@@ -18,16 +18,23 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
 
+import asyncio
+import json
 import logging
+import os
 import sys
 
-
-import json
-import asyncio
-import os
+try:
+    from setproctitle import setproctitle
+except ImportError:
+    setproctitle = None
 
 import discord
-import uvloop
+
+try:
+    import uvloop  # uvloop is not available on Windows
+except ImportError:
+    uvloop = None
 
 from classes.bot import Bot
 from classes.logger import file_handler, stream
@@ -48,6 +55,9 @@ shard_count = int(sys.argv[2])
 cluster_id = int(sys.argv[3])
 cluster_count = int(sys.argv[4])
 cluster_name = sys.argv[5]
+
+if setproctitle is not None:
+    setproctitle("Fable")
 
 # Configure intents
 intents = discord.Intents.all()
@@ -80,7 +90,10 @@ if __name__ == "__main__":
     log.addHandler(file_handler(cluster_id))
 
     try:
-        loop = uvloop.new_event_loop()
+        if uvloop is not None:
+            loop = uvloop.new_event_loop()
+        else:
+            loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         runner = loop.run_until_complete(main())
     except KeyboardInterrupt:

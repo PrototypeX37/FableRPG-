@@ -1,28 +1,58 @@
 from decimal import Decimal
 import asyncio
+import logging
 import random
 import discord
 from datetime import datetime, timedelta
 from collections import deque
 from decimal import Decimal
+from io import BytesIO
 
 from ..core.battle import Battle
 from ..core.combatant import Combatant
 from ..core.team import Team
+from ..extensions.specs import SpecExtension
+from ..dragon_battle_card import render_dragon_battle_card
+from classes.classes import from_string as class_from_string
+
+
+logger = logging.getLogger(__name__)
 
 class DragonBattle(Battle):
     """Implementation of Ice Dragon Challenge battle"""
+    LIGHTS_GUIDANCE_COUNTERABLE_EFFECTS = {
+        "freeze",
+        "stun",
+        "aoe_stun",
+        "possess_player",
+        "possess_pet",
+        "possess_player_and_pet_permanent",
+        "shatter_armor",
+        "invert_healing",
+        "damage_link",
+        "turn_skip_chance",
+        "true_damage_window",
+        "execute",
+        "steal_buffs",
+    }
     
     def __init__(self, ctx, teams, **kwargs):
         super().__init__(ctx, teams, **kwargs)
+        self.spec_ext = SpecExtension()
         
         # Dragon-specific configurations
         self.dragon_level = kwargs.get("dragon_level", 1)
         self.weekly_defeats = kwargs.get("weekly_defeats", 0)
-        self.action_number = 1
+        # Don't override action_number - let base class handle it
+        self.friendly_team_indices = {1}
         
         # Load all battle settings
         settings_cog = self.ctx.bot.get_cog("BattleSettings")
+        hp_bar_style = kwargs.get(
+            "hp_bar_style",
+            "colorful" if kwargs.get("emoji_hp_bars", False) else "normal",
+        )
+        normalized_hp_bar_style = self.normalize_hp_bar_style(hp_bar_style)
         if settings_cog:
             # Ensure all settings are loaded, with defaults if not found
             self.config = {
@@ -31,10 +61,16 @@ class DragonBattle(Battle):
                 "element_effects": settings_cog.get_setting("dragon", "element_effects", default=True),
                 "luck_effects": settings_cog.get_setting("dragon", "luck_effects", default=True),
                 "reflection_damage": settings_cog.get_setting("dragon", "reflection_damage", default=True),
+                "hp_bar_style": normalized_hp_bar_style,
+                "emoji_hp_bars": normalized_hp_bar_style != self.HP_BAR_STYLE_NORMAL,
                 "fireball_chance": settings_cog.get_setting("dragon", "fireball_chance", default=0.3),
                 "cheat_death": settings_cog.get_setting("dragon", "cheat_death", default=True),
                 "tripping": settings_cog.get_setting("dragon", "tripping", default=True),
                 "status_effects": settings_cog.get_setting("dragon", "status_effects", default=False),
+                "image_battle_card": kwargs.get(
+                    "image_battle_card",
+                    settings_cog.get_setting("dragon", "image_battle_card", default=False),
+                ),
                 "pets_continue_battle": settings_cog.get_setting("dragon", "pets_continue_battle", default=False)
             }
         else:
@@ -45,55 +81,21 @@ class DragonBattle(Battle):
                 "element_effects": True,
                 "luck_effects": True,
                 "reflection_damage": True,
+                "hp_bar_style": normalized_hp_bar_style,
+                "emoji_hp_bars": normalized_hp_bar_style != self.HP_BAR_STYLE_NORMAL,
                 "fireball_chance": 0.3,
                 "cheat_death": True,
                 "tripping": True,
                 "status_effects": False,
+                "image_battle_card": kwargs.get("image_battle_card", False),
                 "pets_continue_battle": False
             }
         self.current_turn = 0  # Track turns separately from action numbers
-        self.dragon_stages = {
-            "Frostbite Wyrm": {
-                "level_range": (1, 5),
-                "moves": {
-                    "Ice Breath": {"dmg": 600, "effect": "freeze", "chance": 0.3},
-                    "Tail Sweep": {"dmg": 400, "effect": "aoe", "chance": 0.4},
-                    "Frost Bite": {"dmg": 300, "effect": "dot", "chance": 0.3}
-                },
-                "passives": ["Ice Armor"],
-                "base_multiplier": 1.0
-            },
-            "Corrupted Ice Dragon": {
-                "level_range": (6, 10),
-                "moves": {
-                    "Frosty Ice Burst": {"dmg": 800, "effect": "random_debuff", "chance": 0.3},
-                    "Minion Army": {"dmg": 200, "effect": "summon_adds", "chance": 0.3},
-                    "Frost Spears": {"dmg": 500, "effect": "dot", "chance": 0.4}
-                },
-                "passives": ["Corruption"],
-                "base_multiplier": 1.15
-            },
-            "Permafrost": {
-                "level_range": (11, 15),
-                "moves": {
-                    "Soul Reaver": {"dmg": 1000, "effect": "stun", "chance": 0.3},
-                    "Death Note": {"dmg": 700, "effect": "curse", "chance": 0.3},
-                    "Dark Shadows": {"dmg": 900, "effect": "aoe_dot", "chance": 0.4}
-                },
-                "passives": ["Void Fear"],
-                "base_multiplier": 1.25
-            },
-            "Absolute Zero": {
-                "level_range": (16, 20),
-                "moves": {
-                    "Void Blast": {"dmg": 1200, "effect": "aoe_stun", "chance": 0.3},
-                    "Soul Crusher": {"dmg": 1000, "effect": "death_mark", "chance": 0.3},
-                    "Armageddon": {"dmg": 800, "effect": "global_dot", "chance": 0.4}
-                },
-                "passives": ["Aspect of death"],
-                "base_multiplier": 1.5
-            }
-        }
+        self.dragon_stage_info = None
+        self.dragon_moves = {}
+        self.dragon_passives = []
+        self.dragon_element = "Water"
+        self._move_cooldowns = {}
         
         # Get the dragon team and player team
         self.dragon_team = teams[0]  # Dragon is always the first team
@@ -101,47 +103,382 @@ class DragonBattle(Battle):
         
         # Reference to dragon and players for easier access
         self.dragon = self.dragon_team.combatants[0]  # Dragon is the first combatant in team
+        self.dragon.is_boss = True
+        self.dragon.is_dragon = True
         self.players = self.player_team.combatants  # All player combatants
         
         # Track status effects
         self.status_effects = {}
+
+        # Track which players have already used cheat death in this battle
+        self.cheat_death_used = set()
+        self._extra_dragon_turns = 0
+        self._dominion_used = False
+        self._possession_used = False
+        self._damage_link_guard = False
+        self._player_turn_queue = deque()
+        self.participant_damage_stats = {}
+        self._tracked_party_combatants = []
+        self.dragon_damage_totals = {}
+        self._dragon_damage_persisted = False
+        self._last_image_card_turn = None
+        self.bard_song_owner_name = kwargs.get("bard_song_owner_name")
+        self.bard_song_bonus_pct = kwargs.get("bard_song_bonus_pct")
+        for combatant in self.player_team.combatants:
+            self._register_tracked_combatant(combatant)
+
+    def _build_effective_team(self, name, combatants):
+        return Team(name, list(combatants))
+
+    def _effective_dragon_side_combatants(self):
+        combatants = []
+        seen = set()
+        for combatant in self.dragon_team.combatants:
+            marker = id(combatant)
+            if marker not in seen:
+                seen.add(marker)
+                combatants.append(combatant)
+        for combatant in self.player_team.combatants:
+            if not self._is_possessed(combatant):
+                continue
+            marker = id(combatant)
+            if marker not in seen:
+                seen.add(marker)
+                combatants.append(combatant)
+        return combatants
+
+    def _effective_party_side_combatants(self):
+        return [
+            combatant
+            for combatant in self.player_team.combatants
+            if not self._is_possessed(combatant)
+        ]
+
+    def get_team_for_combatant(self, combatant):
+        if combatant in self.player_team.combatants:
+            if self._is_possessed(combatant):
+                return self._build_effective_team(
+                    "Dragon Side",
+                    self._effective_dragon_side_combatants(),
+                )
+            return self._build_effective_team(
+                "Party",
+                self._effective_party_side_combatants(),
+            )
+        if combatant in self.dragon_team.combatants:
+            return self._build_effective_team(
+                "Dragon Side",
+                self._effective_dragon_side_combatants(),
+            )
+        return super().get_team_for_combatant(combatant)
+
+    def get_enemy_team_for_combatant(self, combatant):
+        if combatant in self.player_team.combatants:
+            if self._is_possessed(combatant):
+                return self._build_effective_team(
+                    "Party",
+                    self._effective_party_side_combatants(),
+                )
+            return self._build_effective_team(
+                "Dragon Side",
+                self._effective_dragon_side_combatants(),
+            )
+        if combatant in self.dragon_team.combatants:
+            return self._build_effective_team(
+                "Party",
+                self._effective_party_side_combatants(),
+            )
+        return super().get_enemy_team_for_combatant(combatant)
+
+    def resolve_pet_owner_combatant(self, pet_combatant):
+        if pet_combatant is None or not getattr(pet_combatant, "is_pet", False):
+            return None
+        if self._is_possessed(pet_combatant):
+            return self.dragon
+        return None
+
+    def is_friendly_combatant(self, combatant):
+        """Treat possessed party members as hostile for team-color HP bars."""
+        if combatant is not None and self._has_effect(combatant, "possessed"):
+            return False
+        return super().is_friendly_combatant(combatant)
+
+    def _register_tracked_combatant(self, combatant):
+        if combatant is None or combatant is self.dragon or getattr(combatant, "is_summoned", False):
+            return
+        if combatant not in self.participant_damage_stats:
+            self.participant_damage_stats[combatant] = {
+                "dealt": Decimal("0"),
+                "taken": Decimal("0"),
+            }
+            self._tracked_party_combatants.append(combatant)
+
+    def record_damage_event(self, source, target, amount):
+        damage = Decimal(str(amount))
+        if damage <= 0:
+            return
+
+        source_stats = self.participant_damage_stats.get(source)
+        if source_stats is not None:
+            source_stats["dealt"] += damage
+
+        target_stats = self.participant_damage_stats.get(target)
+        if target_stats is not None:
+            target_stats["taken"] += damage
+
+        if target is self.dragon or getattr(target, "is_dragon", False):
+            owner_user_id = self._resolve_dragon_damage_owner_id(source)
+            if owner_user_id is not None:
+                self.dragon_damage_totals[owner_user_id] = (
+                    self.dragon_damage_totals.get(owner_user_id, Decimal("0")) + damage
+                )
+
+    def _resolve_dragon_damage_owner_id(self, source):
+        if source is None or source is self.dragon or getattr(source, "is_dragon", False):
+            return None
+        if getattr(source, "is_birthday_assistant", False):
+            return None
+        if self._has_effect(source, "possessed"):
+            return None
+
+        summoner = getattr(source, "summoner", None)
+        if summoner is not None:
+            owner_user_id = self._resolve_dragon_damage_owner_id(summoner)
+            if owner_user_id is not None:
+                return owner_user_id
+
+        owner = getattr(source, "owner", None)
+        owner_user_id = self._extract_user_id(owner)
+        if owner_user_id is not None:
+            return owner_user_id
+
+        direct_user_id = self._extract_user_id(source)
+        if direct_user_id is not None:
+            return direct_user_id
+
+        return None
+
+    async def persist_dragon_damage_totals(self):
+        if self._dragon_damage_persisted or not self.dragon_damage_totals:
+            return
+
+        try:
+            async with self.ctx.bot.pool.acquire() as conn:
+                for user_id, total_damage in self.dragon_damage_totals.items():
+                    if total_damage <= 0:
+                        continue
+                    await conn.execute(
+                        """
+                        INSERT INTO dragon_damage_leaderboard (user_id, total_damage, updated_at)
+                        VALUES ($1, $2, NOW())
+                        ON CONFLICT (user_id) DO UPDATE
+                        SET total_damage = dragon_damage_leaderboard.total_damage + EXCLUDED.total_damage,
+                            updated_at = NOW()
+                        """,
+                        user_id,
+                        total_damage,
+                    )
+            self._dragon_damage_persisted = True
+        except Exception:
+            pass
+
+    def _participant_label(self, combatant):
+        name = getattr(combatant, "name", "Unknown")
+        if getattr(combatant, "is_birthday_assistant", False):
+            return f"{name} 🎂"
+        if getattr(combatant, "is_pet", False):
+            owner = getattr(combatant, "owner", None)
+            owner_name = getattr(owner, "display_name", None) or getattr(owner, "name", None)
+            if owner_name:
+                return f"{name} ({owner_name}'s pet)"
+            return f"{name} (Pet)"
+        return name
+
+    def _build_participant_summary_lines(self, combatants):
+        lines = []
+        ranked = sorted(
+            combatants,
+            key=lambda combatant: (
+                -float(self.participant_damage_stats[combatant]["dealt"]),
+                -float(self.participant_damage_stats[combatant]["taken"]),
+                self._participant_label(combatant).lower(),
+            ),
+        )
+
+        for index, combatant in enumerate(ranked, start=1):
+            stats = self.participant_damage_stats[combatant]
+            lines.append(
+                f"**{index}.** {self._participant_label(combatant)}"
+                f" - dealt **{self.format_number(stats['dealt'])}** | taken **{self.format_number(stats['taken'])}**"
+            )
+
+        return "\n".join(lines) if lines else "No tracked participants."
+
+    def create_participant_damage_summary_embed(self):
+        if not self._tracked_party_combatants:
+            return None
+
+        participants = [
+            combatant
+            for combatant in self._tracked_party_combatants
+            if combatant in self.participant_damage_stats
+        ]
+        if not participants:
+            return None
+
+        top_damage_dealer = max(
+            participants,
+            key=lambda combatant: self.participant_damage_stats[combatant]["dealt"],
+        )
+        top_damage_taken = max(
+            participants,
+            key=lambda combatant: self.participant_damage_stats[combatant]["taken"],
+        )
+        total_dealt = sum(
+            (self.participant_damage_stats[combatant]["dealt"] for combatant in participants),
+            Decimal("0"),
+        )
+        total_taken = sum(
+            (self.participant_damage_stats[combatant]["taken"] for combatant in participants),
+            Decimal("0"),
+        )
+
+        embed = discord.Embed(
+            title="Dragon Party Combat Summary",
+            description=(
+                f"Total dealt: **{self.format_number(total_dealt)}** HP\n"
+                f"Total taken: **{self.format_number(total_taken)}** HP\n"
+                f"Top damage dealer: **{self._participant_label(top_damage_dealer)}** "
+                f"({self.format_number(self.participant_damage_stats[top_damage_dealer]['dealt'])})\n"
+                f"Most damage taken: **{self._participant_label(top_damage_taken)}** "
+                f"({self.format_number(self.participant_damage_stats[top_damage_taken]['taken'])})"
+            ),
+            color=discord.Color.blurple(),
+        )
+
+        player_combatants = [combatant for combatant in participants if not getattr(combatant, "is_pet", False)]
+        pet_combatants = [combatant for combatant in participants if getattr(combatant, "is_pet", False)]
+
+        if player_combatants:
+            embed.add_field(
+                name="Players",
+                value=self._build_participant_summary_lines(player_combatants),
+                inline=False,
+            )
+
+        if pet_combatants:
+            embed.add_field(
+                name="Pets",
+                value=self._build_participant_summary_lines(pet_combatants),
+                inline=False,
+            )
+
+        return embed
+        
+    def get_participants(self):
+        """Get list of participant user IDs for replay storage (dragon-specific)"""
+        participants = []
+        # Only get unique user IDs from players (not pets to avoid duplicates)
+        for combatant in self.player_team.combatants:
+            if not getattr(combatant, 'is_pet', False):  # Only include non-pets
+                if hasattr(combatant, 'user') and hasattr(combatant.user, 'id'):
+                    participants.append(combatant.user.id)
+                elif hasattr(combatant, 'user_id') and combatant.user_id:
+                    participants.append(combatant.user_id)
+        return list(set(participants))  # Remove any remaining duplicates
         
     async def start_battle(self):
         """Initialize and start the battle"""
         self.started = True
         self.start_time = datetime.utcnow()
         
+        # Save initial battle data to database for replay
+        await self.save_battle_to_database()
+        
         # Reset counters to ensure we start fresh
-        self.action_number = 1
+        # Don't reset action_number - let base class handle it properly for turn states
         self.current_turn = 0
         
-        # Determine which dragon stage we're fighting based on level
-        stage_name = self.get_dragon_stage_name()
+        # Use the stage snapshot chosen when the dragon combatant was created.
+        # Re-querying here can pick a different overlapping DB stage mid-run.
+        dragon_ext = None
+        battles_cog = self.ctx.bot.cogs.get("Battles")
+        if battles_cog:
+            dragon_ext = battles_cog.battle_factory.dragon_ext
+        stage_info = getattr(self.dragon, "stage_info", None)
+        moves = getattr(self.dragon, "moves", None)
+        stage_name = getattr(self.dragon, "stage", None)
+        stage = None
+        if stage_name and isinstance(stage_info, dict):
+            stage = {
+                "id": getattr(self.dragon, "stage_id", None),
+                "name": stage_name,
+                "info": stage_info,
+            }
+            if isinstance(moves, dict):
+                stage["info"] = dict(stage_info)
+                stage["info"]["moves"] = moves
+        elif dragon_ext:
+            stage = await dragon_ext.get_dragon_stage(self.ctx.bot, self.dragon_level)
+        if not stage:
+            if int(self.dragon_level or 1) >= 35:
+                stage = {
+                    "name": "The Abyssal Maw",
+                    "info": {
+                        "moves": {
+                            "Abyssal Devour": {"dmg": 1800, "effect": "execute", "chance": 0.25},
+                            "Maw of the Void": {"dmg": 1200, "effect": "aoe_dot", "chance": 0.35},
+                            "Frozen Oblivion": {"dmg": 1400, "effect": "freeze", "chance": 0.25},
+                            "Endless Hunger": {"dmg": 900, "effect": "steal_buffs", "chance": 0.15},
+                        },
+                        "passives": ["Abyssal Presence"],
+                        "element": "Water",
+                    },
+                }
+            else:
+                stage = {"name": "Void Tyrant", "info": {"moves": {}, "passives": [], "element": "Water"}}
+        self.dragon_stage_id = stage.get("id")
+        stage_name = stage["name"]
+        self.dragon_stage_info = stage["info"]
+        self.dragon_moves = self.dragon_stage_info.get("moves", {})
+        self.dragon_passives = self.dragon_stage_info.get("passives", [])
+        self.dragon_element = self.dragon_stage_info.get("element", "Water")
         self.dragon.stage = stage_name
         self.dragon.name = f"{stage_name} (Level {self.dragon_level})"
-        self.dragon.passives = self.dragon_stages[stage_name]["passives"]
+        self.dragon.passives = self.dragon_passives
         
         # Add the initial message to the battle log
         await self.add_to_log(f"The battle against {self.dragon.name} has begun! 🐉")
+
+        if self.bard_song_bonus_pct:
+            owner_name = self.bard_song_owner_name or "A Bard"
+            await self.add_to_log(
+                f"🎶 **{owner_name}'s Bardic Refrain** raises the party's damage by "
+                f"**{Decimal(str(self.bard_song_bonus_pct)):.1f}%**!"
+            )
         
         # Add passive effect descriptions
         passive_descriptions = []
-        for passive in self.dragon.passives:
-            if passive == "Ice Armor":
-                passive_descriptions.append("❄️ Ice Armor reduces all damage by 20%")
-            elif passive == "Corruption":
-                passive_descriptions.append("Corruption reduces shields/armor by 20%")
-            elif passive == "Void Fear":
-                passive_descriptions.append("😱 Void Fear reduces attack power by 20%")
-            elif passive == "Aspect of death":
-                passive_descriptions.append("💀 Aspect of death reduces attack and defense by 30%")
+        passive_desc_map = {}
+        if dragon_ext and self.dragon_passives:
+            passive_desc_map = await dragon_ext.get_passive_descriptions(self.ctx.bot, self.dragon_passives)
+        for passive in self.dragon_passives:
+            desc = passive_desc_map.get(passive, "")
+            if desc:
+                passive_descriptions.append(f"• **{passive}**: {desc}")
+            else:
+                passive_descriptions.append(f"• **{passive}**")
 
         if passive_descriptions:
             await self.add_to_log("**Dragon's Passive Effects:**\n" + "\n".join(passive_descriptions))
-            # Ensure action number continues incrementing after passives
-            self.current_turn = 1  # Set to 1 to start with dragon's turn
+            # Keep dragon as the first actor after passive log
+            self.current_turn = 0
+
+        for opening_message in await self.trigger_ascension_openings():
+            await self.add_to_log(opening_message)
             
         # Create initial battle display
+        self._refresh_player_turn_queue()
         await self.update_display()
         
         return True
@@ -157,13 +494,42 @@ class DragonBattle(Battle):
         
         # Process status effects on the current combatant
         await self.process_status_effects(current_combatant)
+        if not current_combatant.is_alive():
+            await self.add_to_log(f"{current_combatant.name} is defeated and cannot act!")
+            self._decrement_status_effects(current_combatant)
+            await self.update_display(wait_for_turn_delay=True)
+            return True
+
+        silenced_message = self.consume_ascension_action_lock(current_combatant)
+        if silenced_message:
+            await self.add_to_log(silenced_message)
+            self._decrement_status_effects(current_combatant)
+            await self.update_display(wait_for_turn_delay=True)
+            return True
         
         # Skip turn if stunned
         if self.is_stunned(current_combatant):
             await self.add_to_log(f"{current_combatant.name} is stunned and cannot act!")
-            await self.update_display()
-            self.action_number += 1 # Increment action number even for skipped turns
+            self._decrement_status_effects(current_combatant)
+            await self.update_display(wait_for_turn_delay=True)
             return True
+
+        # Skip turn if paralyzed by pet electric effects.
+        if self.consume_paralyzed_turn(current_combatant):
+            await self.add_to_log(f"{current_combatant.name} is paralyzed and cannot act!")
+            self._decrement_status_effects(current_combatant)
+            await self.update_display(wait_for_turn_delay=True)
+            return True
+
+        # Skip turn if affected by terror panic
+        panic_effect = self._get_effect(current_combatant, "turn_skip_chance")
+        if panic_effect:
+            chance = panic_effect.get("value", 0.5)
+            if random.random() < chance:
+                await self.add_to_log(f"{current_combatant.name} is overwhelmed by terror and loses their turn!")
+                self._decrement_status_effects(current_combatant)
+                await self.update_display(wait_for_turn_delay=True)
+                return True
             
         # Process turn based on combatant type
         if current_combatant == self.dragon:
@@ -173,30 +539,255 @@ class DragonBattle(Battle):
             # Player's turn
             await self.process_player_turn(current_combatant)
             
+        # Check if battle is over after processing the turn (important for cheat death)
+        if await self.is_battle_over():
+            return False
+        
+        # Process per-turn effects only for the acting pet, matching other battle types.
+        if (
+            current_combatant.is_pet
+            and current_combatant.is_alive()
+            and hasattr(self.ctx.bot.cogs["Battles"], "battle_factory")
+        ):
+            pet_ext = self.ctx.bot.cogs["Battles"].battle_factory.pet_ext
+            if self._has_effect(current_combatant, "possessed"):
+                setattr(current_combatant, 'team', self.dragon_team)
+                setattr(current_combatant, 'enemy_team', self.player_team)
+            else:
+                setattr(current_combatant, 'team', self.player_team)
+                setattr(current_combatant, 'enemy_team', self.dragon_team)
+
+            turn_messages = pet_ext.process_skill_effects_per_turn(current_combatant)
+            if turn_messages:
+                for turn_msg in turn_messages:
+                    await self.add_to_log(turn_msg)
+        
+        self._decrement_status_effects(current_combatant)
         # Update display after turn is processed
-        await self.update_display()
-        await asyncio.sleep(2)  # Delay between turns for readability
+        await self.update_display(wait_for_turn_delay=True)
         
         # Return True to indicate turn was processed successfully
         return True
         
     async def process_dragon_turn(self, dragon):
         """Process the dragon's turn"""
+        # Tick down move cooldowns
+        if self._move_cooldowns:
+            for effect_key in list(self._move_cooldowns.keys()):
+                self._move_cooldowns[effect_key] -= 1
+                if self._move_cooldowns[effect_key] <= 0:
+                    del self._move_cooldowns[effect_key]
+
         # Get dragon stage and available moves
-        stage_name = dragon.stage
-        stage_info = self.dragon_stages.get(stage_name, self.dragon_stages["Frostbite Wyrm"])
-        available_moves = stage_info["moves"]
-        
+        available_moves = self.dragon_moves or {}
+
+        alive_allies = self._alive_party_combatants()
+        def has_ally_target(combatant):
+            return any(c is not combatant and c.is_alive() for c in alive_allies)
+        def _normalize_chance(value):
+            try:
+                chance = float(value)
+            except (TypeError, ValueError):
+                return 0.0
+            if chance > 1:
+                chance = chance / 100.0
+            return max(0.0, min(1.0, chance))
+
         # Select a random move
-        move_name = random.choice(list(available_moves.keys()))
-        move_info = available_moves[move_name]
+        if not available_moves:
+            await self.add_to_log(f"{dragon.name} hesitates, unable to find a move!")
+            return
+        move_pool = list(available_moves.items())
+        random.shuffle(move_pool)
+        move_name = None
+        move_info = None
+        if not self._possession_used:
+            for candidate_name, candidate_info in move_pool:
+                effect = candidate_info.get("effect")
+                if effect not in ("possess_player", "possess_pet", "possess_player_and_pet_permanent"):
+                    continue
+                if effect in self._move_cooldowns:
+                    continue
+                if effect == "possess_player_and_pet_permanent" and self._dominion_used:
+                    continue
+                if effect == "possess_pet":
+                    pet_targets = [c for c in alive_allies if c.is_pet and has_ally_target(c)]
+                    if not pet_targets:
+                        continue
+                elif effect == "possess_player":
+                    player_targets = [c for c in alive_allies if not c.is_pet and has_ally_target(c)]
+                    if not player_targets:
+                        continue
+                elif effect == "possess_player_and_pet_permanent":
+                    if len(alive_allies) <= 2:
+                        continue
+                    player_targets = [c for c in alive_allies if not c.is_pet and has_ally_target(c)]
+                    pet_targets = [c for c in alive_allies if c.is_pet and has_ally_target(c)]
+                    if not player_targets or not pet_targets:
+                        continue
+                move_name = candidate_name
+                move_info = candidate_info
+                break
+
+        if not move_name:
+            for candidate_name, candidate_info in move_pool:
+                effect = candidate_info.get("effect")
+                if self._possession_used and effect in ("possess_player", "possess_pet", "possess_player_and_pet_permanent"):
+                    continue
+                if effect in self._move_cooldowns:
+                    continue
+                if effect == "possess_player_and_pet_permanent" and self._dominion_used:
+                    continue
+                if effect == "possess_pet":
+                    pet_targets = [c for c in alive_allies if c.is_pet and has_ally_target(c)]
+                    if not pet_targets:
+                        continue
+                elif effect == "possess_player":
+                    player_targets = [c for c in alive_allies if not c.is_pet and has_ally_target(c)]
+                    if not player_targets:
+                        continue
+                elif effect == "possess_player_and_pet_permanent":
+                    if len(alive_allies) <= 2:
+                        continue
+                    player_targets = [c for c in alive_allies if not c.is_pet and has_ally_target(c)]
+                    pet_targets = [c for c in alive_allies if c.is_pet and has_ally_target(c)]
+                    if not player_targets or not pet_targets:
+                        continue
+                move_name = candidate_name
+                move_info = candidate_info
+                break
+
+        if not move_name:
+            if not alive_allies:
+                await self.add_to_log(f"{dragon.name} has no valid targets!")
+                return
+            target = random.choice(alive_allies)
+            base_damage = 300 * (1 + (0.1 * (self.dragon_level - 1)))
+            base_damage = Decimal(str(base_damage))
+            target_armor = target.armor if isinstance(target.armor, Decimal) else Decimal(str(target.armor))
+            damage = max(base_damage - target_armor, Decimal("10"))
+            spec_defense_messages = []
+            if self.config.get("class_buffs", True):
+                damage, spec_defense_messages = self.spec_ext.modify_incoming_damage(
+                    dragon,
+                    target,
+                    damage,
+                    self.get_team_for_combatant(target),
+                )
+            self.apply_damage(dragon, target, damage)
+            pending_class_messages = self.consume_pending_class_messages(target)
+            element_key = str(self.dragon_element or "Unknown").capitalize()
+            element_flavor = {
+                "Water": [
+                    "surges forward in a crashing tide",
+                    "lashes out with a freezing current",
+                    "slams a wave into its foe",
+                    "rends the air with glacial spray",
+                    "strikes with a scalding torrent",
+                ],
+                "Fire": [
+                    "erupts in a searing burst",
+                    "swipes with ember-clad claws",
+                    "breathes a blistering flare",
+                    "scorches the air with a flame lash",
+                    "lunges with a molten bite",
+                ],
+                "Earth": [
+                    "slams the ground with crushing force",
+                    "hammers forward with stonebound might",
+                    "shatters the air with a rocky strike",
+                    "surges with an earthen charge",
+                    "drives a jagged blow into its foe",
+                ],
+                "Wind": [
+                    "dives in on a razor gale",
+                    "slashes with slicing air",
+                    "strikes in a whirling gust",
+                    "rips forward with a cyclone lash",
+                    "surges with a cutting draft",
+                ],
+                "Electric": [
+                    "crackles forward with a charged swipe",
+                    "strikes with a thunderous lash",
+                    "surges in a flash of static",
+                    "rips the air with a sparking blow",
+                    "lunges with a shock-laced bite",
+                ],
+                "Light": [
+                    "flares in a blinding arc",
+                    "strikes with a radiant lash",
+                    "surges with a searing burst",
+                    "rends the air with a holy glare",
+                    "slashes with a prismed strike",
+                ],
+                "Dark": [
+                    "strikes from a shadowed lunge",
+                    "lashes out with a voided swipe",
+                    "rips the air with a grim surge",
+                    "slams down in a murky arc",
+                    "lunges with a night-black bite",
+                ],
+                "Nature": [
+                    "lashes out with thorned fury",
+                    "surges forward in a wild rush",
+                    "rends the air with a vine-laced strike",
+                    "slams down with primal force",
+                    "lunges with a feral snap",
+                ],
+                "Corrupted": [
+                    "erupts in a warped surge",
+                    "lashes out with a tainted swipe",
+                    "rips the air with corrupt force",
+                    "slams down in a twisted arc",
+                    "lunges with a blighted bite",
+                ],
+                "Unknown": [
+                    "lashes out with a savage strike",
+                    "surges forward with brutal force",
+                    "rends the air with a vicious swipe",
+                    "slams its foe with crushing might",
+                    "lunges with a feral bite",
+                ],
+            }
+            fallback_flavor = element_flavor["Unknown"]
+            flavor = element_flavor.get(element_key, fallback_flavor)
+            attack_text = random.choice(flavor)
+            message = (
+                f"{dragon.name} {attack_text}! {target.name} takes "
+                f"**{self.format_number(damage)} HP** damage."
+            )
+            if spec_defense_messages:
+                message += "\n" + "\n".join(spec_defense_messages)
+            if pending_class_messages:
+                message += "\n" + "\n".join(pending_class_messages)
+            cycle_message = await self.maybe_trigger_cyclebreaker(target, dragon)
+            if cycle_message:
+                message += f"\n{cycle_message}"
+            await self.add_to_log(message)
+            return
+
+        # Enforce one-time ultimate use
+        if move_info.get("effect") == "possess_player_and_pet_permanent" and self._dominion_used:
+            alternate_moves = [
+                name for name, info in available_moves.items()
+                if info.get("effect") != "possess_player_and_pet_permanent"
+            ]
+            if alternate_moves:
+                move_name = random.choice(alternate_moves)
+                move_info = available_moves[move_name]
         
         # Determine targets based on move type
-        if move_info["effect"] in ["aoe", "aoe_stun", "aoe_dot", "global_dot"]:
-            targets = self.get_alive_players()
+        if move_info["effect"] == "possess_pet":
+            pet_targets = [c for c in alive_allies if c.is_pet and has_ally_target(c)]
+            targets = [random.choice(pet_targets)] if pet_targets else []
+        elif move_info["effect"] in ["possess_player", "possess_player_and_pet_permanent"]:
+            player_targets = [c for c in alive_allies if not c.is_pet and has_ally_target(c)]
+            targets = [random.choice(player_targets)] if player_targets else []
+        elif move_info["effect"] in ["aoe", "aoe_stun", "aoe_dot", "global_dot"]:
+            targets = alive_allies
         else:
             # Single target
-            alive_players = self.get_alive_players()
+            alive_players = alive_allies
             if alive_players:
                 target = random.choice(alive_players)
                 targets = [target]
@@ -211,55 +802,85 @@ class DragonBattle(Battle):
         # Apply the move to targets
         base_damage = move_info["dmg"] * (1 + (0.1 * (self.dragon_level - 1)))
         effect = move_info["effect"]
-        effect_chance = move_info["chance"]
+        effect_chance = move_info.get("chance", 0) or 0
+        effect_chance = _normalize_chance(effect_chance)
+        if effect in ("possess_player", "possess_pet", "possess_player_and_pet_permanent") and not self._possession_used:
+            effect_chance = 1.0
         
         for target in targets:
             # Apply element effects if enabled
             element_modifier = 1.0
             element_message = ""
             if self.config.get("element_effects", True) and hasattr(self.ctx.bot.cogs["Battles"], "element_ext"):
-                # Dragon is always Ice element
-                dragon_element = "Ice"
-                target_element = getattr(target, "element", None)
+                dragon_element = self.dragon_element or "Water"
+                target_element = self.resolve_defense_element(target)
                 
                 if target_element:
                     # Get element multiplier from element extension
                     try:
-                        element_modifier = await self.ctx.bot.cogs["Battles"].element_ext.get_element_multiplier(dragon_element, target_element)
+                        element_mod = self.ctx.bot.cogs["Battles"].element_ext.calculate_damage_modifier(
+                            self.ctx,
+                            dragon_element,
+                            target_element,
+                        )
+                        element_modifier = 1.0 + element_mod
                         
                         # Element messages will be added to the attack message
-                        if element_modifier > 1.0:
+                        if element_mod > 0:
                             element_message = f" ({dragon_element} is strong against {target_element}!)"
-                        elif element_modifier < 1.0:
+                        elif element_mod < 0:
                             element_message = f" ({dragon_element} is weak against {target_element}!)"
                     except Exception:
                         # Fallback if element extension fails
                         element_modifier = 1.0
             
-            # Calculate damage using direct armor subtraction, matching Ice Dragon Challenge
-            # Convert target.armor to float if it's a Decimal to avoid type errors
-            if isinstance(target.armor, Decimal):
-                target_armor = float(target.armor)
-            else:
-                target_armor = target.armor
+            # Defense-based pet barriers take the raw hit before armor.
+            target_armor = Decimal(str(target.armor))
+            if "Abyssal Presence" in dragon.passives:
+                target_armor *= Decimal('0.65')
                 
             # Apply element modifier to base damage
-            if isinstance(base_damage, Decimal):
-                modified_base_damage = base_damage * Decimal(str(element_modifier))
-            else:
-                modified_base_damage = float(base_damage) * float(element_modifier)
+            modified_base_damage = Decimal(str(base_damage)) * Decimal(str(element_modifier))
+            defender_messages = []
+            pet_ext = None
+            if (target.is_pet and hasattr(self.ctx.bot.cogs["Battles"], "battle_factory")):
+                pet_ext = self.ctx.bot.cogs["Battles"].battle_factory.pet_ext
+                modified_base_damage, barrier_messages = pet_ext.process_barriers_before_defense(
+                    target,
+                    modified_base_damage,
+                )
+                defender_messages.extend(barrier_messages)
                 
-            # Direct subtraction of armor from damage, with a minimum of 1
-            # Ensure consistent types for the calculation
-            if isinstance(modified_base_damage, Decimal):
-                # Convert target_armor to Decimal to avoid type errors
-                target_armor_decimal = target_armor if isinstance(target_armor, Decimal) else Decimal(str(target_armor))
-                damage = max(Decimal('10'), (modified_base_damage - target_armor_decimal).quantize(Decimal('0.01')))
+            # Check for special damage types
+            ignore_armor = getattr(target, 'ignore_armor_this_hit', False)
+            true_damage = getattr(target, 'true_damage', False)
+            bypass_defenses = getattr(target, 'bypass_defenses', False)
+            ignore_all = getattr(target, 'ignore_all_defenses', False)
+            partial_true_damage = getattr(target, 'partial_true_damage', 0)
+
+            # True damage window from terror effects
+            if self._has_effect(target, "true_damage_window"):
+                ignore_all = True
+
+            if modified_base_damage <= 0:
+                damage = Decimal(str(partial_true_damage))
+                blocked_damage = Decimal('0')
+            elif ignore_all or true_damage or ignore_armor or bypass_defenses:
+                damage = modified_base_damage  # No armor reduction
+                blocked_damage = Decimal('0')
+            elif partial_true_damage > 0:
+                # Handle partial true damage: some bypasses armor, some doesn't
+                normal_damage_after_armor = max(modified_base_damage - target_armor, Decimal('10'))
+                damage = normal_damage_after_armor + Decimal(str(partial_true_damage))
+                blocked_damage = min(modified_base_damage, target_armor)
             else:
-                # Both are floats/ints
-                if isinstance(target_armor, Decimal):
-                    target_armor = float(target_armor)
-                damage = max(1, round(float(modified_base_damage) - target_armor, 2))
+                blocked_damage = min(modified_base_damage, target_armor)
+                damage = max(modified_base_damage - target_armor, Decimal('10'))
+
+            # Clear special damage flags
+            for flag in ['ignore_armor_this_hit', 'true_damage', 'bypass_defenses', 'ignore_all_defenses', 'partial_true_damage']:
+                if hasattr(target, flag):
+                    delattr(target, flag)
             
             # Apply additional damage reduction from passive effects if any
             if hasattr(target, 'damage_reduction') and target.damage_reduction > 0:
@@ -282,6 +903,17 @@ class DragonBattle(Battle):
                         damage *= (1.0 - damage_reduction)
                         
                 damage = round(damage, 2)
+
+            # Apply damage taken modifiers (e.g. Death Mark)
+            damage = self._apply_damage_taken_modifiers(target, damage)
+            spec_defense_messages = []
+            if self.config.get("class_buffs", True):
+                damage, spec_defense_messages = self.spec_ext.modify_incoming_damage(
+                    dragon,
+                    target,
+                    damage,
+                    self.get_team_for_combatant(target),
+                )
             
             # Track damage taken for reflection calculations
             if hasattr(target, 'damage_taken_this_turn'):
@@ -293,7 +925,9 @@ class DragonBattle(Battle):
                 self.config.get("cheat_death", True) and
                 not target.is_pet and
                 hasattr(target, 'death_cheat_chance') and 
-                target.death_cheat_chance > 0):
+                target.death_cheat_chance > 0 and
+                int(getattr(target, "reaper_avatar_hits", 0) or 0) <= 0 and
+                target not in self.cheat_death_used):
                 
                 # Only trigger cheat death if the damage would be fatal
                 # Ensure consistent types for comparison
@@ -308,25 +942,83 @@ class DragonBattle(Battle):
                 if fatal_damage:
                     cheat_death_roll = random.randint(1, 100)
                     if cheat_death_roll <= target.death_cheat_chance:
-                        # Reduce damage and restore player to 75 HP
+                        revive_hp = self.get_cheat_death_recovery_hp(target)
+                        # Reduce damage and restore player to the revived HP threshold
                         if isinstance(target.hp, Decimal):
-                            damage = max(Decimal('0'), target.hp - Decimal('75'))
-                            target.hp = Decimal('75')  # Set to 75 HP
+                            damage = max(Decimal('0'), target.hp - revive_hp)
+                            target.hp = revive_hp
                         else:
-                            damage = max(0, target.hp - 75)
-                            target.hp = 75  # Set to 75 HP
+                            revive_hp_value = float(revive_hp)
+                            damage = max(0, target.hp - revive_hp_value)
+                            target.hp = revive_hp_value
                         cheat_death_triggered = True
+                        self.cheat_death_used.add(target)
             
-            # Apply damage
-            target.take_damage(damage)
+            # PROCESS PET SKILL EFFECTS ON DAMAGE TAKEN
+            if pet_ext and damage > 0:
+                damage, mitigation_messages = pet_ext.process_skill_effects_on_damage_taken(target, dragon, damage)
+                defender_messages.extend(mitigation_messages)
             
+            # Apply Death's Embrace passive effect (10% chance to instantly kill)
+            death_embrace_triggered = False
+            if "Death's Embrace" in dragon.passives and random.random() < 0.1:
+                death_embrace_triggered = True
+                self.record_damage_event(dragon, target, Decimal(str(getattr(target, "hp", 0) or 0)))
+                # Instantly kill the target
+                if isinstance(target.hp, Decimal):
+                    target.hp = Decimal('0')
+                else:
+                    target.hp = 0
+                damage = target.max_hp  # Set damage to max HP for display purposes
+            
+            # Apply damage only if cheat death didn't trigger and death embrace didn't trigger
+            if not cheat_death_triggered and not death_embrace_triggered:
+                self.apply_damage(dragon, target, damage)
+                
+                # Apply Soul Devourer passive effect (steal 15% of damage as health)
+                if "Soul Devourer" in dragon.passives:
+                    if isinstance(damage, Decimal):
+                        stolen_health = damage * Decimal('0.15')  # 15% of damage
+                    else:
+                        stolen_health = float(damage) * 0.15
+                    dragon.heal(stolen_health)
+
+            pending_class_messages = self.consume_pending_class_messages(target)
+            
+            # Apply damage link mirroring
+            if not death_embrace_triggered:
+                await self._apply_damage_link(target, damage, dragon)
+
             # Log the action
-            message = f"{dragon.name} uses **{move_name}** on {target.name}! "
-            message += f"{target.name} takes **{self.format_number(damage)} HP** damage.{element_message}"
+            if death_embrace_triggered:
+                message = f"{dragon.name} uses **{move_name}** on {target.name}! "
+                message += f"💀 **DEATH'S EMBRACE!** {target.name} is instantly slain!{element_message}"
+            else:
+                message = f"{dragon.name} uses **{move_name}** on {target.name}! "
+                message += f"{target.name} takes **{self.format_number(damage)} HP** damage.{element_message}"
+            
+            # Add skill effect messages
+            if spec_defense_messages:
+                message += "\n" + "\n".join(spec_defense_messages)
+            if defender_messages:
+                message += "\n" + "\n".join(defender_messages)
+            if pending_class_messages:
+                message += "\n" + "\n".join(pending_class_messages)
             
             # Add cheat death message if triggered
             if cheat_death_triggered:
-                message += f"\n⚡ **CHEAT DEATH!** {target.name} refuses to fall and is restored to 75 HP!"
+                message += (
+                    f"\n⚡ **CHEAT DEATH!** {target.name} refuses to fall and is restored to "
+                    f"{self.format_number(target.hp)} HP!"
+                )
+                
+            # Add Soul Devourer message if triggered
+            if "Soul Devourer" in dragon.passives and not death_embrace_triggered:
+                if isinstance(damage, Decimal):
+                    stolen_health = damage * Decimal('0.15')
+                else:
+                    stolen_health = float(damage) * 0.15
+                message += f"\n👻 **SOUL DEVOURER!** {dragon.name} steals **{self.format_number(stolen_health)} HP** from {target.name}!"
             
             # Handle tank reflection damage if class_buffs and reflection_damage are enabled
             if (self.config.get("class_buffs", True) and 
@@ -351,37 +1043,84 @@ class DragonBattle(Battle):
                     reflected_damage = round(reflected_damage, 2)
                     
                     if reflected_damage > 0:
-                        dragon.take_damage(reflected_damage)
-                        message += f"\n🛡️ {target.name}'s shield reflects **{self.format_number(reflected_damage)} HP** damage back to {dragon.name}!"
+                        reflected_damage, plate_message = self.apply_reflection_plate(
+                            target,
+                            reflected_damage,
+                            reflection_multiplier,
+                        )
+                        if reflected_damage > 0:
+                            self.apply_damage(target, dragon, reflected_damage)
+                            message += f"\n🛡️ {target.name}'s shield reflects **{self.format_number(reflected_damage)} HP** damage back to {dragon.name}!"
+                        if plate_message:
+                            message += f"\n{plate_message}"
             
             # Apply effects if proc chance is met
             if random.random() < effect_chance:
                 effect_desc = await self.apply_effect(target, effect, damage)
                 if effect_desc:
                     message += f" {effect_desc}"
+                    if effect in ("possess_player", "possess_pet", "possess_player_and_pet_permanent"):
+                        self._move_cooldowns[effect] = 2
+
+            cycle_message = await self.maybe_trigger_cyclebreaker(target, dragon)
+            if cycle_message:
+                message += f"\n{cycle_message}"
                     
             await self.add_to_log(message)
             
     async def process_player_turn(self, player):
         """Process a player's turn"""
-        # Get the dragon as target
-        dragon = self.dragon
+        possessed = self._has_effect(player, "possessed")
+        if possessed:
+            party_targets = [c for c in self._alive_party_combatants() if c is not player]
+            if not party_targets:
+                await self.add_to_log(f"{player.name} is possessed but has no valid targets!")
+                return
+            target = random.choice(party_targets)
+        else:
+            enemy_targets = []
+            if self.dragon.is_alive():
+                enemy_targets.append(self.dragon)
+            enemy_targets.extend(self._alive_possessed())
+            if not enemy_targets:
+                await self.add_to_log(f"{player.name} has no valid targets!")
+                return
+            target = random.choice(enemy_targets)
+        is_dragon_target = target is self.dragon or getattr(target, "is_dragon", False)
         
         # Calculate damage based on player's damage stat
         base_damage = player.damage
         
-        # Apply dragon passive effects if applicable
-        if "Void Fear" in dragon.passives:
+        # Apply passive effects that reduce player damage
+        if is_dragon_target and "Corruption" in target.passives:
             if isinstance(base_damage, Decimal):
                 base_damage = base_damage * Decimal('0.8')  # 20% damage reduction
             else:
                 base_damage *= 0.8
                 
-        if "Aspect of death" in dragon.passives:
+        if is_dragon_target and "Aspect of death" in target.passives:
             if isinstance(base_damage, Decimal):
                 base_damage = base_damage * Decimal('0.7')  # 30% damage reduction
             else:
                 base_damage *= 0.7
+                
+        if is_dragon_target and "Void Corruption" in target.passives:
+            if isinstance(base_damage, Decimal):
+                base_damage = base_damage * Decimal('0.75')  # 25% damage reduction
+            else:
+                base_damage *= 0.75
+                
+        if is_dragon_target and "Eternal Winter" in target.passives:
+            if isinstance(base_damage, Decimal):
+                base_damage = base_damage * Decimal('0.6')  # 40% damage reduction
+            else:
+                base_damage *= 0.6
+
+        if is_dragon_target and "Abyssal Presence" in target.passives:
+            if isinstance(base_damage, Decimal):
+                base_damage = base_damage * Decimal('0.65')  # 35% attack reduction
+            else:
+                base_damage *= 0.65
             
         # Apply luck effects if enabled (critical hits)
         crit_message = ""
@@ -406,20 +1145,31 @@ class DragonBattle(Battle):
             damage = base_damage * Decimal(str(variation))
         else:
             damage = float(base_damage) * variation
+
+        spec_attack_messages = []
+        if self.config.get("class_buffs", True) and not getattr(player, "is_pet", False):
+            damage, spec_attack_messages = self.spec_ext.modify_outgoing_damage(
+                player,
+                target,
+                damage,
+            )
         
         # Apply element effects if enabled
         element_message = ""
         if self.config.get("element_effects", True) and hasattr(self.ctx.bot.cogs["Battles"], "element_ext"):
-            # Dragon is always Ice element
-            dragon_element = "Water"
-            player_element = getattr(player, "element", None)
+            # Use configured dragon element for elemental modifiers (or target element if not dragon)
+            dragon_element = self.dragon_element or "Water"
+            defender_element = (
+                dragon_element if is_dragon_target else self.resolve_defense_element(target)
+            )
+            player_element = self.resolve_attack_element(player)
             
-            if player_element:
+            if player_element and defender_element:
                 # Get element multiplier from element extension
                 element_mod = self.ctx.bot.cogs["Battles"].element_ext.calculate_damage_modifier(
                     self.ctx,
                     player_element,
-                    dragon_element
+                    defender_element
                 )
                 element_multiplier = 1.0 + element_mod  # Convert from -0.3/0.3 to 0.7/1.3
                 
@@ -431,34 +1181,51 @@ class DragonBattle(Battle):
                         damage *= element_multiplier
                         
                     if element_multiplier > 1.0:
-                        element_message = f" ({player_element} is strong against {dragon_element}!)"
+                        element_message = f" ({player_element} is strong against {defender_element}!)"
                     else:
-                        element_message = f" ({player_element} is weak against {dragon_element}!)"
+                        element_message = f" ({player_element} is weak against {defender_element}!)"
         
-        # Use direct armor subtraction for damage calculation, matching Ice Dragon Challenge
-        # Make sure both damage and armor are the same type (Decimal) to avoid type errors
-        if isinstance(damage, Decimal):
-            # Convert damage and armor to consistent types
-            if not isinstance(dragon.armor, Decimal):
-                dragon_armor = Decimal(str(dragon.armor))
-            else:
-                dragon_armor = dragon.armor
-            # Do the subtraction with Decimal types
-            final_damage = max(Decimal('10'), (damage - dragon_armor).quantize(Decimal('0.01')))
+        # Use canonical pet damage resolver for pet attacks.
+        skill_messages = []
+        defender_messages = []
+        if player.is_pet:
+            outcome = self.resolve_pet_attack_outcome(
+                player,
+                target,
+                damage,
+                apply_element_mod=False,  # Already applied in this method.
+                damage_variance=0,
+                minimum_damage=Decimal("10"),
+            )
+            final_damage = outcome.final_damage
+            blocked_damage = outcome.blocked_damage
+            skill_messages = outcome.skill_messages
+            defender_messages = outcome.defender_messages
         else:
-            # Both are floats
-            if isinstance(dragon.armor, Decimal):
-                dragon_armor = float(dragon.armor)
+            # Standard non-pet damage path.
+            ignore_armor = getattr(target, 'ignore_armor_this_hit', False) if is_dragon_target else False
+            true_damage = getattr(target, 'true_damage', False) if is_dragon_target else False
+            bypass_defenses = getattr(target, 'bypass_defenses', False) if is_dragon_target else False
+            ignore_all = getattr(target, 'ignore_all_defenses', False) if is_dragon_target else False
+
+            if ignore_all or true_damage or ignore_armor or bypass_defenses:
+                final_damage = damage  # No armor reduction
+                blocked_damage = Decimal('0')
             else:
-                dragon_armor = dragon.armor
-            # Do the subtraction with float types
-            final_damage = max(1, round(float(damage) - dragon_armor, 2))
+                blocked_damage = min(damage, target.armor)
+                final_damage = max(damage - target.armor, Decimal('10'))
+
+            # Clear special damage flags for non-pet path.
+            if is_dragon_target:
+                for flag in ['ignore_armor_this_hit', 'true_damage', 'bypass_defenses', 'ignore_all_defenses', 'partial_true_damage']:
+                    if hasattr(target, flag):
+                        delattr(target, flag)
         
-        # Apply damage reduction from passive effects
+        # Apply damage reduction from passive effects AFTER standard damage calculation
         damage_reduction = Decimal('0.0')
         
         # Apply passive effects
-        if "Ice Armor" in dragon.passives:
+        if is_dragon_target and "Ice Armor" in target.passives:
             damage_reduction += Decimal('0.2')  # 20% damage reduction from Ice Armor
         
         if damage_reduction > 0:
@@ -467,12 +1234,51 @@ class DragonBattle(Battle):
             else:
                 final_damage = float(final_damage) * (1 - float(damage_reduction))
             final_damage = round(final_damage, 2)
+
+        # Apply damage taken modifiers (e.g. Death Mark)
+        final_damage = self._apply_damage_taken_modifiers(target, final_damage)
         
-        # Apply damage to dragon
-        dragon.take_damage(final_damage)
+        # Include defender pet mitigation messages if present.
+        if defender_messages:
+            skill_messages.extend(defender_messages)
         
-        # Log the action
-        message = f"{player.name} attacks!{crit_message} {dragon.name} takes **{self.format_number(final_damage)} HP** damage.{element_message}"
+        # Apply Reality Bender passive effect (50% chance to negate attack)
+        reality_bender_negated = False
+        spec_after_messages = []
+        if is_dragon_target and "Reality Bender" in target.passives and random.random() < 0.5:
+            reality_bender_negated = True
+            # Reflect some damage back to the player
+            if isinstance(final_damage, Decimal):
+                reflected_damage = final_damage * Decimal('0.3')  # Reflect 30% of damage
+            else:
+                reflected_damage = float(final_damage) * 0.3
+            self.apply_damage(target, player, reflected_damage)
+            message = f"{player.name} attacks!{crit_message} 🌀 **REALITY BENDER** negates the attack! {player.name} takes **{self.format_number(reflected_damage)} HP** reflected damage!"
+        else:
+            # Apply damage to dragon normally
+            self.apply_damage(player, target, final_damage)
+            if self.config.get("class_buffs", True) and not getattr(player, "is_pet", False):
+                spec_after_messages = self.spec_ext.after_attack_damage(
+                    player,
+                    target,
+                    self,
+                )
+            if possessed:
+                message = f"{player.name} attacks under possession!{crit_message} {target.name} takes **{self.format_number(final_damage)} HP** damage.{element_message}"
+            else:
+                message = f"{player.name} attacks!{crit_message} {target.name} takes **{self.format_number(final_damage)} HP** damage.{element_message}"
+
+        # Apply damage link mirroring
+        await self._apply_damage_link(target, final_damage, player)
+        
+        # Add skill effect messages
+        if spec_attack_messages:
+            message += "\n" + "\n".join(spec_attack_messages)
+        if spec_after_messages:
+            message += "\n" + "\n".join(spec_after_messages)
+
+        if skill_messages:
+            message += "\n" + "\n".join(skill_messages)
         
         # Handle lifesteal if applicable for class buffs
         if (self.config.get("class_buffs", True) and 
@@ -484,33 +1290,60 @@ class DragonBattle(Battle):
                 lifesteal_amount = (final_damage * Decimal(str(player.lifesteal_percent)) / Decimal('100'))
             else:
                 lifesteal_amount = (float(final_damage) * float(player.lifesteal_percent) / 100.0)
-            player.heal(lifesteal_amount)
+            await self._apply_heal(player, lifesteal_amount, source="lifesteal")
             message += f" Lifesteals: **{self.format_number(lifesteal_amount)} HP**"
             
-        # Handle mage fireball chance if class_buffs and fireball_chance are enabled
-        if (self.config.get("class_buffs", True) and 
-            self.config.get("fireball_chance", 0.3) > 0 and
-            not player.is_pet and
-            hasattr(player, 'mage_evolution') and 
-            player.mage_evolution is not None):
-            
-            fireball_chance = self.config.get("fireball_chance", 0.3)
-            if random.random() < fireball_chance:
-                # Calculate fireball damage based on mage evolution level
-                damage_multiplier = 1.0
-                if hasattr(self.ctx.bot.cogs["Battles"], "class_ext"):
-                    level = player.mage_evolution
-                    damage_multiplier = self.ctx.bot.cogs["Battles"].class_ext.evolution_damage_multiplier.get(level, 1.0)
-                
-                if isinstance(final_damage, Decimal):
-                    fireball_damage = round(final_damage * Decimal(str(damage_multiplier)), 2)
-                else:
-                    fireball_damage = round(float(final_damage) * float(damage_multiplier), 2)
-                dragon.take_damage(fireball_damage)
-                message += f"\n🔥 **FIREBALL!** {player.name} casts a fireball for **{self.format_number(fireball_damage)} HP** additional damage!"
+        mage_charge_state = self.advance_mage_fireball_charge(player)
+        if mage_charge_state and mage_charge_state["fireball_ready"]:
+            fireball_damage = self.calculate_mage_fireball_damage(
+                player,
+                target,
+                damage_variance=100,
+                minimum_damage=Decimal("10"),
+            )
+            fireball_spec_messages = []
+            if self.config.get("class_buffs", True):
+                fireball_damage, fireball_spec_messages = self.spec_ext.modify_outgoing_damage(
+                    player,
+                    target,
+                    fireball_damage,
+                    include_overload=False,
+                )
+            overload_messages = []
+            if self.config.get("class_buffs", True):
+                fireball_damage, overload_messages = self.spec_ext.consume_overload_fireball(
+                    player,
+                    fireball_damage,
+            )
+            self.apply_damage(player, target, fireball_damage)
+            fireball_after_messages = []
+            if self.config.get("class_buffs", True):
+                fireball_after_messages = self.spec_ext.after_attack_damage(
+                    player,
+                    target,
+                    self,
+                )
+            message += (
+                f"\n🔥 **FIREBALL!** {player.name} casts a fireball for "
+                f"**{self.format_number(fireball_damage)} HP** additional damage!"
+            )
+            if fireball_spec_messages:
+                message += "\n" + "\n".join(fireball_spec_messages)
+            if overload_messages:
+                message += "\n" + "\n".join(overload_messages)
+            if fireball_after_messages:
+                message += "\n" + "\n".join(fireball_after_messages)
+        else:
+            charge_message = self.format_mage_charge_message(mage_charge_state)
+            if charge_message:
+                message += "\n" + charge_message
+
+        class_messages = self.resolve_post_hit_class_effects(player, target)
+        if class_messages:
+            message += "\n" + "\n".join(class_messages)
             
         # Handle dragon's reflection damage if reflection_damage is enabled
-        if self.config.get("reflection_damage", True) and "Reflective Scales" in dragon.passives:
+        if is_dragon_target and self.config.get("reflection_damage", True) and "Reflective Scales" in target.passives:
             reflection_percent = Decimal('15')  # 15% reflection damage
             if isinstance(final_damage, Decimal):
                 reflection_damage = final_damage * (reflection_percent / Decimal('100'))
@@ -519,8 +1352,8 @@ class DragonBattle(Battle):
             reflection_damage = round(reflection_damage, 2)
             
             if reflection_damage > 0:
-                player.take_damage(reflection_damage)
-                message += f"\n{dragon.name}'s reflective scales return **{self.format_number(reflection_damage)} HP** damage!"
+                self.apply_damage(target, player, reflection_damage)
+                message += f"\n{target.name}'s reflective scales return **{self.format_number(reflection_damage)} HP** damage!"
                 
         # Handle PLAYER'S reflection damage if class_buffs and reflection_damage are enabled
         if (self.config.get("class_buffs", True) and 
@@ -538,15 +1371,252 @@ class DragonBattle(Battle):
                 reflection_multiplier = self.ctx.bot.cogs["Battles"].class_ext.evolution_reflection_multiplier.get(level, 0.0)
             
             if reflection_multiplier > 0:
-                if isinstance(player.damage_taken_this_turn, Decimal):
-                    reflected_damage = round(player.damage_taken_this_turn * Decimal(str(reflection_multiplier)), 2)
+                if isinstance(final_damage, Decimal):
+                    reflection_damage = final_damage * Decimal(str(reflection_multiplier))
                 else:
-                    reflected_damage = round(float(player.damage_taken_this_turn) * float(reflection_multiplier), 2)
-                if reflected_damage > 0:
-                    dragon.take_damage(reflected_damage)
-                    message += f"\n🛡️ {player.name}'s shield reflects **{self.format_number(reflected_damage)} HP** damage back to {dragon.name}!"
+                    reflection_damage = float(final_damage) * float(reflection_multiplier)
+                reflection_damage = round(reflection_damage, 2)
+                
+                if reflection_damage > 0:
+                    reflection_damage, plate_message = self.apply_reflection_plate(
+                        player,
+                        reflection_damage,
+                        reflection_multiplier,
+                    )
+                    if reflection_damage > 0:
+                        self.apply_damage(player, target, reflection_damage)
+                        message += f"\n🛡️ **SHIELD REFLECTION!** {player.name}'s shield reflects **{self.format_number(reflection_damage)} HP** damage!"
+                    if plate_message:
+                        message += f"\n{plate_message}"
+        
+        # Check for skeleton summoning after skill processing
+        queued_summons = getattr(player, 'summon_skeleton_queue', None)
+        if not queued_summons and hasattr(player, 'summon_skeleton'):
+            queued_summons = [player.summon_skeleton]
+        if queued_summons:
+            from cogs.battles.core.combatant import Combatant
+
+            for skeleton_data in list(queued_summons):
+                skeleton_serial = skeleton_data.get(
+                    'serial',
+                    getattr(player, 'skeleton_count', 1),
+                )
+                skeleton = Combatant(
+                    user=f"Skeleton Warrior #{skeleton_serial}",
+                    hp=skeleton_data['hp'],
+                    max_hp=skeleton_data['hp'],
+                    damage=skeleton_data['damage'],
+                    armor=skeleton_data['armor'],
+                    element=skeleton_data['element'],
+                    luck=skeleton_data.get('luck', 50),
+                    is_pet=True,
+                    name=f"Skeleton Warrior #{skeleton_serial}"
+                )
+                skeleton.is_summoned = True
+
+                if player in self.player_team.combatants:
+                    self.register_summoned_combatant(
+                        skeleton,
+                        team=self.player_team,
+                        summoner=player,
+                    )
+                    self.player_team.combatants.append(skeleton)
+                    self._player_turn_queue.append(skeleton)
+                    message += f"\n💀 Skeleton Warrior #{skeleton_serial} joins your side!"
+                else:
+                    self.register_summoned_combatant(
+                        skeleton,
+                        team=self.dragon_team,
+                        summoner=player,
+                    )
+                    self.dragon_team.combatants.append(skeleton)
+                    message += f"\n💀 Skeleton Warrior #{skeleton_serial} joins the dragon side!"
+
+            if hasattr(player, 'summon_skeleton_queue'):
+                delattr(player, 'summon_skeleton_queue')
+            if hasattr(player, 'summon_skeleton'):
+                delattr(player, 'summon_skeleton')
+
+        grave_message = await self.maybe_trigger_grave_sovereign(player, target)
+        if grave_message:
+            message += f"\n{grave_message}"
+
+        cycle_message = await self.maybe_trigger_cyclebreaker(target, player)
+        if cycle_message:
+            message += f"\n{cycle_message}"
         
         await self.add_to_log(message)
+
+    def _get_effects(self, combatant):
+        return self.status_effects.get(combatant.name, [])
+
+    def _get_effect(self, combatant, effect_type):
+        for effect in self._get_effects(combatant):
+            if effect.get("type") == effect_type:
+                return effect
+        return None
+
+    def _has_effect(self, combatant, effect_type):
+        return self._get_effect(combatant, effect_type) is not None
+
+    @staticmethod
+    def _extract_user_id(entity):
+        """Resolve Discord ids from combatants, users, or raw ids."""
+        if entity is None:
+            return None
+
+        if hasattr(entity, "user"):
+            entity = getattr(entity, "user", None)
+
+        user_id = getattr(entity, "id", None)
+        if user_id is not None:
+            return user_id
+
+        if isinstance(entity, int):
+            return entity
+
+        if isinstance(entity, str):
+            cleaned = entity.strip()
+            if cleaned.isdigit():
+                return int(cleaned)
+
+        return None
+
+    def _get_lights_guidance_proc_chance(self):
+        battles_cog = self.ctx.bot.cogs.get("Battles") if hasattr(self.ctx.bot, "cogs") else None
+        battle_factory = getattr(battles_cog, "battle_factory", None) if battles_cog else None
+        pet_ext = getattr(battle_factory, "pet_ext", None)
+        return float(getattr(pet_ext, "LIGHTS_GUIDANCE_PROC_CHANCE", 0.25))
+
+    def _get_lights_guidance_guardian(self, target):
+        """Find the Light pet that can protect this combatant from possession effects."""
+        if target is None:
+            return None
+
+        if getattr(target, "is_pet", False):
+            skill_effects = getattr(target, "skill_effects", {})
+            if (
+                target.is_alive()
+                and not self._is_possessed(target)
+                and isinstance(skill_effects, dict)
+                and "lights_guidance" in skill_effects
+            ):
+                return target
+            return None
+
+        target_user_id = self._extract_user_id(target)
+        if target_user_id is None:
+            return None
+
+        for combatant in self.player_team.combatants:
+            if not getattr(combatant, "is_pet", False) or not combatant.is_alive():
+                continue
+            if self._is_possessed(combatant):
+                continue
+
+            skill_effects = getattr(combatant, "skill_effects", {})
+            if not isinstance(skill_effects, dict) or "lights_guidance" not in skill_effects:
+                continue
+
+            owner_id = self._extract_user_id(getattr(combatant, "owner", None))
+            pet_user_id = self._extract_user_id(getattr(combatant, "user", None))
+            if owner_id == target_user_id or pet_user_id == target_user_id:
+                return combatant
+
+        return None
+
+    def _try_lights_guidance_counter(self, target):
+        """Roll Light's Guidance against a dragon possession effect."""
+        guardian = self._get_lights_guidance_guardian(target)
+        if not guardian:
+            return None
+
+        if random.random() >= self._get_lights_guidance_proc_chance():
+            return None
+
+        return guardian
+
+    def _maybe_counter_dragon_effect(self, target, effect_type, effect_name):
+        """Resolve Light's Guidance against selected dragon control/setup effects."""
+        if effect_type not in self.LIGHTS_GUIDANCE_COUNTERABLE_EFFECTS:
+            return None
+
+        guardian = self._try_lights_guidance_counter(target)
+        if not guardian:
+            return None
+
+        return (
+            f"🌟 **{guardian.name}'s Light's Guidance** counters the dragon's "
+            f"{effect_name} on **{target.name}**!"
+        )
+
+    async def _apply_damage_link(self, target, damage, attacker=None):
+        if self._damage_link_guard:
+            return
+        effect = self._get_effect(target, "damage_link")
+        if not effect:
+            return
+        linked_name = effect.get("linked")
+        if not linked_name:
+            return
+        linked_target = None
+        for combatant in self.player_team.combatants:
+            if combatant.name == linked_name and combatant.is_alive():
+                linked_target = combatant
+                break
+        if not linked_target:
+            return
+        if isinstance(damage, Decimal):
+            mirrored = damage * Decimal("0.5")
+        else:
+            mirrored = float(damage) * 0.5
+        self._damage_link_guard = True
+        try:
+            self.apply_damage(attacker, linked_target, mirrored)
+            message = (
+                f"🔗 **Terror Link**: {linked_target.name} takes "
+                f"**{self.format_number(mirrored)} HP** mirrored damage!"
+            )
+            cycle_message = await self.maybe_trigger_cyclebreaker(linked_target, None)
+            if cycle_message:
+                message += f"\n{cycle_message}"
+            await self.add_to_log(message)
+        finally:
+            self._damage_link_guard = False
+
+    async def _apply_heal(self, combatant, amount, source="heal"):
+        if self._has_effect(combatant, "invert_healing"):
+            if isinstance(amount, Decimal):
+                dmg = amount
+            else:
+                dmg = float(amount)
+            self.apply_damage(None, combatant, dmg)
+            message = (
+                f"🩸 **Inverted Healing**: {combatant.name} takes "
+                f"**{self.format_number(dmg)} HP** instead!"
+            )
+            cycle_message = await self.maybe_trigger_cyclebreaker(combatant, None)
+            if cycle_message:
+                message += f"\n{cycle_message}"
+            await self.add_to_log(message)
+            return
+        curse = self._get_effect(combatant, "curse")
+        if curse:
+            reduction = curse.get("value", 0.5)
+            if isinstance(amount, Decimal):
+                amount = amount * (Decimal("1") - Decimal(str(reduction)))
+            else:
+                amount = float(amount) * (1.0 - float(reduction))
+        combatant.heal(amount)
+
+    def _apply_damage_taken_modifiers(self, target, damage):
+        death_mark = self._get_effect(target, "death_mark")
+        if not death_mark:
+            return damage
+        multiplier = death_mark.get("value", 1.3)
+        if isinstance(damage, Decimal):
+            return damage * Decimal(str(multiplier))
+        return float(damage) * float(multiplier)
         
     async def initialize_player(self, player, player_data):
         """Initialize a player combatant"""
@@ -566,7 +1636,13 @@ class DragonBattle(Battle):
             player.lifesteal_percent = player_data.get("lifesteal_percent", 0)
             player.mage_evolution = player_data.get("mage_evolution", None)
             player.tank_evolution = player_data.get("tank_evolution", None)
+            player.paladin_evolution = player_data.get("paladin_evolution", None)
+            player.raider_evolution = player_data.get("raider_evolution", None)
+            player.ritualist_evolution = player_data.get("ritualist_evolution", None)
+            player.paragon_evolution = player_data.get("paragon_evolution", None)
             player.ranger_evolution = player_data.get("ranger_evolution", None)
+            player.reaper_evolution = player_data.get("reaper_evolution", None)
+            player.santa_evolution = player_data.get("santa_evolution", None)
             player.has_shield = player_data.get("has_shield", False)
             
             # Apply tank health buff if applicable
@@ -579,6 +1655,179 @@ class DragonBattle(Battle):
                 )
                 player.hp = player.hp * (player.max_hp / old_max_hp)  # Scale current HP too
                 
+    @staticmethod
+    def _battle_card_class_label(classes):
+        if not classes:
+            return "Adventurer"
+        if not isinstance(classes, (list, tuple)):
+            classes = [classes]
+
+        labels = []
+        for class_name in classes:
+            resolved = class_from_string(class_name)
+            if not resolved:
+                continue
+            label = resolved.get_class_line_name()
+            if label == "SantasHelper":
+                label = "Santa's Helper"
+            if label not in labels:
+                labels.append(label)
+        return " / ".join(labels) if labels else "Adventurer"
+
+    def _battle_card_statuses(self, combatant):
+        statuses = []
+        for effect in self._get_effects(combatant):
+            label = effect.get("name") or effect.get("type")
+            if label and label not in statuses:
+                statuses.append(str(label))
+        if self._has_effect(combatant, "possessed") and "Possessed" not in statuses:
+            statuses.append("Possessed")
+        return statuses[:6]
+
+    def _build_battle_card_data(self):
+        pets_by_owner = {}
+        party_players = []
+        for combatant in self.player_team.combatants:
+            if getattr(combatant, "is_summoned", False):
+                continue
+            if getattr(combatant, "is_pet", False):
+                owner_id = self._extract_user_id(getattr(combatant, "owner", None))
+                if owner_id is None:
+                    owner_id = getattr(combatant, "user_id", None)
+                if owner_id is not None:
+                    pets_by_owner[owner_id] = combatant
+                continue
+            party_players.append(combatant)
+
+        players = []
+        for player in party_players[:4]:
+            owner_id = self._extract_user_id(player)
+            pet = pets_by_owner.get(owner_id)
+            players.append(
+                {
+                    "name": player.name,
+                    "level": int(getattr(player, "display_level", 1) or 1),
+                    "class": self._battle_card_class_label(
+                        getattr(player, "display_classes", [])
+                    ),
+                    "hp": player.hp,
+                    "max_hp": player.max_hp,
+                    "attack": player.damage,
+                    "defense": player.armor,
+                    "statuses": self._battle_card_statuses(player),
+                    "pet": (
+                        {
+                            "name": pet.name,
+                            "level": int(getattr(pet, "display_level", 1) or 1),
+                            "hp": pet.hp,
+                            "max_hp": pet.max_hp,
+                            "attack": pet.damage,
+                            "defense": pet.armor,
+                        }
+                        if pet
+                        else None
+                    ),
+                }
+            )
+
+        return {
+            "turn": self.current_turn,
+            "boss": {
+                "name": getattr(self.dragon, "stage", self.dragon.name),
+                "level": self.dragon_level,
+                "hp": self.dragon.hp,
+                "max_hp": self.dragon.max_hp,
+                "attack": self.dragon.damage,
+                "defense": self.dragon.armor,
+                "statuses": self._battle_card_statuses(self.dragon),
+            },
+            "log": [message for _, message in list(self.log)[-3:]],
+            "players": players,
+        }
+
+    async def _publish_battle_card(self):
+        if not self._should_publish_battle_card():
+            return self.battle_message
+
+        card_data = self._build_battle_card_data()
+        card_buffer = await asyncio.to_thread(render_dragon_battle_card, card_data)
+        filename = "ice_dragon_battle.jpg"
+        card_bytes = card_buffer.getvalue()
+        previous_message = self.battle_message
+
+        send_result = await self.send_with_retry(
+            content=(
+                f"{self._battle_card_mobile_summary(card_data)}\n"
+                f"-# Battle ID: {self.battle_id}"
+            ),
+            file=discord.File(BytesIO(card_bytes), filename=filename),
+        )
+        if send_result not in (None, False):
+            self.battle_message = send_result
+            self._last_image_card_turn = self.current_turn
+            if previous_message is not None and previous_message is not send_result:
+                try:
+                    await previous_message.delete()
+                except discord.NotFound:
+                    pass
+                except (discord.Forbidden, discord.HTTPException):
+                    logger.exception(
+                        "Battle %s could not delete the previous Ice Dragon card",
+                        self.battle_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Battle %s hit an unexpected error deleting its previous card",
+                        self.battle_id,
+                    )
+        return self.battle_message
+
+    def _should_publish_battle_card(self):
+        if self.battle_message is None or self.finished:
+            return True
+        if self.current_turn % 2 != 0:
+            return False
+        return self._last_image_card_turn != self.current_turn
+
+    @staticmethod
+    def _battle_card_mobile_summary(card_data):
+        boss = card_data["boss"]
+        boss_max_hp = float(boss.get("max_hp", 0) or 0)
+        boss_percent = (
+            max(0.0, float(boss.get("hp", 0) or 0)) / boss_max_hp * 100
+            if boss_max_hp > 0
+            else 0.0
+        )
+        party_parts = []
+        for player in card_data.get("players", []):
+            max_hp = float(player.get("max_hp", 0) or 0)
+            percent = (
+                max(0.0, float(player.get("hp", 0) or 0)) / max_hp * 100
+                if max_hp > 0
+                else 0.0
+            )
+            party_parts.append(f"{player['name']} {percent:.0f}%")
+
+        summary = (
+            f"**Ice Dragon Battle | Turn {card_data.get('turn', 0)}**\n"
+            f"Dragon: **{boss_percent:.0f}%**"
+        )
+        if party_parts:
+            summary += f" | Party: {' · '.join(party_parts)}"
+
+        log_entries = card_data.get("log", [])
+        if log_entries:
+            latest = " ".join(str(log_entries[-1]).replace("\n", " ").split())
+            summary += f"\n{latest[:350]}"
+        return summary
+
+    async def _publish_embed_fallback(self):
+        embed = await self.create_battle_embed()
+        kwargs = {"embed": embed}
+        if self.battle_message:
+            kwargs["attachments"] = []
+        return await self.publish_battle_message(**kwargs)
+
     async def create_battle_embed(self):
         """Create the battle status embed"""
         # Get current stage name
@@ -603,14 +1852,29 @@ class DragonBattle(Battle):
         dragon_hp = max(0, float(self.dragon.hp))
         dragon_max_hp = float(self.dragon.max_hp)
         dragon_hp_percent = (dragon_hp / dragon_max_hp) * 100 if dragon_max_hp > 0 else 0
-        dragon_hp_bar = self.create_hp_bar(dragon_hp, dragon_max_hp, length=20)
+        hp_bar_length = 10 if self.config.get("emoji_hp_bars", True) else 20
+        dragon_hp_bar = self.create_hp_bar(
+            dragon_hp,
+            dragon_max_hp,
+            length=hp_bar_length,
+            combatant=self.dragon,
+        )
         
-        # Get dragon element emoji (always Water)
-        dragon_element_emoji = element_to_emoji.get("Water", "❓")
+        # Get dragon element emoji from current stage element
+        dragon_element_key = self.dragon_element or "Water"
+        dragon_element_emoji = element_to_emoji.get(dragon_element_key, "❓")
         
         embed.add_field(
             name=f"🐉 {self.dragon.name} {dragon_element_emoji}",
-            value=f"HP: {dragon_hp:.1f}/{dragon_max_hp:.1f} ({dragon_hp_percent:.1f}%)\n{dragon_hp_bar}",
+            value=(
+                f"HP: {dragon_hp:.1f}/{dragon_max_hp:.1f} ({dragon_hp_percent:.1f}%)\n"
+                f"{dragon_hp_bar}"
+                + (
+                    f"\nShield: {self.format_number(self.dragon.shield)}"
+                    if hasattr(self.dragon, "shield") and Decimal(str(self.dragon.shield)) > 0
+                    else ""
+                )
+            ),
             inline=False
         )
         
@@ -619,56 +1883,118 @@ class DragonBattle(Battle):
             player_hp = max(0, float(player.hp))
             player_max_hp = float(player.max_hp)
             player_hp_percent = (player_hp / player_max_hp) * 100 if player_max_hp > 0 else 0
-            player_hp_bar = self.create_hp_bar(player_hp, player_max_hp, length=15)
-            
+            player_hp_bar = self.create_hp_bar(
+                player_hp,
+                player_max_hp,
+                length=hp_bar_length,
+                combatant=player,
+            )
+
             # Get player element emoji
             player_element_emoji = "❓"
             if hasattr(player, 'element') and player.element and player.element in element_to_emoji:
                 player_element_emoji = element_to_emoji[player.element]
+            possession_marker = " 🌀" if self._has_effect(player, "possessed") else ""
+            birthday_marker = (
+                " 🎂" if getattr(player, "is_birthday_assistant", False) else ""
+            )
             
             # Set name based on player type with element emoji
             if hasattr(player, 'is_pet') and player.is_pet:
-                field_name = f"{player.name} {player_element_emoji}"
+                field_name = f"{player.name} {player_element_emoji}{possession_marker}"
             else:
-                field_name = f"{player.name} {player_element_emoji}"
+                field_name = (
+                    f"{player.name} {player_element_emoji}"
+                    f"{birthday_marker}{possession_marker}"
+                )
                 
             embed.add_field(
                 name=field_name,
-                value=f"HP: {player_hp:.1f}/{player_max_hp:.1f} ({player_hp_percent:.1f}%)\n{player_hp_bar}",
+                value=(
+                    f"HP: {player_hp:.1f}/{player_max_hp:.1f} ({player_hp_percent:.1f}%)\n"
+                    f"{player_hp_bar}"
+                    + (
+                        f"\nShield: {self.format_number(player.shield)}"
+                        if hasattr(player, "shield") and Decimal(str(player.shield)) > 0
+                        else ""
+                    )
+                ),
                 inline=False  # Set to False so each combatant appears on a new line
             )
             
         # Add battle log
-        log_text = "\n\n".join([f"**Action #{i}**\n{msg}" for i, msg in self.log])
-        embed.add_field(name="Battle Log", value=log_text or "Battle starting...", inline=False)
+        log_text = ""
+        max_length = 900  # Leave some room for "..." and potential formatting
+        
+        # Process log entries in reverse order (newest first)
+        for action_num, msg in reversed(self.log):
+            # Format the message with proper newlines and action number
+            formatted_msg = str(msg).replace('\n', '\n    ')  # Indent wrapped lines
+            new_entry = f"**Action #{action_num}**\n{formatted_msg}\n\n"
+            
+            # Check if adding this entry would exceed the max length
+            if len(log_text) + len(new_entry) > max_length:
+                log_text = "...\n\n" + log_text  # Add ellipsis for truncated messages
+                break
+                
+            log_text = new_entry + log_text
+        
+        if not log_text.strip():
+            log_text = "Battle starting..."
+        else:
+            # Ensure we don't exceed max length after all processing
+            log_text = log_text[-max_length:].lstrip('\n')
+            
+        embed.add_field(name="Battle Log", value=log_text, inline=False)
+        
+        # Add battle ID to footer for GM replay functionality
+        embed.set_footer(text=f"Battle ID: {self.battle_id}")
         
         return embed
         
-    async def update_display(self):
+    async def update_display(self, wait_for_turn_delay=False):
         """Update the battle display"""
-        embed = await self.create_battle_embed()
-        if self.battle_message:
-            await self.battle_message.edit(embed=embed)
+        async def publish_display():
+            if self.config.get("image_battle_card", False):
+                try:
+                    return await self._publish_battle_card()
+                except Exception:
+                    logger.exception(
+                        "Battle %s failed to render the Ice Dragon image card; using embed",
+                        self.battle_id,
+                    )
+            return await self._publish_embed_fallback()
+
+        display_task = asyncio.create_task(publish_display())
+        if wait_for_turn_delay:
+            result, _ = await asyncio.gather(display_task, asyncio.sleep(2))
         else:
-            self.battle_message = await self.ctx.send(embed=embed)
+            result = await display_task
+        return result is not None
             
     async def end_battle(self):
         """End the battle and determine outcome"""
         self.finished = True
         
-        # Check if dragon is defeated
-        if self.dragon.hp <= 0:
-            # Players win
-            await self.add_to_log(f"**Victory!** The {self.dragon.name} has been defeated!")
-            await self.update_display()
-            return True
+        # Save final battle data to database for replay
+        await self.save_battle_to_database()
+        await self.persist_dragon_damage_totals()
         
-        # Check if all players are defeated
-        if all(player.hp <= 0 for player in self.players):
-            # Dragon wins
+        party_players_alive = [c for c in self._alive_party_combatants() if not c.is_pet]
+        party_pets_alive = [c for c in self._alive_party_combatants() if c.is_pet]
+        party_defeated = not party_players_alive
+        if party_defeated and self.config.get("pets_continue_battle", False) and self.config.get("allow_pets", True):
+            party_defeated = not party_pets_alive
+
+        if party_defeated:
             await self.add_to_log(f"**Defeat!** The party has been wiped out by the {self.dragon.name}!")
             await self.update_display()
             return False
+
+        if self.dragon.hp <= 0 and not self._alive_possessed():
+            await self.add_to_log(f"**Victory!** The {self.dragon.name} has been defeated!")
+            await self.update_display()
+            return True
             
         # Check for timeout
         if await self.is_timed_out():
@@ -684,27 +2010,22 @@ class DragonBattle(Battle):
         if self.finished:
             return True
             
-        # Check if dragon is defeated
-        if self.dragon.hp <= 0:
+        # Check if dragon and any possessed enemies are defeated
+        if self.dragon.hp <= 0 and not self._alive_possessed():
             return True
             
         # Check for timeout
         if await self.is_timed_out():
             return True
             
-        # Check if all players (non-pets) are defeated
-        player_chars_defeated = all(player.hp <= 0 for player in self.players)
+        party_players_alive = [c for c in self._alive_party_combatants() if not c.is_pet]
+        party_pets_alive = [c for c in self._alive_party_combatants() if c.is_pet]
+        party_defeated = not party_players_alive
         
-        if player_chars_defeated:
-            # If pets should continue battling after player defeat
+        if party_defeated:
             if self.config.get("pets_continue_battle", False) and self.config.get("allow_pets", True):
-                # Check if there are alive pets
-                pet_combatants = [c for c in self.player_team.combatants if c.is_pet and c.is_alive()]
-                if pet_combatants:
-                    # Pets can continue fighting
+                if party_pets_alive:
                     return False
-                    
-            # Either pets_continue_battle is off, or no pets are alive
             return True
             
         # Otherwise battle continues
@@ -714,29 +2035,69 @@ class DragonBattle(Battle):
         """Get the next combatant in turn order"""
         # Simplified turn system - alternate between dragon and a random player
         # Use current_turn instead of action_number to determine whose turn it is
+        if self._extra_dragon_turns > 0:
+            self._extra_dragon_turns -= 1
+            self.current_turn += 1
+            return self.dragon
         if self.current_turn % 2 == 0:  # Dragon on even turns (0, 2, 4, etc.)
             self.current_turn += 1
             return self.dragon
         else:  # Players on odd turns (1, 3, 5, etc.)
             self.current_turn += 1
-            alive_players = self.get_alive_players()
-            if alive_players:
-                return random.choice(alive_players)
+            if not self._player_turn_queue:
+                self._refresh_player_turn_queue()
+            for _ in range(len(self._player_turn_queue)):
+                combatant = self._player_turn_queue[0]
+                self._player_turn_queue.rotate(-1)
+                if combatant.is_alive():
+                    return combatant
+            self._refresh_player_turn_queue()
+            if self._player_turn_queue:
+                combatant = self._player_turn_queue[0]
+                self._player_turn_queue.rotate(-1)
+                return combatant
             return self.dragon  # Fallback
     
     def get_alive_players(self):
         """Get all alive players"""
         return [player for player in self.players if player.hp > 0]
+
+    def _refresh_player_turn_queue(self):
+        alive = [c for c in self.player_team.combatants if c.is_alive()]
+        alive = self.prioritize_turn_order(alive)
+        self._player_turn_queue = deque(alive)
+
+    def _is_possessed(self, combatant):
+        return self._has_effect(combatant, "possessed")
+
+    def _alive_party_combatants(self):
+        return [
+            c for c in self.player_team.combatants
+            if c.is_alive() and not self._is_possessed(c)
+        ]
+
+    def _alive_possessed(self):
+        return [
+            c for c in self.player_team.combatants
+            if c.is_alive() and self._is_possessed(c)
+        ]
         
     def get_dragon_stage_name(self):
         """Determine which dragon stage to use based on level"""
-        for stage_name, stage_info in self.dragon_stages.items():
-            level_range = stage_info.get("level_range", (1, 5))
-            if level_range[0] <= self.dragon_level <= level_range[1]:
-                return stage_name
-        
-        # Default to first stage if no match found
-        return "Frostbite Wyrm"
+        if self.dragon_stage_info and hasattr(self.dragon, "stage"):
+            return self.dragon.stage
+        level = int(self.dragon_level or 1)
+        if level <= 5:
+            return "Frostbite Wyrm"
+        if level <= 10:
+            return "Corrupted Ice Dragon"
+        if level <= 15:
+            return "Permafrost"
+        if level <= 20:
+            return "Absolute Zero"
+        if level <= 34:
+            return "Void Tyrant"
+        return "The Abyssal Maw"
     
     async def process_status_effects(self, combatant):
         """Process status effects for a combatant"""
@@ -744,29 +2105,40 @@ class DragonBattle(Battle):
         if combatant.name not in self.status_effects:
             return
             
-        effects_to_remove = []
-        
         for effect in self.status_effects[combatant.name]:
-            # Decrement duration
-            effect["duration"] -= 1
-            
             # Apply effect
             if effect["type"] == "dot":
                 # Damage over time
                 damage = effect["value"]
-                combatant.take_damage(damage)
-                await self.add_to_log(f"{combatant.name} takes **{self.format_number(damage)} HP** from {effect['name']}!")
-                
-            # Check if effect expired
-            if effect["duration"] <= 0:
+                self.apply_damage(None, combatant, damage)
+                message = (
+                    f"{combatant.name} takes **{self.format_number(damage)} HP** "
+                    f"from {effect['name']}!"
+                )
+                cycle_message = await self.maybe_trigger_cyclebreaker(combatant, None)
+                if cycle_message:
+                    message += f"\n{cycle_message}"
+                await self.add_to_log(message)
+
+    def _decrement_status_effects(self, combatant):
+        if combatant.name not in self.status_effects:
+            return
+        effects_to_remove = []
+        for effect in self.status_effects[combatant.name]:
+            if effect.get("duration", 0) < 0:
+                continue
+            effect["duration"] -= 1
+            if effect.get("duration", 0) <= 0:
+                if effect["type"] == "shatter_armor":
+                    restore = effect.get("value", None)
+                    if restore is not None:
+                        combatant.armor = restore
                 effects_to_remove.append(effect)
-                
-        # Remove expired effects
         for effect in effects_to_remove:
             self.status_effects[combatant.name].remove(effect)
-            await self.add_to_log(f"{effect['name']} on {combatant.name} has worn off.")
-            
-        # Clean up empty effect lists
+            self.ctx.bot.loop.create_task(
+                self.add_to_log(f"{effect['name']} on {combatant.name} has worn off.")
+            )
         if combatant.name in self.status_effects and not self.status_effects[combatant.name]:
             del self.status_effects[combatant.name]
     
@@ -780,6 +2152,22 @@ class DragonBattle(Battle):
                 return True
                 
         return False
+
+    def consume_paralyzed_turn(self, combatant):
+        """Consume one turn of direct paralysis applied by pet skills."""
+        turns = int(getattr(combatant, "paralyzed", 0) or 0)
+        if turns <= 0:
+            return False
+
+        remaining = turns - 1
+        if remaining > 0:
+            setattr(combatant, "paralyzed", remaining)
+        else:
+            try:
+                delattr(combatant, "paralyzed")
+            except AttributeError:
+                setattr(combatant, "paralyzed", 0)
+        return True
         
     async def apply_effect(self, target, effect_type, damage):
         """Apply a status effect to a target"""
@@ -790,10 +2178,27 @@ class DragonBattle(Battle):
         if target.name not in self.status_effects:
             self.status_effects[target.name] = []
             
+        # Map legacy/unused effects to supported ones
+        effect_aliases = {
+            "summon_adds": "extra_dragon_turn",
+            "dimension_tear": "true_damage_window",
+            "time_stop": "aoe_stun",
+            "eternal_curse": "curse",
+            "world_ender": "global_dot",
+            "soul_drain": "drain_max_hp",
+            "void_explosion": "aoe_dot",
+        }
+        alias = effect_aliases.get(effect_type)
+        if alias:
+            return await self.apply_effect(target, alias, damage)
+
         # Define effect details
         effect_desc = ""
         
         if effect_type == "freeze":
+            counter_message = self._maybe_counter_dragon_effect(target, effect_type, "freeze")
+            if counter_message:
+                return counter_message
             self.status_effects[target.name].append({
                 "type": "stun",
                 "name": "Freeze",
@@ -803,6 +2208,9 @@ class DragonBattle(Battle):
             effect_desc = "🧊 **Frozen** for 1 turn!"
             
         elif effect_type == "stun":
+            counter_message = self._maybe_counter_dragon_effect(target, effect_type, "stun")
+            if counter_message:
+                return counter_message
             self.status_effects[target.name].append({
                 "type": "stun",
                 "name": "Stun",
@@ -812,6 +2220,9 @@ class DragonBattle(Battle):
             effect_desc = "⚡ **Stunned** for 1 turn!"
             
         elif effect_type == "aoe_stun":
+            counter_message = self._maybe_counter_dragon_effect(target, effect_type, "mass stun")
+            if counter_message:
+                return counter_message
             self.status_effects[target.name].append({
                 "type": "stun",
                 "name": "Mass Stun",
@@ -892,5 +2303,241 @@ class DragonBattle(Battle):
             selected_debuff = random.choice(debuffs)
             # Recursively apply the selected debuff
             return await self.apply_effect(target, selected_debuff, damage)
+
+        elif effect_type == "execute":
+            counter_message = self._maybe_counter_dragon_effect(target, effect_type, "execution")
+            if counter_message:
+                return counter_message
+            current_hp = Decimal(str(getattr(target, "hp", 0) or 0))
+            max_hp = Decimal(str(getattr(target, "max_hp", 0) or 0))
+            if max_hp > 0 and current_hp <= max_hp * Decimal("0.25"):
+                self.apply_damage(None, target, current_hp)
+                effect_desc = "⚰️ **Executed** below 25% HP!"
+            else:
+                effect_desc = "⚰️ **Marked for execution**, but still above the kill threshold!"
+
+        elif effect_type == "steal_buffs":
+            counter_message = self._maybe_counter_dragon_effect(target, effect_type, "buff theft")
+            if counter_message:
+                return counter_message
+            stolen = []
+            for attr in ("damage_reduction", "speed_boost", "damage_boost", "armor_boost", "zeus_protection", "sky_dodge"):
+                if hasattr(target, attr):
+                    try:
+                        delattr(target, attr)
+                        stolen.append(attr)
+                    except AttributeError:
+                        pass
+            self.status_effects[target.name].append({
+                "type": "death_mark",
+                "name": "Endless Hunger",
+                "duration": 2,
+                "value": 1.15
+            })
+            if stolen:
+                effect_desc = "💫 **Buffs stolen** and damage taken increased for 2 turns!"
+            else:
+                effect_desc = "💫 **Buffs suppressed** and damage taken increased for 2 turns!"
+
+        elif effect_type == "possess_player":
+            alive_allies = self._alive_party_combatants()
+            if not any(c is not target for c in alive_allies):
+                return ""
+            guidance_guardian = self._try_lights_guidance_counter(target)
+            if guidance_guardian:
+                self._possession_used = True
+                return (
+                    f"🌟 **{guidance_guardian.name}'s Light's Guidance** counters the dragon's possession of "
+                    f"**{target.name}**!"
+                )
+            self.status_effects[target.name].append({
+                "type": "possessed",
+                "name": "Possessed",
+                "duration": -1,
+                "value": None
+            })
+            effect_desc = "🌀 **Possessed** for the entire battle!"
+            self._possession_used = True
+
+        elif effect_type == "possess_pet":
+            pet_target = target if getattr(target, "is_pet", False) else None
+            if not pet_target:
+                pet_targets = [c for c in self._alive_party_combatants() if c.is_pet]
+                pet_target = random.choice(pet_targets) if pet_targets else None
+            if pet_target:
+                alive_allies = self._alive_party_combatants()
+                if not any(c is not pet_target for c in alive_allies):
+                    return ""
+                guidance_guardian = self._try_lights_guidance_counter(pet_target)
+                if guidance_guardian:
+                    self._possession_used = True
+                    return (
+                        f"🌟 **{guidance_guardian.name}'s Light's Guidance** counters the dragon's possession of "
+                        f"**{pet_target.name}**!"
+                    )
+                if pet_target.name not in self.status_effects:
+                    self.status_effects[pet_target.name] = []
+                self.status_effects[pet_target.name].append({
+                    "type": "possessed",
+                    "name": "Beastmind Override",
+                    "duration": -1,
+                    "value": None
+                })
+                effect_desc = f"🐾 **{pet_target.name}** is possessed for the entire battle!"
+                self._possession_used = True
+
+        elif effect_type == "possess_player_and_pet_permanent":
+            player_target = target
+            if getattr(target, "is_pet", False):
+                player_candidates = [c for c in self._alive_party_combatants() if not c.is_pet]
+                if player_candidates:
+                    player_target = random.choice(player_candidates)
+
+            # Possess player permanently (battle duration)
+            alive_allies = self._alive_party_combatants()
+            if len(alive_allies) <= 2:
+                return ""
+            if not any(c is not player_target for c in alive_allies):
+                return ""
+
+            protected_messages = []
+            affected_names = []
+
+            player_guardian = self._try_lights_guidance_counter(player_target)
+            player_blocked = player_guardian is not None
+            if player_blocked:
+                protected_messages.append(
+                    f"🌟 **{player_guardian.name}'s Light's Guidance** shields **{player_target.name}** from Dominion!"
+                )
+            else:
+                self.status_effects[player_target.name].append({
+                    "type": "possessed",
+                    "name": "Dominion",
+                    "duration": -1,
+                    "value": None
+                })
+                affected_names.append(player_target.name)
+
+            # Possess a pet if available
+            pet_targets = [c for c in self._alive_party_combatants() if c.is_pet]
+            if pet_targets:
+                pet_target = random.choice(pet_targets)
+                if not any(c is not pet_target for c in alive_allies):
+                    return ""
+                pet_guardian = None if player_blocked else self._try_lights_guidance_counter(pet_target)
+                if pet_guardian:
+                    protected_messages.append(
+                        f"🌟 **{pet_guardian.name}'s Light's Guidance** shields **{pet_target.name}** from Dominion!"
+                    )
+                else:
+                    if pet_target.name not in self.status_effects:
+                        self.status_effects[pet_target.name] = []
+                    self.status_effects[pet_target.name].append({
+                        "type": "possessed",
+                        "name": "Dominion",
+                        "duration": -1,
+                        "value": None
+                    })
+                    affected_names.append(pet_target.name)
+            else:
+                pet_target = None
+
+            if len(affected_names) >= 2:
+                effect_desc = (
+                    f"🧿 **Dominion!** {affected_names[0]} and {affected_names[1]} are possessed for the entire battle!"
+                )
+            elif len(affected_names) == 1:
+                effect_desc = f"🧿 **Dominion!** {affected_names[0]} is possessed for the entire battle!"
+            else:
+                effect_desc = "🧿 **Dominion surges out, but Light's Guidance breaks the dragon's hold!**"
+
+            if protected_messages:
+                effect_desc += " " + " ".join(protected_messages)
+
+            self._dominion_used = True
+            self._possession_used = True
+
+        elif effect_type == "shatter_armor":
+            counter_message = self._maybe_counter_dragon_effect(target, effect_type, "armor shatter")
+            if counter_message:
+                return counter_message
+            self.status_effects[target.name].append({
+                "type": "shatter_armor",
+                "name": "Armor Shatter",
+                "duration": 2,
+                "value": float(target.armor) if isinstance(target.armor, Decimal) else target.armor
+            })
+            target.armor = 0
+            effect_desc = "🧊 **Armor Shattered** for 2 turns!"
+
+        elif effect_type == "drain_max_hp":
+            if isinstance(target.max_hp, Decimal):
+                drain = target.max_hp * Decimal("0.10")
+                target.max_hp = max(Decimal("1"), target.max_hp - drain)
+            else:
+                drain = float(target.max_hp) * 0.10
+                target.max_hp = max(1, target.max_hp - drain)
+            if target.hp > target.max_hp:
+                target.hp = target.max_hp
+            effect_desc = "💀 **Soul Tax** reduces max HP by 10%!"
+
+        elif effect_type == "invert_healing":
+            counter_message = self._maybe_counter_dragon_effect(target, effect_type, "healing inversion")
+            if counter_message:
+                return counter_message
+            self.status_effects[target.name].append({
+                "type": "invert_healing",
+                "name": "Dread Inversion",
+                "duration": 2,
+                "value": None
+            })
+            effect_desc = "🩸 **Healing Inverted** for 2 turns!"
+
+        elif effect_type == "damage_link":
+            counter_message = self._maybe_counter_dragon_effect(target, effect_type, "damage link")
+            if counter_message:
+                return counter_message
+            ally_targets = [
+                c for c in self.player_team.combatants
+                if c.is_alive() and c is not target
+            ]
+            if ally_targets:
+                linked = random.choice(ally_targets)
+                self.status_effects[target.name].append({
+                    "type": "damage_link",
+                    "name": "Terror Link",
+                    "duration": 2,
+                    "value": 0.5,
+                    "linked": linked.name
+                })
+                effect_desc = f"🔗 **Terror Link** with {linked.name} for 2 turns!"
+
+        elif effect_type == "turn_skip_chance":
+            counter_message = self._maybe_counter_dragon_effect(target, effect_type, "panic")
+            if counter_message:
+                return counter_message
+            self.status_effects[target.name].append({
+                "type": "turn_skip_chance",
+                "name": "Panic",
+                "duration": 3,
+                "value": 0.5
+            })
+            effect_desc = "😱 **Panic**: 50% chance to lose turns!"
+
+        elif effect_type == "true_damage_window":
+            counter_message = self._maybe_counter_dragon_effect(target, effect_type, "null phase")
+            if counter_message:
+                return counter_message
+            self.status_effects[target.name].append({
+                "type": "true_damage_window",
+                "name": "Null Phase",
+                "duration": 1,
+                "value": None
+            })
+            effect_desc = "🕳️ **Null Phase**: damage ignores armor for 1 turn!"
+
+        elif effect_type == "extra_dragon_turn":
+            self._extra_dragon_turns += 1
+            effect_desc = "⏳ **Riftstep**: Dragon takes an extra action!"
             
         return effect_desc

@@ -18,12 +18,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 import asyncio
 import datetime
-import firebase_admin
-from firebase_admin import credentials, storage
+import mimetypes
 import urllib.request
 import urllib.parse, urllib.error
 
 import aiohttp
+import boto3
 import discord
 import requests
 
@@ -62,9 +62,72 @@ class Patreon(commands.Cog):
     def __init__(self, bot: Bot) -> None:
         self.bot = bot
         self.ruby_or_above = []
+        self._r2_client = None
+        self._r2_bucket = None
+        self._r2_public_base_url = None
+        ids_section = getattr(self.bot.config, "ids", None)
+        patreon_ids = getattr(ids_section, "patreon", {}) if ids_section else {}
+        if not isinstance(patreon_ids, dict):
+            patreon_ids = {}
+        self.message_target_user_id = patreon_ids.get("message_target_user_id")
 
         if self.bot.config.external.patreon_token:
             asyncio.create_task(self.update_ruby_or_above())
+
+    def _get_r2_client(self):
+        if self._r2_client is not None:
+            return self._r2_client
+
+        ext = getattr(self.bot.config, "external", None)
+        account_id = (getattr(ext, "r2_account_id", None) or "").strip()
+        access_key_id = (getattr(ext, "r2_access_key_id", None) or "").strip()
+        secret_access_key = (getattr(ext, "r2_secret_access_key", None) or "").strip()
+        bucket = (getattr(ext, "r2_bucket", None) or "").strip()
+        public_base_url = (getattr(ext, "r2_public_base_url", None) or "").strip().rstrip("/")
+        endpoint_url = (getattr(ext, "r2_endpoint_url", None) or "").strip()
+
+        missing = []
+        if not account_id and not endpoint_url:
+            missing.append("R2_ACCOUNT_ID (or R2_ENDPOINT_URL)")
+        if not access_key_id:
+            missing.append("R2_ACCESS_KEY_ID")
+        if not secret_access_key:
+            missing.append("R2_SECRET_ACCESS_KEY")
+        if not bucket:
+            missing.append("R2_BUCKET")
+        if not public_base_url:
+            missing.append("R2_PUBLIC_BASE_URL")
+
+        if missing:
+            raise RuntimeError(f"Missing R2 configuration: {', '.join(missing)}")
+
+        if not endpoint_url:
+            endpoint_url = f"https://{account_id}.r2.cloudflarestorage.com"
+
+        self._r2_client = boto3.client(
+            "s3",
+            endpoint_url=endpoint_url,
+            aws_access_key_id=access_key_id,
+            aws_secret_access_key=secret_access_key,
+            region_name="auto",
+        )
+        self._r2_bucket = bucket
+        self._r2_public_base_url = public_base_url
+        return self._r2_client
+
+    async def _r2_upload_bytes(self, data: bytes, key: str) -> str:
+        client = self._get_r2_client()
+        object_key = key.lstrip("/")
+        content_type = mimetypes.guess_type(object_key)[0] or "application/octet-stream"
+
+        await asyncio.to_thread(
+            client.put_object,
+            Bucket=self._r2_bucket,
+            Key=object_key,
+            Body=data,
+            ContentType=content_type,
+        )
+        return f"{self._r2_public_base_url}/{urllib.parse.quote(object_key, safe='/-_.~')}"
 
     async def update_ruby_or_above(self) -> None:
         await self.bot.wait_until_ready()
@@ -184,10 +247,13 @@ class Patreon(commands.Cog):
     @user_cooldown(600)
     @commands.command()
     async def message(self, ctx, email):
-        user_id = 295173706496475136  # Replace with the specific user ID
+        user_id = self.message_target_user_id
+        if not user_id:
+            return await ctx.send("Patreon message target user is not configured.")
 
         try:
             # Fetch the user from Discord's servers
+
             user = await self.bot.fetch_user(user_id)
 
             # Send a direct message to the user
@@ -229,7 +295,7 @@ class Patreon(commands.Cog):
 
             if new_type == "Shield":
                 hand = "left"
-            elif new_type in ("Spear", "Wand"):
+            elif new_type in "Spear":
                 hand = "right"
             elif new_type in ("Bow", "Mace", "Scythe"):
                 hand = "both"
@@ -307,9 +373,8 @@ class Patreon(commands.Cog):
         )
         await ctx.send(f"You have {weapontoken_value} tokens left")
 
-    @is_patron("bronze")
     @has_char()
-    @commands.command(brief=_("[bronze] Change an item's type"))
+    @commands.command(brief=_("Change an item's type"))
     @locale_doc
     async def weapontype(self, ctx, itemid: int, new_type: str.title):
         _(
@@ -321,15 +386,19 @@ class Patreon(commands.Cog):
             You may not change a two-handed item into a one-handed one, or vice versa.
             This proves useful for merging items.
 
-            Only bronze (or above) tier patrons can use this command."""
+            Users can spend a weapon token to use this command.
+            Patreon tier 4 and above can use it for free."""
         )
-
-        # First, fetch the current value of weapontoken for the user
 
         item_type = ItemType.from_string(new_type)
         if item_type is None:
             return await ctx.send(_("Invalid type."))
         hand = item_type.get_hand().value
+        effective_tier = await self.bot.get_effective_donator_tier(
+            ctx.author.id,
+            sync_profile=True,
+        )
+        remaining_tokens = None
         async with self.bot.pool.acquire() as conn:
             item = await conn.fetchrow(
                 "SELECT * FROM inventory i JOIN allitems ai ON (i.item=ai.id) WHERE"
@@ -359,77 +428,59 @@ class Patreon(commands.Cog):
                     )
                 )
             stat = item["damage"] or item["armor"]
-            result = await self.bot.pool.fetchval('SELECT tier FROM profile WHERE "user" = $1;', ctx.author.id)
-
-            if result != 4:
-
-                if item["hand"] == "both" and stat > 40:
-                    weapontoken_value = await self.bot.pool.fetchval(
+            async with conn.transaction():
+                if effective_tier < 4:
+                    weapontoken_value = await conn.fetchval(
                         'SELECT weapontoken FROM profile WHERE "user"=$1;',
-                        ctx.author.id
+                        ctx.author.id,
                     )
+                    try:
+                        weapontoken_value = int(weapontoken_value or 0)
+                    except (TypeError, ValueError):
+                        weapontoken_value = 0
 
-                    # If the value is 0 or below, you can return
                     if weapontoken_value <= 0:
-                        await ctx.send("You don't have enough Weapon tokens!")
-                        return
+                        return await ctx.send(_("You don't have enough weapon tokens!"))
 
-                    weapontoken_value = weapontoken_value - 1
-                    await ctx.send(f"You have {weapontoken_value} token(s) left!")
-
-                    await self.bot.pool.execute(
-                        'UPDATE profile SET weapontoken = weapontoken - 1 WHERE "user"=$1;',
-                        ctx.author.id
+                    update_result = await conn.execute(
+                        'UPDATE profile SET weapontoken = weapontoken - 1 WHERE "user"=$1 AND weapontoken > 0;',
+                        ctx.author.id,
                     )
+                    if update_result != "UPDATE 1":
+                        return await ctx.send(_("You don't have enough weapon tokens!"))
+                    remaining_tokens = weapontoken_value - 1
 
-                # Check if the item is not both
-                if item["hand"] != "both":
-                    if stat > 40:
-                        weapontoken_value = await self.bot.pool.fetchval(
-                            'SELECT weapontoken FROM profile WHERE "user"=$1;',
-                            ctx.author.id
-                        )
+                await conn.execute(
+                    'UPDATE allitems SET "type"=$1, "original_type"=CASE WHEN'
+                    ' "original_type" IS NULL THEN "type" ELSE "original_type" END,'
+                    ' "damage"=$2, "armor"=$3, "hand"=$4 WHERE "id"=$5;',
+                    new_type,
+                    0 if new_type == "Shield" else stat,
+                    stat if new_type == "Shield" else 0,
+                    hand,
+                    itemid,
+                )
+                await conn.execute(
+                    'UPDATE inventory SET "equipped"=$1 WHERE "item"=$2;', False, itemid
+                )
 
-                        # If the value is 0 or below, you can return
-                        if weapontoken_value <= 0:
-                            await ctx.send("You don't have enough Weapon tokens!")
-                            return
-
-                        weapontoken_value = weapontoken_value - 1
-                        await ctx.send(f"You have {weapontoken_value} token(s) left!")
-
-                        await self.bot.pool.execute(
-                            'UPDATE profile SET weapontoken = weapontoken - 1 WHERE "user"=$1;',
-                            ctx.author.id
-                        )
-
-                # Otherwise, decrement weapontoken by 1
-
-            await conn.execute(
-                'UPDATE allitems SET "type"=$1, "original_type"=CASE WHEN'
-                ' "original_type" IS NULL THEN "type" ELSE "original_type" END,'
-                ' "damage"=$2, "armor"=$3, "hand"=$4 WHERE "id"=$5;',
-                new_type,
-                0 if new_type == "Shield" else stat,
-                stat if new_type == "Shield" else 0,
-                hand,
-                itemid,
-            )
-            await conn.execute(
-                'UPDATE inventory SET "equipped"=$1 WHERE "item"=$2;', False, itemid
-            )
-        await ctx.send(
-            _("The item with the ID `{itemid}` is now a `{itemtype}`.").format(
-                itemid=itemid, itemtype=new_type
-            )
+        message = _("The item with the ID `{itemid}` is now a `{itemtype}`.").format(
+            itemid=itemid, itemtype=new_type
         )
+        if remaining_tokens is not None:
+            message = (
+                f"{message}\n"
+                + _("You have {tokens} weapon token(s) left.").format(
+                    tokens=remaining_tokens
+                )
+            )
+        await ctx.send(message)
 
-    @is_patron("gold")
     @has_char()
     @next_day_cooldown()
-    @commands.command(brief=_("[gold] Receive a daily booster"))
+    @commands.command(brief=_("Receive a daily booster"), aliases=["donatordaily"])
     @locale_doc
-    async def donatordaily(self, ctx):
+    async def boosterdaily(self, ctx):
         _(
             """Receive a daily booster. The booster can be a time, money or luck booster.
 
@@ -478,15 +529,6 @@ class Patreon(commands.Cog):
     @locale_doc
     async def upload(self, ctx):
         try:
-            cred = credentials.Certificate("acc.json")
-            if not firebase_admin._apps:
-                firebase_app = firebase_admin.initialize_app(cred)
-            else:
-                firebase_app = firebase_admin.get_app()
-
-            firebase_storage = storage.bucket("fablerpg-f74c2.appspot.com")
-
-
             if ctx.message.attachments:
                 for attachment in ctx.message.attachments:
                     if attachment.height:  # Checking if it's an image
@@ -496,12 +538,8 @@ class Patreon(commands.Cog):
                         # Get image data
                         image_data = await attachment.read()
 
-                        # Upload image to Firebase Storage
-                        blob = firebase_storage.blob(user_filename)
-                        blob.upload_from_string(image_data)
-
-                        # Get the URL of the uploaded image
-                        image_url = blob.public_url
+                        # Upload image to Cloudflare R2
+                        image_url = await self._r2_upload_bytes(image_data, user_filename)
 
                         await ctx.send(f"Uploaded image URL: {image_url}")
                         return
@@ -545,7 +583,14 @@ class Patreon(commands.Cog):
         allowed_whitelist = ["https://cdn.discordapp.com", "https://i.postimg.cc", "https://i.ibb.co", "https://media.discordapp.net",
                              "https://idlerpg.xyz", "https://gcdnb.pbrd.co", "https://storage.googleapis.com"]
 
-        if not any(url.startswith(whitelisted) for whitelisted in allowed_whitelist):
+        # Our own R2 bucket, so uploads from $makebackground pass their own check
+        r2_base = self.bot.config.external.r2_public_base_url
+        if r2_base:
+            allowed_whitelist.append(r2_base.rstrip("/"))
+
+        if isinstance(url, str) and not any(
+            url.startswith(whitelisted) for whitelisted in allowed_whitelist
+        ):
             return await ctx.send(_("The provided URL is not in the allowed whitelist."))
 
         if url != 0 and not await user_is_patron(self.bot, ctx.author):
@@ -627,26 +672,20 @@ class Patreon(commands.Cog):
 
     @is_patron()
     @is_guild_leader()
-    @commands.command(brief=_("[basic] Upgrade your guild"))
+    @commands.command(brief=_("[tier 1] Upgrade your guild"))
     @locale_doc
     async def updateguild(self, ctx):
         _(
             """Update your guild member limit and bank size according to your donation tier.
 
-            Gold (and above) Donators have their bank space quintupled (x5), Silver Donators have theirs doubled.
-            The member limit is set to 100 regardless of donation tier.
+            Patreon tier 1 and above can use this command.
+            The member limit is set to 100 and the bank space is always quintupled (x5).
 
             ⚠ To use this, you have to be the leader of a guild, not just a member.
 
-            Only basic (or above) tier patrons can use this command."""
+            Only tier 1 (or above) patrons can use this command."""
         )
-        # Silver x2, Gold x5
-        if await user_is_patron(self.bot, ctx.author, "gold"):
-            m = 5
-        elif await user_is_patron(self.bot, ctx.author, "silver"):
-            m = 2
-        else:
-            m = 1
+        m = 5
         async with self.bot.pool.acquire() as conn:
             old = await conn.fetchrow(
                 'SELECT * FROM guild WHERE "leader"=$1;', ctx.author.id

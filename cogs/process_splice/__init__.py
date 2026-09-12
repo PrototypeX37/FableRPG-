@@ -1,0 +1,7059 @@
+import datetime
+import mimetypes
+import traceback
+from operator import truediv
+from collections import defaultdict, deque, OrderedDict
+import re
+import discord
+from discord.ext import commands
+from discord.ui import Button, View
+import asyncio
+import threading
+from typing import Optional, List, Dict, Tuple, Union
+from discord import ButtonStyle, SelectOption, ui
+from discord.ui import Button, View, Select
+import boto3
+import random
+import json
+import aiohttp
+from cogs.shard_communication import user_on_cooldown as user_cooldown
+from utils.checks import has_char, is_gm, is_patreon
+# New imports for OpenAI integration
+import os
+import base64
+import tempfile
+from io import BytesIO
+import pathlib
+from urllib.parse import quote
+from openai import OpenAI
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
+import secrets
+
+from cogs.splice_identity import (
+    canonical_parent_pair_key,
+    ensure_splice_identity_schema,
+    known_parent_names,
+    link_created_splice_result,
+    plan_duplicate_splice_names,
+    plan_orphan_parent_repairs,
+    plan_unmatched_parent_slots,
+    reserve_splice_combination,
+)
+from cogs.frontier_catalog.legacy import clean_name, normalize_name
+from .parent_resolver import ParentResolverView
+
+# Constants for auto splice persistence
+AUTO_SPLICE_SAVE_FILE = "auto_splice_saves.json"
+SPLICE_IMAGE_MODEL = "gpt-image-2-2026-04-21"
+
+SPLICE_BACKGROUND_THEME_DATA = {
+    "auto": {
+        "label": "Forge's Choice",
+        "prompt": (
+            "Let the environment emerge naturally from the creature's essence, element, and silhouette. "
+            "Use a cinematic fantasy backdrop that supports the creature without overpowering it."
+        ),
+    },
+    "wildlands": {
+        "label": "Wildlands",
+        "prompt": (
+            "Set the creature in untamed wildlands with windswept terrain, cliffs, tall grass, dust, and distant scale cues."
+        ),
+    },
+    "ruins": {
+        "label": "Ancient Ruins",
+        "prompt": (
+            "Place the creature among ancient ruins with broken arches, weathered stone, relic fragments, and subtle overgrowth."
+        ),
+    },
+    "astral": {
+        "label": "Astral",
+        "prompt": (
+            "Use an astral environment with nebula light, starfields, floating debris, and cosmic depth behind the creature."
+        ),
+    },
+    "storm": {
+        "label": "Stormfront",
+        "prompt": (
+            "Frame the creature against a stormfront with charged clouds, rain haze, wind, and distant lightning."
+        ),
+    },
+    "volcanic": {
+        "label": "Volcanic",
+        "prompt": (
+            "Use a volcanic setting with obsidian rock, lava glow, smoke plumes, ember drift, and heat shimmer."
+        ),
+    },
+    "glacial": {
+        "label": "Frozen",
+        "prompt": (
+            "Use a frozen landscape with glacial light, frost crystals, snow haze, icy ground, and cold atmospheric depth."
+        ),
+    },
+    "abyssal": {
+        "label": "Abyssal",
+        "prompt": (
+            "Place the creature above an abyssal void with eerie mist, dim bioluminescence, darkness, and immense depth."
+        ),
+    },
+    "verdant": {
+        "label": "Verdant",
+        "prompt": (
+            "Use a verdant primordial environment with giant roots, dense foliage, filtered light, spores, and lush scale."
+        ),
+    },
+    "ossuary": {
+        "label": "Crimson Ossuary",
+        "prompt": (
+            "Place the creature in a blood-soaked ossuary of human remains, shattered bones, dark crimson pools, and battlefield aftermath."
+        ),
+    },
+    "bioluminescent_forest": {
+        "label": "Bioluminescent Forest",
+        "prompt": (
+            "Use a bioluminescent forest with glowing plants, luminous spores, drifting mist, and deep enchanted woodland light."
+        ),
+    },
+    "cute_clouds": {
+        "label": "Cute Clouds",
+        "prompt": (
+            "Use a whimsical cloudscape with soft pastel clouds, warm sunlight, airy depth, and charming dreamlike softness."
+        ),
+    },
+    "hell": {
+        "label": "Hellscape",
+        "prompt": (
+            "Place the creature in a hellish inferno of ash, brimstone, lava fissures, black rock, and oppressive red firelight."
+        ),
+    },
+    "desert": {
+        "label": "Desert Expanse",
+        "prompt": (
+            "Use a desert expanse with sweeping dunes, sun-bleached ruins, dust trails, and severe heat haze."
+        ),
+    },
+    "cathedral": {
+        "label": "Grand Cathedral",
+        "prompt": (
+            "Place the creature inside a grand cathedral with towering arches, stained-glass light shafts, and sacred monumental scale."
+        ),
+    },
+    "crystal_cavern": {
+        "label": "Crystal Cavern",
+        "prompt": (
+            "Use a crystal cavern filled with reflective mineral spires, refracted light, cave mist, and luminous facets."
+        ),
+    },
+    "moonlit_marsh": {
+        "label": "Moonlit Marsh",
+        "prompt": (
+            "Set the creature in a moonlit marsh with black water, reeds, fog banks, and cold silver moonlight."
+        ),
+    },
+    "sunken_temple": {
+        "label": "Sunken Temple",
+        "prompt": (
+            "Use a sunken temple with flooded stone halls, submerged relics, algae-covered carvings, and ancient aquatic ruin."
+        ),
+    },
+    "arcane_lab": {
+        "label": "Arcane Laboratory",
+        "prompt": (
+            "Place the creature inside an arcane laboratory with runic devices, alchemical vessels, magical machinery, and controlled mystical light."
+        ),
+    },
+    "fungal_grove": {
+        "label": "Fungal Grove",
+        "prompt": (
+            "Use a fungal grove filled with giant mushrooms, spores, damp earth, strange growths, and eerie natural biolight."
+        ),
+    },
+    "industrial_forge": {
+        "label": "Industrial Forge",
+        "prompt": (
+            "Set the creature in an industrial forge of chains, catwalks, furnaces, sparks, smoke, and molten metal glow."
+        ),
+    },
+    "royal_garden": {
+        "label": "Royal Garden",
+        "prompt": (
+            "Use an opulent royal garden with sculpted hedges, marble fountains, floral symmetry, and refined aristocratic atmosphere."
+        ),
+    },
+    "graveyard": {
+        "label": "Graveyard",
+        "prompt": (
+            "Place the creature in a graveyard of crooked tombstones, dead trees, drifting mist, and haunted nocturnal silence."
+        ),
+    },
+    "coral_reef": {
+        "label": "Coral Reef",
+        "prompt": (
+            "Use a coral reef environment with vivid corals, suspended particles, underwater light shafts, and layered ocean depth."
+        ),
+    },
+    "dreamscape": {
+        "label": "Dreamscape",
+        "prompt": (
+            "Set the creature in a surreal dreamscape of impossible geometry, floating fragments, strange gradients, and reality-bending atmosphere."
+        ),
+    },
+}
+
+SPLICE_STYLE_DATA = {
+    "auto": {
+        "label": "Forge's Choice",
+        "descriptor": None,
+        "prompt": (
+            "Let the forge choose the most fitting visual treatment for this creature while preserving a strong fantasy splash-art finish."
+        ),
+    },
+    "anime": {
+        "label": "Anime",
+        "descriptor": "anime-inspired",
+        "prompt": (
+            "Use polished anime fantasy illustration with expressive motion, strong silhouette design, crisp stylization, and heightened dramatic energy."
+        ),
+    },
+    "manga": {
+        "label": "Manga",
+        "descriptor": "manga-styled",
+        "prompt": (
+            "Use manga-inspired fantasy illustration with bold ink shapes, dramatic monochrome value design, speed, impact, and sharp expressive linework."
+        ),
+    },
+    "chibi": {
+        "label": "Chibi",
+        "descriptor": "chibi",
+        "prompt": (
+            "Use chibi fantasy styling with exaggerated proportions, oversized personality, cute readability, and playful creature charm without losing design clarity."
+        ),
+    },
+    "vintage": {
+        "label": "Vintage Illustration",
+        "descriptor": "vintage fantasy",
+        "prompt": (
+            "Use vintage fantasy illustration cues with aged print character, restrained palette choices, poster-like composition, and old-world mythic drama."
+        ),
+    },
+    "horror": {
+        "label": "Horror",
+        "descriptor": "horror-themed",
+        "prompt": (
+            "Use horror art direction with oppressive mood, disturbing anatomical emphasis, unsettling lighting, and a threatening nightmare presence."
+        ),
+    },
+    "dark_fantasy": {
+        "label": "Dark Fantasy",
+        "descriptor": "dark-fantasy",
+        "prompt": (
+            "Use dark fantasy styling with grim atmosphere, bleak grandeur, severe contrast, weathered textures, and ominous mythical weight."
+        ),
+    },
+    "gothic": {
+        "label": "Gothic",
+        "descriptor": "gothic",
+        "prompt": (
+            "Use gothic fantasy styling with cathedral-like severity, ornate darkness, spired silhouettes, solemn elegance, and haunted grandeur."
+        ),
+    },
+    "noir": {
+        "label": "Noir",
+        "descriptor": "noir",
+        "prompt": (
+            "Use noir-inspired creature art with hard shadow shapes, narrow highlights, moody contrast, smoke-like atmosphere, and cinematic menace."
+        ),
+    },
+    "storybook": {
+        "label": "Storybook",
+        "descriptor": "storybook",
+        "prompt": (
+            "Use storybook fantasy illustration with folkloric charm, painterly imagination, enchanted readability, and a sense of mythic wonder."
+        ),
+    },
+    "comic": {
+        "label": "Comic Splash",
+        "descriptor": "comic-book",
+        "prompt": (
+            "Use comic splash-page energy with bold graphic contrast, decisive outlines, dramatic posing, and stylized action clarity."
+        ),
+    },
+    "watercolor": {
+        "label": "Watercolor",
+        "descriptor": "watercolor",
+        "prompt": (
+            "Use watercolor fantasy illustration with controlled pigment blooms, layered washes, softened transitions, and elegant painterly atmosphere."
+        ),
+    },
+    "oil_painting": {
+        "label": "Oil Painting",
+        "descriptor": "oil-painted",
+        "prompt": (
+            "Use classical oil-painting treatment with rich brushwork, layered texture, dramatic chiaroscuro, and museum-scale fantasy gravitas."
+        ),
+    },
+    "ink_wash": {
+        "label": "Ink Wash",
+        "descriptor": "ink-wash",
+        "prompt": (
+            "Use ink-wash fantasy illustration with flowing brush rhythm, controlled bleed, misty negative space, and elegant atmospheric restraint."
+        ),
+    },
+    "stained_glass": {
+        "label": "Stained Glass",
+        "descriptor": "stained-glass",
+        "prompt": (
+            "Use stained-glass styling with luminous segmented color panes, strong leaded outlines, sacred symmetry, and jewel-toned radiance."
+        ),
+    },
+    "art_nouveau": {
+        "label": "Art Nouveau",
+        "descriptor": "art-nouveau",
+        "prompt": (
+            "Use Art Nouveau fantasy styling with sinuous curves, decorative organic framing, elegant silhouettes, and ornamental natural motifs."
+        ),
+    },
+    "baroque": {
+        "label": "Baroque",
+        "descriptor": "baroque",
+        "prompt": (
+            "Use baroque fantasy styling with lavish ornament, theatrical lighting, opulent grandeur, and intense dramatic movement."
+        ),
+    },
+    "surreal": {
+        "label": "Surreal",
+        "descriptor": "surrealist",
+        "prompt": (
+            "Use surreal fantasy art direction with dream logic, uncanny transformations, impossible spatial relationships, and poetic visual strangeness."
+        ),
+    },
+    "cel_shaded": {
+        "label": "Cel-Shaded",
+        "descriptor": "cel-shaded",
+        "prompt": (
+            "Use cel-shaded fantasy art with clean shape language, hard shadow blocks, vivid readability, and stylized game-art finish."
+        ),
+    },
+    "pixel": {
+        "label": "Pixel Art",
+        "descriptor": "pixel-art",
+        "prompt": (
+            "Use deliberate pixel-art styling with readable retro creature design, clean clustering, restrained dithering, and iconic silhouette clarity."
+        ),
+    },
+    "retro_rpg": {
+        "label": "Retro RPG",
+        "descriptor": "retro-RPG",
+        "prompt": (
+            "Use retro RPG fantasy art direction with classic 16-bit-era creature portrait energy, iconic readable forms, and nostalgic game-world charm."
+        ),
+    },
+    "low_poly": {
+        "label": "Low Poly",
+        "descriptor": "low-poly",
+        "prompt": (
+            "Use low-poly stylization with faceted geometry, simplified planes, bold lighting separation, and intentional 3D abstraction."
+        ),
+    },
+    "stop_motion": {
+        "label": "Stop-Motion",
+        "descriptor": "stop-motion",
+        "prompt": (
+            "Use stop-motion-inspired fantasy styling with handcrafted miniature texture, tactile sculpted forms, and practical diorama presence."
+        ),
+    },
+    "biomechanical": {
+        "label": "Biomechanical",
+        "descriptor": "biomechanical",
+        "prompt": (
+            "Use biomechanical fantasy styling with fused sinew and machinery, engineered anatomy, mechanical detail, and unnerving synthetic life."
+        ),
+    },
+    "cyberpunk": {
+        "label": "Cyberpunk",
+        "descriptor": "cyberpunk",
+        "prompt": (
+            "Use cyberpunk creature styling with neon tech-noir atmosphere, chrome accents, electric color contrast, and futuristic urban menace."
+        ),
+    },
+}
+
+
+class AutoSpliceReview(View):
+    """Interactive review system for auto splice"""
+    def __init__(self, ctx, pets, openai_client, timeout=300, save_id=None):
+        super().__init__(timeout=timeout)
+        self.ctx = ctx
+        self.pets = pets
+        self.openai_client = openai_client
+        self.message = None
+        self.confirmed = False
+        self.save_id = save_id
+        
+        # Add edit buttons for each pet (limited by Discord's component limit)
+        for i in range(min(len(pets), 10)):
+            button = Button(
+                label=f"Edit {i+1}", 
+                style=ButtonStyle.secondary, 
+                emoji="✏️",
+                custom_id=f"edit_{i}"
+            )
+            button.callback = self.create_edit_callback(i)
+            self.add_item(button)
+    
+    async def on_timeout(self):
+        """Save data when timeout occurs"""
+        if not self.confirmed and self.pets:
+            await self.save_auto_splice_data()
+            try:
+                await self.message.edit(content="⏰ **Auto splice timed out!** Data has been saved. Use `$resume_auto_splice` to continue later.", embed=None, view=None)
+            except:
+                pass
+    
+    async def save_auto_splice_data(self):
+        """Save auto splice data to JSON file"""
+        if not self.save_id:
+            self.save_id = f"auto_splice_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000, 9999)}"
+        
+        save_data = {
+            "save_id": self.save_id,
+            "created_at": datetime.datetime.utcnow().isoformat(),
+            "ctx_author_id": self.ctx.author.id,
+            "ctx_channel_id": self.ctx.channel.id,
+            "pets": self.pets
+        }
+        
+        # Load existing saves
+        saves = {}
+        if os.path.exists(AUTO_SPLICE_SAVE_FILE):
+            try:
+                with open(AUTO_SPLICE_SAVE_FILE, 'r') as f:
+                    saves = json.load(f)
+            except:
+                saves = {}
+        
+        # Add new save
+        saves[self.save_id] = save_data
+        
+        # Write back to file
+        try:
+            with open(AUTO_SPLICE_SAVE_FILE, 'w') as f:
+                json.dump(saves, f, indent=2, default=str)
+        except Exception as e:
+            print(f"Error saving auto splice data: {e}")
+    
+    async def remove_save_data(self):
+        """Remove save data after successful completion"""
+        if self.save_id and os.path.exists(AUTO_SPLICE_SAVE_FILE):
+            try:
+                with open(AUTO_SPLICE_SAVE_FILE, 'r') as f:
+                    saves = json.load(f)
+                
+                if self.save_id in saves:
+                    del saves[self.save_id]
+                    
+                    with open(AUTO_SPLICE_SAVE_FILE, 'w') as f:
+                        json.dump(saves, f, indent=2, default=str)
+            except Exception as e:
+                print(f"Error removing save data: {e}")
+    
+    def create_edit_callback(self, index):
+        async def edit_callback(interaction):
+            await self.edit_pet(interaction, index)
+        return edit_callback
+    
+    async def get_review_embed(self):
+        embed = discord.Embed(
+            title="🧬 Auto Splice Review",
+            description=f"Review your {len(self.pets)} spliced pets below. You have 5 minutes to confirm or edit.",
+            color=0x9C44DC
+        )
+        
+        for i, pet in enumerate(self.pets, 1):
+            embed.add_field(
+                name=f"{i}. {pet['name']}",
+                value=(
+                    f"**HP**: {pet['hp']} | **ATK**: {pet['attack']} | **DEF**: {pet['defense']}\n"
+                    f"**Element**: {pet['element']}\n"
+                    f"[🖼️ Image Link]({pet['url']})"
+                ),
+                inline=False
+            )
+        
+        embed.set_footer(text="Use the buttons below to confirm or edit specific pets.")
+        return embed
+    
+    @discord.ui.button(label="Confirm All", style=discord.ButtonStyle.success, emoji="✅")
+    async def confirm_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="✅ Confirmed! Creating pets...", embed=None, view=None)
+        self.confirmed = True
+        # Remove save data since we're confirming
+        await self.remove_save_data()
+        self.stop()
+    
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, emoji="❌")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="❌ Auto splice cancelled.", embed=None, view=None)
+        self.pets.clear()  # Signal to cancel
+        self.stop()
+    
+    async def edit_pet(self, interaction: discord.Interaction, index: int):
+        pet = self.pets[index]
+        
+        # Create edit submenu
+        edit_view = PetEditView(self.ctx, pet, self, index, self.openai_client)
+        
+        embed = discord.Embed(
+            title=f"Edit Pet #{index + 1}: {pet['name']}",
+            description="Choose what to edit:",
+            color=0x9C44DC
+        )
+        embed.add_field(
+            name="Current Details",
+            value=(
+                f"**Name**: {pet['name']}\n"
+                f"**HP**: {pet['hp']} | **ATK**: {pet['attack']} | **DEF**: {pet['defense']}\n"
+                f"**Element**: {pet['element']}"
+            ),
+            inline=False
+        )
+        embed.set_image(url=pet['url'])
+        
+        await interaction.response.edit_message(embed=embed, view=edit_view)
+
+class PetEditView(View):
+    """Edit submenu for individual pets"""
+    def __init__(self, ctx, pet, parent_view, pet_index, openai_client, timeout=300):
+        super().__init__(timeout=timeout)
+        self.ctx = ctx
+        self.pet = pet
+        self.parent_view = parent_view
+        self.pet_index = pet_index
+        self.openai_client = openai_client
+
+    def _get_preserved_splice_tag(self) -> str:
+        splice_type = str(self.pet.get("splice_type") or "").strip().upper()
+        tag_by_type = {
+            "FINAL": "[FINAL]",
+            "SPECIAL": "[SPECIAL]",
+            "UNSTABLE": "[UNSTABLE]",
+            "DESTABILIZED": "[DESTABILISED]",
+            "DESTABILISED": "[DESTABILISED]",
+        }
+        if splice_type in tag_by_type:
+            return tag_by_type[splice_type]
+
+        current_name = str(self.pet.get("name") or "").upper()
+        for tag in (
+            "[FINAL]",
+            "[SPECIAL]",
+            "[UNSTABLE]",
+            "[DESTABILISED]",
+        ):
+            if tag in current_name:
+                return tag
+        return ""
+
+    def _apply_preserved_splice_tag(self, raw_name: str) -> str:
+        cleaned = (raw_name or "").strip()
+        preserved_tag = self._get_preserved_splice_tag()
+        if not preserved_tag:
+            return cleaned
+
+        cleaned = re.sub(
+            r"\s+\[(FINAL|SPECIAL|UNSTABLE|DESTABILISED)\]\s*$",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        ).strip()
+        return f"{cleaned} {preserved_tag}" if cleaned else preserved_tag
+    
+    @discord.ui.button(label="1. Edit Name", style=discord.ButtonStyle.primary, emoji="📝")
+    async def edit_name(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="Please type the new name in chat, or type 'generate' to get AI suggestions:",
+            embed=None,
+            view=None
+        )
+        
+        def check(m):
+            return m.author.id == self.ctx.author.id and m.channel.id == self.ctx.channel.id
+        
+        try:
+            msg = await self.ctx.bot.wait_for('message', check=check, timeout=60)
+            
+            if msg.content.lower() == 'generate':
+                # Generate name suggestions using vision
+                await self.ctx.send("🤖 Generating name suggestions...")
+                
+                base_prompt = (
+                    "Look at this picture and propose exactly five unique "
+                    "names related to its features (max two words, do not place numbers next to each name ex. 1. <name> 2. <name> etc. 1 name per line)."
+                )
+
+                vision_msg = [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": base_prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": self.pet["url"], "detail": "auto"},
+                        },
+                    ],
+                }]
+
+                resp = await asyncio.to_thread(
+                    self.openai_client.chat.completions.create,
+                    model="gpt-5.4",
+                    messages=vision_msg,
+                )
+                raw_text = resp.choices[0].message.content
+
+                names = [
+                    x.strip(" .-")
+                    for x in raw_text.replace("\r", "").split("\n")
+                    if x.strip()
+                ][:5]
+                
+                if names:
+                    names_text = "\n".join(f'`{n + 1}` {nm}' for n, nm in enumerate(names))
+                    names_text += "\n\nChoose a number (1-5) or type a custom name:"
+                    
+                    await self.ctx.send(names_text)
+                    
+                    choice_msg = await self.ctx.bot.wait_for('message', check=check, timeout=60)
+                    choice = choice_msg.content.strip()
+                    
+                    if choice.isdigit() and 1 <= int(choice) <= len(names):
+                        self.pet['name'] = self._apply_preserved_splice_tag(
+                            names[int(choice) - 1]
+                        )
+                    else:
+                        self.pet['name'] = self._apply_preserved_splice_tag(choice)
+                else:
+                    await self.ctx.send("Failed to generate names. Please type a custom name:")
+                    custom_msg = await self.ctx.bot.wait_for('message', check=check, timeout=60)
+                    self.pet['name'] = self._apply_preserved_splice_tag(
+                        custom_msg.content
+                    )
+            else:
+                self.pet['name'] = self._apply_preserved_splice_tag(msg.content)
+            
+            await self.ctx.send(f"✅ Name updated to: **{self.pet['name']}**")
+            
+        except asyncio.TimeoutError:
+            await self.ctx.send("⏰ Timed out. Name not changed.")
+        
+        # Return to review
+        embed = await self.parent_view.get_review_embed()
+        await self.ctx.send(embed=embed, view=self.parent_view)
+    
+    @discord.ui.button(label="2. Edit Stats", style=discord.ButtonStyle.primary, emoji="⚔️")
+    async def edit_stats(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content=f"Enter new stats for **{self.pet['name']}** in the format:\n`hp,attack,defense,element`\n\nCurrent: {self.pet['hp']},{self.pet['attack']},{self.pet['defense']},{self.pet['element']}",
+            embed=None,
+            view=None
+        )
+        
+        def check(m):
+            return m.author.id == self.ctx.author.id and m.channel.id == self.ctx.channel.id
+        
+        try:
+            msg = await self.ctx.bot.wait_for('message', check=check, timeout=120)
+            parts = msg.content.split(",")
+            
+            if len(parts) >= 3:
+                self.pet['hp'] = int(parts[0].strip())
+                self.pet['attack'] = int(parts[1].strip())
+                self.pet['defense'] = int(parts[2].strip())
+                if len(parts) >= 4:
+                    self.pet['element'] = parts[3].strip().title()
+                
+                await self.ctx.send(f"✅ Stats updated for **{self.pet['name']}**!")
+            else:
+                await self.ctx.send("❌ Invalid format. Stats not changed.")
+                
+        except (asyncio.TimeoutError, ValueError):
+            await self.ctx.send("⏰ Timed out or invalid input. Stats not changed.")
+        
+        # Return to review
+        embed = await self.parent_view.get_review_embed()
+        await self.ctx.send(embed=embed, view=self.parent_view)
+    
+    @discord.ui.button(label="3. Edit Image", style=discord.ButtonStyle.primary, emoji="🖼️")
+    async def edit_image(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="Please upload a new image or paste an image URL:",
+            embed=None,
+            view=None
+        )
+        
+        def check(m):
+            return m.author.id == self.ctx.author.id and m.channel.id == self.ctx.channel.id
+        
+        try:
+            msg = await self.ctx.bot.wait_for('message', check=check, timeout=120)
+            process_cog = self.ctx.bot.get_cog("ProcessSplice")
+            
+            if msg.attachments:
+                # Handle file upload
+                attachment = msg.attachments[0]
+                if attachment.height:  # Verify it's an image
+                    if process_cog:
+                        image_bytes = await attachment.read()
+                        suffix = (pathlib.Path(attachment.filename or "").suffix or "").lower()
+                        if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+                            suffix = ".png"
+                        safe_name = process_cog._sanitize_storage_name(self.pet.get("name", "pet"))
+                        key = (
+                            f"pets/splices/{self.ctx.author.id}/{datetime.datetime.utcnow().strftime('%Y%m%d')}/"
+                            f"edit_{safe_name}_{secrets.token_hex(6)}{suffix}"
+                        )
+                        self.pet['url'] = await process_cog._r2_upload_bytes(
+                            image_bytes,
+                            key,
+                            content_type=attachment.content_type or mimetypes.guess_type(attachment.filename or "")[0] or "image/png",
+                        )
+                    else:
+                        self.pet['url'] = attachment.url
+                    await self.ctx.send(f"✅ Image updated for **{self.pet['name']}**!")
+                else:
+                    await self.ctx.send("❌ Invalid image file.")
+            else:
+                # Handle URL
+                new_url = msg.content.strip()
+                if process_cog:
+                    self.pet['url'] = await process_cog._ensure_pet_image_on_r2(
+                        image_url=new_url,
+                        user_id=self.ctx.author.id,
+                        pet_name=self.pet.get("name", "pet"),
+                        source_tag="edit",
+                    )
+                    await self.ctx.send(f"✅ Image URL imported to Cloudflare for **{self.pet['name']}**!")
+                else:
+                    self.pet['url'] = new_url
+                    await self.ctx.send(f"✅ Image URL updated for **{self.pet['name']}**!")
+                
+        except asyncio.TimeoutError:
+            await self.ctx.send("⏰ Timed out. Image not changed.")
+        except Exception as e:
+            await self.ctx.send(f"❌ Failed to update image: {e}")
+        
+        # Return to review
+        embed = await self.parent_view.get_review_embed()
+        await self.ctx.send(embed=embed, view=self.parent_view)
+    
+    @discord.ui.button(label="Back to Review", style=discord.ButtonStyle.secondary, emoji="⬅️")
+    async def back_to_review(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = await self.parent_view.get_review_embed()
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
+
+class SpliceRequestPaginator(View):
+    """A paginator for viewing pending splice requests"""
+    def __init__(self, ctx, splices, per_page=8):
+        super().__init__(timeout=180)
+        self.ctx = ctx
+        self.splices = splices
+        self.per_page = per_page
+        self.current_page = 0
+        self.total_pages = (len(splices) + per_page - 1) // per_page
+        self.message = None
+        self.current_time = datetime.datetime.now(datetime.timezone.utc)
+        self.prev_button = None
+        self.next_button = None
+        
+        # Add navigation buttons
+        self.add_buttons()
+        self._sync_navigation_buttons()
+    
+    def add_buttons(self):
+        """Add navigation buttons to the view"""
+        # Previous button
+        self.prev_button = Button(style=ButtonStyle.primary, emoji="⬅️", disabled=self.current_page == 0)
+        self.prev_button.callback = self.previous_page
+        self.add_item(self.prev_button)
+        
+        # Next button
+        self.next_button = Button(style=ButtonStyle.primary, emoji="➡️", disabled=self.current_page == self.total_pages - 1)
+        self.next_button.callback = self.next_page
+        self.add_item(self.next_button)
+        
+        # Close button
+        close_button = Button(style=ButtonStyle.danger, emoji="❌")
+        close_button.callback = self.close_view
+        self.add_item(close_button)
+
+    def _sync_navigation_buttons(self):
+        """Keep button states in sync with the current page."""
+        if self.prev_button:
+            self.prev_button.disabled = self.current_page <= 0
+        if self.next_button:
+            self.next_button.disabled = self.current_page >= self.total_pages - 1
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("This paginator is not for you.", ephemeral=True)
+            return False
+        return True
+    
+    def get_current_page_embed(self):
+        """Generate the embed for the current page"""
+        start_idx = self.current_page * self.per_page
+        end_idx = start_idx + self.per_page
+        current_splices = self.splices[start_idx:end_idx]
+        
+        embed = discord.Embed(
+            title="🧬 Pending Splice Requests",
+            description=(
+                f"Page {self.current_page + 1}/{self.total_pages} • "
+                f"{len(self.splices)} total request{'s' if len(self.splices) != 1 else ''}"
+            ),
+            color=0x9C44DC
+        )
+        
+        for splice in current_splices:
+            user = self.ctx.bot.get_user(splice["user_id"]) or f"Unknown User ({splice['user_id']})"
+            
+            # Handle time difference
+            created_at = splice["created_at"]
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=datetime.timezone.utc)
+                
+            time_diff = self.current_time - created_at
+            hours_ago = time_diff.total_seconds() / 3600
+            
+            if hours_ago < 1:
+                time_str = f"{int(hours_ago * 60)}m ago"
+            elif hours_ago < 24:
+                time_str = f"{int(hours_ago)}h ago"
+            else:
+                days = int(hours_ago / 24)
+                time_str = f"{days}d ago"
+
+            background_label = SPLICE_BACKGROUND_THEME_DATA.get(
+                splice["background_theme"] if "background_theme" in splice else "auto",
+                SPLICE_BACKGROUND_THEME_DATA["auto"],
+            )["label"]
+            style_label = SPLICE_STYLE_DATA.get(
+                splice["splice_style"] if "splice_style" in splice else "auto",
+                SPLICE_STYLE_DATA["auto"],
+            )["label"]
+            
+            embed.add_field(
+                name=f"#{splice['id']} • {user} • {time_str}",
+                value=(
+                    f"🐾 **{splice['pet1_name']}** (`{splice['pet1_default']}`) + "
+                    f"**{splice['pet2_name']}** (`{splice['pet2_default']}`)\n"
+                    f"🎨 Background: `{background_label}`\n"
+                    f"🖌️ Style: `{style_label}`\n"
+                    f"🔗 [Pet 1]({splice['pet1_url']}) • [Pet 2]({splice['pet2_url']})"
+                ),
+                inline=False
+            )
+        
+        # Add a field with all suggested names for the current page if they exist
+        suggested_names = [
+            s['temp_name']
+            for s in current_splices 
+            if s.get('temp_name')
+        ]
+        
+        if suggested_names:
+            embed.add_field(
+                name="Suggested Names",
+                value=", ".join(suggested_names),
+                inline=False
+            )
+        
+        return embed
+    
+    async def update_message(self, interaction: discord.Interaction):
+        """Update the message with current page"""
+        self._sync_navigation_buttons()
+        embed = self.get_current_page_embed()
+        if interaction.response.is_done():
+            await self.message.edit(embed=embed, view=self)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def previous_page(self, interaction):
+        """Go to the previous page"""
+        if self.current_page > 0:
+            self.current_page -= 1
+        await self.update_message(interaction)
+    
+    async def next_page(self, interaction):
+        """Go to the next page"""
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+        await self.update_message(interaction)
+    
+    async def close_view(self, interaction):
+        """Close the paginator"""
+        await interaction.response.defer()
+        await interaction.message.delete()
+        self.stop()
+    
+    async def start(self):
+        """Start the paginator"""
+        self.message = await self.ctx.send(embed=self.get_current_page_embed(), view=self)
+        return self.message
+
+
+class SpliceTreeTargetPicker(View):
+    """Owner-only, paginated picker for ambiguous splice-tree names."""
+
+    def __init__(
+        self,
+        ctx,
+        candidates: list[dict],
+        *,
+        selection_action: str = "Building its splice tree...",
+        timeout: float = 180,
+    ):
+        super().__init__(timeout=timeout)
+        if len(candidates) < 2:
+            raise ValueError("SpliceTreeTargetPicker requires at least two candidates")
+        self.ctx = ctx
+        self.candidates = candidates
+        self.page = 0
+        self.per_page = 25
+        self.selected_key: Optional[str] = None
+        self.selection_action = selection_action
+        self.message: Optional[discord.Message] = None
+        self.allowed_user_ids = {int(ctx.author.id)}
+        alt_invoker_id = getattr(ctx, "alt_invoker_id", None)
+        if alt_invoker_id is not None:
+            self.allowed_user_ids.add(int(alt_invoker_id))
+        self._sync_components()
+
+    @property
+    def total_pages(self) -> int:
+        return max(1, (len(self.candidates) + self.per_page - 1) // self.per_page)
+
+    def _sync_components(self) -> None:
+        self.clear_items()
+        start = self.page * self.per_page
+        page_candidates = self.candidates[start:start + self.per_page]
+        options = []
+        for offset, candidate in enumerate(page_candidates):
+            options.append(
+                SelectOption(
+                    label=str(candidate["label"])[:100],
+                    value=str(start + offset),
+                    description=str(candidate.get("description") or "")[:100] or None,
+                )
+            )
+
+        picker = Select(
+            placeholder=f"Choose the exact creature ({self.page + 1}/{self.total_pages})",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+        picker.callback = self._choose
+        self.add_item(picker)
+
+        if self.total_pages > 1:
+            previous = Button(
+                label="Previous",
+                style=ButtonStyle.secondary,
+                disabled=self.page == 0,
+                row=1,
+            )
+            previous.callback = self._previous
+            self.add_item(previous)
+            following = Button(
+                label="Next",
+                style=ButtonStyle.secondary,
+                disabled=self.page >= self.total_pages - 1,
+                row=1,
+            )
+            following.callback = self._next
+            self.add_item(following)
+
+        cancel = Button(label="Cancel", style=ButtonStyle.danger, row=1)
+        cancel.callback = self._cancel
+        self.add_item(cancel)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if int(interaction.user.id) in self.allowed_user_ids:
+            return True
+        await interaction.response.send_message(
+            "This splice picker belongs to another player.", ephemeral=True
+        )
+        return False
+
+    async def _choose(self, interaction: discord.Interaction) -> None:
+        selected_index = int(interaction.data["values"][0])
+        candidate = self.candidates[selected_index]
+        self.selected_key = candidate["key"]
+        await interaction.response.edit_message(
+            content=f"Selected **{candidate['label']}**. {self.selection_action}",
+            view=None,
+        )
+        self.stop()
+
+    async def _previous(self, interaction: discord.Interaction) -> None:
+        self.page = max(0, self.page - 1)
+        self._sync_components()
+        await interaction.response.edit_message(view=self)
+
+    async def _next(self, interaction: discord.Interaction) -> None:
+        self.page = min(self.total_pages - 1, self.page + 1)
+        self._sync_components()
+        await interaction.response.edit_message(view=self)
+
+    async def _cancel(self, interaction: discord.Interaction) -> None:
+        await interaction.response.edit_message(
+            content="Splice selection cancelled.", view=None
+        )
+        self.stop()
+
+
+
+
+class ProcessSplice(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self._splice_bg_lock = threading.Lock()
+        self._splice_bg_checked = False
+        self._splice_bg_source = None
+        self._splice_bg_cache = OrderedDict()
+        self._splice_bg_cache_max_entries = 2
+        self._splice_bg_cache_max_pixels = 8_000_000
+        self._r2_client = None
+        self._r2_bucket = None
+        self._r2_public_base_url = None
+
+    @staticmethod
+    def _normalize_splice_background_theme(theme_key: Optional[str]) -> str:
+        key = str(theme_key or "auto").strip().lower()
+        if key not in SPLICE_BACKGROUND_THEME_DATA:
+            return "auto"
+        return key
+
+    def _get_splice_background_theme_label(self, theme_key: Optional[str]) -> str:
+        key = self._normalize_splice_background_theme(theme_key)
+        return SPLICE_BACKGROUND_THEME_DATA[key]["label"]
+
+    def _get_splice_background_theme_prompt(self, theme_key: Optional[str]) -> str:
+        key = self._normalize_splice_background_theme(theme_key)
+        return SPLICE_BACKGROUND_THEME_DATA[key]["prompt"]
+
+    @staticmethod
+    def _normalize_splice_style(style_key: Optional[str]) -> str:
+        key = str(style_key or "auto").strip().lower()
+        if key not in SPLICE_STYLE_DATA:
+            return "auto"
+        return key
+
+    def _get_splice_style_label(self, style_key: Optional[str]) -> str:
+        key = self._normalize_splice_style(style_key)
+        return SPLICE_STYLE_DATA[key]["label"]
+
+    def _get_splice_style_prompt(self, style_key: Optional[str]) -> str:
+        key = self._normalize_splice_style(style_key)
+        return SPLICE_STYLE_DATA[key]["prompt"]
+
+    def _get_splice_style_descriptor(self, style_key: Optional[str]) -> Optional[str]:
+        key = self._normalize_splice_style(style_key)
+        return SPLICE_STYLE_DATA[key]["descriptor"]
+
+    async def _ensure_splice_request_background_column(self, conn) -> None:
+        exists = await conn.fetchval(
+            "SELECT to_regclass('public.splice_requests') IS NOT NULL;"
+        )
+        if not exists:
+            return
+        await conn.execute(
+            "ALTER TABLE splice_requests ADD COLUMN IF NOT EXISTS background_theme TEXT NOT NULL DEFAULT 'auto';"
+        )
+        await conn.execute(
+            "ALTER TABLE splice_requests ADD COLUMN IF NOT EXISTS splice_style TEXT NOT NULL DEFAULT 'auto';"
+        )
+
+    async def _ensure_splice_tree_tracking_table(self, conn) -> None:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS splice_tree_tracks (
+                user_id BIGINT NOT NULL,
+                target_key TEXT NOT NULL,
+                target_name TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (user_id, target_key)
+            );
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS splice_tree_tracks_user_created_idx
+            ON splice_tree_tracks(user_id, created_at ASC, target_name ASC);
+            """
+        )
+
+    @staticmethod
+    def _normalize_splice_tree_name(value: Optional[str]) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        return cleaned.casefold()
+
+    @staticmethod
+    def _splice_tree_recipe_key(recipe_id) -> Optional[str]:
+        try:
+            parsed = int(recipe_id)
+        except (TypeError, ValueError):
+            return None
+        return f"splice:{parsed}" if parsed > 0 else None
+
+    @staticmethod
+    def _splice_tree_recipe_id(value: Optional[str]) -> Optional[int]:
+        match = re.fullmatch(
+            r"(?:splice\s*:\s*|\[?s\s*)(\d+)\]?",
+            str(value or "").strip(),
+            flags=re.IGNORECASE,
+        )
+        return int(match.group(1)) if match else None
+
+    async def _load_splice_tree_catalog(self, conn) -> dict:
+        monsters_data = await asyncio.to_thread(self._load_monsters_json_data)
+
+        base_url_by_key = {}
+        canonical_by_key = {}
+        aliases_by_name = defaultdict(list)
+        base_keys = set()
+
+        def register_alias(value, node_key):
+            key = self._normalize_splice_tree_name(value)
+            if key is None:
+                return None
+            if node_key not in aliases_by_name[key]:
+                aliases_by_name[key].append(node_key)
+            return key
+
+        base_monster_names = set()
+        if isinstance(monsters_data, dict):
+            for monster_list in monsters_data.values():
+                if not isinstance(monster_list, list):
+                    continue
+                for monster in monster_list:
+                    if not isinstance(monster, dict):
+                        continue
+                    m_name = monster.get("name")
+                    m_url = monster.get("url")
+                    key = self._normalize_splice_tree_name(m_name)
+                    if key is None:
+                        continue
+                    canonical_by_key.setdefault(key, m_name.strip())
+                    register_alias(m_name, key)
+                    base_keys.add(key)
+                    base_monster_names.add(canonical_by_key[key])
+                    if isinstance(m_url, str) and m_url.strip() and key not in base_url_by_key:
+                        base_url_by_key[key] = m_url.strip()
+
+        completed_rows = await conn.fetch(
+            """
+            SELECT id, pet1_default, pet2_default, result_name,
+                   base_result_name, url, created_at,
+                   parent1_splice_combination_id,
+                   parent2_splice_combination_id
+            FROM splice_combinations
+            ORDER BY created_at ASC, id ASC
+            """
+        )
+
+        node_url_by_key = dict(base_url_by_key)
+        recipe_rows_by_id = {}
+        recipe_key_by_id = {}
+        current_recipe_keys_by_name = defaultdict(list)
+        generation_edges = []
+
+        for row in completed_rows:
+            recipe_id = int(row["id"])
+            child_key = self._splice_tree_recipe_key(recipe_id)
+            if child_key is None:
+                continue
+            recipe_rows_by_id[recipe_id] = row
+            recipe_key_by_id[recipe_id] = child_key
+            display_name = (
+                str(row["result_name"] or row["base_result_name"] or f"Splice S{recipe_id}").strip()
+            )
+            canonical_by_key[child_key] = display_name
+            for alias_index, alias in enumerate((row["result_name"], row["base_result_name"])):
+                alias_key = register_alias(alias, child_key)
+                if alias_index == 0 and alias_key:
+                    current_recipe_keys_by_name[alias_key].append(child_key)
+            register_alias(f"S{recipe_id}", child_key)
+            register_alias(f"[S{recipe_id}]", child_key)
+            row_url = row["url"]
+            if child_key and isinstance(row_url, str) and row_url.strip():
+                node_url_by_key[child_key] = row_url.strip()
+
+        unresolved_parent_links = 0
+        parent_pair_by_child = {}
+
+        def resolve_parent(row, slot, link_column):
+            nonlocal unresolved_parent_links
+            linked_key = recipe_key_by_id.get(row[link_column])
+            if linked_key:
+                return linked_key
+
+            parent_name = row[slot]
+            parent_name_key = self._normalize_splice_tree_name(parent_name)
+            if parent_name_key is None:
+                return None
+
+            recipe_matches = current_recipe_keys_by_name.get(parent_name_key, ())
+            is_base = parent_name_key in base_keys
+            if len(recipe_matches) == 1 and not is_base:
+                return recipe_matches[0]
+            if not recipe_matches and is_base:
+                return parent_name_key
+
+            # A missing identifier plus a colliding legacy name cannot be
+            # resolved safely. Keep it visible as an unknown leaf instead of
+            # silently attaching the first recipe with that name.
+            unresolved_parent_links += 1
+            unknown_key = f"unresolved:{int(row['id'])}:{slot}"
+            canonical_by_key[unknown_key] = str(parent_name or "Unknown parent").strip()
+            return unknown_key
+
+        for recipe_id, row in recipe_rows_by_id.items():
+            child_key = recipe_key_by_id[recipe_id]
+            p1_key = resolve_parent(
+                row, "pet1_default", "parent1_splice_combination_id"
+            )
+            p2_key = resolve_parent(
+                row, "pet2_default", "parent2_splice_combination_id"
+            )
+            if p1_key or p2_key:
+                parent_pair_by_child[child_key] = (p1_key, p2_key, recipe_id)
+            if p1_key and p2_key:
+                generation_edges.append((p1_key, p2_key, child_key))
+
+        generation_by_key = {key: -1 for key in base_keys}
+        max_passes = max(1, len(generation_edges) + 1)
+        for _ in range(max_passes):
+            changed = False
+            for p1_key, p2_key, child_key in generation_edges:
+                parent1_gen = generation_by_key.get(p1_key)
+                parent2_gen = generation_by_key.get(p2_key)
+                if parent1_gen is None or parent2_gen is None:
+                    continue
+
+                child_gen = max(parent1_gen, parent2_gen) + 1
+                existing = generation_by_key.get(child_key)
+                if existing is None or child_gen < existing:
+                    generation_by_key[child_key] = child_gen
+                    changed = True
+            if not changed:
+                break
+
+        return {
+            "base_monster_names": base_monster_names,
+            "canonical_by_key": canonical_by_key,
+            "aliases_by_name": dict(aliases_by_name),
+            "base_keys": base_keys,
+            "recipe_rows_by_id": recipe_rows_by_id,
+            "node_url_by_key": node_url_by_key,
+            "generation_by_key": generation_by_key,
+            "parent_pair_by_child": parent_pair_by_child,
+            "unresolved_parent_links": unresolved_parent_links,
+            "completed_row_count": len(completed_rows),
+        }
+
+    def _find_splice_tree_target_keys(self, requested_name: str, catalog: dict) -> list[str]:
+        requested_key = self._normalize_splice_tree_name(requested_name)
+        if requested_key is None:
+            return []
+
+        canonical_by_key = catalog["canonical_by_key"]
+        direct_recipe_id = self._splice_tree_recipe_id(requested_name)
+        if direct_recipe_id is not None:
+            direct_key = self._splice_tree_recipe_key(direct_recipe_id)
+            return [direct_key] if direct_key in canonical_by_key else []
+
+        exact = list(catalog.get("aliases_by_name", {}).get(requested_key, ()))
+        if requested_key in canonical_by_key and requested_key not in exact:
+            exact.append(requested_key)
+        if exact:
+            return sorted(set(exact), key=lambda key: self._splice_tree_target_sort_key(key, catalog))
+
+        matches = []
+        for alias, candidate_keys in catalog.get("aliases_by_name", {}).items():
+            if requested_key in alias:
+                matches.extend(candidate_keys)
+        return sorted(
+            set(matches), key=lambda key: self._splice_tree_target_sort_key(key, catalog)
+        )
+
+    def _resolve_splice_tree_target_key(self, requested_name: str, catalog: dict) -> Optional[str]:
+        candidates = self._find_splice_tree_target_keys(requested_name, catalog)
+        return candidates[0] if len(candidates) == 1 else None
+
+    def _splice_tree_target_sort_key(self, node_key: str, catalog: dict):
+        recipe_id = self._splice_tree_recipe_id(node_key)
+        return (
+            0 if recipe_id is not None else 1,
+            self._normalize_splice_tree_name(
+                catalog.get("canonical_by_key", {}).get(node_key, node_key)
+            ) or "",
+            recipe_id or 0,
+        )
+
+    def _splice_tree_picker_candidates(self, node_keys: list[str], catalog: dict) -> list[dict]:
+        candidates = []
+        rows_by_id = catalog.get("recipe_rows_by_id", {})
+        generations = catalog.get("generation_by_key", {})
+        canonical = catalog.get("canonical_by_key", {})
+        for node_key in node_keys:
+            recipe_id = self._splice_tree_recipe_id(node_key)
+            name = canonical.get(node_key, node_key)
+            if recipe_id is None:
+                label = f"Base · {name}"
+                description = "Base monster"
+            else:
+                row = rows_by_id.get(recipe_id, {})
+                label = f"S{recipe_id} · {name}"
+                generation = generations.get(node_key)
+                generation_text = f"Gen {generation}" if isinstance(generation, int) else "Gen ?"
+                parents = " + ".join(
+                    str(value).strip()
+                    for value in (row.get("pet1_default"), row.get("pet2_default"))
+                    if value
+                )
+                description = f"{generation_text} · {parents}" if parents else generation_text
+            candidates.append(
+                {"key": node_key, "label": label, "description": description}
+            )
+        return candidates
+
+    def _build_splice_genealogy_tree(
+        self,
+        root_key: Optional[str],
+        parent_pair_by_child: dict,
+        *,
+        max_tree_depth: int = 80,
+    ) -> dict:
+        def build_gene_node(node_key, depth=0, lineage=None):
+            if lineage is None:
+                lineage = set()
+
+            node = {
+                "key": node_key,
+                "depth": depth,
+                "left": None,
+                "right": None,
+                "order": None,
+                "x": 0,
+                "y": 0,
+                "completed": False,
+                "directly_owned": False,
+                "propagates_completion": False,
+                "completion_locked": False,
+            }
+
+            if node_key is None:
+                return node
+            if depth >= max_tree_depth:
+                return node
+            if node_key in lineage:
+                return node
+
+            parent_pair = parent_pair_by_child.get(node_key)
+            if not parent_pair:
+                return node
+
+            p1_key, p2_key, _ = parent_pair
+            next_lineage = set(lineage)
+            next_lineage.add(node_key)
+
+            if p1_key:
+                node["left"] = build_gene_node(p1_key, depth + 1, next_lineage)
+            if p2_key:
+                node["right"] = build_gene_node(p2_key, depth + 1, next_lineage)
+            return node
+
+        return build_gene_node(root_key)
+
+    @staticmethod
+    def _collect_splice_tree_nodes(root_node: dict) -> list:
+        tree_nodes = []
+
+        def collect(node):
+            if node is None:
+                return
+            tree_nodes.append(node)
+            collect(node["left"])
+            collect(node["right"])
+
+        collect(root_node)
+        return tree_nodes
+
+    @staticmethod
+    def _assign_splice_tree_inorder(root_node: dict) -> int:
+        leaf_counter = 0
+
+        def assign_inorder(node):
+            nonlocal leaf_counter
+            if node is None:
+                return None
+
+            left_order = assign_inorder(node["left"])
+            right_order = assign_inorder(node["right"])
+
+            if node["left"] is None and node["right"] is None:
+                node["order"] = float(leaf_counter)
+                leaf_counter += 1
+            else:
+                valid = [value for value in (left_order, right_order) if value is not None]
+                if valid:
+                    node["order"] = sum(valid) / len(valid)
+                else:
+                    node["order"] = float(leaf_counter)
+                    leaf_counter += 1
+            return node["order"]
+
+        assign_inorder(root_node)
+        return max(1, leaf_counter)
+
+    def _annotate_splice_tree_completion(
+        self,
+        root_node: dict,
+        owned_keys: set[str],
+        tracked_root_keys: set[str],
+    ) -> list[str]:
+        missing_keys = []
+
+        def walk(node, inherited_completion=False):
+            if node is None:
+                return
+
+            node_key = node.get("key")
+            directly_owned = node_key in owned_keys if node_key else False
+            completion_locked = directly_owned and node_key in tracked_root_keys
+            completed = inherited_completion or directly_owned
+            propagates_completion = completed and not completion_locked
+
+            node["directly_owned"] = directly_owned
+            node["completion_locked"] = completion_locked
+            node["completed"] = completed
+            node["propagates_completion"] = propagates_completion
+
+            if node_key and not completed:
+                missing_keys.append(node_key)
+
+            walk(node.get("left"), propagates_completion)
+            walk(node.get("right"), propagates_completion)
+
+        walk(root_node)
+        return missing_keys
+
+    async def _get_user_owned_splice_keys(
+        self,
+        conn,
+        user_id: int,
+        catalog: Optional[dict] = None,
+    ) -> set[str]:
+        rows = await conn.fetch(
+            """
+            SELECT COALESCE(NULLIF(BTRIM(default_name), ''), NULLIF(BTRIM(name), '')) AS raw_name,
+                   splice_combination_id
+            FROM monster_pets
+            WHERE user_id = $1
+            """,
+            user_id,
+        )
+        owned_keys = set()
+        for row in rows:
+            recipe_key = self._splice_tree_recipe_key(row["splice_combination_id"])
+            if recipe_key:
+                owned_keys.add(recipe_key)
+                continue
+
+            legacy_name_key = self._normalize_splice_tree_name(row["raw_name"])
+            if not legacy_name_key:
+                continue
+            if not catalog:
+                owned_keys.add(legacy_name_key)
+                continue
+
+            # Unlinked base pets remain unambiguous even if a splice later
+            # reused their display name. Unlinked legacy splice pets are only
+            # credited when their name maps to one exact identity.
+            if legacy_name_key in catalog.get("base_keys", set()):
+                owned_keys.add(legacy_name_key)
+                continue
+            matches = catalog.get("aliases_by_name", {}).get(legacy_name_key, ())
+            if len(matches) == 1:
+                owned_keys.add(matches[0])
+        return owned_keys
+
+    def _canonicalize_tracked_splice_targets(
+        self,
+        tracked_targets: list[dict],
+        catalog: dict,
+    ) -> list[dict]:
+        """Resolve legacy name keys only when they identify exactly one node."""
+        canonicalized = []
+        canonical_by_key = catalog.get("canonical_by_key", {})
+        aliases_by_name = catalog.get("aliases_by_name", {})
+        for tracked_target in tracked_targets:
+            item = dict(tracked_target)
+            target_key = item.get("target_key")
+            item["_stored_target_key"] = target_key
+            if target_key not in canonical_by_key:
+                legacy_key = self._normalize_splice_tree_name(target_key)
+                matches = aliases_by_name.get(legacy_key, ()) if legacy_key else ()
+                if len(matches) == 1:
+                    item["target_key"] = matches[0]
+                    item["target_name"] = canonical_by_key.get(
+                        matches[0], item.get("target_name")
+                    )
+            canonicalized.append(item)
+        return canonicalized
+
+    async def _get_user_tracked_splice_targets(self, conn, user_id: int) -> list[dict]:
+        await self._ensure_splice_tree_tracking_table(conn)
+        rows = await conn.fetch(
+            """
+            SELECT target_key, target_name, created_at
+            FROM splice_tree_tracks
+            WHERE user_id = $1
+            ORDER BY created_at ASC, target_name ASC
+            LIMIT 10
+            """,
+            user_id,
+        )
+        return [dict(row) for row in rows]
+
+    def _build_tracked_splice_target_summaries(
+        self,
+        tracked_targets: list[dict],
+        *,
+        parent_pair_by_child: dict,
+        canonical_by_key: dict,
+        generation_by_key: dict,
+        owned_keys: set[str],
+        tracked_root_keys: set[str],
+    ) -> list[dict]:
+        summaries = []
+        for tracked_target in tracked_targets[:10]:
+            target_key = tracked_target.get("target_key")
+            if not target_key:
+                continue
+
+            root_node = self._build_splice_genealogy_tree(target_key, parent_pair_by_child)
+            missing_keys = self._annotate_splice_tree_completion(root_node, owned_keys, tracked_root_keys)
+
+            missing_preview = []
+            seen_preview = set()
+            for key in missing_keys:
+                if key in seen_preview:
+                    continue
+                seen_preview.add(key)
+                missing_preview.append(canonical_by_key.get(key, key))
+                if len(missing_preview) >= 3:
+                    break
+
+            missing_display_lines = []
+            counted_missing = OrderedDict()
+            for key in missing_keys:
+                counted_missing[key] = counted_missing.get(key, 0) + 1
+
+            for key, required_count in counted_missing.items():
+                generation = generation_by_key.get(key)
+                source_label = "T9" if generation == -1 else "Splice"
+                name_text = canonical_by_key.get(key, key)
+                count_text = f" x{required_count}" if required_count > 1 else ""
+                missing_display_lines.append(
+                    f"{name_text}{count_text} -- {source_label}"
+                )
+
+            summaries.append(
+                {
+                    "target_key": target_key,
+                    "target_name": canonical_by_key.get(
+                        target_key,
+                        tracked_target.get("target_name") or target_key,
+                    ),
+                    "generation": generation_by_key.get(target_key),
+                    "owned": target_key in owned_keys,
+                    "remaining_count": len(missing_keys),
+                    "missing_preview": missing_preview,
+                    "missing_display_lines": missing_display_lines,
+                }
+            )
+
+        return summaries
+
+    def _get_splice_level_bonus_pct(self, level: int | None) -> float:
+        if not level:
+            return 0.0
+        pets_cog = self.bot.get_cog("Pets")
+        max_level = int(getattr(pets_cog, "PET_MAX_LEVEL", 100))
+        level_bonus_per_level = float(getattr(pets_cog, "PET_LEVEL_STAT_BONUS", 0.01))
+        effective_level = max(1, min(int(level or 1), max_level))
+        splice_level_bonus_multiplier = 0.5
+        level_bonus = effective_level * level_bonus_per_level * splice_level_bonus_multiplier
+        return round(level_bonus * 100, 1)
+
+    def _get_splice_creation_bonus_pct(
+        self,
+        pet1_level: int | None,
+        pet2_level: int | None,
+    ) -> float:
+        pet1_bonus_pct = self._get_splice_level_bonus_pct(pet1_level)
+        pet2_bonus_pct = self._get_splice_level_bonus_pct(pet2_level)
+        return round((pet1_bonus_pct + pet2_bonus_pct) / 2, 1)
+
+    def _apply_splice_creation_bonus_pct(
+        self,
+        hp: int | float | None,
+        attack: int | float | None,
+        defense: int | float | None,
+        bonus_pct: float | None,
+    ) -> tuple[int, int, int]:
+        multiplier = 1 + (float(bonus_pct or 0) / 100.0)
+        adjusted_hp = int(round(float(hp or 0) * multiplier))
+        adjusted_attack = int(round(float(attack or 0) * multiplier))
+        adjusted_defense = int(round(float(defense or 0) * multiplier))
+        return adjusted_hp, adjusted_attack, adjusted_defense
+
+    async def _persist_processed_splice_pet(
+        self,
+        conn,
+        pet: dict,
+        *,
+        hp_iv: int | float,
+        attack_iv: int | float,
+        defense_iv: int | float,
+        growth_time,
+        iv_percentage: int | float,
+    ) -> tuple[int, int]:
+        """Create one result pet with an immutable recipe link."""
+        async with conn.transaction():
+            reservation = await reserve_splice_combination(
+                conn,
+                parent1_name=pet["pet1_default"],
+                parent2_name=pet["pet2_default"],
+                proposed_result_name=pet["name"],
+                hp=pet["hp"],
+                attack=pet["attack"],
+                defense=pet["defense"],
+                element=pet["element"],
+                url=pet["url"],
+                parent1_pet_id=pet.get("pet1_id"),
+                parent2_pet_id=pet.get("pet2_id"),
+            )
+            recipe = reservation.row
+
+            # A concurrently discovered parent pair must reuse the canonical
+            # recipe rather than persisting a second stat/name variant.
+            pet["name"] = recipe["result_name"]
+            pet["hp"] = int(recipe["hp"])
+            pet["attack"] = int(recipe["attack"])
+            pet["defense"] = int(recipe["defense"])
+            pet["element"] = recipe["element"]
+            pet["url"] = recipe["url"]
+
+            creation_bonus_pct = 0.0
+            if reservation.created:
+                creation_bonus_pct = await self._get_splice_creation_bonus_pct_for_ids(
+                    conn,
+                    pet.get("pet1_id"),
+                    pet.get("pet2_id"),
+                )
+            baby_hp, baby_attack, baby_defense = self._apply_splice_creation_bonus_pct(
+                round(pet["hp"] * 0.25),
+                round(pet["attack"] * 0.25),
+                round(pet["defense"] * 0.25),
+                creation_bonus_pct,
+            )
+            baby_hp += hp_iv
+            baby_attack += attack_iv
+            baby_defense += defense_iv
+
+            new_pet_id = await conn.fetchval(
+                """
+                INSERT INTO monster_pets (
+                    user_id, name, hp, attack, defense, element, default_name,
+                    url, growth_stage, growth_time, "IV", splice_combination_id
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7,
+                    $8, $9, $10, $11, $12
+                )
+                RETURNING id;
+                """,
+                pet["user_id"],
+                pet["name"],
+                baby_hp,
+                baby_attack,
+                baby_defense,
+                pet["element"],
+                pet["name"],
+                pet["url"],
+                "baby",
+                growth_time,
+                iv_percentage,
+                int(recipe["id"]),
+            )
+            await link_created_splice_result(
+                conn,
+                request_id=pet.get("splice_id"),
+                pet_id=int(new_pet_id),
+                splice_id=int(recipe["id"]),
+                result_name=pet["name"],
+            )
+        return int(new_pet_id), int(recipe["id"])
+
+    async def _get_splice_creation_bonus_pct_for_ids(
+        self,
+        conn,
+        pet1_id: int | None,
+        pet2_id: int | None,
+    ) -> float:
+        parent_ids = [int(parent_id) for parent_id in (pet1_id, pet2_id) if parent_id]
+        if not parent_ids:
+            return 0.0
+
+        parent_rows = await conn.fetch(
+            """
+            SELECT id, COALESCE(level, 1) AS level
+            FROM monster_pets
+            WHERE id = ANY($1::bigint[])
+            """,
+            parent_ids,
+        )
+        levels_by_id = {
+            int(row["id"]): max(1, int(row["level"] or 1))
+            for row in parent_rows
+        }
+        return self._get_splice_creation_bonus_pct(
+            levels_by_id.get(int(pet1_id), 0) if pet1_id else 0,
+            levels_by_id.get(int(pet2_id), 0) if pet2_id else 0,
+        )
+
+    async def _hydrate_splice_parent_stats(self, conn, rows):
+        if not rows:
+            return []
+
+        hydrated_rows = [dict(row) for row in rows]
+        parent_ids = sorted(
+            {
+                int(parent_id)
+                for row in hydrated_rows
+                for parent_id in (row.get("pet1_id"), row.get("pet2_id"))
+                if parent_id
+            }
+        )
+
+        if not parent_ids:
+            return hydrated_rows
+
+        parent_rows = await conn.fetch(
+            """
+            SELECT id, COALESCE(level, 1) AS level
+            FROM monster_pets
+            WHERE id = ANY($1::bigint[])
+            """,
+            parent_ids,
+        )
+        parents_by_id = {int(row["id"]): dict(row) for row in parent_rows}
+
+        for row in hydrated_rows:
+            pet1_level = 0
+            pet2_level = 0
+            for prefix in ("pet1", "pet2"):
+                parent_id = row.get(f"{prefix}_id")
+                if not parent_id:
+                    row[f"{prefix}_level"] = 0
+                    row[f"{prefix}_level_bonus_pct"] = 0.0
+                    continue
+
+                parent = parents_by_id.get(int(parent_id))
+                if not parent:
+                    row[f"{prefix}_level"] = 0
+                    row[f"{prefix}_level_bonus_pct"] = 0.0
+                    continue
+
+                level = max(1, int(parent.get("level") or 1))
+                row[f"{prefix}_level"] = level
+                row[f"{prefix}_level_bonus_pct"] = self._get_splice_level_bonus_pct(level)
+                if prefix == "pet1":
+                    pet1_level = level
+                else:
+                    pet2_level = level
+
+            row["splice_creation_bonus_pct"] = self._get_splice_creation_bonus_pct(
+                pet1_level,
+                pet2_level,
+            )
+
+        return hydrated_rows
+
+    def _build_batch_splice_ai_prompt(
+        self,
+        theme_key: Optional[str],
+        style_key: Optional[str] = None,
+    ) -> str:
+        background_prompt = self._get_splice_background_theme_prompt(theme_key)
+        style_prompt = self._get_splice_style_prompt(style_key)
+        return (
+            "Fuse these two monsters into one impossible hybrid creature. "
+            "Merge their strongest visual traits into a single anatomically coherent fantasy beast. "
+            "Show exactly one fully visible creature in a dynamic pose with clean silhouette readability. "
+            "Use dramatic lighting, strong focal clarity, and a polished finish appropriate to the chosen style. "
+            f"Visual style direction: {style_prompt} "
+            f"Background direction: {background_prompt} "
+            "If the selected style implies painterly, graphic, retro, sculptural, or mosaic-like rendering, commit fully to that look instead of generic splash-art realism. "
+            "Keep the environment secondary to the creature, with no extra creatures, no humanoids, no text, and no collage effect."
+        )
+
+    def _create_openai_client(self):
+        openai_key = self.bot.config.external.openai
+        if not openai_key:
+            raise ValueError("Missing OpenAI key: bot.config.external.openai")
+        return OpenAI(api_key=openai_key)
+
+    def _get_r2_client(self):
+        if self._r2_client is not None:
+            return self._r2_client
+
+        ext = getattr(self.bot.config, "external", None)
+        account_id = (getattr(ext, "r2_account_id", None) or "").strip()
+        access_key_id = (getattr(ext, "r2_access_key_id", None) or "").strip()
+        secret_access_key = (getattr(ext, "r2_secret_access_key", None) or "").strip()
+        bucket = (getattr(ext, "r2_bucket", None) or "").strip()
+        public_base_url = (getattr(ext, "r2_public_base_url", None) or "").strip().rstrip("/")
+        endpoint_url = (getattr(ext, "r2_endpoint_url", None) or "").strip()
+
+        missing = []
+        if not account_id and not endpoint_url:
+            missing.append("R2_ACCOUNT_ID (or R2_ENDPOINT_URL)")
+        if not access_key_id:
+            missing.append("R2_ACCESS_KEY_ID")
+        if not secret_access_key:
+            missing.append("R2_SECRET_ACCESS_KEY")
+        if not bucket:
+            missing.append("R2_BUCKET")
+
+        if missing:
+            raise RuntimeError(f"Missing R2 configuration: {', '.join(missing)}")
+
+        if not endpoint_url:
+            endpoint_url = f"https://{account_id}.r2.cloudflarestorage.com"
+
+        self._r2_client = boto3.client(
+            "s3",
+            endpoint_url=endpoint_url,
+            aws_access_key_id=access_key_id,
+            aws_secret_access_key=secret_access_key,
+            region_name="auto",
+        )
+        self._r2_bucket = bucket
+        self._r2_public_base_url = public_base_url
+        return self._r2_client
+
+    @staticmethod
+    def _normalize_r2_key(key: str) -> str:
+        return key.lstrip("/")
+
+    def _build_r2_public_url(self, key: str) -> str:
+        if not self._r2_public_base_url:
+            raise RuntimeError(
+                "Missing R2_PUBLIC_BASE_URL. Configure a public domain (or r2.dev URL) for persisted image URLs."
+            )
+        encoded_key = quote(key, safe="/-_.~")
+        return f"{self._r2_public_base_url}/{encoded_key}"
+
+    async def _r2_upload_bytes(
+        self,
+        data: bytes,
+        key: str,
+        *,
+        content_type: Optional[str] = None,
+    ) -> str:
+        client = self._get_r2_client()
+        object_key = self._normalize_r2_key(key)
+        content_type = content_type or mimetypes.guess_type(object_key)[0] or "application/octet-stream"
+
+        await asyncio.to_thread(
+            client.put_object,
+            Bucket=self._r2_bucket,
+            Key=object_key,
+            Body=data,
+            ContentType=content_type,
+        )
+        return self._build_r2_public_url(object_key)
+
+    async def _r2_upload_temp_and_get_url(
+        self,
+        data: bytes,
+        key: str,
+        *,
+        expires_in: int = 900,
+        content_type: Optional[str] = None,
+    ) -> str:
+        client = self._get_r2_client()
+        object_key = self._normalize_r2_key(key)
+        content_type = content_type or mimetypes.guess_type(object_key)[0] or "application/octet-stream"
+
+        await asyncio.to_thread(
+            client.put_object,
+            Bucket=self._r2_bucket,
+            Key=object_key,
+            Body=data,
+            ContentType=content_type,
+        )
+
+        if self._r2_public_base_url:
+            return self._build_r2_public_url(object_key)
+
+        return await asyncio.to_thread(
+            lambda: client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": self._r2_bucket, "Key": object_key},
+                ExpiresIn=expires_in,
+            )
+        )
+
+    async def _r2_delete_object(self, key: str) -> None:
+        client = self._get_r2_client()
+        object_key = self._normalize_r2_key(key)
+        await asyncio.to_thread(
+            client.delete_object,
+            Bucket=self._r2_bucket,
+            Key=object_key,
+        )
+
+    @staticmethod
+    def _sanitize_storage_name(value: str, *, fallback: str = "pet") -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", (value or "").strip())
+        cleaned = cleaned.strip("._")
+        return cleaned[:80] or fallback
+
+    def _is_r2_public_url(self, url: str) -> bool:
+        normalized_url = (url or "").strip()
+        base = (self._r2_public_base_url or "").rstrip("/")
+        return bool(base and normalized_url.startswith(f"{base}/"))
+
+    async def _download_image_bytes(self, url: str, *, timeout_seconds: int = 30) -> bytes:
+        normalized_url = (url or "").strip()
+        if not normalized_url:
+            raise RuntimeError("Cannot download image: empty URL.")
+
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds, connect=15, sock_connect=15, sock_read=timeout_seconds)
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        }
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(normalized_url, headers=headers, allow_redirects=True) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"Image download failed with status {response.status}.")
+                data = await response.read()
+                if not data:
+                    raise RuntimeError("Image download returned empty bytes.")
+                return data
+
+    async def _ensure_pet_image_on_r2(
+        self,
+        *,
+        image_url: Optional[str],
+        user_id: int,
+        pet_name: str,
+        source_tag: str,
+    ) -> str:
+        """
+        Ensure pet image URLs persisted in DB are Cloudflare R2-hosted.
+        If URL is not already on configured public R2 base, download and re-upload.
+        """
+        normalized_url = (image_url or "").strip()
+        self._get_r2_client()  # ensure config/client are available
+
+        if normalized_url and self._is_r2_public_url(normalized_url):
+            return normalized_url
+
+        image_bytes = await self._download_image_bytes(normalized_url)
+        parsed_path = normalized_url.split("?", 1)[0].split("#", 1)[0]
+        suffix = (pathlib.Path(parsed_path).suffix or "").lower()
+        if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+            suffix = ".png"
+
+        safe_name = self._sanitize_storage_name(pet_name, fallback="pet")
+        key = (
+            f"pets/splices/{int(user_id)}/{datetime.datetime.utcnow().strftime('%Y%m%d')}/"
+            f"{source_tag}_{safe_name}_{secrets.token_hex(6)}{suffix}"
+        )
+        content_type = mimetypes.guess_type(f"file{suffix}")[0] or "image/png"
+        return await self._r2_upload_bytes(image_bytes, key, content_type=content_type)
+
+    def _get_pixelcut_key(self) -> str:
+        external = getattr(self.bot.config, "external", None)
+        pixelcut_key = (getattr(external, "pixelcut_key", None) or "").strip()
+        if not pixelcut_key:
+            raise RuntimeError("Missing PixelCut configuration: external.pixelcut_key")
+        return pixelcut_key
+
+    @staticmethod
+    def _image_has_transparency(image_bytes: bytes) -> bool:
+        try:
+            image = Image.open(BytesIO(image_bytes))
+            if image.mode not in ("RGBA", "LA") and "transparency" not in image.info:
+                return False
+
+            if image.mode != "RGBA":
+                image = image.convert("RGBA")
+
+            alpha = image.getchannel("A")
+            min_alpha, _ = alpha.getextrema()
+            return min_alpha < 255
+        except Exception:
+            return False
+
+    async def _pixelcut_remove_background_from_url(
+        self,
+        image_url: str,
+        *,
+        attempts: int = 3,
+        timeout_seconds: int = 45,
+    ) -> bytes:
+        pixelcut_key = self._get_pixelcut_key()
+        pixelcut_url = "https://api.developer.pixelcut.ai/v1/remove-background"
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-API-KEY": pixelcut_key,
+        }
+        payload = json.dumps({"image_url": image_url, "format": "png"})
+        image_download_headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        }
+
+        timeout = aiohttp.ClientTimeout(
+            total=timeout_seconds,
+            connect=15,
+            sock_connect=15,
+            sock_read=timeout_seconds,
+        )
+        last_error = None
+
+        for attempt in range(1, max(1, attempts) + 1):
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(pixelcut_url, headers=headers, data=payload) as response:
+                        raw = await response.text()
+                        if response.status != 200:
+                            detail = raw[:500].replace("\n", " ")
+                            # Retry only for rate limits / transient upstream errors.
+                            if response.status in {429, 500, 502, 503, 504} and attempt < attempts:
+                                await asyncio.sleep(min(2 ** (attempt - 1), 4))
+                                continue
+                            raise RuntimeError(f"PixelCut status {response.status}: {detail}")
+
+                        try:
+                            data = json.loads(raw)
+                        except json.JSONDecodeError:
+                            raise RuntimeError("PixelCut returned non-JSON response.")
+
+                        result_url = (data.get("result_url") or "").strip()
+                        if not result_url:
+                            raise RuntimeError("PixelCut response missing result_url.")
+
+                    async with session.get(
+                        result_url,
+                        headers=image_download_headers,
+                        allow_redirects=True,
+                    ) as image_response:
+                        if image_response.status != 200:
+                            if image_response.status in {429, 500, 502, 503, 504} and attempt < attempts:
+                                await asyncio.sleep(min(2 ** (attempt - 1), 4))
+                                continue
+                            raise RuntimeError(
+                                f"PixelCut result download failed with status {image_response.status}."
+                            )
+
+                        result_bytes = await image_response.read()
+                        if not result_bytes:
+                            raise RuntimeError("PixelCut returned empty image bytes.")
+                        if not self._image_has_transparency(result_bytes):
+                            raise RuntimeError(
+                                "PixelCut returned an image without transparency (background likely unchanged)."
+                            )
+                        return result_bytes
+            except Exception as exc:
+                last_error = exc
+                if attempt < attempts:
+                    await asyncio.sleep(min(2 ** (attempt - 1), 4))
+
+        raise RuntimeError(f"PixelCut failed after {attempts} attempt(s): {last_error}")
+
+    async def _remove_background_with_fallback(
+        self,
+        ctx: commands.Context,
+        *,
+        img_url: Optional[str] = None,
+        img_bytes: Optional[bytes] = None,
+        filename: str = "temp.png",
+        attempts_per_source: int = 3,
+    ) -> bytes:
+        """
+        Remove image background using PixelCut with multiple source fallbacks:
+        source URL -> Discord temp URL -> R2 temp URL.
+        """
+        if not img_url and not img_bytes:
+            raise ValueError("Need either img_url or img_bytes")
+
+        candidate_sources: List[Tuple[str, str]] = []
+        failure_notes: List[str] = []
+        temp_message: Optional[discord.Message] = None
+        temp_r2_key: Optional[str] = None
+        safe_filename = pathlib.Path(filename or "temp.png").name or "temp.png"
+
+        if img_url:
+            candidate_sources.append(("provided URL", img_url))
+
+        if img_bytes:
+            try:
+                temp_message = await ctx.channel.send(
+                    file=discord.File(BytesIO(img_bytes), filename=safe_filename)
+                )
+                if temp_message.attachments:
+                    candidate_sources.append(("Discord temp URL", temp_message.attachments[0].url))
+                else:
+                    failure_notes.append("Discord temp upload produced no attachment URL.")
+            except Exception as exc:
+                failure_notes.append(f"Discord temp URL setup failed: {exc}")
+
+            content_type = mimetypes.guess_type(safe_filename)[0] or "image/png"
+            temp_r2_key = (
+                f"temp/pixelcut_{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}_"
+                f"{secrets.token_hex(6)}_{safe_filename}"
+            )
+            try:
+                r2_temp_url = await self._r2_upload_temp_and_get_url(
+                    img_bytes,
+                    temp_r2_key,
+                    expires_in=900,
+                    content_type=content_type,
+                )
+                candidate_sources.append(("R2 temp URL", r2_temp_url))
+            except Exception as exc:
+                temp_r2_key = None
+                failure_notes.append(f"R2 temp upload failed: {exc}")
+
+        # Keep unique URLs in order.
+        deduped_sources: List[Tuple[str, str]] = []
+        seen_urls = set()
+        for label, url in candidate_sources:
+            if url and url not in seen_urls:
+                deduped_sources.append((label, url))
+                seen_urls.add(url)
+
+        try:
+            for label, url in deduped_sources:
+                try:
+                    return await self._pixelcut_remove_background_from_url(
+                        url,
+                        attempts=attempts_per_source,
+                    )
+                except Exception as exc:
+                    failure_notes.append(f"{label} failed: {exc}")
+
+            details = "; ".join(failure_notes) if failure_notes else "No valid image source URL was available."
+            raise RuntimeError(details)
+        finally:
+            if temp_message is not None:
+                try:
+                    await temp_message.delete()
+                except Exception:
+                    pass
+
+            if temp_r2_key:
+                try:
+                    await self._r2_delete_object(temp_r2_key)
+                except Exception:
+                    pass
+        
+    async def get_player_data(self, user_id):
+        """Get player's quest progress and character data"""
+        async with self.bot.pool.acquire() as conn:
+            # Check if player has started the quest
+            quest_data = await conn.fetchrow(
+                "SELECT * FROM splicing_quest WHERE user_id = $1", user_id)
+            
+            character = await conn.fetchrow(
+                "SELECT name, god, money FROM profile WHERE profile.user = $1", user_id)
+            
+            if not character:
+                return None
+                
+            if not quest_data:
+                return {
+                    "quest_started": False,
+                    "name": character["name"],
+                    "god": character["god"],
+                    "money": character["money"],
+                    "shards": 0,
+                    "primer": False,
+                    "forge_built": False
+                }
+            
+            return {
+                "quest_started": True,
+                "name": character["name"],
+                "god": character["god"],
+                "money": character["money"],
+                "shards": quest_data["shards_collected"],
+                "primer": quest_data["primer_found"],
+                "forge_built": quest_data["crucible_built"]
+            }
+
+    async def suggest_element(self, element1, element2):
+        """Suggest an element for the spliced pet based on parent elements"""
+        # Normalize elements to consistent case
+        e1 = element1.title() if element1 else "Unknown"
+        e2 = element2.title() if element2 else "Unknown"
+        
+        # List of standard elements
+        standard_elements = [
+            "Fire", "Water", "Wind", "Earth", "Nature", 
+            "Electric", "Corrupted", "Dark", "Light", "Ice"
+        ]
+        
+        # If both parents have valid elements, just pick one of them
+        if e1 != "Unknown" and e2 != "Unknown":
+            # If both have the same element, always keep it
+            if e1 == e2:
+                return e1
+            # Otherwise randomly choose one of the parent elements
+            return random.choice([e1, e2])
+        
+        # If one parent has an unknown element, use the known one
+        if e1 != "Unknown":
+            return e1
+        if e2 != "Unknown":
+            return e2
+        
+        # If both are unknown, pick a random standard element
+        return random.choice(standard_elements)
+    
+    async def allocate_iv_points(self, total_points):
+        """Distribute IV points between HP, Attack, and Defense"""
+        # Get three random values that sum to total_points
+        r1 = random.random()
+        r2 = random.random()
+        r3 = random.random()
+        
+        # Normalize so they sum to 1
+        total = r1 + r2 + r3
+        if total == 0:  # Avoid division by zero
+            r1, r2, r3 = 0.33, 0.33, 0.34
+        else:
+            r1, r2, r3 = r1/total, r2/total, r3/total
+        
+        # Distribute points according to normalized values
+        hp_iv = int(r1 * total_points)
+        attack_iv = int(r2 * total_points)
+        defense_iv = int(r3 * total_points)
+        
+        # Ensure all points are allocated by assigning any remainder to HP
+        remainder = total_points - (hp_iv + attack_iv + defense_iv)
+        hp_iv += remainder
+        
+        return hp_iv, attack_iv, defense_iv
+
+    def _load_default_pve_monster_names(self):
+        """Load base monster names from monsters.json used by PvE."""
+        with open("monsters.json", "r", encoding="utf-8") as f:
+            monsters_data = json.load(f)
+
+        base_names = set()
+        if isinstance(monsters_data, dict):
+            for monster_list in monsters_data.values():
+                if not isinstance(monster_list, list):
+                    continue
+                for monster in monster_list:
+                    if not isinstance(monster, dict):
+                        continue
+                    name = monster.get("name")
+                    if isinstance(name, str):
+                        cleaned = name.strip()
+                        if cleaned:
+                            base_names.add(cleaned)
+        return base_names
+
+    def _load_default_pve_monsters(self):
+        """Load full base monster records from monsters.json, keyed by name."""
+        with open("monsters.json", "r", encoding="utf-8") as f:
+            monsters_data = json.load(f)
+
+        by_name = {}
+        if isinstance(monsters_data, dict):
+            for monster_list in monsters_data.values():
+                if not isinstance(monster_list, list):
+                    continue
+                for monster in monster_list:
+                    if not isinstance(monster, dict):
+                        continue
+                    name = monster.get("name")
+                    if isinstance(name, str) and name.strip():
+                        by_name.setdefault(name.strip(), monster)
+        return by_name
+
+    def _build_splice_generation_map(self, base_monster_names, completed_rows):
+        """
+        Build a generation map where:
+        - Base PvE monsters are treated as generation -1 parents.
+        - Child generation = max(parent_generations) + 1.
+        """
+        generation_by_name = {name: -1 for name in base_monster_names}
+        max_passes = max(1, len(completed_rows) + 1)
+
+        for _ in range(max_passes):
+            changed = False
+            for row in completed_rows:
+                pet1_default = row["pet1_default"]
+                pet2_default = row["pet2_default"]
+                result_name = row["result_name"]
+
+                if not pet1_default or not pet2_default or not result_name:
+                    continue
+
+                if not isinstance(pet1_default, str) or not isinstance(pet2_default, str) or not isinstance(result_name, str):
+                    continue
+
+                pet1_default = pet1_default.strip()
+                pet2_default = pet2_default.strip()
+                result_name = result_name.strip()
+                if not pet1_default or not pet2_default or not result_name:
+                    continue
+
+                parent1_gen = generation_by_name.get(pet1_default)
+                parent2_gen = generation_by_name.get(pet2_default)
+                if parent1_gen is None or parent2_gen is None:
+                    continue
+
+                child_gen = max(parent1_gen, parent2_gen) + 1
+                existing = generation_by_name.get(result_name)
+
+                # Keep canonical base-monster mapping untouched.
+                if existing == -1:
+                    continue
+
+                if existing is None or child_gen < existing:
+                    generation_by_name[result_name] = child_gen
+                    changed = True
+
+            if not changed:
+                break
+
+        return generation_by_name
+
+    def _load_monsters_json_data(self):
+        with open("monsters.json", "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _build_splice_thumb(self, image_bytes: bytes, thumb_size: int):
+        with Image.open(BytesIO(image_bytes)) as source_img:
+            source_img = source_img.convert("RGBA")
+            return ImageOps.fit(source_img, (thumb_size, thumb_size), method=Image.LANCZOS)
+
+    def _build_splice_tree_fallback_image(self, image_bytes: bytes, fast_mode: bool = False):
+        with Image.open(BytesIO(image_bytes)) as source_img:
+            source_img = source_img.convert("RGB" if fast_mode else "RGBA")
+            fallback = source_img.resize(
+                (max(1024, source_img.width // 2), max(1024, source_img.height // 2)),
+                Image.LANCZOS,
+            )
+            output = BytesIO()
+            if fast_mode:
+                fallback.save(
+                    output,
+                    format="JPEG",
+                    quality=86,
+                    optimize=True,
+                    progressive=True,
+                    subsampling=2,
+                )
+            else:
+                fallback.save(output, format="PNG", optimize=True, compress_level=6)
+            return output.getvalue()
+
+    def _ensure_splice_bg_source_loaded(self):
+        background_candidates = [
+            "/home/fableadmin/FableRPG-FINAL/FableRPG-FINAL/Fable/cogs/process_splice/Base.png",
+            str(pathlib.Path(__file__).with_name("Base.png")),
+        ]
+
+        with self._splice_bg_lock:
+            checked = self._splice_bg_checked
+            bg_source = self._splice_bg_source
+
+        if checked:
+            return bg_source
+
+        loaded_source = None
+        for bg_path in background_candidates:
+            try:
+                if not os.path.exists(bg_path):
+                    continue
+                with Image.open(bg_path) as src:
+                    loaded_source = src.convert("RGBA")
+                break
+            except Exception:
+                continue
+
+        with self._splice_bg_lock:
+            self._splice_bg_checked = True
+            self._splice_bg_source = loaded_source
+            return self._splice_bg_source
+
+    def _get_splice_bg_anchor_for_canvas(
+        self,
+        width: int,
+        height: int,
+        source_anchor_x: int,
+        source_anchor_y: int,
+    ):
+        bg_source = self._ensure_splice_bg_source_loaded()
+        if bg_source is None:
+            return int(source_anchor_x), int(source_anchor_y)
+
+        src_w, src_h = bg_source.size
+        if src_w <= 0 or src_h <= 0:
+            return int(source_anchor_x), int(source_anchor_y)
+
+        anchor_x = max(0.0, min(float(source_anchor_x), float(src_w)))
+        anchor_y = max(0.0, min(float(source_anchor_y), float(src_h)))
+
+        scale = max(float(width) / float(src_w), float(height) / float(src_h))
+        scaled_w = float(src_w) * scale
+        scaled_h = float(src_h) * scale
+        crop_left = max(0.0, (scaled_w - float(width)) * 0.5)
+        crop_top = max(0.0, (scaled_h - float(height)) * 0.5)
+
+        out_x = int(round((anchor_x * scale) - crop_left))
+        out_y = int(round((anchor_y * scale) - crop_top))
+        return out_x, out_y
+
+    def _get_splice_tree_background(self, width: int, height: int):
+        cache_key = (int(width), int(height))
+
+        with self._splice_bg_lock:
+            cached = self._splice_bg_cache.get(cache_key)
+            if cached is not None:
+                self._splice_bg_cache.move_to_end(cache_key)
+                return cached.copy()
+
+        bg_source = self._ensure_splice_bg_source_loaded()
+
+        if bg_source is None:
+            return None
+
+        fitted = ImageOps.fit(
+            bg_source,
+            (width, height),
+            method=Image.LANCZOS,
+            centering=(0.5, 0.5),
+        )
+
+        if (width * height) <= self._splice_bg_cache_max_pixels:
+            with self._splice_bg_lock:
+                self._splice_bg_cache[cache_key] = fitted.copy()
+                self._splice_bg_cache.move_to_end(cache_key)
+                while len(self._splice_bg_cache) > self._splice_bg_cache_max_entries:
+                    self._splice_bg_cache.popitem(last=False)
+
+        return fitted
+
+    def _render_splice_tree_images(
+        self,
+        *,
+        width: int,
+        height: int,
+        title_band: int,
+        node_diameter: int,
+        spacing_x: float,
+        leaf_count: int,
+        side_gutter: int,
+        max_depth: int,
+        target_name: str,
+        target_generation,
+        unresolved_parent_links: int,
+        tree_nodes: list,
+        generation_by_key: dict,
+        canonical_by_key: dict,
+        thumbnails: dict,
+        tracked_target_summaries: Optional[list] = None,
+        fast_mode: bool = False,
+    ):
+        tracked_target_summaries = tracked_target_summaries or []
+        canvas = self._get_splice_tree_background(width, height)
+
+        if canvas is None:
+            canvas = Image.new("RGBA", (width, height), (12, 16, 24, 255))
+
+        draw = ImageDraw.Draw(canvas)
+        draw.rectangle([0, 0, width, title_band], fill=(10, 14, 22, 185))
+
+        def load_font(size_px, bold=False):
+            font_candidates = [
+                "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            ]
+            for font_path in font_candidates:
+                try:
+                    return ImageFont.truetype(font_path, size_px)
+                except Exception:
+                    continue
+            return ImageFont.load_default()
+
+        title_font = load_font(min(220, max(48, width // 24)), bold=True)
+        header_font = load_font(min(96, max(24, width // 64)), bold=False)
+        label_font = load_font(min(62, max(15, node_diameter // 4)), bold=True)
+        meta_font = load_font(min(42, max(12, node_diameter // 6)), bold=False)
+
+        dark_edge_color = (76, 150, 235)
+        complete_edge_color = (74, 214, 118)
+        edge_width = max(2, node_diameter // 14)
+
+        def draw_connectors(draw_ctx, line_width, *, glow=False):
+            for node in tree_nodes:
+                child_x = node["x"]
+                child_y = node["y"]
+                parents = [p for p in (node.get("left"), node.get("right")) if p is not None]
+                if not parents:
+                    continue
+                if glow and not node.get("propagates_completion"):
+                    continue
+                line_color = (
+                    (110, 255, 160, 155)
+                    if glow
+                    else (complete_edge_color if node.get("propagates_completion") else dark_edge_color)
+                )
+
+                if len(parents) == 2:
+                    p1 = parents[0]
+                    p2 = parents[1]
+                    left_parent, right_parent = (p1, p2) if p1["x"] <= p2["x"] else (p2, p1)
+
+                    connector_y = int(child_y + (left_parent["y"] - child_y) * 0.42)
+                    child_anchor_y = child_y + (node_diameter // 2)
+                    left_anchor_y = left_parent["y"] - (node_diameter // 2)
+                    right_anchor_y = right_parent["y"] - (node_diameter // 2)
+
+                    draw_ctx.line(
+                        [(child_x, child_anchor_y), (child_x, connector_y)],
+                        fill=line_color,
+                        width=line_width,
+                    )
+                    draw_ctx.line(
+                        [(left_parent["x"], connector_y), (right_parent["x"], connector_y)],
+                        fill=line_color,
+                        width=line_width,
+                    )
+                    draw_ctx.line(
+                        [(left_parent["x"], left_anchor_y), (left_parent["x"], connector_y)],
+                        fill=line_color,
+                        width=line_width,
+                    )
+                    draw_ctx.line(
+                        [(right_parent["x"], right_anchor_y), (right_parent["x"], connector_y)],
+                        fill=line_color,
+                        width=line_width,
+                    )
+                else:
+                    parent = parents[0]
+                    draw_ctx.line(
+                        [
+                            (child_x, child_y + (node_diameter // 2)),
+                            (parent["x"], parent["y"] - (node_diameter // 2)),
+                        ],
+                        fill=line_color,
+                        width=line_width,
+                    )
+
+        if not fast_mode:
+            glow_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            glow_draw = ImageDraw.Draw(glow_layer)
+            glow_width = max(edge_width + 4, edge_width * 4)
+            draw_connectors(glow_draw, glow_width, glow=True)
+            glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(radius=max(2, edge_width * 2)))
+            canvas.alpha_composite(glow_layer)
+
+        # Draw crisp connector lines on top of the glow.
+        draw_connectors(draw, edge_width)
+
+        def text_width(text, font):
+            text_bbox = draw.textbbox((0, 0), text, font=font)
+            return text_bbox[2] - text_bbox[0]
+
+        def wrap_text_to_width(text, font, max_width):
+            if not text:
+                return [""]
+            words = text.split()
+            if not words:
+                return [text]
+
+            effective_max_width = max(20, max_width - 4)
+            lines = []
+            current = ""
+            for word in words:
+                if not current:
+                    current = word
+                    continue
+                candidate = f"{current} {word}"
+                if text_width(candidate, font) <= effective_max_width:
+                    current = candidate
+                else:
+                    lines.append(current)
+                    current = word
+            if current:
+                lines.append(current)
+            return lines
+
+        inter_node_gap = spacing_x if leaf_count > 1 else (width * 0.40)
+        base_label_max_width = int(
+            max(node_diameter * 1.75, min(width * 0.32, inter_node_gap * 1.55))
+        )
+        base_label_max_width = max(140, min(int(width * 0.42), base_label_max_width))
+        edge_safe_padding = max(24, int(width * 0.012), int(side_gutter * 0.55))
+        label_box_pad_x = max(8, edge_safe_padding // 2)
+
+        nodes_by_depth = defaultdict(list)
+        for node in tree_nodes:
+            nodes_by_depth[node["depth"]].append(node)
+        for depth_nodes in nodes_by_depth.values():
+            depth_nodes.sort(key=lambda n: n["x"])
+
+        neighbor_gap_by_node = {}
+        for depth_nodes in nodes_by_depth.values():
+            depth_node_count = len(depth_nodes)
+            for idx, depth_node in enumerate(depth_nodes):
+                left_gap = depth_node["x"] - depth_nodes[idx - 1]["x"] if idx > 0 else None
+                right_gap = (
+                    depth_nodes[idx + 1]["x"] - depth_node["x"]
+                    if idx < depth_node_count - 1
+                    else None
+                )
+                candidate_gaps = [g for g in (left_gap, right_gap) if g is not None]
+                nearest_gap = min(candidate_gaps) if candidate_gaps else inter_node_gap
+                neighbor_gap_by_node[id(depth_node)] = max(80, int(nearest_gap))
+
+        label_boxes_by_depth = defaultdict(list)
+
+        def rects_overlap(a, b, padding=5):
+            return not (
+                a[2] + padding < b[0]
+                or a[0] > b[2] + padding
+                or a[3] + padding < b[1]
+                or a[1] > b[3] + padding
+            )
+
+        # Draw nodes.
+        for node in sorted(tree_nodes, key=lambda n: (n["depth"], n["x"])):
+            node_key = node["key"]
+            cx = node["x"]
+            cy = node["y"]
+            node_gen = generation_by_key.get(node_key)
+            if node_gen == -1:
+                gen_text = "BASE"
+            elif isinstance(node_gen, int):
+                gen_text = f"G{node_gen}"
+            else:
+                gen_text = "UNK"
+            if node.get("completed"):
+                border = (74, 214, 118)
+                fill = (18, 60, 38)
+            elif node_gen == -1:
+                border = (72, 72, 82)
+                fill = (10, 10, 12)
+            elif isinstance(node_gen, int):
+                border = (58, 58, 66)
+                fill = (12, 12, 16)
+            else:
+                border = (88, 88, 96)
+                fill = (18, 18, 22)
+
+            radius = node_diameter // 2
+            left = cx - radius
+            top = cy - radius
+            right = cx + radius
+            bottom = cy + radius
+
+            draw.ellipse([left, top, right, bottom], fill=fill, outline=border, width=max(2, node_diameter // 20))
+
+            thumb = thumbnails.get(node_key)
+            if thumb:
+                inner = int(node_diameter * 0.80)
+                inner_left = cx - (inner // 2)
+                inner_top = cy - (inner // 2)
+                mask = Image.new("L", (inner, inner), 0)
+                mask_draw = ImageDraw.Draw(mask)
+                mask_draw.ellipse([0, 0, inner - 1, inner - 1], fill=255)
+                thumb_resized = ImageOps.fit(thumb, (inner, inner), method=Image.LANCZOS)
+                canvas.paste(thumb_resized, (inner_left, inner_top), mask)
+
+            node_name = canonical_by_key.get(node_key, node_key) or "Unknown"
+            local_gap = neighbor_gap_by_node.get(id(node), inter_node_gap)
+            local_label_max_width = max(
+                132, min(base_label_max_width, int(local_gap * 0.96))
+            )
+            name_lines = wrap_text_to_width(node_name, label_font, local_label_max_width)
+            line_spacing = max(4, label_font.size // 6)
+            line_metrics = []
+            for line in name_lines:
+                line_bbox = draw.textbbox((0, 0), line, font=label_font)
+                line_left = line_bbox[0]
+                line_top = line_bbox[1]
+                line_w = line_bbox[2] - line_bbox[0]
+                line_h = line_bbox[3] - line_bbox[1]
+                line_metrics.append((line, line_w, line_h, line_left, line_top))
+
+            label_w = max((metric[1] for metric in line_metrics), default=0)
+            label_h = sum(metric[2] for metric in line_metrics)
+            if len(line_metrics) > 1:
+                label_h += line_spacing * (len(line_metrics) - 1)
+
+            def make_label_rect(x, y):
+                return [
+                    x - label_box_pad_x,
+                    y - 6,
+                    x + label_w + label_box_pad_x,
+                    y + label_h + 6,
+                ]
+
+            label_x_max = max(edge_safe_padding, width - label_w - edge_safe_padding)
+
+            label_x = cx - (label_w // 2)
+            label_x = max(edge_safe_padding, min(label_x, label_x_max))
+            base_label_gap = 18 if node["depth"] <= 2 else 10
+            label_y = cy + radius + base_label_gap
+            label_rect = make_label_rect(label_x, label_y)
+
+            depth_label_boxes = label_boxes_by_depth[node["depth"]]
+            if depth_label_boxes:
+                max_horizontal_shift = max(0, int(local_gap * 0.45))
+                shift_step = max(8, label_font.size // 3)
+                candidate_offsets = [0]
+                if max_horizontal_shift > 0:
+                    for delta in range(shift_step, max_horizontal_shift + shift_step, shift_step):
+                        candidate_offsets.extend((-delta, delta))
+
+                placed = False
+                for offset in candidate_offsets:
+                    candidate_x = max(edge_safe_padding, min(label_x + offset, label_x_max))
+                    candidate_rect = make_label_rect(candidate_x, label_y)
+                    if not any(rects_overlap(candidate_rect, box) for box in depth_label_boxes):
+                        label_x = candidate_x
+                        label_rect = candidate_rect
+                        placed = True
+                        break
+
+                if not placed:
+                    stagger_step = max(8, label_font.size // 2)
+                    max_stagger = max(stagger_step, int(node_diameter * 0.35))
+                    used_stagger = 0
+                    while used_stagger < max_stagger and any(
+                        rects_overlap(label_rect, box) for box in depth_label_boxes
+                    ):
+                        label_y += stagger_step
+                        used_stagger += stagger_step
+                        label_rect = make_label_rect(label_x, label_y)
+
+            depth_label_boxes.append(label_rect)
+            draw.rectangle(
+                label_rect,
+                fill=(0, 0, 0),
+            )
+
+            line_y = label_y
+            for line, line_w, line_h, line_left, line_top in line_metrics:
+                line_box_x = label_x + ((label_w - line_w) // 2)
+                draw_x = line_box_x - line_left
+                draw_y = line_y - line_top
+                draw.text((draw_x, draw_y), line, font=label_font, fill=(245, 248, 255))
+                line_y += line_h + line_spacing
+
+            gen_bbox = draw.textbbox((0, 0), gen_text, font=meta_font)
+            gen_w = gen_bbox[2] - gen_bbox[0]
+            gen_h = gen_bbox[3] - gen_bbox[1]
+            gen_x = cx - (gen_w // 2)
+            gen_y = cy - radius - gen_h - 8
+            draw.rectangle(
+                [gen_x - 6, gen_y - 3, gen_x + gen_w + 6, gen_y + gen_h + 3],
+                fill=(0, 0, 0),
+            )
+            draw.text((gen_x, gen_y), gen_text, font=meta_font, fill=(232, 236, 245))
+
+        title_text = f"Splice Tree: {target_name}"
+        subtitle_text = (
+            f"Nodes: {len(tree_nodes)} | Levels: {max_depth + 1} | "
+            f"Target Gen: {target_generation if target_generation is not None else 'Unknown'} | "
+            f"Unlinked ambiguous parents: {unresolved_parent_links}"
+        )
+        title_y = max(26, int(title_band * 0.12))
+        subtitle_y = title_y + title_font.size + max(12, title_font.size // 4)
+        title_bbox = draw.textbbox((0, 0), title_text, font=title_font)
+        title_w = title_bbox[2] - title_bbox[0]
+        subtitle_bbox = draw.textbbox((0, 0), subtitle_text, font=header_font)
+        subtitle_w = subtitle_bbox[2] - subtitle_bbox[0]
+        title_x = max(12, (width - title_w) // 2)
+        subtitle_x = max(12, (width - subtitle_w) // 2)
+        draw.text((title_x, title_y), title_text, font=title_font, fill=(248, 250, 255))
+        draw.text((subtitle_x, subtitle_y), subtitle_text, font=header_font, fill=(190, 205, 230))
+
+        final_canvas = canvas
+        if tracked_target_summaries:
+            panel_gap = max(26, int(width * 0.02))
+            panel_width = max(520, min(980, int(width * 0.42)))
+            panel_header_font = load_font(min(64, max(34, panel_width // 9)), bold=True)
+            panel_meta_font = load_font(min(38, max(20, panel_width // 16)), bold=False)
+            panel_name_font = load_font(min(46, max(25, panel_width // 12)), bold=True)
+            panel_section_font = load_font(min(34, max(18, panel_width // 18)), bold=True)
+            panel_detail_font = load_font(min(30, max(17, panel_width // 19)), bold=False)
+
+            panel_left = width + panel_gap
+            panel_right = panel_left + panel_width
+            panel_pad = max(24, panel_width // 16)
+            panel_top = max(24, int(title_band * 0.10))
+
+            measurement_image = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
+            measurement_draw = ImageDraw.Draw(measurement_image)
+            sub_text = f"{len(tracked_target_summaries)}/10 active targets"
+            entry_gap = max(16, panel_width // 30)
+            entry_inner_pad = max(18, panel_width // 28)
+            text_max_width = panel_width - (entry_inner_pad * 2) - 20
+
+            def line_height_for(font):
+                bbox = measurement_draw.textbbox((0, 0), "Ag", font=font)
+                return bbox[3] - bbox[1]
+
+            name_line_height = line_height_for(panel_name_font)
+            meta_line_height = line_height_for(panel_meta_font)
+            section_line_height = line_height_for(panel_section_font)
+            detail_line_height = line_height_for(panel_detail_font)
+            header_line_height = line_height_for(panel_header_font)
+
+            header_text = "Tracked Splices"
+            header_bbox = measurement_draw.textbbox((0, 0), header_text, font=panel_header_font)
+            header_width = header_bbox[2] - header_bbox[0]
+            sub_bbox = measurement_draw.textbbox((0, 0), sub_text, font=panel_meta_font)
+            sub_width = sub_bbox[2] - sub_bbox[0]
+
+            measured_entries = []
+            total_entries_height = 0
+
+            for entry in tracked_target_summaries[:10]:
+                is_owned = bool(entry.get("owned"))
+                remaining_count = int(entry.get("remaining_count", 0))
+                entry_name = str(entry.get("target_name") or "Unknown")
+                entry_name_lines = wrap_text_to_width(entry_name, panel_name_font, text_max_width)
+                entry_name_lines = entry_name_lines[:2]
+
+                generation = entry.get("generation")
+                gen_text = (
+                    f"Gen {generation}" if isinstance(generation, int) and generation >= 0 else "Gen ?"
+                )
+                status_text = "Done" if remaining_count == 0 else f"{remaining_count} left"
+                meta_text = f"{gen_text} | {status_text}"
+
+                missing_lines = list(entry.get("missing_display_lines") or [])
+                if not missing_lines:
+                    missing_lines = ["None -- Complete"]
+
+                entry_height = (
+                    (entry_inner_pad * 2)
+                    + (len(entry_name_lines) * name_line_height)
+                    + max(8, entry_inner_pad // 3)
+                    + meta_line_height
+                    + max(14, entry_inner_pad // 2)
+                    + section_line_height
+                    + max(10, entry_inner_pad // 3)
+                    + (len(missing_lines) * detail_line_height)
+                    + (max(4, detail_line_height // 4) * max(0, len(missing_lines) - 1))
+                )
+                entry_height = max(entry_height, 180)
+                total_entries_height += entry_height
+                measured_entries.append(
+                    {
+                        "is_owned": is_owned,
+                        "entry_name_lines": entry_name_lines,
+                        "meta_text": meta_text,
+                        "missing_lines": missing_lines,
+                        "entry_height": entry_height,
+                    }
+                )
+
+            visible_entry_count = len(measured_entries)
+            header_block_height = (
+                panel_pad
+                + header_line_height
+                + 8
+                + meta_line_height
+                + max(18, panel_width // 18)
+            )
+            gaps_height = entry_gap * max(0, visible_entry_count - 1)
+            panel_content_height = header_block_height + total_entries_height + gaps_height + panel_pad
+            panel_bottom = max(
+                height - max(24, int(title_band * 0.12)),
+                panel_top + panel_content_height,
+            )
+            final_height = max(height, panel_bottom + max(24, int(title_band * 0.12)))
+
+            final_canvas = Image.new(
+                "RGBA",
+                (width + panel_gap + panel_width, final_height),
+                (4, 4, 6, 255),
+            )
+            final_canvas.paste(canvas, (0, 0))
+
+            panel_draw = ImageDraw.Draw(final_canvas)
+            panel_draw.rounded_rectangle(
+                [panel_left, panel_top, panel_right, panel_bottom],
+                radius=max(18, panel_width // 20),
+                fill=(0, 0, 0, 235),
+                outline=(56, 96, 148),
+                width=3,
+            )
+
+            header_x = panel_left + ((panel_width - header_width) // 2)
+            header_y = panel_top + panel_pad
+            panel_draw.text(
+                (header_x, header_y),
+                header_text,
+                font=panel_header_font,
+                fill=(242, 246, 255),
+            )
+
+            sub_x = panel_left + ((panel_width - sub_width) // 2)
+            sub_y = header_y + header_line_height + 8
+            panel_draw.text((sub_x, sub_y), sub_text, font=panel_meta_font, fill=(156, 166, 182))
+
+            current_y = sub_y + meta_line_height + max(18, panel_width // 18)
+
+            for measured_entry in measured_entries:
+                is_owned = measured_entry["is_owned"]
+                entry_fill = (16, 68, 40, 235) if is_owned else (12, 12, 15, 230)
+                entry_outline = (74, 214, 118) if is_owned else (76, 150, 235)
+                entry_rect = [
+                    panel_left + panel_pad,
+                    current_y,
+                    panel_right - panel_pad,
+                    current_y + measured_entry["entry_height"],
+                ]
+                panel_draw.rounded_rectangle(
+                    entry_rect,
+                    radius=max(12, panel_width // 28),
+                    fill=entry_fill,
+                    outline=entry_outline,
+                    width=2,
+                )
+
+                name_y = current_y + entry_inner_pad
+                for line in measured_entry["entry_name_lines"]:
+                    panel_draw.text(
+                        (entry_rect[0] + entry_inner_pad, name_y),
+                        line,
+                        font=panel_name_font,
+                        fill=(244, 248, 255),
+                    )
+                    name_y += name_line_height
+
+                meta_y = name_y + max(8, entry_inner_pad // 3)
+                panel_draw.text(
+                    (entry_rect[0] + entry_inner_pad, meta_y),
+                    measured_entry["meta_text"],
+                    font=panel_meta_font,
+                    fill=(188, 220, 195) if is_owned else (168, 205, 245),
+                )
+
+                section_y = meta_y + meta_line_height + max(14, entry_inner_pad // 2)
+                panel_draw.text(
+                    (entry_rect[0] + entry_inner_pad, section_y),
+                    "Missing Monsters",
+                    font=panel_section_font,
+                    fill=(242, 246, 255),
+                )
+
+                detail_y = section_y + section_line_height + max(10, entry_inner_pad // 3)
+                detail_gap = max(4, detail_line_height // 4)
+                for line in measured_entry["missing_lines"]:
+                    panel_draw.text(
+                        (entry_rect[0] + entry_inner_pad, detail_y),
+                        line,
+                        font=panel_detail_font,
+                        fill=(226, 234, 245),
+                    )
+                    detail_y += detail_line_height + detail_gap
+
+                current_y += measured_entry["entry_height"] + entry_gap
+
+        filename_safe_target = "".join(ch for ch in target_name if ch.isalnum() or ch in ("-", "_", " ")).strip()
+        if not filename_safe_target:
+            filename_safe_target = "splice_tree"
+        filename_safe_target = filename_safe_target.replace(" ", "_")[:80]
+
+        output = BytesIO()
+        if fast_mode:
+            jpeg_canvas = final_canvas.convert("RGB")
+            jpeg_canvas.save(
+                output,
+                format="JPEG",
+                quality=88,
+                optimize=True,
+                progressive=True,
+                subsampling=2,
+            )
+            output_ext = "jpg"
+        else:
+            final_canvas.save(output, format="PNG", optimize=True, compress_level=6)
+            output_ext = "png"
+        output_bytes = output.getvalue()
+
+        return filename_safe_target, output_bytes, output_ext
+
+    @is_gm()
+    @commands.command(
+        name="splicegenstats",
+        aliases=["splicegen", "splicegens", "splicegencount"],
+        hidden=True,
+    )
+    async def splice_generation_stats(self, ctx: commands.Context):
+        """
+        Count splice generation combinations.
+        Gen 0: default PvE + default PvE
+        Gen 1: any combo whose parents resolve to generation 1
+        """
+        try:
+            base_monster_names = self._load_default_pve_monster_names()
+        except FileNotFoundError:
+            return await ctx.send("Could not read `monsters.json` to determine default PvE monsters.")
+        except Exception as e:
+            return await ctx.send(f"Failed to load base monster data: {e}")
+
+        if not base_monster_names:
+            return await ctx.send("No base PvE monster names were found in `monsters.json`.")
+
+        try:
+            async with self.bot.pool.acquire() as conn:
+                completed_rows = await conn.fetch(
+                    """
+                    SELECT id, pet1_default, pet2_default, result_name, created_at
+                    FROM splice_combinations
+                    ORDER BY created_at ASC, id ASC
+                    """
+                )
+                pending_rows = await conn.fetch(
+                    """
+                    SELECT id, pet1_default, pet2_default, created_at
+                    FROM splice_requests
+                    WHERE status = 'pending'
+                    ORDER BY created_at ASC, id ASC
+                    """
+                )
+        except Exception as e:
+            return await ctx.send(f"Failed to query splice tables: {e}")
+
+        generation_by_name = self._build_splice_generation_map(base_monster_names, completed_rows)
+
+        def classify_generation(parent1_name, parent2_name):
+            if not isinstance(parent1_name, str) or not isinstance(parent2_name, str):
+                return None, None, None
+
+            p1 = parent1_name.strip()
+            p2 = parent2_name.strip()
+            if not p1 or not p2:
+                return None, None, None
+
+            p1_gen = generation_by_name.get(p1)
+            p2_gen = generation_by_name.get(p2)
+            if p1_gen is None or p2_gen is None:
+                return None, p1_gen, p2_gen
+
+            return max(p1_gen, p2_gen) + 1, p1_gen, p2_gen
+
+        def add_gen_count(gen_counts, generation):
+            gen_counts[generation] = gen_counts.get(generation, 0) + 1
+
+        completed_gen_counts = {}
+        pending_gen_counts = {}
+        completed_unresolved = 0
+        pending_unresolved = 0
+
+        for row in completed_rows:
+            row_gen, _, _ = classify_generation(row["pet1_default"], row["pet2_default"])
+            if row_gen is None:
+                completed_unresolved += 1
+                continue
+            add_gen_count(completed_gen_counts, row_gen)
+
+        for row in pending_rows:
+            row_gen, _, _ = classify_generation(row["pet1_default"], row["pet2_default"])
+            if row_gen is None:
+                pending_unresolved += 1
+                continue
+            add_gen_count(pending_gen_counts, row_gen)
+
+        all_gen_counts = dict(completed_gen_counts)
+        for gen, count in pending_gen_counts.items():
+            all_gen_counts[gen] = all_gen_counts.get(gen, 0) + count
+
+        completed_total_resolved = sum(completed_gen_counts.values())
+        pending_total_resolved = sum(pending_gen_counts.values())
+        all_total_resolved = completed_total_resolved + pending_total_resolved
+        all_total_unresolved = completed_unresolved + pending_unresolved
+
+        beyond_30_count = sum(count for gen, count in all_gen_counts.items() if gen > 30)
+        furthest_generation = max(all_gen_counts.keys()) if all_gen_counts else None
+        furthest_generation_count = (
+            all_gen_counts.get(furthest_generation, 0) if furthest_generation is not None else 0
+        )
+
+        generation_lines = []
+        for gen in range(0, 31):
+            generation_lines.append(f"Gen {gen}: **{all_gen_counts.get(gen, 0)}**")
+        generation_text = "\n".join(generation_lines)
+
+        embed = discord.Embed(
+            title="🧬 Splice Generation Stats",
+            description="Counts based on default PvE monsters from `monsters.json`.",
+            color=discord.Color.teal(),
+        )
+        embed.add_field(
+            name="Generation Counts 0-30 (`completed + pending`)",
+            value=generation_text,
+            inline=False,
+        )
+        embed.add_field(
+            name="Totals",
+            value=(
+                f"Completed resolved: **{completed_total_resolved}**\n"
+                f"Pending resolved: **{pending_total_resolved}**\n"
+                f"All resolved: **{all_total_resolved}**\n"
+                f"All unresolved: **{all_total_unresolved}**\n"
+                f"Beyond Gen 30: **{beyond_30_count}**\n"
+                f"Furthest generation: **Gen {furthest_generation if furthest_generation is not None else 'N/A'}** "
+                f"(**{furthest_generation_count}** combo(s))"
+            ),
+            inline=False,
+        )
+        embed.set_footer(
+            text=(
+                f"Base monsters: {len(base_monster_names)} | "
+                f"Completed rows: {len(completed_rows)} | Pending rows: {len(pending_rows)}"
+            )
+        )
+        await ctx.send(embed=embed)
+
+    @commands.command(
+        name="splicetree",
+        aliases=["splicemap", "splicetreeimg"],
+        hidden=True,
+    )
+    async def splice_tree(self, ctx: commands.Context, *, target: str = ""):
+        """
+        Generate a high-resolution splice ancestry tree image.
+        Usage:
+        - $splicetree
+        - $splicetree <monster name>
+        - $splicetree <size> <monster name>   (size max: 16000)
+        - $splicetree quality <monster name>        (PNG output)
+        - $splicetree <size> quality <monster name> (PNG output)
+        """
+        default_size = 4096
+        min_size = 2048
+        max_size = 16000
+
+        requested = (target or "").strip()
+        size = default_size
+        fast_mode = True
+        target_name = "furthest"
+
+        if requested:
+            parts = requested.split()
+            if parts and parts[0].isdigit():
+                size = int(parts[0])
+                parts = parts[1:]
+
+            if parts and parts[0].casefold() in {"quality", "png", "--quality", "hq"}:
+                fast_mode = False
+                parts = parts[1:]
+            elif parts and parts[0].casefold() in {"fast", "--fast", "jpg", "jpeg"}:
+                fast_mode = True
+                parts = parts[1:]
+
+            remainder = " ".join(parts).strip()
+            target_name = remainder if remainder else "furthest"
+
+        size = max(min_size, min(max_size, size))
+
+        status = await ctx.send(
+            f"Building splice tree at base size **{size}** for target: **{target_name}** "
+            f"({'jpg-fast' if fast_mode else 'png-quality'} mode)..."
+        )
+
+        try:
+            async with self.bot.pool.acquire() as conn:
+                await self._ensure_splice_tree_tracking_table(conn)
+                catalog = await self._load_splice_tree_catalog(conn)
+                tracked_targets = await self._get_user_tracked_splice_targets(conn, ctx.author.id)
+                owned_keys = await self._get_user_owned_splice_keys(
+                    conn, ctx.author.id, catalog
+                )
+        except FileNotFoundError:
+            return await status.edit(content="Could not read `monsters.json`.")
+        except Exception as e:
+            return await status.edit(content=f"Failed to build splice tree data: {e}")
+
+        base_monster_names = catalog["base_monster_names"]
+        canonical_by_key = catalog["canonical_by_key"]
+        node_url_by_key = catalog["node_url_by_key"]
+        generation_by_key = catalog["generation_by_key"]
+        parent_pair_by_child = catalog["parent_pair_by_child"]
+        unresolved_parent_links = catalog["unresolved_parent_links"]
+        tracked_targets = self._canonicalize_tracked_splice_targets(
+            tracked_targets, catalog
+        )
+        tracked_root_keys = {
+            row["target_key"]
+            for row in tracked_targets
+            if row.get("target_key")
+        }
+
+        if not base_monster_names:
+            return await status.edit(content="No base monsters were found in `monsters.json`.")
+
+        if not catalog["completed_row_count"]:
+            return await status.edit(content="No rows in `splice_combinations` to build a tree from.")
+
+        tracked_target_summaries = self._build_tracked_splice_target_summaries(
+            tracked_targets,
+            parent_pair_by_child=parent_pair_by_child,
+            canonical_by_key=canonical_by_key,
+            generation_by_key=generation_by_key,
+            owned_keys=owned_keys,
+            tracked_root_keys=tracked_root_keys,
+        )
+
+        requested_key = self._normalize_splice_tree_name(target_name)
+        if requested_key in (None, "", "furthest", "highest", "latest", "max"):
+            spliced_nodes = [(k, v) for k, v in generation_by_key.items() if isinstance(v, int) and v >= 0]
+            if not spliced_nodes:
+                return await status.edit(content="No resolved spliced generations were found.")
+            furthest_key, furthest_gen = max(spliced_nodes, key=lambda item: item[1])
+            root_key = furthest_key
+            target_name = canonical_by_key.get(root_key, root_key)
+            target_generation = furthest_gen
+        else:
+            candidate_keys = self._find_splice_tree_target_keys(target_name, catalog)
+            if not candidate_keys:
+                return await status.edit(
+                    content=f"Target `{target_name}` not found in monsters or splice combinations."
+                )
+            if len(candidate_keys) > 1:
+                picker = SpliceTreeTargetPicker(
+                    ctx,
+                    self._splice_tree_picker_candidates(candidate_keys, catalog),
+                )
+                picker.message = status
+                await status.edit(
+                    content=(
+                        f"More than one creature matches **{target_name}**. "
+                        "Select the exact recipe identifier to build."
+                    ),
+                    view=picker,
+                )
+                timed_out = await picker.wait()
+                if timed_out:
+                    return await status.edit(
+                        content="Splice tree selection timed out.", view=None
+                    )
+                if picker.selected_key is None:
+                    return
+                root_key = picker.selected_key
+            else:
+                root_key = candidate_keys[0]
+            target_generation = generation_by_key.get(root_key)
+            target_name = canonical_by_key.get(root_key, target_name)
+
+        root_node = self._build_splice_genealogy_tree(root_key, parent_pair_by_child)
+        tree_nodes = self._collect_splice_tree_nodes(root_node)
+        if not tree_nodes:
+            return await status.edit(content="Could not build genealogy tree nodes for this target.")
+
+        self._annotate_splice_tree_completion(root_node, owned_keys, tracked_root_keys)
+        leaf_count = self._assign_splice_tree_inorder(root_node)
+        max_depth = max(node["depth"] for node in tree_nodes)
+        node_count = len(tree_nodes)
+
+        spacing_pressure = 1.0
+        if max_depth > 10:
+            spacing_pressure += min(1.2, (max_depth - 10) * 0.08)
+        if leaf_count > 18:
+            spacing_pressure += min(0.8, (leaf_count - 18) * 0.025)
+        if node_count > 30:
+            spacing_pressure += min(0.6, (node_count - 30) * 0.02)
+        spacing_pressure = min(2.6, spacing_pressure)
+
+        # Use a wider landscape canvas so dense trees have enough horizontal room.
+        min_leaf_spacing_base = max(220, int(size * 0.055))
+        min_leaf_spacing = int(min_leaf_spacing_base * spacing_pressure)
+        min_leaf_spacing = min(min_leaf_spacing, max(320, int(size * 0.22)))
+        width_buffer = int(size * (0.20 + min(0.24, (max_depth * 0.006))))
+        width_from_leaves = int(max(0, leaf_count - 1) * min_leaf_spacing + width_buffer)
+        landscape_multiplier = 1.55 + min(
+            1.05,
+            (max_depth * 0.04) + (leaf_count * 0.015) + (node_count * 0.006),
+        )
+        base_tree_width = max(size, int(size * landscape_multiplier), width_from_leaves)
+        side_gutter_base = max(220, int(size * 0.09))
+        side_gutter = int(side_gutter_base * min(2.0, 0.9 + (spacing_pressure * 0.45)))
+        width = base_tree_width + (side_gutter * 2)
+        title_band = max(300, int(size * 0.14))
+        margin_x = side_gutter + max(96, int(base_tree_width * 0.03))
+        margin_bottom = max(280, int(size * 0.16))
+        # Slightly larger top padding so the root splice sits lower in the scene.
+        tree_top_padding = max(130, int(size * 0.04) + 20)
+        source_root_anchor_x = 2438
+        source_root_anchor_y = 1272
+
+        height = int(size * 0.74)
+        if max_depth > 8:
+            height = int(height * (1.0 + min(1.5, (max_depth - 8) * 0.10)))
+        if node_count > 30:
+            height = int(height * (1.0 + min(0.45, (node_count - 30) * 0.02)))
+        height = max(min_size, min(max_size, height))
+
+        # Keep memory in check for very large requests.
+        max_pixels = 110_000_000
+        if width * height > max_pixels:
+            scale = (max_pixels / float(width * height)) ** 0.5
+            width = max(1800, int(width * scale))
+            height = max(1400, int(height * scale))
+
+        try:
+            root_anchor_x, root_anchor_y = await asyncio.to_thread(
+                self._get_splice_bg_anchor_for_canvas,
+                width,
+                height,
+                source_root_anchor_x,
+                source_root_anchor_y,
+            )
+        except Exception:
+            root_anchor_x, root_anchor_y = source_root_anchor_x, source_root_anchor_y
+
+        usable_width = max(1, width - (2 * margin_x))
+        usable_height = max(1, height - title_band - tree_top_padding - margin_bottom)
+        spacing_x = usable_width / max(1, leaf_count - 1) if leaf_count > 1 else usable_width
+        level_spacing = usable_height / max(1, max_depth if max_depth > 0 else 1)
+
+        node_diameter = int(min(
+            spacing_x * 0.62 if leaf_count > 1 else (width * 0.20),
+            level_spacing * 0.58,
+            width * 0.11,
+        ))
+        node_diameter = max(54, node_diameter)
+
+        for node in tree_nodes:
+            if leaf_count > 1:
+                node["x"] = int(margin_x + (node["order"] * spacing_x))
+            else:
+                node["x"] = width // 2
+            node["y"] = int(title_band + tree_top_padding + (node["depth"] * level_spacing))
+
+        # Anchor root to the mapped background focal coordinate.
+        if tree_nodes:
+            min_x = min(node["x"] for node in tree_nodes)
+            max_x = max(node["x"] for node in tree_nodes)
+            min_y = min(node["y"] for node in tree_nodes)
+            max_y = max(node["y"] for node in tree_nodes)
+
+            requested_shift_x = root_anchor_x - root_node["x"]
+            requested_shift_y = root_anchor_y - root_node["y"]
+
+            min_shift = margin_x - min_x
+            max_shift = (width - margin_x) - max_x
+            clamped_shift_x = int(max(min_shift, min(max_shift, requested_shift_x)))
+
+            min_visual_center_y = title_band + (node_diameter // 2) + 8
+            max_visual_center_y = height - margin_bottom - (node_diameter // 2) - 10
+            min_shift_y = min_visual_center_y - min_y
+            max_shift_y = max(0, max_visual_center_y - max_y)
+
+            # Grow canvas just enough when necessary so downward shift isn't clamped away.
+            if requested_shift_y > max_shift_y and height < max_size:
+                needed_extra = int(requested_shift_y - max_shift_y)
+                grow_by = min(max_size - height, needed_extra)
+                if grow_by > 0:
+                    height += grow_by
+                    max_visual_center_y = height - margin_bottom - (node_diameter // 2) - 10
+                    max_shift_y = max(0, max_visual_center_y - max_y)
+
+            clamped_shift_y = int(max(min_shift_y, min(max_shift_y, requested_shift_y)))
+
+            if clamped_shift_x or clamped_shift_y:
+                for node in tree_nodes:
+                    node["x"] += clamped_shift_x
+                    node["y"] += clamped_shift_y
+
+        await status.edit(
+            content=(
+                f"Rendering splice tree for **{target_name}** "
+                f"(generation: **{target_generation if target_generation is not None else 'Unknown'}**) ..."
+            )
+        )
+
+        # Fetch node thumbnails.
+        thumb_size = max(52, int(node_diameter * 0.84))
+        thumbnails = {}
+        semaphore = asyncio.Semaphore(20)
+
+        async def fetch_thumb(session, node_key):
+            node_url = node_url_by_key.get(node_key)
+            if not node_url:
+                return
+            try:
+                async with semaphore:
+                    timeout = aiohttp.ClientTimeout(total=15)
+                    async with session.get(node_url, timeout=timeout) as response:
+                        if response.status != 200:
+                            return
+                        data = await response.read()
+
+                thumb = await asyncio.to_thread(self._build_splice_thumb, data, thumb_size)
+                thumbnails[node_key] = thumb
+            except Exception:
+                return
+
+        image_candidate_nodes = list({node["key"] for node in tree_nodes if node.get("key")})
+        image_limit = 800
+        if len(image_candidate_nodes) > image_limit:
+            node_depth_by_key = {}
+            for node in tree_nodes:
+                key = node.get("key")
+                if not key:
+                    continue
+                existing_depth = node_depth_by_key.get(key)
+                if existing_depth is None or node["depth"] < existing_depth:
+                    node_depth_by_key[key] = node["depth"]
+            image_candidate_nodes.sort(key=lambda k: (node_depth_by_key.get(k, 9999), canonical_by_key.get(k, k)))
+            image_candidate_nodes = image_candidate_nodes[:image_limit]
+
+        async with aiohttp.ClientSession() as session:
+            await asyncio.gather(
+                *(fetch_thumb(session, node_key) for node_key in image_candidate_nodes),
+                return_exceptions=True,
+            )
+
+        try:
+            filename_safe_target, output_bytes, output_ext = await asyncio.to_thread(
+                self._render_splice_tree_images,
+                width=width,
+                height=height,
+                title_band=title_band,
+                node_diameter=node_diameter,
+                spacing_x=spacing_x,
+                leaf_count=leaf_count,
+                side_gutter=side_gutter,
+                max_depth=max_depth,
+                target_name=target_name,
+                target_generation=target_generation,
+                unresolved_parent_links=unresolved_parent_links,
+                tree_nodes=tree_nodes,
+                generation_by_key=generation_by_key,
+                canonical_by_key=canonical_by_key,
+                thumbnails=thumbnails,
+                tracked_target_summaries=tracked_target_summaries,
+                fast_mode=fast_mode,
+            )
+        except Exception as e:
+            return await status.edit(content=f"Failed to render splice tree: {e}")
+
+        try:
+            await ctx.send(
+                file=discord.File(
+                    BytesIO(output_bytes),
+                    filename=f"{filename_safe_target}_tree.{output_ext}",
+                )
+            )
+            await status.edit(content="Splice tree generated.")
+        except discord.HTTPException:
+            try:
+                fallback_bytes = await asyncio.to_thread(
+                    self._build_splice_tree_fallback_image,
+                    output_bytes,
+                    fast_mode,
+                )
+            except Exception as e:
+                return await status.edit(content=f"Failed to build fallback splice tree: {e}")
+            await ctx.send(
+                file=discord.File(
+                    BytesIO(fallback_bytes),
+                    filename=f"{filename_safe_target}_tree_fallback.{output_ext}",
+                )
+            )
+            await status.edit(content=f"Splice tree generated (fallback size, {output_ext.upper()}).")
+        except Exception as e:
+            await status.edit(content=f"Failed to render splice tree: {e}")
+
+    @commands.group(
+        name="splicetrack",
+        aliases=["splicetracks", "splicegoal", "splicegoals"],
+        invoke_without_command=True,
+        hidden=True,
+    )
+    async def splice_track(self, ctx: commands.Context):
+        """List the splice targets you're tracking."""
+        try:
+            async with self.bot.pool.acquire() as conn:
+                await self._ensure_splice_tree_tracking_table(conn)
+                tracked_targets = await self._get_user_tracked_splice_targets(conn, ctx.author.id)
+                if not tracked_targets:
+                    return await ctx.send(
+                        "You are not tracking any splice targets yet. Use `$splicetrack add <monster name>`."
+                    )
+
+                try:
+                    catalog = await self._load_splice_tree_catalog(conn)
+                except FileNotFoundError:
+                    return await ctx.send("Could not read `monsters.json`.")
+                owned_keys = await self._get_user_owned_splice_keys(
+                    conn, ctx.author.id, catalog
+                )
+
+            tracked_targets = self._canonicalize_tracked_splice_targets(
+                tracked_targets, catalog
+            )
+            tracked_root_keys = {
+                row["target_key"]
+                for row in tracked_targets
+                if row.get("target_key")
+            }
+            summaries = self._build_tracked_splice_target_summaries(
+                tracked_targets,
+                parent_pair_by_child=catalog["parent_pair_by_child"],
+                canonical_by_key=catalog["canonical_by_key"],
+                generation_by_key=catalog["generation_by_key"],
+                owned_keys=owned_keys,
+                tracked_root_keys=tracked_root_keys,
+            )
+        except Exception as e:
+            return await ctx.send(f"Failed to load tracked splice targets: {e}")
+
+        embed = discord.Embed(
+            title="Tracked Splice Targets",
+            color=discord.Color.green(),
+            description="Up to 10 tracked targets. Owned targets stay green, but tracked roots keep their copy path open.",
+        )
+
+        for entry in summaries[:10]:
+            generation = entry.get("generation")
+            gen_text = f"Gen {generation}" if isinstance(generation, int) and generation >= 0 else "Gen ?"
+            remaining_count = int(entry.get("remaining_count", 0))
+            if remaining_count <= 0:
+                detail_text = "All requirements covered."
+            else:
+                preview = entry.get("missing_preview") or []
+                preview_text = ", ".join(preview[:3])
+                if remaining_count > len(preview):
+                    preview_text = f"{preview_text} +{remaining_count - len(preview)}" if preview_text else f"{remaining_count} left"
+                if entry.get("owned"):
+                    detail_text = (
+                        f"Owned target. Copy path still needs: {preview_text}"
+                        if preview_text
+                        else "Owned target. Copy path still open."
+                    )
+                else:
+                    detail_text = f"Need: {preview_text}" if preview_text else f"Need: {remaining_count} more"
+
+            embed.add_field(
+                name=(
+                    f"{'🟩' if entry.get('owned') else '⬛'} "
+                    f"{entry.get('target_name', 'Unknown')} • {gen_text}"
+                ),
+                value=detail_text,
+                inline=False,
+            )
+
+        embed.set_footer(text="Use `$splicetrack add <name>`, `$splicetrack remove <name>`, or `$splicetrack clear`.")
+        await ctx.send(embed=embed)
+
+    @splice_track.command(name="add", aliases=["track"])
+    async def splice_track_add(self, ctx: commands.Context, *, target: str):
+        """Track a splice target for tree progress."""
+        requested_target = (target or "").strip()
+        if not requested_target:
+            return await ctx.send("Usage: `$splicetrack add <monster name>`")
+
+        try:
+            async with self.bot.pool.acquire() as conn:
+                await self._ensure_splice_tree_tracking_table(conn)
+                catalog = await self._load_splice_tree_catalog(conn)
+        except FileNotFoundError:
+            return await ctx.send("Could not read `monsters.json`.")
+        except Exception as e:
+            return await ctx.send(f"Failed to load splice targets: {e}")
+
+        canonical_by_key = catalog["canonical_by_key"]
+        candidate_keys = self._find_splice_tree_target_keys(requested_target, catalog)
+        if not candidate_keys:
+            return await ctx.send(
+                f"Could not find a splice target matching `{requested_target}`."
+            )
+        if len(candidate_keys) > 1:
+            picker = SpliceTreeTargetPicker(
+                ctx,
+                self._splice_tree_picker_candidates(candidate_keys, catalog),
+                selection_action="Adding it to your tracked targets...",
+            )
+            picker.message = await ctx.send(
+                f"More than one creature matches **{requested_target}**. "
+                "Select the exact recipe identifier to track.",
+                view=picker,
+            )
+            timed_out = await picker.wait()
+            if timed_out:
+                return await picker.message.edit(
+                    content="Splice target selection timed out.", view=None
+                )
+            if picker.selected_key is None:
+                return
+            target_key = picker.selected_key
+        else:
+            target_key = candidate_keys[0]
+
+        try:
+            async with self.bot.pool.acquire() as conn:
+                tracked_targets = await self._get_user_tracked_splice_targets(
+                    conn, ctx.author.id
+                )
+                tracked_targets = self._canonicalize_tracked_splice_targets(
+                    tracked_targets, catalog
+                )
+                if any(
+                    item.get("target_key") == target_key
+                    for item in tracked_targets
+                ):
+                    return await ctx.send(
+                        f"Already tracking **{canonical_by_key.get(target_key, requested_target)}**."
+                    )
+
+                if len(tracked_targets) >= 10:
+                    return await ctx.send("You can only track up to 10 splice targets at once.")
+
+                resolved_name = canonical_by_key.get(target_key, requested_target.strip())
+                await conn.execute(
+                    """
+                    INSERT INTO splice_tree_tracks (user_id, target_key, target_name)
+                    VALUES ($1, $2, $3)
+                    """,
+                    ctx.author.id,
+                    target_key,
+                    resolved_name,
+                )
+        except Exception as e:
+            return await ctx.send(f"Failed to add tracked splice target: {e}")
+
+        await ctx.send(
+            f"Now tracking **{resolved_name}**. Use `$splicetree {resolved_name}` to see ownership progress."
+        )
+
+    @splice_track.command(name="remove", aliases=["delete", "del", "rm", "untrack"])
+    async def splice_track_remove(self, ctx: commands.Context, *, target: str):
+        """Stop tracking a splice target."""
+        requested_target = self._normalize_splice_tree_name(target)
+        if requested_target is None:
+            return await ctx.send("Usage: `$splicetrack remove <monster name>`")
+
+        try:
+            async with self.bot.pool.acquire() as conn:
+                tracked_targets = await self._get_user_tracked_splice_targets(conn, ctx.author.id)
+                catalog = await self._load_splice_tree_catalog(conn)
+        except FileNotFoundError:
+            return await ctx.send("Could not read `monsters.json`.")
+        except Exception as e:
+            return await ctx.send(f"Failed to load tracked splice targets: {e}")
+
+        tracked_targets = self._canonicalize_tracked_splice_targets(
+            tracked_targets, catalog
+        )
+        direct_recipe_key = self._splice_tree_recipe_key(
+            self._splice_tree_recipe_id(target)
+        )
+        matches = []
+        for tracked_target in tracked_targets:
+            target_key = tracked_target.get("target_key")
+            target_name_key = self._normalize_splice_tree_name(
+                tracked_target.get("target_name")
+            )
+            if (
+                (direct_recipe_key and target_key == direct_recipe_key)
+                or target_key == requested_target
+                or target_name_key == requested_target
+                or (target_name_key and requested_target in target_name_key)
+            ):
+                matches.append(tracked_target)
+
+        if not matches:
+            return await ctx.send(f"`{target.strip()}` is not in your tracked splice targets.")
+
+        if len(matches) > 1:
+            picker = SpliceTreeTargetPicker(
+                ctx,
+                self._splice_tree_picker_candidates(
+                    [item["target_key"] for item in matches], catalog
+                ),
+                selection_action="Removing it from your tracked targets...",
+            )
+            picker.message = await ctx.send(
+                f"More than one tracked creature matches **{target.strip()}**. "
+                "Select the exact recipe identifier to remove.",
+                view=picker,
+            )
+            timed_out = await picker.wait()
+            if timed_out:
+                return await picker.message.edit(
+                    content="Splice target selection timed out.", view=None
+                )
+            if picker.selected_key is None:
+                return
+            match = next(
+                item for item in matches if item["target_key"] == picker.selected_key
+            )
+        else:
+            match = matches[0]
+
+        try:
+            async with self.bot.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    DELETE FROM splice_tree_tracks
+                    WHERE user_id = $1 AND target_key = $2
+                    """,
+                    ctx.author.id,
+                    match.get("_stored_target_key", match["target_key"]),
+                )
+        except Exception as e:
+            return await ctx.send(f"Failed to remove tracked splice target: {e}")
+
+        await ctx.send(f"Stopped tracking **{match.get('target_name', target.strip())}**.")
+
+    @splice_track.command(name="clear", aliases=["reset"])
+    async def splice_track_clear(self, ctx: commands.Context):
+        """Clear all tracked splice targets."""
+        try:
+            async with self.bot.pool.acquire() as conn:
+                await self._ensure_splice_tree_tracking_table(conn)
+                deleted = await conn.execute(
+                    "DELETE FROM splice_tree_tracks WHERE user_id = $1",
+                    ctx.author.id,
+                )
+        except Exception as e:
+            return await ctx.send(f"Failed to clear tracked splice targets: {e}")
+
+        deleted_count = int(str(deleted).split()[-1]) if deleted else 0
+        if deleted_count <= 0:
+            return await ctx.send("You do not have any tracked splice targets to clear.")
+        await ctx.send(f"Cleared **{deleted_count}** tracked splice target(s).")
+
+    @is_gm()
+    @commands.command(
+        name="repairsplicenames",
+        aliases=["fixsplicenames", "splicenameaudit"],
+        hidden=True,
+    )
+    async def repair_splice_names(self, ctx: commands.Context, mode: str = "preview"):
+        """Preview or apply deterministic repairs for duplicate splice names."""
+        mode = str(mode or "preview").strip().lower()
+        if mode not in {"preview", "apply"}:
+            return await ctx.send("Use `$repairsplicenames preview` or `$repairsplicenames apply`.")
+
+        async with self.bot.pool.acquire() as conn:
+            await ensure_splice_identity_schema(conn)
+            splice_rows = [
+                dict(row)
+                for row in await conn.fetch(
+                    """
+                    SELECT id, pet1_default, pet2_default, result_name,
+                           base_result_name, hp, attack, defense, element, url,
+                           parent1_splice_combination_id,
+                           parent2_splice_combination_id
+                    FROM splice_combinations
+                    ORDER BY id ASC;
+                    """
+                )
+            ]
+            repairs = plan_duplicate_splice_names(splice_rows)
+            if not repairs:
+                return await ctx.send("No duplicate splice result names need repair.")
+
+            recipe_by_id = {int(row["id"]): row for row in splice_rows}
+            repair_by_id = {repair.splice_id: repair for repair in repairs}
+            duplicate_keys = {repair.normalized_base_name for repair in repairs}
+            final_name_by_recipe = {
+                recipe_id: (
+                    repair_by_id[recipe_id].new_name
+                    if recipe_id in repair_by_id
+                    else clean_name(row["result_name"])
+                )
+                for recipe_id, row in recipe_by_id.items()
+            }
+
+            pet_rows = [
+                dict(row)
+                for row in await conn.fetch(
+                    """
+                    SELECT id, user_id, name, default_name, url,
+                           splice_combination_id
+                    FROM monster_pets
+                    ORDER BY id ASC;
+                    """
+                )
+            ]
+
+            candidates_by_name_url = defaultdict(list)
+            for recipe_id, row in recipe_by_id.items():
+                recipe_url = clean_name(row["url"])
+                if not recipe_url:
+                    continue
+                identity_keys = {
+                    normalize_name(row["result_name"]),
+                    normalize_name(row["base_result_name"]),
+                }
+                for identity_key in identity_keys:
+                    if identity_key:
+                        candidates_by_name_url[(identity_key, recipe_url)].append(recipe_id)
+
+            pet_recipe_map = {}
+            ambiguous_duplicate_pets = []
+            for pet in pet_rows:
+                current_recipe_id = pet.get("splice_combination_id")
+                if current_recipe_id is not None and int(current_recipe_id) in recipe_by_id:
+                    pet_recipe_map[int(pet["id"])] = int(current_recipe_id)
+                    continue
+
+                pet_name_key = normalize_name(pet.get("default_name"))
+                pet_url = clean_name(pet.get("url"))
+                candidates = set(
+                    candidates_by_name_url.get((pet_name_key, pet_url), ())
+                )
+                if len(candidates) == 1:
+                    pet_recipe_map[int(pet["id"])] = candidates.pop()
+                elif pet_name_key in duplicate_keys:
+                    ambiguous_duplicate_pets.append(int(pet["id"]))
+
+            request_rows = []
+            requests_exist = await conn.fetchval(
+                "SELECT to_regclass('public.splice_requests') IS NOT NULL;"
+            )
+            if requests_exist:
+                request_rows = [
+                    dict(row)
+                    for row in await conn.fetch(
+                        """
+                        SELECT id, status, pet1_id, pet2_id,
+                               pet1_default, pet2_default
+                        FROM splice_requests
+                        ORDER BY id ASC;
+                        """
+                    )
+                ]
+
+            recipes_by_pair = defaultdict(list)
+            for row in splice_rows:
+                pair_key = canonical_parent_pair_key(
+                    row["pet1_default"], row["pet2_default"]
+                )
+                if pair_key:
+                    recipes_by_pair[pair_key].append(int(row["id"]))
+
+            requests_by_pair = defaultdict(list)
+            request_recipe_map = {}
+            for request in request_rows:
+                pair_key = canonical_parent_pair_key(
+                    request["pet1_default"], request["pet2_default"]
+                )
+                if not pair_key:
+                    continue
+                requests_by_pair[pair_key].append(request)
+                matching_recipes = recipes_by_pair.get(pair_key, ())
+                if len(matching_recipes) == 1 and request.get("status") == "completed":
+                    request_recipe_map[int(request["id"])] = matching_recipes[0]
+
+            lineage_updates = {}
+            unresolved_parent_slots = 0
+            for row in splice_rows:
+                parent_names = [row["pet1_default"], row["pet2_default"]]
+                parent_recipe_ids = [
+                    row.get("parent1_splice_combination_id"),
+                    row.get("parent2_splice_combination_id"),
+                ]
+                pair_key = canonical_parent_pair_key(*parent_names)
+                matching_requests = requests_by_pair.get(pair_key, ())
+
+                for slot in (0, 1):
+                    parent_key = normalize_name(parent_names[slot])
+                    inferred_recipe_ids = set()
+                    for request in matching_requests:
+                        for request_slot in (0, 1):
+                            if normalize_name(request[f"pet{request_slot + 1}_default"]) != parent_key:
+                                continue
+                            source_pet_id = request.get(f"pet{request_slot + 1}_id")
+                            source_recipe_id = (
+                                pet_recipe_map.get(int(source_pet_id))
+                                if source_pet_id is not None
+                                else None
+                            )
+                            if source_recipe_id is not None:
+                                inferred_recipe_ids.add(source_recipe_id)
+
+                    if len(inferred_recipe_ids) == 1:
+                        parent_recipe_id = inferred_recipe_ids.pop()
+                        parent_recipe_ids[slot] = parent_recipe_id
+                        parent_names[slot] = final_name_by_recipe[parent_recipe_id]
+                    elif parent_key in duplicate_keys:
+                        unresolved_parent_slots += 1
+
+                lineage_updates[int(row["id"])] = (
+                    parent_names[0],
+                    parent_names[1],
+                    int(parent_recipe_ids[0]) if parent_recipe_ids[0] is not None else None,
+                    int(parent_recipe_ids[1]) if parent_recipe_ids[1] is not None else None,
+                )
+
+            final_pair_keys = {
+                recipe_id: canonical_parent_pair_key(names[0], names[1])
+                for recipe_id, names in lineage_updates.items()
+            }
+            pair_key_counts = defaultdict(int)
+            for pair_key in final_pair_keys.values():
+                if pair_key:
+                    pair_key_counts[pair_key] += 1
+
+            matched_pets_by_recipe = defaultdict(int)
+            for recipe_id in pet_recipe_map.values():
+                matched_pets_by_recipe[recipe_id] += 1
+
+            report_lines = [
+                "SPLICE NAME REPAIR PLAN",
+                "=" * 76,
+                f"Mode: {mode.upper()}",
+                f"Duplicate base-name groups: {len(duplicate_keys)}",
+                f"Recipes to disambiguate: {len(repairs)}",
+                f"Existing pets linked by exact identity evidence: {len(pet_recipe_map)}",
+                f"Ambiguous duplicate-name pets left untouched: {len(ambiguous_duplicate_pets)}",
+                f"Ambiguous duplicate parent slots left untouched: {unresolved_parent_slots}",
+                "",
+            ]
+            for repair in repairs:
+                row = recipe_by_id[repair.splice_id]
+                report_lines.extend(
+                    [
+                        "-" * 76,
+                        f"Recipe S{repair.splice_id}: {repair.old_name} -> {repair.new_name}",
+                        f"Parents: {row['pet1_default']} + {row['pet2_default']}",
+                        (
+                            f"Stats: HP {row['hp']} | ATK {row['attack']} | "
+                            f"DEF {row['defense']} | {row['element']}"
+                        ),
+                        f"Matched existing pets: {matched_pets_by_recipe[repair.splice_id]}",
+                    ]
+                )
+            if ambiguous_duplicate_pets:
+                report_lines.extend(
+                    [
+                        "",
+                        "AMBIGUOUS PET IDS (no changes will be guessed)",
+                        ", ".join(map(str, ambiguous_duplicate_pets)),
+                    ]
+                )
+            report = "\n".join(report_lines)
+
+            if mode == "preview":
+                return await ctx.send(
+                    (
+                        f"Found **{len(duplicate_keys)}** duplicate-name groups across "
+                        f"**{len(repairs)}** recipes. Preview attached; no data changed."
+                    ),
+                    file=discord.File(
+                        BytesIO(report.encode("utf-8")),
+                        filename="splice_name_repair_preview.txt",
+                    ),
+                )
+
+            confirmed = await ctx.confirm(
+                f"Apply unique recipe-ID names to {len(repairs)} splice recipes and "
+                f"link {len(pet_recipe_map)} pets? Ambiguous records will be left untouched."
+            )
+            if not confirmed:
+                return await ctx.send("Splice name repair cancelled; no data changed.")
+
+            pet_columns = {
+                row["column_name"]
+                for row in await conn.fetch(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = 'monster_pets';
+                    """
+                )
+            }
+            splice_columns = {
+                row["column_name"]
+                for row in await conn.fetch(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = 'splice_combinations';
+                    """
+                )
+            }
+
+            async with conn.transaction():
+                # Clear constrained keys first so every rename is an atomic swap.
+                await conn.execute(
+                    """
+                    UPDATE splice_combinations
+                    SET result_name_key = NULL,
+                        parent_pair_key = NULL;
+                    """
+                )
+
+                await conn.executemany(
+                    """
+                    UPDATE splice_combinations
+                    SET result_name = $1,
+                        base_result_name = $2
+                    WHERE id = $3;
+                    """,
+                    [
+                        (repair.new_name, repair.base_name, repair.splice_id)
+                        for repair in repairs
+                    ],
+                )
+
+                for pet in pet_rows:
+                    pet_id = int(pet["id"])
+                    recipe_id = pet_recipe_map.get(pet_id)
+                    if recipe_id is None:
+                        continue
+                    new_default_name = final_name_by_recipe[recipe_id]
+                    update_visible_name = normalize_name(pet.get("name")) == normalize_name(
+                        pet.get("default_name")
+                    )
+                    if "frontier_species_id" in pet_columns:
+                        await conn.execute(
+                            """
+                            UPDATE monster_pets
+                            SET default_name = $1,
+                                name = CASE WHEN $2 THEN $1 ELSE name END,
+                                splice_combination_id = $3,
+                                frontier_species_id = NULL
+                            WHERE id = $4;
+                            """,
+                            new_default_name,
+                            update_visible_name,
+                            recipe_id,
+                            pet_id,
+                        )
+                    else:
+                        await conn.execute(
+                            """
+                            UPDATE monster_pets
+                            SET default_name = $1,
+                                name = CASE WHEN $2 THEN $1 ELSE name END,
+                                splice_combination_id = $3
+                            WHERE id = $4;
+                            """,
+                            new_default_name,
+                            update_visible_name,
+                            recipe_id,
+                            pet_id,
+                        )
+
+                if requests_exist:
+                    await conn.execute(
+                        """
+                        UPDATE splice_requests sr
+                        SET pet1_default = pet.default_name
+                        FROM monster_pets pet
+                        WHERE sr.pet1_id = pet.id
+                          AND pet.splice_combination_id IS NOT NULL;
+                        """
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE splice_requests sr
+                        SET pet2_default = pet.default_name
+                        FROM monster_pets pet
+                        WHERE sr.pet2_id = pet.id
+                          AND pet.splice_combination_id IS NOT NULL;
+                        """
+                    )
+                    await conn.executemany(
+                        """
+                        UPDATE splice_requests
+                        SET result_splice_combination_id = $1,
+                            result_name = $2
+                        WHERE id = $3;
+                        """,
+                        [
+                            (
+                                recipe_id,
+                                final_name_by_recipe[recipe_id],
+                                request_id,
+                            )
+                            for request_id, recipe_id in request_recipe_map.items()
+                        ],
+                    )
+
+                await conn.executemany(
+                    """
+                    UPDATE splice_combinations
+                    SET pet1_default = $1,
+                        pet2_default = $2,
+                        parent1_splice_combination_id = $3,
+                        parent2_splice_combination_id = $4
+                    WHERE id = $5;
+                    """,
+                    [
+                        (*lineage_updates[recipe_id], recipe_id)
+                        for recipe_id in sorted(lineage_updates)
+                    ],
+                )
+
+                await conn.executemany(
+                    """
+                    UPDATE splice_combinations
+                    SET result_name_key = $1,
+                        parent_pair_key = $2
+                    WHERE id = $3;
+                    """,
+                    [
+                        (
+                            normalize_name(final_name_by_recipe[recipe_id]),
+                            (
+                                final_pair_keys[recipe_id]
+                                if pair_key_counts[final_pair_keys[recipe_id]] == 1
+                                else None
+                            ),
+                            recipe_id,
+                        )
+                        for recipe_id in sorted(recipe_by_id)
+                    ],
+                )
+
+                frontier_link_columns = {
+                    "frontier_recipe_id",
+                    "frontier_parent1_species_id",
+                    "frontier_parent2_species_id",
+                    "frontier_result_species_id",
+                }
+                if frontier_link_columns.issubset(splice_columns):
+                    await conn.execute(
+                        """
+                        UPDATE splice_combinations
+                        SET frontier_recipe_id = NULL,
+                            frontier_parent1_species_id = NULL,
+                            frontier_parent2_species_id = NULL,
+                            frontier_result_species_id = NULL;
+                        """
+                    )
+
+        refresh_note = ""
+        frontier_cog = self.bot.get_cog("SoulforgeFrontiers")
+        if frontier_cog is not None and getattr(frontier_cog, "catalog", None) is not None:
+            try:
+                await frontier_cog.catalog.refresh_legacy()
+            except Exception as error:
+                refresh_note = f" Frontier refresh failed and needs a retry/restart: {error}"
+
+        await ctx.send(
+            (
+                f"Repaired **{len(repairs)}** splice recipes across "
+                f"**{len(duplicate_keys)}** duplicate-name groups and linked "
+                f"**{len(pet_recipe_map)}** existing pets. "
+                f"Left **{len(ambiguous_duplicate_pets)}** ambiguous pets unchanged."
+                f"{refresh_note}"
+            ),
+            file=discord.File(
+                BytesIO(report.encode("utf-8")),
+                filename="splice_name_repair_applied.txt",
+            ),
+        )
+
+    @is_gm()
+    @commands.command(
+        name="repairspliceparents",
+        aliases=["fixspliceparents", "spliceparentaudit"],
+        hidden=True,
+    )
+    async def repair_splice_parents(self, ctx: commands.Context, mode: str = "preview"):
+        """Repoint parent names orphaned by the duplicate-name repair."""
+        try:
+            await self._repair_splice_parents(ctx, mode)
+        except Exception:
+            await self._send_splice_traceback(ctx, "repairspliceparents")
+
+    @staticmethod
+    async def _send_splice_traceback(ctx: commands.Context, label: str) -> None:
+        """Surface a failure instead of letting the command die quietly."""
+        trace = traceback.format_exc()
+        try:
+            await ctx.send(f"`{label}` raised:\n```py\n{trace[-1800:]}\n```")
+        except Exception:
+            await ctx.send(
+                f"`{label}` raised an exception too large to display; see the log.",
+                file=discord.File(
+                    BytesIO(trace.encode("utf-8")), filename=f"{label}_traceback.txt"
+                ),
+            )
+
+    async def _repair_splice_parents(self, ctx: commands.Context, mode: str) -> None:
+        mode = str(mode or "preview").strip().lower()
+        if mode not in {"preview", "apply"}:
+            return await ctx.send(
+                "Use `$repairspliceparents preview` or `$repairspliceparents apply`."
+            )
+
+        from cogs.soulforge_frontiers.frontier_pve import resolve_recipe_generations
+
+        base_names = self._load_default_pve_monster_names()
+        async with self.bot.pool.acquire() as conn:
+            splice_columns = {
+                row["column_name"]
+                for row in await conn.fetch(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = 'splice_combinations';
+                    """
+                )
+            }
+            base_column = (
+                "base_result_name"
+                if "base_result_name" in splice_columns
+                else "NULL::text AS base_result_name"
+            )
+            rows = [
+                dict(row)
+                for row in await conn.fetch(
+                    f"""
+                    SELECT id, pet1_default, pet2_default, result_name, created_at,
+                           {base_column}
+                    FROM splice_combinations
+                    ORDER BY id ASC;
+                    """
+                )
+            ]
+
+            repairs, ambiguous, unresolved = plan_orphan_parent_repairs(rows, base_names)
+            if not repairs and not ambiguous and not unresolved:
+                return await ctx.send("No orphaned splice parent names found.")
+
+            before = len(resolve_recipe_generations(base_names, rows))
+            repaired_rows = [dict(row) for row in rows]
+            row_by_id = {int(row["id"]): row for row in repaired_rows}
+            for repair in repairs:
+                row_by_id[repair.splice_id][repair.slot] = repair.new_name
+            after = len(resolve_recipe_generations(base_names, repaired_rows))
+
+            report_lines = [
+                "SPLICE PARENT REPAIR PLAN",
+                "=" * 76,
+                f"Mode: {mode.upper()}",
+                f"Orphaned parent slots repaired: {len(repairs)}",
+                f"Ambiguous parent slots left untouched: {len(ambiguous)}",
+                f"Unmatched orphan names left untouched: {len(unresolved)}",
+                f"Recipes with a resolvable generation: {before} -> {after}",
+                "",
+                "Only a recipe created before the child can have been its parent;",
+                "that rules out later duplicates automatically.",
+                "",
+            ]
+            for repair in repairs:
+                report_lines.append(
+                    f"S{repair.splice_id}.{repair.slot}: {repair.orphan_name!r} -> "
+                    f"{repair.new_name!r} (recipe S{repair.parent_splice_id})"
+                )
+            if ambiguous:
+                report_lines.extend(
+                    ["", "AMBIGUOUS (several candidates predate the child)", "-" * 76]
+                )
+                for slot in ambiguous:
+                    options = ", ".join(
+                        f"S{splice_id} {name!r}" for splice_id, name in slot.candidates
+                    )
+                    report_lines.append(
+                        f"S{slot.splice_id}.{slot.slot}: {slot.orphan_name!r} -> {options}"
+                    )
+            if unresolved:
+                report_lines.extend(["", "NO RENAME CANDIDATE (a different problem)", "-" * 76])
+                for group in unresolved:
+                    hint = (
+                        f"  ? did you mean {', '.join(repr(s) for s in group.suggestions)}"
+                        if group.suggestions
+                        else ""
+                    )
+                    report_lines.append(
+                        f"{group.orphan_name!r} used by {list(group.children)}{hint}"
+                    )
+            report = "\n".join(report_lines)
+
+            if mode == "preview":
+                return await ctx.send(
+                    (
+                        f"Found **{len(repairs)}** repairable parent slots, "
+                        f"**{len(ambiguous)}** ambiguous and **{len(unresolved)}** unmatched "
+                        f"orphan names. Resolvable generations would go "
+                        f"**{before} -> {after}**. Preview attached; no data changed."
+                    ),
+                    file=discord.File(
+                        BytesIO(report.encode("utf-8")),
+                        filename="splice_parent_repair_preview.txt",
+                    ),
+                )
+
+            if not repairs:
+                return await ctx.send(
+                    "Nothing can be repaired automatically; every orphan needs a decision.",
+                    file=discord.File(
+                        BytesIO(report.encode("utf-8")),
+                        filename="splice_parent_repair_preview.txt",
+                    ),
+                )
+
+            confirmed = await ctx.confirm(
+                f"Repoint {len(repairs)} orphaned parent slots across "
+                f"{len({repair.splice_id for repair in repairs})} recipes? "
+                f"{len(ambiguous) + len(unresolved)} orphan names will be left untouched."
+            )
+            if not confirmed:
+                return await ctx.send("Splice parent repair cancelled; no data changed.")
+
+            link_columns = {
+                "pet1_default": "parent1_splice_combination_id",
+                "pet2_default": "parent2_splice_combination_id",
+            }
+            async with conn.transaction():
+                for slot, link_column in link_columns.items():
+                    slot_repairs = [
+                        repair for repair in repairs if repair.slot == slot
+                    ]
+                    if not slot_repairs:
+                        continue
+                    if link_column in splice_columns:
+                        await conn.executemany(
+                            f"""
+                            UPDATE splice_combinations
+                            SET {slot} = $1,
+                                {link_column} = $2
+                            WHERE id = $3;
+                            """,
+                            [
+                                (repair.new_name, repair.parent_splice_id, repair.splice_id)
+                                for repair in slot_repairs
+                            ],
+                        )
+                    else:
+                        await conn.executemany(
+                            f"UPDATE splice_combinations SET {slot} = $1 WHERE id = $2;",
+                            [
+                                (repair.new_name, repair.splice_id)
+                                for repair in slot_repairs
+                            ],
+                        )
+
+        refresh_note = ""
+        frontier_cog = self.bot.get_cog("SoulforgeFrontiers")
+        if frontier_cog is not None and getattr(frontier_cog, "catalog", None) is not None:
+            try:
+                await frontier_cog.catalog.refresh_legacy()
+            except Exception as error:
+                refresh_note = f" Frontier refresh failed and needs a retry/restart: {error}"
+
+        await ctx.send(
+            (
+                f"Repointed **{len(repairs)}** orphaned parent slots. "
+                f"Recipes with a resolvable generation: **{before} -> {after}**. "
+                f"Left **{len(ambiguous) + len(unresolved)}** orphan names for review."
+                f"{refresh_note}"
+            ),
+            file=discord.File(
+                BytesIO(report.encode("utf-8")),
+                filename="splice_parent_repair_applied.txt",
+            ),
+        )
+
+    @is_gm()
+    @commands.command(
+        name="resolvespliceparents",
+        aliases=["spliceparentpicker", "pickspliceparents"],
+        hidden=True,
+    )
+    async def resolve_splice_parents(self, ctx: commands.Context):
+        """Pick the right parent for each slot the repair could not infer."""
+        try:
+            await self._resolve_splice_parents(ctx)
+        except Exception:
+            await self._send_splice_traceback(ctx, "resolvespliceparents")
+
+    async def _resolve_splice_parents(self, ctx: commands.Context) -> None:
+        from cogs.soulforge_frontiers.frontier_pve import resolve_recipe_generations
+
+        base_names = self._load_default_pve_monster_names()
+        async with self.bot.pool.acquire() as conn:
+            splice_columns = {
+                row["column_name"]
+                for row in await conn.fetch(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = 'splice_combinations';
+                    """
+                )
+            }
+            base_column = (
+                "base_result_name"
+                if "base_result_name" in splice_columns
+                else "NULL::text AS base_result_name"
+            )
+            rows = [
+                dict(row)
+                for row in await conn.fetch(
+                    f"""
+                    SELECT id, pet1_default, pet2_default, result_name, created_at,
+                           hp, attack, defense, element, url, {base_column}
+                    FROM splice_combinations
+                    ORDER BY id ASC;
+                    """
+                )
+            ]
+
+        _repairs, ambiguous, _unresolved = plan_orphan_parent_repairs(rows, base_names)
+        worklist = list(ambiguous) + plan_unmatched_parent_slots(rows, base_names)
+        if not worklist:
+            return await ctx.send(
+                "No orphaned parent slots left. Run `$repairspliceparents preview` "
+                "to confirm."
+            )
+
+        row_by_id = {int(row["id"]): row for row in rows}
+        generations = resolve_recipe_generations(base_names, rows)
+        known_names, id_by_name = known_parent_names(rows, base_names)
+        base_by_name = self._load_default_pve_monsters()
+
+        link_columns = {
+            "pet1_default": "parent1_splice_combination_id",
+            "pet2_default": "parent2_splice_combination_id",
+        }
+
+        async def on_choose(
+            splice_id: int, slot: str, parent_splice_id: Optional[int], parent_name: str
+        ) -> None:
+            link_column = link_columns[slot]
+            async with self.bot.pool.acquire() as conn:
+                if parent_splice_id is not None and link_column in splice_columns:
+                    await conn.execute(
+                        f"""
+                        UPDATE splice_combinations
+                        SET {slot} = $1,
+                            {link_column} = $2
+                        WHERE id = $3;
+                        """,
+                        parent_name,
+                        int(parent_splice_id),
+                        int(splice_id),
+                    )
+                else:
+                    await conn.execute(
+                        f"UPDATE splice_combinations SET {slot} = $1 WHERE id = $2;",
+                        parent_name,
+                        int(splice_id),
+                    )
+            row_by_id[int(splice_id)][slot] = parent_name
+
+        view = ParentResolverView(
+            ctx,
+            worklist,
+            row_by_id,
+            generations,
+            on_choose,
+            base_by_name=base_by_name,
+            known_names=known_names,
+            id_by_name=id_by_name,
+        )
+        await view.start()
+
+    @is_gm()
+    @commands.command(name="linksplicepet", hidden=True)
+    async def link_splice_pet(
+        self,
+        ctx: commands.Context,
+        pet_id: int,
+        recipe_id: int,
+    ):
+        """Manually resolve one pet that the automated repair left ambiguous."""
+        async with self.bot.pool.acquire() as conn:
+            await ensure_splice_identity_schema(conn)
+            pet = await conn.fetchrow(
+                """
+                SELECT id, user_id, name, default_name, hp, attack, defense,
+                       element, url, splice_combination_id
+                FROM monster_pets
+                WHERE id = $1;
+                """,
+                int(pet_id),
+            )
+            recipe = await conn.fetchrow(
+                """
+                SELECT id, result_name, pet1_default, pet2_default,
+                       hp, attack, defense, element, url
+                FROM splice_combinations
+                WHERE id = $1;
+                """,
+                int(recipe_id),
+            )
+            if pet is None:
+                return await ctx.send(f"Monster pet ID `{pet_id}` does not exist.")
+            if recipe is None:
+                return await ctx.send(f"Splice recipe ID `S{recipe_id}` does not exist.")
+
+            current_link = pet["splice_combination_id"]
+            url_match = clean_name(pet["url"]) == clean_name(recipe["url"])
+            confirmed = await ctx.confirm(
+                f"Link pet **#{pet_id}** (`{pet['default_name']}`) to "
+                f"**S{recipe_id}: {recipe['result_name']}**?\n"
+                f"Recipe parents: `{recipe['pet1_default']} + {recipe['pet2_default']}`\n"
+                f"Recipe stats: HP {recipe['hp']} | ATK {recipe['attack']} | "
+                f"DEF {recipe['defense']} | {recipe['element']}\n"
+                f"Exact image URL match: **{'Yes' if url_match else 'No'}**\n"
+                f"Current recipe link: `{current_link or 'none'}`"
+            )
+            if not confirmed:
+                return await ctx.send("Pet recipe link cancelled; no data changed.")
+
+            pet_columns = {
+                row["column_name"]
+                for row in await conn.fetch(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = 'monster_pets';
+                    """
+                )
+            }
+            update_visible_name = normalize_name(pet["name"]) == normalize_name(
+                pet["default_name"]
+            )
+            async with conn.transaction():
+                if "frontier_species_id" in pet_columns:
+                    await conn.execute(
+                        """
+                        UPDATE monster_pets
+                        SET default_name = $1,
+                            name = CASE WHEN $2 THEN $1 ELSE name END,
+                            splice_combination_id = $3,
+                            frontier_species_id = NULL
+                        WHERE id = $4;
+                        """,
+                        recipe["result_name"],
+                        update_visible_name,
+                        int(recipe_id),
+                        int(pet_id),
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        UPDATE monster_pets
+                        SET default_name = $1,
+                            name = CASE WHEN $2 THEN $1 ELSE name END,
+                            splice_combination_id = $3
+                        WHERE id = $4;
+                        """,
+                        recipe["result_name"],
+                        update_visible_name,
+                        int(recipe_id),
+                        int(pet_id),
+                    )
+
+                requests_exist = await conn.fetchval(
+                    "SELECT to_regclass('public.splice_requests') IS NOT NULL;"
+                )
+                if requests_exist:
+                    await conn.execute(
+                        """
+                        UPDATE splice_requests
+                        SET pet1_default = $1
+                        WHERE pet1_id = $2;
+                        """,
+                        recipe["result_name"],
+                        int(pet_id),
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE splice_requests
+                        SET pet2_default = $1
+                        WHERE pet2_id = $2;
+                        """,
+                        recipe["result_name"],
+                        int(pet_id),
+                    )
+
+        frontier_cog = self.bot.get_cog("SoulforgeFrontiers")
+        if frontier_cog is not None and getattr(frontier_cog, "catalog", None) is not None:
+            try:
+                await frontier_cog.catalog.refresh_legacy()
+            except Exception:
+                pass
+        await ctx.send(
+            f"Linked pet **#{pet_id}** to **S{recipe_id}: {recipe['result_name']}**. "
+            "Run `$repairsplicenames apply` again to propagate the resolved parent lineage."
+        )
+
+    @is_gm()
+    @commands.command(
+        name="testbgremoval",
+        aliases=["test_bg_removal", "testbgremove"],
+        hidden=True,
+    )
+    async def testbgremoval(self, ctx: commands.Context, mode: str = "upload"):
+        """GM-only PixelCut background-removal test using direct URL, then R2 fallback."""
+        pixelcut_key = (getattr(self.bot.config.external, "pixelcut_key", None) or "").strip()
+        if not pixelcut_key:
+            return await ctx.send("Missing `external.pixelcut_key` in `config.toml`.")
+
+        pixelcut_url = "https://api.developer.pixelcut.ai/v1/remove-background"
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-API-KEY": pixelcut_key,
+        }
+
+        async def call_pixelcut(image_url: str):
+            payload = json.dumps({"image_url": image_url, "format": "png"})
+            async with aiohttp.ClientSession() as session:
+                async with session.post(pixelcut_url, headers=headers, data=payload) as response:
+                    raw = await response.text()
+                    if response.status != 200:
+                        return False, None, f"HTTP {response.status}: {raw[:1000]}"
+                    try:
+                        data = json.loads(raw)
+                    except json.JSONDecodeError:
+                        return False, None, "PixelCut returned non-JSON response."
+
+                    result_url = data.get("result_url")
+                    if not result_url:
+                        return False, None, "PixelCut response had no `result_url`."
+                    return True, result_url, None
+
+        if mode.lower() == "example":
+            await ctx.send("Testing PixelCut with example image URL...")
+            ok, result_url, err = await call_pixelcut("https://cdn3.pixelcut.app/product.jpg")
+            if ok:
+                return await ctx.send(f"Success: {result_url}")
+            return await ctx.send(f"Example test failed: {err}")
+
+        await ctx.send("Upload an image to test background removal.")
+
+        def check(message: discord.Message):
+            return (
+                message.author.id == ctx.author.id
+                and message.channel.id == ctx.channel.id
+                and bool(message.attachments)
+            )
+
+        try:
+            msg = await self.bot.wait_for("message", check=check, timeout=90)
+        except asyncio.TimeoutError:
+            return await ctx.send("Timed out waiting for image upload.")
+
+        attachment = msg.attachments[0]
+        if not attachment.height:
+            return await ctx.send("Attachment is not an image.")
+
+        await ctx.send("Trying PixelCut with direct Discord attachment URL...")
+        ok, result_url, err = await call_pixelcut(attachment.url)
+        if ok:
+            return await ctx.send(f"Direct URL succeeded: {result_url}")
+
+        await ctx.send(f"Direct URL failed ({err}). Trying R2 temp URL fallback...")
+        temp_key = (
+            f"temp/test_bgremoval_{ctx.author.id}_"
+            f"{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}_"
+            f"{secrets.token_hex(4)}_{attachment.filename}"
+        )
+
+        try:
+            image_data = await attachment.read()
+            temp_url = await self._r2_upload_temp_and_get_url(
+                image_data,
+                temp_key,
+                expires_in=900,
+                content_type=attachment.content_type or "image/png",
+            )
+            ok, result_url, err = await call_pixelcut(temp_url)
+        except Exception as e:
+            return await ctx.send(f"R2 fallback failed: {e}")
+        finally:
+            try:
+                await self._r2_delete_object(temp_key)
+            except Exception:
+                pass
+
+        if ok:
+            await ctx.send(f"R2 fallback succeeded: {result_url}")
+        else:
+            await ctx.send(f"R2 fallback failed: {err}")
+
+    # ──────────────────────────────────────────────────────────────────────
+    #  AUTO S P L I C E   (automated version of batch splice)
+    # ──────────────────────────────────────────────────────────────────────
+    @is_gm()
+    @commands.command(hidden=True)
+    async def auto_splice(self, ctx: commands.Context, count: int = 5):
+        """Automated batch splice with default settings and interactive review"""
+        
+        import aiohttp, asyncio, base64, datetime, io, json, os, random, traceback, secrets
+        from openai import OpenAI
+
+        MAX_BATCH = 21
+        DEFAULT_IMG = "https://i.imgur.com/nJYMPOQ.png"
+
+        # ──────────────────────────────────────────────────────────
+        # helper wrappers
+        # ──────────────────────────────────────────────────────────
+        async def download_bytes(url: str) -> bytes:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url) as r:
+                    return await r.read()
+
+        async def storage_upload(data: bytes, filename: str) -> str:
+            return await self._r2_upload_bytes(data, filename)
+
+        # Helper to generate a unique filename
+        def unique_filename(base: str, ext: str = ".png") -> str:
+            ts = datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
+            rand = secrets.token_hex(4)
+            return f"{base}_{ts}_{rand}{ext}"
+
+        # ──────────────────────────────────────────────────────────
+        # 0) limit batch + create OpenAI client
+        # ──────────────────────────────────────────────────────────
+        if count > MAX_BATCH:
+            count = MAX_BATCH
+            await ctx.send(f"Batch size limited to {MAX_BATCH}")
+
+        try:
+            openai_client = self._create_openai_client()
+            await ctx.send("🤖 **AUTO SPLICE INITIATED**\n✅ OpenAI client ready – processing with default settings...")
+        except Exception as e:
+            return await ctx.send(f"⚠️ OpenAI init failed ({e}) – cannot proceed with auto splice.")
+
+        # ──────────────────────────────────────────────────────────
+        # 1) pull pending requests
+        # ──────────────────────────────────────────────────────────
+        async with self.bot.pool.acquire() as conn:
+            await self._ensure_splice_request_background_column(conn)
+            rows = await conn.fetch(
+                """
+                SELECT  id, user_id, pet1_id, pet2_id, pet1_name, pet2_name,
+                        pet1_default, pet2_default, created_at,
+                        pet1_url, pet2_url,
+                        pet1_hp, pet1_attack, pet1_defense,
+                        pet2_hp, pet2_attack, pet2_defense,
+                        pet1_element, pet2_element, temp_name, background_theme, splice_style
+                FROM    splice_requests
+                WHERE   status='pending'
+                ORDER BY created_at
+                LIMIT   $1
+                """,
+                count,
+            )
+            rows = await self._hydrate_splice_parent_stats(conn, rows)
+
+        if not rows:
+            return await ctx.send("No pending splice requests.")
+
+        # ──────────────────────────────────────────────────────────
+        # 2) build working objects
+        # ──────────────────────────────────────────────────────────
+        pets = []
+        for r in rows:
+            pets.append(
+                dict(
+                    splice_id=r["id"],
+                    user_id=r["user_id"],
+                    name=r["temp_name"],
+                    pet1_id=r["pet1_id"],
+                    pet2_id=r["pet2_id"],
+                    pet1_default=r["pet1_default"],
+                    pet2_default=r["pet2_default"],
+                    pet1_hp=r["pet1_hp"],
+                    pet1_attack=r["pet1_attack"],
+                    pet1_defense=r["pet1_defense"],
+                    pet2_hp=r["pet2_hp"],
+                    pet2_attack=r["pet2_attack"],
+                    pet2_defense=r["pet2_defense"],
+                    pet1_element=r["pet1_element"],
+                    pet2_element=r["pet2_element"],
+                    pet1_url=r["pet1_url"],
+                    pet2_url=r["pet2_url"],
+                    background_theme=r["background_theme"],
+                    splice_style=r["splice_style"],
+                    url=None,
+                    hp=None,
+                    attack=None,
+                    defense=None,
+                    element=None,
+                    is_destabilised="[DESTABILISED]" in r["temp_name"],
+                    divine_suggestion=0,
+                    forge_suggestion=0,
+                )
+            )
+        
+        # Check for splice final potion effect for each user
+        user_splice_final_effects = {}
+        for pet in pets:
+            if pet['user_id'] not in user_splice_final_effects:
+                # Check if user has splice final potion active
+                async with self.bot.pool.acquire() as conn:
+                    has_effect = await conn.fetchval(
+                        'SELECT splice_final_active FROM profile WHERE "user" = $1;',
+                        pet['user_id']
+                    )
+                    user_splice_final_effects[pet['user_id']] = has_effect or False
+
+        # ──────────────────────────────────────────────────────────
+        # 3) STEP-1 AUTO IMAGE GENERATION
+        # ──────────────────────────────────────────────────────────
+        await ctx.send(
+            f"🎨 **AUTO-GENERATING IMAGES** (using {SPLICE_IMAGE_MODEL} with enhanced creative prompts...)"
+        )
+        
+        # Define creative elements for dynamic prompt generation
+        creature_types = ['mythical', 'elemental', 'celestial', 'abyssal', 'arcane', 'primordial', 'ethereal', 'fey',
+            'crystalline', 'fungal', 'biomechanical', 'astral', 'geomantic', 'phantasmal', 'insectoid',
+            'draconic', 'shadow', 'prismatic', 'eldritch', 'botanical', 'amorphous', 'aquatic', 'volcanic'
+        ]
+        art_styles = ['vibrant', 'detailed', 'mystical', 'elegant', 'dynamic', 'striking',
+            'surreal', 'luminous', 'bioluminescent', 'fractal', 'iridescent', 'ornate',
+            'ink-style', 'glyph-marked', 'runic', 'neon-edged', 'watercolor', 'geometric'
+        ]
+        special_traits = ['glowing', 'shimmering', 'spectral', 'crystalline', 'shadowy', 'radiant', 'phantasmal',
+            'kaleidoscopic', 'reality-defying', 'dimension-shifting', 'void-touched', 'time-warped',
+            'dream-woven', 'soul-bound', 'elder', 'mutated', 'phase-shifting', 'mana-infused'
+        ]
+        
+        # Define anatomical features for uniqueness
+        anatomical_features = [
+            'segmented exoskeleton', 'multiple symmetrical eyes', 'bioluminescent patterns',
+            'floating appendages', 'translucent membranes', 'spiraling horns', 'crystalline growths',
+            'energy-channeling tendrils', 'armored scales', 'reality-fracturing limbs', 'hypnotic markings',
+            'phase-shifting wings', 'smoke-emitting vents', 'liquid metal skin', 'floating energy cores',
+            'rune-inscribed hide', 'geometric shell segments', 'prismatic feathers'
+        ]
+        
+        # Define specific dos and don'ts
+        dos_and_donts = [
+            "DO: Create exactly ONE unified creature, not multiple separate entities.",
+            "DO: Ensure the fusion appears genetically coherent, not a collage of parts.",
+            "DO: Include unexpected anatomical features that neither parent possesses.",
+            "DO: Give it asymmetrical or unusual anatomical proportions.",
+            "DON'T: Show humanoid faces or human-like expressions.",
+            "DON'T: Create a simple mashup of overlaid parts - truly integrate the elements.",
+            "DON'T: Let the background overpower the creature or turn into a busy scene.",
+            "DON'T: Add weapons, clothing, or artificial accessories unless they're fused into anatomy."
+        ]
+
+        for idx, pet in enumerate(pets, 1):
+            await ctx.send(f"🔄 Processing {idx}/{len(pets)}: {pet['name']}...")
+            
+            try:
+                # Check if user has splice final potion effect
+                has_splice_final_effect = user_splice_final_effects.get(pet['user_id'], False)
+                
+                # Decide if this is a special type of splice based on probabilities
+                if has_splice_final_effect:
+                    # 25% chance for FINAL with splice final potion
+                    is_final = random.random() < 0.15
+                else:
+                    # Normal 3% chance for FINAL
+                    is_final = random.random() < 0.03
+                
+                is_special = not is_final and random.random() < 0.07  # 7% chance
+                is_unstable = not (is_final or is_special) and random.random() < 0.06  # 6% chance
+                
+                # Check if any parent has [UNSTABLE] in the name
+                has_unstable_parent = ('[UNSTABLE]' in pet['pet1_default'].upper() or 
+                                      '[UNSTABLE]' in pet['pet2_default'].upper())
+                    
+                # 40% chance of DESTABILIZED if parent is unstable (overrides other types)
+                is_destabilized = has_unstable_parent and random.random() < 0.4
+                
+                # Store the tag in the pet object
+                if is_destabilized:
+                    pet['splice_type'] = 'DESTABILIZED'
+                    pet['is_destabilised'] = True
+                elif is_final:
+                    pet['splice_type'] = 'FINAL'
+                elif is_special:
+                    pet['splice_type'] = 'SPECIAL'
+                elif is_unstable:
+                    pet['splice_type'] = 'UNSTABLE'
+                else:
+                    pet['splice_type'] = 'NORMAL'
+                
+                # Clear splice final effect if user had it active (regardless of outcome)
+                if has_splice_final_effect:
+                    async with self.bot.pool.acquire() as conn:
+                        await conn.execute(
+                            'UPDATE profile SET splice_final_active = FALSE WHERE "user" = $1;',
+                            pet['user_id']
+                        )
+                    # Update the local cache
+                    user_splice_final_effects[pet['user_id']] = False
+                    
+                    # Notify if the effect was successful
+                    if is_final:
+                        await ctx.send(f"🔮 **Splice Final Potion activated!** {pet['name']} became a [FINAL] form!")
+                    else:
+                        await ctx.send(f"🔮 **Splice Final Potion used** - The effect has expired.")
+                
+                # Get random unique elements for this specific creature
+                creature_type = random.choice(creature_types)
+                selected_style_key = self._normalize_splice_style(
+                    pet.get("splice_style")
+                )
+                style_descriptor = self._get_splice_style_descriptor(
+                    selected_style_key
+                )
+                art_style = style_descriptor or random.choice(art_styles)
+                special_trait = random.choice(special_traits)
+                anatomical_feature = random.choice(anatomical_features)
+                
+                # Select 3 random dos/don'ts
+                selected_guidelines = random.sample(dos_and_donts, 3)
+                background_prompt = self._get_splice_background_theme_prompt(
+                    pet.get("background_theme")
+                )
+                style_prompt = self._get_splice_style_prompt(selected_style_key)
+                
+                # Generate a unique random seed for this creature to ensure distinctiveness
+                unique_seed = random.randint(10000, 99999)
+                
+                # Base prompt with highly specific creativity elements
+                prompt = (
+                    f"Create a single, unified {art_style} {creature_type} hybrid entity formed by seamlessly fusing two beings into one evolved lifeform. "
+                    f"This is creature design #{unique_seed}. "
+
+                    f"The creature's most defining feature is a distinctive {anatomical_feature}. "
+
+                    "Integrate anatomical structures, textures, materials, and energy traits from both parent beings into one cohesive organism. "
+                    "The result must feel naturally evolved or supernaturally ascended — NEVER a simple combination or collage. "
+
+                    "The entity may embody aspects of nature, supernatural forces, cosmic energy, elemental power, divine presence, or alien biology. "
+                    "It should feel mythological, believable, and internally consistent within its own existence. "
+
+                    "Show the ENTIRE creature in a powerful dynamic pose emphasizing silhouette readability and anatomical clarity. "
+
+                    f"The being radiates a strong sense of {special_trait}, conveying intelligence, power, and presence. "
+
+                    "Design should combine organic, mystical, and fantastical elements while maintaining visual cohesion and balance. "
+
+                    "Use strong readability, deliberate contrast, and a polished finish appropriate to the chosen style. "
+                    "If the requested style implies painterly, graphic, retro, handcrafted, mosaic-like, or simplified geometric rendering, fully commit to that visual language instead of defaulting to generic realism. "
+                    "Preserve clear focal hierarchy, intentional materials, and confident execution within the chosen style. "
+
+                    "Cinematic composition with dramatic perspective and strong visual hierarchy. "
+                    "Volumetric lighting, atmospheric effects, glowing energy interactions, environmental storytelling. "
+
+                    f"Visual style direction: {style_prompt} "
+                    f"Background direction: {background_prompt} "
+                    "Build an epic, immersive background that reinforces scale, mood, and narrative impact while remaining secondary to the creature. "
+                    f"Guidelines: {selected_guidelines[0]} {selected_guidelines[1]} {selected_guidelines[2]}"
+                )
+                
+                # Enhance prompt based on splice type
+                if is_final:
+                    prompt += (
+                        "This is a [FINAL] tier creature of immense power. Give it majestic, god-like qualities "
+                        "with impossible anatomical features that transcend reality. Add cosmic elements, "
+                        "multiple energy sources, and reality-bending visual effects integrated into its form."
+                    )
+                    # Add the tag to the name (at end)
+                    pet['name'] = f"{pet['name']} [FINAL]"
+                elif is_special:
+                    prompt += (
+                        "This is a [SPECIAL] tier creature with extraordinary qualities. Give it unique, "
+                        "unexpected anatomical features that surprise and delight. Include visual elements "
+                        "that suggest magical abilities, ancient wisdom, or elemental mastery."
+                    )
+                    # Add the tag to the name (at end)
+                    pet['name'] = f"{pet['name']} [SPECIAL]"
+                elif is_unstable:
+                    prompt += (
+                        "This is an [UNSTABLE] tier creature with volatile energy. Include visual elements "
+                        "of instability like asymmetry, shifting forms, energy leakage, or partial transparency. "
+                        "Suggest power that is barely contained within its form."
+                    )
+                    # Add the tag to the name (at end)
+                    pet['name'] = f"{pet['name']} [UNSTABLE]"
+                elif is_destabilized:
+                    prompt += (
+                        "This is a [DESTABILIZED] creature that is breaking down at a molecular level. "
+                        "Visualize this with fragmentation, particle effects, glitching anatomy, or partial dissolution. "
+                        "It should appear weakened but still holding onto its essence."
+                    )
+                    # Add the tag to the name (at end)
+                    pet['name'] = f"{pet['name']} [DESTABILISED]"
+                
+                # Download parent images
+                p1_bytes = await download_bytes(pet["pet1_url"])
+                p2_bytes = await download_bytes(pet["pet2_url"])
+                p1_file = f"p1_{pet['splice_id']}.png"
+                p2_file = f"p2_{pet['splice_id']}.png"
+                
+                with open(p1_file, "wb") as f:
+                    f.write(p1_bytes)
+                with open(p2_file, "wb") as f:
+                    f.write(p2_bytes)
+
+                # Generate with the configured splice image model
+                def _edit():
+                    return openai_client.images.edit(
+                        model=SPLICE_IMAGE_MODEL,
+                        image=[open(p1_file, "rb"), open(p2_file, "rb")],
+                        prompt=prompt,
+                    )
+
+                result = await asyncio.to_thread(_edit)
+                img_b64 = result.data[0].b64_json
+                gen_bytes = base64.b64decode(img_b64)
+                # PixelCut background removal intentionally disabled for auto_splice.
+                # We keep generated image bytes as-is and persist directly to R2.
+
+                # Upload to R2
+                pet["url"] = await storage_upload(
+                    gen_bytes, unique_filename(f"{ctx.author.id}_{pet['name']}_auto")
+                )
+
+                # Clean up temp files
+                try:
+                    os.remove(p1_file)
+                    os.remove(p2_file)
+                except Exception:
+                    pass
+
+            except Exception as e:
+                await ctx.send(f"⚠️ Image generation failed for {pet['name']}: {e}")
+                pet["url"] = DEFAULT_IMG
+
+        # ──────────────────────────────────────────────────────────
+        # 4) STEP-2 AUTO STAT GENERATION (no hard caps)
+        # ──────────────────────────────────────────────────────────
+        await ctx.send("⚔️ **AUTO-GENERATING STATS** (no hard caps; splice-type weighted)...")
+
+        for pet in pets:
+            try:
+                p1hp, p1atk, p1def = pet["pet1_hp"], pet["pet1_attack"], pet["pet1_defense"]
+                p2hp, p2atk, p2def = pet["pet2_hp"], pet["pet2_attack"], pet["pet2_defense"]
+                
+                if pet["splice_type"] == "FINAL":
+                    def avg(a, b):
+                        m = max(a, b)
+                        # FINAL splices get higher boost chance
+                        if m > 2600:  # If already high, apply smaller increase
+                            return int(m * random.uniform(1.02, 1.08))
+                        else:  # Otherwise give more significant boost
+                            return int(m * random.uniform(1.10, 1.18))
+                    
+                    # Generate stats with higher boost
+                    hp = avg(p1hp, p2hp)
+                    atk = avg(p1atk, p2atk)
+                    dfs = avg(p1def, p2def)
+                    
+                elif pet["splice_type"] == "SPECIAL":
+                    def avg(a, b):
+                        m = max(a, b)
+                        # SPECIAL splices get moderate boost
+                        if m > 2400:
+                            return int(m * random.uniform(1.01, 1.05))
+                        else:
+                            return int(m * random.uniform(1.05, 1.12))
+                    
+                    # Generate stats
+                    hp = avg(p1hp, p2hp)
+                    atk = avg(p1atk, p2atk)
+                    dfs = avg(p1def, p2def)
+                    
+                elif pet["splice_type"] == "UNSTABLE":
+                    def avg(a, b):
+                        m = max(a, b)
+                        # UNSTABLE splices get randomly varying boosts
+                        volatility = random.random() * 0.2  # 0 to 0.2 volatility
+                        return int(m * random.uniform(0.95 + volatility, 1.08 + volatility))
+                    
+                    # Generate potentially volatile stats
+                    hp = avg(p1hp, p2hp)
+                    atk = avg(p1atk, p2atk) 
+                    dfs = avg(p1def, p2def)
+                    
+                elif pet["splice_type"] == "DESTABILIZED":
+                        # DESTABILIZED splices get much weaker stats
+                    pet['is_destabilised'] = True  # Ensure this flag is set for compatibility
+                    
+                    def d(x, y):
+                        return int(max(x, y) * random.uniform(0.10, 0.30))
+
+                    hp = d(p1hp, p2hp)
+                    atk = d(p1atk, p2atk)
+                    dfs = d(p1def, p2def)
+                    
+                else:  # NORMAL splice
+                    def avg(a, b):
+                        m = max(a, b)
+                        # Keep NORMAL splices near/around the stronger parent stat.
+                        return int(m * random.uniform(0.98, 1.03))
+
+                    hp = avg(p1hp, p2hp)
+                    atk = avg(p1atk, p2atk) 
+                    dfs = avg(p1def, p2def)
+
+                elm = await self.suggest_element(pet["pet1_element"], pet["pet2_element"])
+                pet.update(dict(hp=hp, attack=atk, defense=dfs, element=elm))
+
+                mx = max(hp, atk, dfs)
+                
+                # Set divine/forge suggestions based on splice type and stats
+                if pet["splice_type"] == "DESTABILIZED":
+                    # DESTABILIZED pets give no quest progress
+                    div, frg = 0, 0
+                elif pet["splice_type"] == "FINAL":
+                    # FINAL pets give significant quest progress
+                    div, frg = random.randint(40, 70), random.randint(40, 70)
+                elif pet["splice_type"] == "SPECIAL":
+                    # SPECIAL pets give good quest progress
+                    div, frg = random.randint(30, 60), random.randint(30, 60)
+                elif pet["splice_type"] == "UNSTABLE":
+                    # UNSTABLE pets give variable quest progress
+                    div, frg = random.randint(10, 40), random.randint(10, 40)
+                elif mx > 2000:  # Normal splice with high stats
+                    div, frg = random.randint(20, 50), random.randint(20, 50)
+                elif mx > 1500:
+                    div, frg = random.randint(5, 20), random.randint(5, 20)
+                else:
+                    div, frg = 0, 0
+                    
+                pet["divine_suggestion"], pet["forge_suggestion"] = div, frg
+
+            except Exception as e:
+                await ctx.send(f"⚠️ Stat generation error for {pet['name']}: {e}")
+                pet.update(dict(hp=100, attack=100, defense=100, element="Unknown"))
+
+        # ──────────────────────────────────────────────────────────
+        # 5) STEP-3 AUTO NAME GENERATION
+        # ──────────────────────────────────────────────────────────
+        await ctx.send("📝 **AUTO-GENERATING NAMES** (using vision AI with enhanced creative prompts)...")
+
+        # Define creative keywords for dynamic name generation
+        name_themes = [
+            # Foundational & Elemental
+            'Celestial', 'Abyssal', 'Verdant', 'Arcane', 'Volcanic', 'Glacial', 'Ethereal', 'Tempest', 'Infernal', 'Sylvan',
+            'Aquatic', 'Zephyrian', 'Cthonic', 'Empyrean', 'Galactic', 'Cosmic', 'Quantum', 'Ashen', 'Crystalline', 'Obsidian',
+            'Metallic', 'Rusted', 'Blighted', 'Fungal', 'Geomantic', 'Kinetic', 'Psionic', 'Magnetic', 'Radioactive', 'Seismic',
+            # Abstract & Emotional
+            'Dread', 'Sanctified', 'Corrupted', 'Hallowed', 'Warped', 'Sovereign', 'Feral', 'Silent', 'Screaming', 'Weeping',
+            'Joyful', 'Sorrowful', 'Wrathful', 'Peaceful', 'Chaotic', 'Lawful', 'Neutral', 'Vengeful', 'Merciful', 'Hopeful',
+            # State & Condition
+            'Chimeric', 'Prismatic', 'Nocturnal', 'Solar', 'Lunar', 'Miasmic', 'Auroral', 'Phantasmal', 'Grave-born', 'Dream-forged',
+            'Nightmare', 'Mirage', 'Sunken', 'Plague-ridden', 'Symbiotic', 'Parasitic', 'Apex', 'Alpha', 'Omega', 'Prime',
+            'Ancestral', 'Forgotten', 'Forbidden', 'Timeless', 'Ephemeral', 'Cyclical', 'Shattered', 'Mended', 'Wounded', 'Grotesque',
+            # Mythical & Class-based
+            'Seraphic', 'Demonic', 'Angelic', 'Diabolic', 'Draconic', 'Wyrm', 'Titan', 'Undead', 'Lich', 'Vampiric',
+            'Elemental', 'Golem', 'Automaton', 'Cybernetic', 'Biomechanical', 'Clockwork', 'Eldritch', 'Outsider', 'Primordial', 'Ancient'
+        ]
+        name_concepts = [
+            # Roles & Titles
+            'Sentinel', 'Warden', 'Oracle', 'Goliath', 'Leviathan', 'Behemoth', 'Juggernaut', 'Specter', 'Phantom', 'Revenant',
+            'Harbinger', 'Warden', 'Arbiter', 'Avatar', 'Champion', 'Guardian', 'Herald', 'Martyr', 'Master', 'Nemesis',
+            'Paladin', 'Prodigy', 'Protector', 'Scion', 'Scourge', 'Seer', 'Sovereign', 'Tyrant', 'Vanguard', 'Victor',
+            'Watcher', 'Warlord', 'Zealot', 'Adept', 'Ascendant', 'Barbarian', 'Cleric', 'Druid', 'Monk', 'Ranger',
+            # Objects & Artifacts
+            'Nexus', 'Vortex', 'Cipher', 'Fragment', 'Aegis', 'Altar', 'Anchor', 'Artifact', 'Beacon', 'Blade',
+            'Codex', 'Core', 'Crown', 'Crucible', 'Curse', 'Diadem', 'Effigy', 'Elixir', 'Emblem', 'Font',
+            'Forge', 'Gate', 'Gauntlet', 'Gem', 'Glyph', 'Grail', 'Grimoire', 'Idol', 'Keystone', 'Labyrinth',
+            'Maw', 'Monolith', 'Orb', 'Pylon', 'Relic', 'Rune', 'Scepter', 'Shard', 'Shield', 'Shrine',
+            'Sigil', 'Talisman', 'Tome', 'Totem', 'Veil', 'Weapon', 'Sanctum', 'Sarcophagus', 'Throne', 'Spire',
+            # Events & Phenomena
+            'Echo', 'Riddle', 'Mirage', 'Legacy', 'Paradox', 'Omen', 'Whisper', 'Requiem', 'Genesis', 'Apex',
+            'Enigma', 'Chimera', 'Lament', 'Solitude', 'Fury', 'Serenity', 'Epoch', 'Aeon', 'Momentum', 'Catalyst',
+            'Anomaly', 'Bastion', 'Conflux', 'Dirge', 'Flux', 'Calamity', 'Cascade', 'Deluge', 'Demise', 'Destiny',
+            'Eclipse', 'Exodus', 'Finale', 'Fissure', 'Maelstrom', 'Nova', 'Oblivion', 'Onslaught', 'Rapture', 'Rift'
+        ]
+        name_origins = [
+            # Forged & Wrought
+            'Star-forged', 'Flame-wrought', 'Frost-forged', 'Chaos-forged', 'Grave-risen', 'Core-fused', 'Steel-forged', 'Iron-clad', 'Bone-crushed', 'Flesh-molded',
+            'Mind-shattered', 'Will-bent', 'Fire-tempered', 'Titan-forged', 'Gold-plated', 'Bronze-cast', 'Spell-cast', 'Glory-won', 'War-torn', 'Battle-hardened',
+            # Woven & Stitched
+            'Dream-woven', 'Shadow-stitched', 'Fate-spun', 'Sinew-laced', 'Spider-spun', 'Light-woven', 'Nether-stitched', 'Vine-laced', 'Story-woven', 'Myth-spun',
+            # Touched & Kissed
+            'Void-touched', 'Angel-touched', 'Moon-kissed', 'Sun-scorched', 'Plague-touched', 'Hell-touched', 'Fey-touched', 'God-touched', 'Sorrow-touched', 'Winter-kissed',
+            # Carved & Etched
+            'Rune-carved', 'Pain-etched', 'Stone-hewn', 'Wood-carved', 'Gem-cut', 'Fear-etched', 'Hope-carved', 'Glory-etched', 'Despair-carved', 'Victory-etched',
+            # Bound & Sworn
+            'Soul-bound', 'Light-blessed', 'Blood-sworn', 'Order-bound', 'Ice-bound', 'Demon-bound', 'Honor-bound', 'Vow-kept', 'Oath-broken', 'Curse-bound',
+            # Born & Spawned
+            'Storm-born', 'Abyss-born', 'Sky-fallen', 'Thought-spawn', 'Fear-made', 'Myth-born', 'God-slain', 'Dragon-spawn', 'Slime-born', 'Hate-fueled',
+            # Written & Told
+            'Truth-spoken', 'Lie-whispered', 'Song-sung', 'Tale-told', 'Legend-written', 'Prophecy-fulfilled', 'Prayer-answered', 'Doom-sealed', 'Secret-kept', 'Last-word',
+            # Lost & Found
+            'Time-lost', 'Reality-bent', 'Hope-lost', 'Faith-given', 'Love-lost', 'Gamble-lost', 'Victory-claimed', 'Defeat-suffered', 'Glory-found', 'Wisdom-gained',
+            # Ender & Bringer
+            'World-ender', 'Life-bringer', 'Dawn-bringer', 'Dusk-ender', 'Peace-bringer', 'War-ender', 'Hope-bringer', 'Doom-bringer', 'Light-bringer', 'Night-ender'
+        ]
+
+        for i, pet in enumerate(pets, 1):
+            try:
+                # Add 1 to 3 random keywords for inspiration
+                keywords_to_add = random.randint(1, 3)
+                inspiration_keywords = random.sample(name_themes + name_concepts + name_origins, keywords_to_add)
+                inspiration_text = f"Hint for inspiration: {', '.join(inspiration_keywords)}. "
+
+                base_prompt = (
+                    "You are a master myth-maker. A new legendary creature stands before you. "
+                    "Gaze upon its form and essence. What is its true name, a name for legends? "
+                    f"{inspiration_text}"
+                    "Consider its powers, temperament, and the story it tells. "
+                    "Forge a unique, resonant name (one or two words). "
+                    "Avoid common fantasy names (e.g., Nyx, Umbra, Shadow, Luna, Ember). "
+                    "Draw inspiration from myths, celestial bodies, rare minerals, or abstract concepts. "
+                    "Deliver only the name. No titles, no explanations. Just the name."
+                )
+
+                vision_msg = [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": base_prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": pet["url"]}
+                        },
+                    ],
+                }]
+
+                resp = await asyncio.to_thread(
+                    openai_client.chat.completions.create,  # Fixed: was responses.create
+                    model="o3",  # Fixed: was "o3-2025-04-16"
+                    messages=vision_msg,  # Fixed: was input=vision_msg
+                )
+
+                # Get the AI-generated name
+                generated_name = resp.choices[0].message.content.strip()
+                
+                # Preserve the splice tag if it exists
+                if pet["splice_type"] != "NORMAL":
+                    # Re-add the appropriate tag to the end of the AI-generated name
+                    if pet["splice_type"] == "FINAL":
+                        tagged_name = f"{generated_name} [FINAL]"
+                    elif pet["splice_type"] == "SPECIAL":
+                        tagged_name = f"{generated_name} [SPECIAL]"
+                    elif pet["splice_type"] == "UNSTABLE":
+                        tagged_name = f"{generated_name} [UNSTABLE]"
+                    elif pet["splice_type"] == "DESTABILIZED":
+                        tagged_name = f"{generated_name} [DESTABILISED]"
+                    else:
+                        tagged_name = generated_name
+                    
+                    # Update the pet name with tag preserved
+                    pet["name"] = tagged_name
+                    await ctx.send(f"✨ {i}/{len(pets)}: {pet['pet1_default']}+{pet['pet2_default']} → **{tagged_name}**")
+                else:
+                    # Normal pet with no tag
+                    pet["name"] = generated_name
+                    await ctx.send(f"✨ {i}/{len(pets)}: {pet['pet1_default']}+{pet['pet2_default']} → **{generated_name}**")
+
+            except Exception as e:
+                await ctx.send(f"⚠️ Name generation failed for pet {i}: {e}")
+
+        # ──────────────────────────────────────────────────────────
+        # 6) INTERACTIVE REVIEW SYSTEM
+        # ──────────────────────────────────────────────────────────
+        await ctx.send("📋 **REVIEW PHASE** - Check your spliced pets below...")
+
+        # Generate unique save ID for this auto splice session
+        save_id = f"auto_splice_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000, 9999)}"
+        
+        review_view = AutoSpliceReview(ctx, pets, openai_client, timeout=300, save_id=save_id)
+        embed = await review_view.get_review_embed()
+        
+        message = await ctx.send(embed=embed, view=review_view)
+        review_view.message = message
+
+        # Wait for review completion
+        await review_view.wait()
+
+        # Check if cancelled
+        if not pets:
+            return await ctx.send("Auto splice cancelled.")
+
+        if not review_view.confirmed:
+            return await ctx.send("⏰ Review timed out. Auto splice cancelled.")
+
+        # ──────────────────────────────────────────────────────────
+        # 7) CREATE PETS IN DATABASE
+        # ──────────────────────────────────────────────────────────
+        await ctx.send("🔨 **CREATING PETS IN DATABASE**...")
+
+        completed = []
+        for pet in pets:
+            try:
+                # Guarantee DB-persisted pet image URLs are Cloudflare R2-hosted.
+                pet["url"] = await self._ensure_pet_image_on_r2(
+                    image_url=pet.get("url"),
+                    user_id=pet["user_id"],
+                    pet_name=pet["name"],
+                    source_tag="auto",
+                )
+
+                iv_pct = random.uniform(30, 70)
+                iv_pts = (iv_pct / 100) * 100
+                hp_iv, atk_iv, def_iv = await self.allocate_iv_points(iv_pts)
+                growth_t = datetime.datetime.utcnow() + datetime.timedelta(days=2)
+
+                async with self.bot.pool.acquire() as conn:
+                    new_id, legacy_splice_id = await self._persist_processed_splice_pet(
+                        conn,
+                        pet,
+                        hp_iv=hp_iv,
+                        attack_iv=atk_iv,
+                        defense_iv=def_iv,
+                        growth_time=growth_t,
+                        iv_percentage=iv_pct,
+                    )
+
+                self.bot.dispatch(
+                    "frontier_splice_created",
+                    int(pet["user_id"]),
+                    pet["name"],
+                    int(legacy_splice_id),
+                    int(pet["splice_id"]),
+                    int(new_id),
+                )
+                completed.append((new_id, pet))
+
+                # Update forge/divine
+                async with self.bot.pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT forge_condition, divine_attention FROM splicing_quest WHERE user_id=$1",
+                        pet["user_id"],
+                    )
+                forge_c = row["forge_condition"] if row else 100
+                divine = row["divine_attention"] if row else 0
+                forge_c = max(0, forge_c - pet["forge_suggestion"])
+                divine = min(100, divine + pet["divine_suggestion"])
+
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO splicing_quest (user_id, forge_condition, divine_attention)
+                        VALUES ($1,$2,$3)
+                        ON CONFLICT (user_id)
+                        DO UPDATE SET forge_condition=$2, divine_attention=$3
+                        """,
+                        pet["user_id"], forge_c, divine,
+                    )
+
+                # DM owner
+                owner = self.bot.get_user(pet["user_id"])
+                if owner:
+                    try:
+                        await owner.send(
+                            f"🧬 Your new creature **{pet['name']}** is born! Check `$pets`."
+                        )
+                    except Exception:
+                        pass
+
+            except Exception as e:
+                await ctx.send(f"⚠️ Error creating {pet['name']}: {e}")
+
+        # ──────────────────────────────────────────────────────────
+        # 8) SUMMARY
+        # ──────────────────────────────────────────────────────────
+        if not completed:
+            return await ctx.send("No pets were created.")
+
+        summ = discord.Embed(
+            title="🎉 Auto Splice Complete!",
+            description=f"Successfully created {len(completed)} pet(s) automatically.",
+            color=0x00FF00,
+        )
+        for pid, p in completed:
+            summ.add_field(
+                name=p['name'], 
+                value=f"ID `{pid}` • <@{p['user_id']}>\nHP: {p['hp']} | ATK: {p['attack']} | DEF: {p['defense']}", 
+                inline=True
+            )
+        
+        await ctx.send(embed=summ)
+
+    @is_gm()
+    @commands.command(hidden=True)
+    async def resume_auto_splice(self, ctx: commands.Context, save_id: str = None):
+        """Resume a saved auto splice session"""
+        
+        from openai import OpenAI
+        
+        # Load saved auto splice data
+        if not os.path.exists(AUTO_SPLICE_SAVE_FILE):
+            return await ctx.send("❌ No saved auto splice sessions found.")
+        
+        try:
+            with open(AUTO_SPLICE_SAVE_FILE, 'r') as f:
+                saves = json.load(f)
+        except Exception as e:
+            return await ctx.send(f"❌ Error loading saved data: {e}")
+        
+        if not saves:
+            return await ctx.send("❌ No saved auto splice sessions found.")
+        
+        # If no save_id provided, show available saves
+        if not save_id:
+            embed = discord.Embed(
+                title="📋 Saved Auto Splice Sessions",
+                description="Available sessions to resume:",
+                color=0x9C44DC
+            )
+            
+            for sid, data in saves.items():
+                created_at = datetime.datetime.fromisoformat(data["created_at"])
+                time_ago = datetime.datetime.utcnow() - created_at
+                hours_ago = time_ago.total_seconds() / 3600
+                
+                embed.add_field(
+                    name=f"Session: {sid}",
+                    value=f"Created: {hours_ago:.1f} hours ago\nPets: {len(data['pets'])}\nAuthor: <@{data['ctx_author_id']}>",
+                    inline=False
+                )
+            
+            embed.set_footer(text="Use: $resume_auto_splice <save_id>")
+            return await ctx.send(embed=embed)
+        
+        # Check if save_id exists
+        if save_id not in saves:
+            return await ctx.send(f"❌ Save ID '{save_id}' not found.")
+        
+        save_data = saves[save_id]
+        
+        # Check if user is authorized (original author or GM)
+        if save_data["ctx_author_id"] != ctx.author.id:
+            # Check if user is GM (you might want to add a GM check here)
+            pass
+        
+        # Initialize OpenAI client
+        try:
+            openai_client = self._create_openai_client()
+        except Exception as e:
+            return await ctx.send(f"❌ OpenAI client initialization failed: {e}")
+        
+        # Load pets from save data
+        pets = save_data["pets"]
+        
+        await ctx.send(f"🔄 **Resuming Auto Splice Session**\n📋 Found {len(pets)} pets ready for review...")
+        
+        # Create review view with the saved data
+        review_view = AutoSpliceReview(ctx, pets, openai_client, timeout=300, save_id=save_id)
+        embed = await review_view.get_review_embed()
+        
+        message = await ctx.send(embed=embed, view=review_view)
+        review_view.message = message
+        
+        # Wait for review completion
+        await review_view.wait()
+        
+        # Check if cancelled
+        if not pets:
+            return await ctx.send("Auto splice cancelled.")
+        
+        if not review_view.confirmed:
+            return await ctx.send("⏰ Review timed out. Auto splice cancelled.")
+        
+        # Create pets in database (same logic as auto_splice)
+        await ctx.send("🔨 **CREATING PETS IN DATABASE**...")
+        
+        completed = []
+        for pet in pets:
+            try:
+                # Guarantee DB-persisted pet image URLs are Cloudflare R2-hosted.
+                pet["url"] = await self._ensure_pet_image_on_r2(
+                    image_url=pet.get("url"),
+                    user_id=pet["user_id"],
+                    pet_name=pet["name"],
+                    source_tag="resume",
+                )
+
+                iv_pct = random.uniform(30, 70)
+                iv_pts = (iv_pct / 100) * 100
+                hp_iv, atk_iv, def_iv = await self.allocate_iv_points(iv_pts)
+                growth_t = datetime.datetime.utcnow() + datetime.timedelta(days=2)
+
+                async with self.bot.pool.acquire() as conn:
+                    new_id, legacy_splice_id = await self._persist_processed_splice_pet(
+                        conn,
+                        pet,
+                        hp_iv=hp_iv,
+                        attack_iv=atk_iv,
+                        defense_iv=def_iv,
+                        growth_time=growth_t,
+                        iv_percentage=iv_pct,
+                    )
+
+                self.bot.dispatch(
+                    "frontier_splice_created",
+                    int(pet["user_id"]),
+                    pet["name"],
+                    int(legacy_splice_id),
+                    int(pet["splice_id"]),
+                    int(new_id),
+                )
+                completed.append((new_id, pet))
+                
+                # Update forge/divine
+                async with self.bot.pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT forge_condition, divine_attention FROM splicing_quest WHERE user_id=$1",
+                        pet["user_id"],
+                    )
+                forge_c = row["forge_condition"] if row else 100
+                divine = row["divine_attention"] if row else 0
+                forge_c = max(0, forge_c - pet["forge_suggestion"])
+                divine = min(100, divine + pet["divine_suggestion"])
+                
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO splicing_quest (user_id, forge_condition, divine_attention)
+                        VALUES ($1,$2,$3)
+                        ON CONFLICT (user_id)
+                        DO UPDATE SET forge_condition=$2, divine_attention=$3
+                        """,
+                        pet["user_id"], forge_c, divine,
+                    )
+                
+                # DM owner
+                owner = self.bot.get_user(pet["user_id"])
+                if owner:
+                    try:
+                        await owner.send(
+                            f"🧬 Your new creature **{pet['name']}** is born! Check `$pets`."
+                        )
+                    except Exception:
+                        pass
+                        
+            except Exception as e:
+                await ctx.send(f"⚠️ Error creating {pet['name']}: {e}")
+        
+        # Summary
+        if not completed:
+            return await ctx.send("No pets were created.")
+        
+        summ = discord.Embed(
+            title="🎉 Auto Splice Resumed and Complete!",
+            description=f"Successfully created {len(completed)} pet(s) from saved session.",
+            color=0x00FF00,
+        )
+        for pid, p in completed:
+            summ.add_field(
+                name=p['name'], 
+                value=f"ID `{pid}` • <@{p['user_id']}>\nHP: {p['hp']} | ATK: {p['attack']} | DEF: {p['defense']}", 
+                inline=True
+            )
+        
+        await ctx.send(embed=summ)
+
+    @is_gm()
+    @commands.command(hidden=True)
+    async def list_auto_splices(self, ctx: commands.Context):
+        """List all saved auto splice sessions"""
+        
+        if not os.path.exists(AUTO_SPLICE_SAVE_FILE):
+            return await ctx.send("❌ No saved auto splice sessions found.")
+        
+        try:
+            with open(AUTO_SPLICE_SAVE_FILE, 'r') as f:
+                saves = json.load(f)
+        except Exception as e:
+            return await ctx.send(f"❌ Error loading saved data: {e}")
+        
+        if not saves:
+            return await ctx.send("❌ No saved auto splice sessions found.")
+        
+        embed = discord.Embed(
+            title="📋 Saved Auto Splice Sessions",
+            description=f"Found {len(saves)} saved session(s):",
+            color=0x9C44DC
+        )
+        
+        for sid, data in saves.items():
+            created_at = datetime.datetime.fromisoformat(data["created_at"])
+            time_ago = datetime.datetime.utcnow() - created_at
+            hours_ago = time_ago.total_seconds() / 3600
+            
+            embed.add_field(
+                name=f"Session: {sid}",
+                value=f"Created: {hours_ago:.1f} hours ago\nPets: {len(data['pets'])}\nAuthor: <@{data['ctx_author_id']}>",
+                inline=False
+            )
+        
+        embed.set_footer(text="Use: $resume_auto_splice <save_id> to resume | $delete_auto_splice <save_id> to delete")
+        await ctx.send(embed=embed)
+
+    @is_gm()
+    @commands.command(hidden=True)
+    async def delete_auto_splice(self, ctx: commands.Context, save_id: str):
+        """Delete a saved auto splice session"""
+        
+        if not os.path.exists(AUTO_SPLICE_SAVE_FILE):
+            return await ctx.send("❌ No saved auto splice sessions found.")
+        
+        try:
+            with open(AUTO_SPLICE_SAVE_FILE, 'r') as f:
+                saves = json.load(f)
+        except Exception as e:
+            return await ctx.send(f"❌ Error loading saved data: {e}")
+        
+        if save_id not in saves:
+            return await ctx.send(f"❌ Save ID '{save_id}' not found.")
+        
+        # Remove the save
+        del saves[save_id]
+        
+        # Write back to file
+        try:
+            with open(AUTO_SPLICE_SAVE_FILE, 'w') as f:
+                json.dump(saves, f, indent=2, default=str)
+            await ctx.send(f"✅ Successfully deleted save session: {save_id}")
+        except Exception as e:
+            await ctx.send(f"❌ Error deleting save: {e}")
+
+    @is_gm()
+    @commands.command(hidden=True)
+    async def clear_auto_splices(self, ctx: commands.Context):
+        """Clear all saved auto splice sessions"""
+        
+        if not os.path.exists(AUTO_SPLICE_SAVE_FILE):
+            return await ctx.send("❌ No saved auto splice sessions found.")
+        
+        try:
+            with open(AUTO_SPLICE_SAVE_FILE, 'r') as f:
+                saves = json.load(f)
+        except Exception as e:
+            return await ctx.send(f"❌ Error loading saved data: {e}")
+        
+        if not saves:
+            return await ctx.send("❌ No saved auto splice sessions found.")
+        
+        count = len(saves)
+        
+        # Clear all saves
+        try:
+            with open(AUTO_SPLICE_SAVE_FILE, 'w') as f:
+                json.dump({}, f)
+            await ctx.send(f"✅ Successfully cleared {count} saved auto splice session(s)")
+        except Exception as e:
+            await ctx.send(f"❌ Error clearing saves: {e}")
+
+    # ──────────────────────────────────────────────────────────────────────
+    #  BATCH S P L I C E   (full command – configured image model, retry loops, etc.)
+    # ──────────────────────────────────────────────────────────────────────
+    @is_gm()
+    @commands.command(hidden=True)
+    async def batch_splice(self, ctx: commands.Context, count: int = 5):
+
+        import aiohttp, asyncio, base64, datetime, io, json, os, random, traceback
+        from openai import OpenAI
+
+        MAX_BATCH = 21
+        DEFAULT_IMG = "https://i.imgur.com/nJYMPOQ.png"
+
+        # ──────────────────────────────────────────────────────────
+        # helper wrappers  (only used inside this command)
+        # ──────────────────────────────────────────────────────────
+        async def admin_wait(timeout=60):
+            return await self.bot.wait_for(
+                "message",
+                timeout=timeout,
+                check=lambda m: m.author.id == ctx.author.id and m.channel.id == ctx.channel.id,
+            )
+
+        async def download_bytes(url: str) -> bytes:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url) as r:
+                    return await r.read()
+
+        async def remove_background(
+                ctx: commands.Context,
+                *,
+                img_url: str | None = None,
+                img_bytes: bytes | None = None,
+                filename: str = "temp.png",
+        ) -> bytes:
+            return await self._remove_background_with_fallback(
+                ctx,
+                img_url=img_url,
+                img_bytes=img_bytes,
+                filename=filename,
+                attempts_per_source=4,
+            )
+
+        async def storage_upload(data: bytes, filename: str) -> str:
+            return await self._r2_upload_bytes(data, filename)
+
+        # ──────────────────────────────────────────────────────────
+        # 0) limit batch + create OpenAI client
+        # ──────────────────────────────────────────────────────────
+        if count > MAX_BATCH:
+            count = MAX_BATCH
+            await ctx.send(f"Batch size limited to {MAX_BATCH}")
+
+        try:
+            openai_client = self._create_openai_client()
+            await ctx.send(f"✅ OpenAI client initialised – {SPLICE_IMAGE_MODEL} enabled.")
+        except Exception as e:
+            openai_client = None
+            await ctx.send(f"⚠️  OpenAI init failed ({e}) – AI disabled.")
+
+        # ──────────────────────────────────────────────────────────
+        # 1) pull pending requests
+        # ──────────────────────────────────────────────────────────
+        async with self.bot.pool.acquire() as conn:
+            await self._ensure_splice_request_background_column(conn)
+            rows = await conn.fetch(
+                """
+                SELECT  id, user_id, pet1_id, pet2_id, pet1_name, pet2_name,
+                        pet1_default, pet2_default, created_at,
+                        pet1_url, pet2_url,
+                        pet1_hp, pet1_attack, pet1_defense,
+                        pet2_hp, pet2_attack, pet2_defense,
+                        pet1_element, pet2_element, temp_name, background_theme, splice_style
+                FROM    splice_requests
+                WHERE   status='pending'
+                ORDER BY created_at
+                LIMIT   $1
+                """,
+                count,
+            )
+            rows = await self._hydrate_splice_parent_stats(conn, rows)
+
+        if not rows:
+            return await ctx.send("No pending splice requests.")
+
+        # ──────────────────────────────────────────────────────────
+        # 2) build working objects
+        # ──────────────────────────────────────────────────────────
+        pets = []
+        for r in rows:
+            pets.append(
+                dict(
+                    splice_id=r["id"],
+                    user_id=r["user_id"],
+                    name=r["temp_name"],
+                    pet1_id=r["pet1_id"],
+                    pet2_id=r["pet2_id"],
+                    pet1_default=r["pet1_default"],
+                    pet2_default=r["pet2_default"],
+                    pet1_hp=r["pet1_hp"],
+                    pet1_attack=r["pet1_attack"],
+                    pet1_defense=r["pet1_defense"],
+                    pet2_hp=r["pet2_hp"],
+                    pet2_attack=r["pet2_attack"],
+                    pet2_defense=r["pet2_defense"],
+                    pet1_element=r["pet1_element"],
+                    pet2_element=r["pet2_element"],
+                    pet1_url=r["pet1_url"],
+                    pet2_url=r["pet2_url"],
+                    background_theme=r["background_theme"],
+                    splice_style=r["splice_style"],
+                    url=None,
+                    hp=None,
+                    attack=None,
+                    defense=None,
+                    element=None,
+                    is_destabilised="[DESTABILISED]" in r["temp_name"],
+                    divine_suggestion=0,
+                    forge_suggestion=0,
+                )
+            )
+
+        # ──────────────────────────────────────────────────────────
+        # 3) STEP-1  IMAGE  (with retry loop + configured image edit model)
+        # ──────────────────────────────────────────────────────────
+        await ctx.send("__**STEP-1  – choose / create an image for each pet**__")
+
+        for idx, pet in enumerate(pets, 1):
+            while True:
+                try:
+                    menu = (
+                        f"**{idx}/{len(pets)} – {pet['name']}**\n"
+                        "Choose:\n"
+                        "`1` upload attachment\n`2` paste URL\n"
+                        f"`3` generate with {SPLICE_IMAGE_MODEL} (parent pictures merged)\n"
+                        "`cancel` abort batch"
+                    )
+                    await ctx.send(menu)
+                    msg = await admin_wait()
+                    choice = msg.content.lower().strip()
+
+                    if choice == "cancel":
+                        await ctx.send("Batch cancelled.")
+                        return
+
+                    # ── 1) attachment
+                    if choice == "1":
+                        await ctx.send("Upload the image:")
+                        up = await admin_wait()
+                        if not up.attachments:
+                            await ctx.send("No attachment – try again.")
+                            continue
+                        att = up.attachments[0]
+                        data = await att.read()
+
+                        if "[SPECIAL]" not in pet["name"].upper():
+                            await ctx.send("Remove background? (`yes`/`no`)")
+                            try:
+                                if (await admin_wait()).content.lower().startswith("y"):
+                                    data = await remove_background(ctx, img_url=att.url)
+                            except asyncio.TimeoutError:
+                                pass
+
+                        pet["url"] = await storage_upload(
+                            data, f"{ctx.author.id}_{pet['name']}_{att.filename}"
+                        )
+                        break
+
+                    # ── 2) direct URL
+                    if choice == "2":
+                        await ctx.send("Paste direct image URL:")
+                        pet["url"] = (await admin_wait()).content.strip()
+                        break
+
+                    # ── 3) configured image model (merge parents)
+                    if choice == "3" and openai_client:
+                        # download parent images to temp files
+                        p1_bytes = await download_bytes(pet["pet1_url"])
+                        p2_bytes = await download_bytes(pet["pet2_url"])
+                        p1_file = f"p1_{pet['splice_id']}.png"
+                        p2_file = f"p2_{pet['splice_id']}.png"
+                        with open(p1_file, "wb") as f:
+                            f.write(p1_bytes)
+                        with open(p2_file, "wb") as f:
+                            f.write(p2_bytes)
+
+                        default_prompt = self._build_batch_splice_ai_prompt(
+                            pet.get("background_theme"),
+                            pet.get("splice_style"),
+                        )
+                        await ctx.send(
+                            f"Background preference: **{self._get_splice_background_theme_label(pet.get('background_theme'))}**\n"
+                            f"Style preference: **{self._get_splice_style_label(pet.get('splice_style'))}**\n"
+                            f"Default prompt:\n`{default_prompt}`\nAdd anything? (`yes`/`no`)"
+                        )
+                        extra = (await admin_wait()).content.lower().startswith("y")
+                        if extra:
+                            await ctx.send("Enter extra prompt:")
+                            default_prompt += " " + (await admin_wait(timeout=120)).content.strip()
+
+                        await ctx.send(f"Creating image with {SPLICE_IMAGE_MODEL}…")
+
+                        def _edit():
+                            return openai_client.images.edit(
+                                model=SPLICE_IMAGE_MODEL,
+                                image=[open(p1_file, "rb"), open(p2_file, "rb")],
+                                prompt=default_prompt,
+                            )
+
+                        try:
+                            result = await asyncio.to_thread(_edit)
+                            img_b64 = result.data[0].b64_json
+                            gen_bytes = base64.b64decode(img_b64)
+                        except Exception as e:
+                            await ctx.send(f"⚠️  AI edit failed: {e}")
+                            gen_bytes = None
+
+                        try:
+                            result = await asyncio.to_thread(_edit)
+                            img_b64 = result.data[0].b64_json
+                            gen_bytes = base64.b64decode(img_b64)
+                        except Exception as e:
+                            await ctx.send(f"⚠️  AI edit failed: {e}")
+                            gen_bytes = None
+
+
+                        # remove temp files
+                        try:
+                            os.remove(p1_file)
+                            os.remove(p2_file)
+                        except Exception:
+                            pass
+
+                        if not gen_bytes:
+                            pet["url"] = DEFAULT_IMG
+                            break
+
+                        # preview
+                        await ctx.send(file=discord.File(io.BytesIO(gen_bytes), "preview.png"))
+                        await ctx.send("`yes` accept   `retry` redo   anything else = default")
+                        try:
+                            dec = await admin_wait()
+                        except asyncio.TimeoutError:
+                            dec = None
+
+                        if dec and dec.content.lower().startswith("y"):
+                            pet["url"] = await storage_upload(
+                                gen_bytes, f"{ctx.author.id}_{pet['name']}_ai.png"
+                            )
+                            if gen_bytes:
+                                await ctx.send("Remove background from AI image? (`yes`/`no`)")
+                                try:
+                                    if (await admin_wait()).content.lower().startswith("y"):
+                                        gen_bytes = await remove_background(ctx, img_bytes=gen_bytes, filename="ai.png")
+                                except asyncio.TimeoutError:
+                                    pass
+                            break
+                        if dec and dec.content.lower().startswith("retry"):
+                            continue  # restart image step
+                        pet["url"] = DEFAULT_IMG
+                        break
+
+                    await ctx.send("Invalid choice – try again.")
+                except asyncio.TimeoutError:
+                    await ctx.send("⌛ timeout – default image used.")
+                    pet["url"] = DEFAULT_IMG
+                    break
+                except Exception as e:
+                    await ctx.send(f"⚠️  image step error: {e}")
+                    pet["url"] = DEFAULT_IMG
+                    break
+
+        # ──────────────────────────────────────────────────────────
+        # 4) STEP-2  STAT SUGGESTION  (your logic unchanged)
+        # ──────────────────────────────────────────────────────────
+
+        # ─── ask whether to post-process the AI image ───
+
+
+        await ctx.send("__**STEP-2  – generating suggested stats**__")
+        for pet in pets:
+            try:
+                p1hp, p1atk, p1def = pet["pet1_hp"], pet["pet1_attack"], pet["pet1_defense"]
+                p2hp, p2atk, p2def = pet["pet2_hp"], pet["pet2_attack"], pet["pet2_defense"]
+
+                if pet["is_destabilised"]:
+                    def d(x, y):
+                        return int(max(x, y) * random.uniform(0.10, 0.30))
+
+                    hp, atk, dfs = d(p1hp, p2hp), d(p1atk, p2atk), d(p1def, p2def)
+                else:
+                    def avg(a, b):
+                        m = max(a, b)
+                        # Keep non-destabilized batch suggestions near/around
+                        # the stronger parent stat without hard-cap clipping.
+                        return int(m * random.uniform(0.98, 1.03))
+
+                    hp, atk, dfs = avg(p1hp, p2hp), avg(p1atk, p2atk), avg(p1def, p2def)
+
+                elm = await self.suggest_element(pet["pet1_element"], pet["pet2_element"])
+                pet.update(dict(hp=hp, attack=atk, defense=dfs, element=elm))
+
+                mx = max(hp, atk, dfs)
+                if pet["is_destabilised"]:
+                    div, frg = 0, 0
+                elif mx > 1200:
+                    div, frg = random.randint(20, 50), random.randint(20, 50)
+                elif mx > 800:
+                    div, frg = random.randint(5, 20), random.randint(5, 20)
+                else:
+                    div, frg = 0, 0
+                pet["divine_suggestion"], pet["forge_suggestion"] = div, frg
+
+            except Exception as e:
+                await ctx.send(f"⚠️  stat generation error: {e}")
+                pet.update(dict(hp=100, attack=100, defense=100, element="Unknown"))
+
+        # ──────────────────────────────────────────────────────────
+        # 2b)  allow GM to review / edit stats
+        # ──────────────────────────────────────────────────────────
+        embed = discord.Embed(
+            title="🧬 Review suggested stats",
+            description=(
+                "Type **confirm** to accept all, a **number** (1-{0}) to edit, "
+                "or **cancel** to abort."
+            ).format(len(pets)),
+            color=0x9C44DC,
+        )
+        for n, p in enumerate(pets, 1):
+            embed.add_field(
+                name=f"{n}. {p['name']}",
+                value=f"HP {p['hp']}\nATK {p['attack']}\nDEF {p['defense']}\nELM {p['element']}",
+                inline=True,
+            )
+        await ctx.send(embed=embed)
+
+        while True:
+            try:
+                msg = await admin_wait(timeout=90)
+            except asyncio.TimeoutError:
+                await ctx.send("⌛ timed out – keeping current stats.")
+                break
+
+            txt = msg.content.lower().strip()
+            if txt == "confirm":
+                break
+            if txt == "cancel":
+                await ctx.send("Batch aborted.")
+                return
+            if txt.isdigit() and 1 <= int(txt) <= len(pets):
+                idx = int(txt) - 1
+                p = pets[idx]
+                await ctx.send(
+                    f"Send new stats for **{p['name']}** in the form "
+                    "`hp,attack,defense,element`  or type `back`."
+                )
+                try:
+                    edit = await admin_wait(timeout=120)
+                except asyncio.TimeoutError:
+                    continue
+                if edit.content.lower().startswith("back"):
+                    continue
+                parts = edit.content.split(",", 3)
+                if len(parts) < 3:
+                    await ctx.send("Need at least hp,atk,def.  Try again.")
+                    continue
+                try:
+                    p["hp"] = int(parts[0])
+                    p["attack"] = int(parts[1])
+                    p["defense"] = int(parts[2])
+                    if len(parts) == 4:
+                        p["element"] = parts[3].title().strip()
+                except ValueError:
+                    await ctx.send("Numbers were not valid – try again.")
+                    continue
+                # redisplay the embed
+                embed.set_field_at(
+                    idx,
+                    name=f"{idx + 1}. {p['name']}",
+                    value=(
+                        f"HP {p['hp']}\nATK {p['attack']}\n"
+                        f"DEF {p['defense']}\nELM {p['element']}"
+                    ),
+                    inline=True,
+                )
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("Please type `confirm`, `cancel` or a valid number.")
+
+        # ─── STEP-3  NAME (Vision) ───────────────────────────
+        await ctx.send("__**STEP-3  – naming**__")
+        if openai_client:
+            for i, pet in enumerate(pets, 1):
+                while True:
+                    try:
+                        base_prompt = (
+                            "Look at this picture and propose exactly five unique "
+                            "names related to its features (max two words, do not place numbers next to each name ex. 1. <name> 2. <name> etc. 1 name per line)."
+                        )
+
+                        vision_msg = [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": base_prompt},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {"url": pet["url"], "detail": "auto"},
+                                    },
+                                ],
+                            }
+                        ]
+
+                        resp = await asyncio.to_thread(
+                            openai_client.chat.completions.create,
+                            model="gpt-5.4",
+                            messages=vision_msg,
+                        )
+                        raw_text = resp.choices[0].message.content
+
+                        names = [
+                                    x.strip(" .-")
+                                    for x in raw_text.replace("\r", "").split("\n")
+                                    if x.strip()
+                                ][:5]
+
+                        if not names:
+                            raise RuntimeError("Vision returned no names")
+
+                        # present the list to the GM
+                        await ctx.send(
+                            f"**{i}/{len(pets)} – "
+                            f"{pet['pet1_default']}+{pet['pet2_default']}**\n"
+                            + "\n".join(f'`{n + 1}` {nm}' for n, nm in enumerate(names))
+                            + "\nChoose a number, type `retry <extra prompt>` "
+                              "or enter a custom name."
+                        )
+
+                        msg = await admin_wait(timeout=120)
+                        choice = msg.content.strip()
+
+                        if choice.lower().startswith("retry"):
+                            extra = choice[5:].strip()
+                            if extra:
+                                base_prompt += "\nExtra: " + extra
+                            continue
+
+                        if choice.isdigit() and 1 <= int(choice) <= len(names):
+                            pet["name"] = names[int(choice) - 1]
+                        else:
+                            pet["name"] = choice
+                        break
+
+                    except Exception as e:
+                        await ctx.send(f"⚠️  Vision naming error: {e}")
+                        break
+        else:
+            await ctx.send("GPT unavailable – keeping temporary names.")
+
+        # ──────────────────────────────────────────────────────────
+        # 6) STEP-4  REVIEW & CONFIRM
+        # ──────────────────────────────────────────────────────────
+        emb = discord.Embed(
+            title="🧬 Final review",
+            description="`confirm` to create pets, anything else to abort.",
+            color=0x00FF00,
+        )
+        for i, p in enumerate(pets, 1):
+            emb.add_field(
+                name=f"{i}. {p['name']}",
+                value=f"HP {p['hp']}  ATK {p['attack']}  DEF {p['defense']}  ELM {p['element']}",
+                inline=True,
+            )
+        await ctx.send(embed=emb)
+
+        try:
+            if (await admin_wait()).content.lower() != "confirm":
+                await ctx.send("Batch aborted.")
+                return
+        except asyncio.TimeoutError:
+            await ctx.send("⌛ no answer – batch aborted.")
+            return
+
+        # ──────────────────────────────────────────────────────────
+        # 7) STEP-5  INSERT INTO DB  (unchanged)
+        # ──────────────────────────────────────────────────────────
+        completed = []
+        for pet in pets:
+            try:
+                iv_pct = random.uniform(30, 70)
+                iv_pts = (iv_pct / 100) * 100
+                hp_iv, atk_iv, def_iv = await self.allocate_iv_points(iv_pts)
+                growth_t = datetime.datetime.utcnow() + datetime.timedelta(days=2)
+
+                async with self.bot.pool.acquire() as conn:
+                    new_id, legacy_splice_id = await self._persist_processed_splice_pet(
+                        conn,
+                        pet,
+                        hp_iv=hp_iv,
+                        attack_iv=atk_iv,
+                        defense_iv=def_iv,
+                        growth_time=growth_t,
+                        iv_percentage=iv_pct,
+                    )
+
+                self.bot.dispatch(
+                    "frontier_splice_created",
+                    int(pet["user_id"]),
+                    pet["name"],
+                    int(legacy_splice_id),
+                    int(pet["splice_id"]),
+                    int(new_id),
+                )
+                completed.append((new_id, pet))
+
+                # forge / divine
+                async with self.bot.pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT forge_condition, divine_attention FROM splicing_quest WHERE user_id=$1",
+                        pet["user_id"],
+                    )
+                forge_c = row["forge_condition"] if row else 100
+                divine = row["divine_attention"] if row else 0
+                forge_c = max(0, forge_c - pet["forge_suggestion"])
+                divine = min(100, divine + pet["divine_suggestion"])
+
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO splicing_quest (user_id, forge_condition, divine_attention)
+                        VALUES ($1,$2,$3)
+                        ON CONFLICT (user_id)
+                        DO UPDATE SET forge_condition=$2, divine_attention=$3
+                        """,
+                        pet["user_id"], forge_c, divine,
+                    )
+
+                # DM owner
+                owner = self.bot.get_user(pet["user_id"])
+                if owner:
+                    try:
+                        await owner.send(
+                            f"🧬 Your new creature **{pet['name']}** is born! Check `$pets`."
+                        )
+                    except Exception:
+                        pass
+
+            except Exception as e:
+                await ctx.send(f"⚠️  error creating {pet['name']}: {e}")
+                await ctx.send(f"```{traceback.format_exc()[:1500]}```")
+
+        # ──────────────────────────────────────────────────────────
+        # 8) summary
+        # ──────────────────────────────────────────────────────────
+        if not completed:
+            return await ctx.send("No pets were created.")
+
+        summ = discord.Embed(
+            title="🎉 Batch splice complete",
+            description=f"{len(completed)} pet(s) created.",
+            color=0x00FF00,
+        )
+        for pid, p in completed:
+            summ.add_field(
+                name=p['name'], value=f"ID `{pid}` • owner <@{p['user_id']}>", inline=True
+            )
+        await ctx.send(embed=summ)
+
+
+    @commands.command(hidden=True)
+    @user_cooldown(30)
+    async def process_splice(self, ctx, splice_id: int = None):
+        """Process a splice request (owner only)"""
+        try:
+            if not splice_id:
+                # List pending splice requests
+                async with self.bot.pool.acquire() as conn:
+                    await self._ensure_splice_request_background_column(conn)
+                    splices = await conn.fetch(
+                        """
+                        SELECT 
+                            id, user_id, pet1_name, pet2_name, 
+                            pet1_default, pet2_default, created_at,
+                            pet1_url, pet2_url, temp_name, background_theme, splice_style
+                        FROM splice_requests 
+                        WHERE status = 'pending' 
+                        ORDER BY created_at ASC
+                        """
+                    )
+
+                if not splices:
+                    return await ctx.send("No pending splice requests.")
+                
+                # Create and start the paginator
+                paginator = SpliceRequestPaginator(ctx, splices)
+                await paginator.start()
+                return
+        except Exception as e:
+            await ctx.send(f"Error: {e}")
+
+
+        # Get splice request details
+        async with self.bot.pool.acquire() as conn:
+            await self._ensure_splice_request_background_column(conn)
+            splice_row = await conn.fetchrow(
+                "SELECT * FROM splice_requests WHERE id = $1 AND status = 'pending'",
+                splice_id
+            )
+            hydrated_rows = await self._hydrate_splice_parent_stats(
+                conn,
+                [splice_row] if splice_row else [],
+            )
+            splice = hydrated_rows[0] if hydrated_rows else None
+
+        if not splice:
+            return await ctx.send(f"No pending splice request found with ID {splice_id}.")
+
+        # Send information about the splice
+        embed = discord.Embed(
+            title=f"Process Splice #{splice['id']}",
+            description=f"User: {self.bot.get_user(splice['user_id']) or splice['user_id']}\n"
+                        f"Pets: {splice['pet1_name']} + {splice['pet2_name']}\n"
+                        f"Default Names: {splice['pet1_default']} + {splice['pet2_default']}\n"
+                        f"Suggested Name: {splice['temp_name']}",
+            color=0x00ff00
+        )
+
+        embed.add_field(name="Pet 1 Stats",
+                        value=(
+                            f"HP: {splice['pet1_hp']}, ATK: {splice['pet1_attack']}, DEF: {splice['pet1_defense']}, "
+                            f"Element: {splice['pet1_element']}\n"
+                            f"Level: {splice.get('pet1_level', 1)}\n"
+                            f"Post-Creation Bonus Contribution: +{splice.get('pet1_level_bonus_pct', 0):g}%\n"
+                            f"URL: {splice['pet1_url']}"
+                        ),
+                        inline=True)
+        embed.add_field(name="Pet 2 Stats",
+                        value=(
+                            f"HP: {splice['pet2_hp']}, ATK: {splice['pet2_attack']}, DEF: {splice['pet2_defense']}, "
+                            f"Element: {splice['pet2_element']}\n"
+                            f"Level: {splice.get('pet2_level', 1)}\n"
+                            f"Post-Creation Bonus Contribution: +{splice.get('pet2_level_bonus_pct', 0):g}%\n"
+                            f"URL: {splice['pet2_url']}"
+                        ),
+                        inline=True)
+        embed.add_field(
+            name="Background Preference",
+            value=self._get_splice_background_theme_label(
+                splice["background_theme"] if "background_theme" in splice else None
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Art Style",
+            value=self._get_splice_style_label(
+                splice["splice_style"] if "splice_style" in splice else None
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Post-Creation Level Bonus",
+            value=(
+                f"Combined bonus if created now: +{splice.get('splice_creation_bonus_pct', 0):g}%\n"
+                "This is applied after the baby-stage 25% stat cut and does not alter stored splice stats."
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Splice requests stay level-neutral. Parent levels only affect the pet when it is created.")
+
+        await ctx.send(embed=embed)
+
+        # Start the interactive creation process
+        await ctx.send("Please enter a name for the spliced creature:")
+
+        def check(m):
+            return m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
+
+        try:
+            name_msg = await self.bot.wait_for('message', check=check, timeout=60)
+            new_name = name_msg.content.strip()
+            
+            # Get both pets' stats for suggestion calculation
+            pet1_hp = splice['pet1_hp']
+            pet1_attack = splice['pet1_attack']
+            pet1_defense = splice['pet1_defense']
+            pet2_hp = splice['pet2_hp']
+            pet2_attack = splice['pet2_attack']
+            pet2_defense = splice['pet2_defense']
+            
+            # Function to calculate stats that are slightly under the max parent stat
+            def calc_slightly_under(stat1, stat2):
+                effective_max = max(stat1, stat2)
+                under_percentage = random.uniform(0.90, 0.99)
+                return int(effective_max * under_percentage)
+            
+            # Function to calculate a stat that slightly exceeds the max parent stat
+            def calc_slightly_over(stat1, stat2):
+                effective_max = max(stat1, stat2)
+                over_percentage = random.uniform(1.01, 1.15)
+                return int(effective_max * over_percentage)
+            
+            # Check if this is a destabilized creature
+            is_destabilised = "[DESTABILISED]" in new_name
+            
+            if is_destabilised:
+                # For destabilized pets, all stats are severely reduced (10-30% of parent max)
+                def calc_destabilised(stat1, stat2):
+                    effective_max = max(stat1, stat2)
+                    reduction = random.uniform(0.10, 0.30)  # 10-30% of original
+                    return int(effective_max * reduction)
+                
+                suggested_hp = calc_destabilised(pet1_hp, pet2_hp)
+                suggested_attack = calc_destabilised(pet1_attack, pet2_attack)
+                suggested_defense = calc_destabilised(pet1_defense, pet2_defense)
+                
+                # Add warning about destabilized status
+                destabilised_warning = "⚠️ **DESTABILIZED GENETIC STRUCTURE DETECTED** ⚠️\nThe forging process has encountered severe arcane instability! The resulting creature will manifest with diminished capabilities."
+            else:
+                # Calculate stats based on 60/40 chance
+                random_chance = random.random()
+                
+                # Helper functions for the two different calculation methods
+                def calc_averaged_stats(stat1, stat2):
+                    """60% chance: Calculate stats close to parents' strongest stats"""
+                    max_stat = max(stat1, stat2)
+                    
+                    if max_stat > 1500:
+                        # Calculate a weighted average favoring the higher stat
+                        average = (stat1 + stat2) / 2
+                        # Add 5-10% to the average
+                        boost = random.uniform(1.05, 1.10)
+                        return int(average * boost)
+                    else:
+                        # Otherwise, stay close to the stronger parent
+                        close_percentage = random.uniform(0.92, 0.98)  # 92-98% of max
+                        return int(max_stat * close_percentage)
+
+                def calc_one_boosted(stat1, stat2, boost_this=False):
+                    """40% chance: One stat higher than parent, others slightly lower"""
+                    max_stat = max(stat1, stat2)
+                    
+                    if boost_this:
+                        # Calculate boosted value
+                        boost = random.uniform(1.02, 1.07)  # 2-7% boost
+                        return int(max_stat * boost)
+                    # For non-boosted stats
+                    else:
+                        # Slightly lower than max parent
+                        lower_percentage = random.uniform(0.85, 0.95)  # 85-95% of max
+                        return int(max_stat * lower_percentage)
+                
+                # Apply the appropriate calculation based on random chance
+                if random_chance < 0.60:  # 60% chance
+                    # All stats close to parents' strongest stats
+                    suggested_hp = calc_averaged_stats(pet1_hp, pet2_hp)
+                    suggested_attack = calc_averaged_stats(pet1_attack, pet2_attack)
+                    suggested_defense = calc_averaged_stats(pet1_defense, pet2_defense)
+                    calc_method = "✨ The forge has analyzed both genetic structures and created a balanced splice."
+                else:  # 40% chance
+                    # One stat will be higher than parent
+                    exceed_stat = random.choice(['hp', 'attack', 'defense'])
+                    
+                    if exceed_stat == 'hp':
+                        suggested_hp = calc_one_boosted(pet1_hp, pet2_hp, True)
+                        suggested_attack = calc_one_boosted(pet1_attack, pet2_attack, False)
+                        suggested_defense = calc_one_boosted(pet1_defense, pet2_defense, False)
+                        calc_method = "⚡ The forge has enhanced this creature's vitality essence! Stronger HP potential detected."
+                    elif exceed_stat == 'attack':
+                        suggested_hp = calc_one_boosted(pet1_hp, pet2_hp, False)
+                        suggested_attack = calc_one_boosted(pet1_attack, pet2_attack, True)
+                        suggested_defense = calc_one_boosted(pet1_defense, pet2_defense, False)
+                        calc_method = "⚡ The forge has enhanced this creature's offensive essence! Stronger Attack potential detected."
+                    else:  # defense
+                        suggested_hp = calc_one_boosted(pet1_hp, pet2_hp, False)
+                        suggested_attack = calc_one_boosted(pet1_attack, pet2_attack, False)
+                        suggested_defense = calc_one_boosted(pet1_defense, pet2_defense, True)
+                        calc_method = "⚡ The forge has enhanced this creature's defensive essence! Stronger Defense potential detected."
+                
+                # No warning needed for normal splices
+                destabilised_warning = None
+            
+            # Create functions to generate different types of suggestions
+            def generate_balanced_stats():
+                """Generate balanced stats (close to parents' strongest stats)"""
+                hp = calc_averaged_stats(pet1_hp, pet2_hp)
+                attack = calc_averaged_stats(pet1_attack, pet2_attack)
+                defense = calc_averaged_stats(pet1_defense, pet2_defense)
+                method = "✨ The forge has analyzed both genetic structures and created a balanced splice."
+                return hp, attack, defense, method
+                
+            def generate_specialized_stats(boost_stat=None):
+                """Generate specialized stats with one boosted stat"""
+                if boost_stat is None:
+                    boost_stat = random.choice(['hp', 'attack', 'defense'])
+                    
+                if boost_stat == 'hp':
+                    hp = calc_one_boosted(pet1_hp, pet2_hp, True)
+                    attack = calc_one_boosted(pet1_attack, pet2_attack, False)
+                    defense = calc_one_boosted(pet1_defense, pet2_defense, False)
+                    method = "⚡ The forge has enhanced this creature's vitality essence! Stronger HP potential detected."
+                elif boost_stat == 'attack':
+                    hp = calc_one_boosted(pet1_hp, pet2_hp, False)
+                    attack = calc_one_boosted(pet1_attack, pet2_attack, True)
+                    defense = calc_one_boosted(pet1_defense, pet2_defense, False)
+                    method = "⚡ The forge has enhanced this creature's offensive essence! Stronger Attack potential detected."
+                else:  # defense
+                    hp = calc_one_boosted(pet1_hp, pet2_hp, False)
+                    attack = calc_one_boosted(pet1_attack, pet2_attack, False)
+                    defense = calc_one_boosted(pet1_defense, pet2_defense, True)
+                    method = "⚡ The forge has enhanced this creature's defensive essence! Stronger Defense potential detected."
+                    
+                return hp, attack, defense, method
+            
+            # Initial suggestion generation based on 60/40 chance for normal pets
+            if is_destabilised:
+                # For destabilized pets, all stats are severely reduced (10-30% of parent max)
+                def calc_destabilised(stat1, stat2):
+                    effective_max = max(stat1, stat2)
+                    reduction = random.uniform(0.10, 0.30)  # 10-30% of original
+                    return int(effective_max * reduction)
+                
+                suggested_hp = calc_destabilised(pet1_hp, pet2_hp)
+                suggested_attack = calc_destabilised(pet1_attack, pet2_attack)
+                suggested_defense = calc_destabilised(pet1_defense, pet2_defense)
+                
+                # Add warning about destabilized status
+                calc_method = "⚠️ **DESTABILIZED GENETIC STRUCTURE DETECTED** ⚠️\nThe forging process has encountered severe arcane instability! The resulting creature will manifest with diminished capabilities."
+                can_switch_method = False  # Can't switch for destabilized pets
+            else:
+                # Normal pet, start with random method based on 60/40 chance
+                if random.random() < 0.60:  # 60% chance for balanced
+                    suggested_hp, suggested_attack, suggested_defense, calc_method = generate_balanced_stats()
+                    current_method = "balanced"
+                else:  # 40% chance for specialized
+                    suggested_hp, suggested_attack, suggested_defense, calc_method = generate_specialized_stats()
+                    current_method = "specialized"
+                can_switch_method = True
+                
+            # Interactive stat suggestion loop
+            suggestion_accepted = False
+            custom_stats = False
+            
+            while not suggestion_accepted:
+                # Show suggestions to the user
+                embed_color = 0xDD2222 if is_destabilised else 0x9C44DC  # Red for destabilized, purple for normal
+                
+                description = "Based on the parent pets, here are the suggested stats for your spliced pet:"
+                if 'calc_method' in locals():
+                    description = f"**{calc_method}**\n\n{description}"
+                    
+                suggestion_embed = discord.Embed(
+                    title=f"Suggested Stats for {new_name}",
+                    description=description,
+                    color=embed_color
+                )
+                
+                suggestion_embed.add_field(
+                    name="Parent 1 Stats",
+                    value=f"HP: {pet1_hp}\nAttack: {pet1_attack}\nDefense: {pet1_defense}",
+                    inline=True
+                )
+                
+                suggestion_embed.add_field(
+                    name="Parent 2 Stats",
+                    value=f"HP: {pet2_hp}\nAttack: {pet2_attack}\nDefense: {pet2_defense}",
+                    inline=True
+                )
+                
+                suggestion_embed.add_field(
+                    name="Suggested Stats",
+                    value=f"**HP**: {suggested_hp}\n**Attack**: {suggested_attack}\n**Defense**: {suggested_defense}",
+                    inline=False
+                )
+                
+                # Show appropriate options based on pet type
+                if can_switch_method:
+                    footer_text = "Commands: 'yes' (accept) | 'no' (custom) | 'reroll' | 'switch' (method) | 'boost hp/attack/defense'"
+                else:
+                    footer_text = "Commands: 'yes' (accept) | 'no' (custom) | 'reroll'"
+                suggestion_embed.set_footer(text=footer_text)
+                
+                await ctx.send(embed=suggestion_embed)
+                
+                # Wait for user response
+                response_msg = await self.bot.wait_for('message', check=check, timeout=60)
+                response = response_msg.content.strip().lower()
+                
+                if response == 'yes':
+                    # Use suggested stats
+                    hp = suggested_hp
+                    attack = suggested_attack
+                    defense = suggested_defense
+                    await ctx.send(f"Great! Using the suggested stats for {new_name}.")
+                    suggestion_accepted = True
+                elif response == 'no':
+                    # Manual entry
+                    await ctx.send(f"Enter HP value for {new_name} (adult form):")
+                    hp_msg = await self.bot.wait_for('message', check=check, timeout=60)
+                    hp = int(hp_msg.content.strip())
+                    
+                    await ctx.send(f"Enter attack value for {new_name} (adult form):")
+                    attack_msg = await self.bot.wait_for('message', check=check, timeout=60)
+                    attack = int(attack_msg.content.strip())
+                    
+                    await ctx.send(f"Enter defense value for {new_name} (adult form):")
+                    defense_msg = await self.bot.wait_for('message', check=check, timeout=60)
+                    defense = int(defense_msg.content.strip())
+                    
+                    suggestion_accepted = True
+                    custom_stats = True
+                elif response == 'reroll':
+                    # Regenerate stats using same method
+                    if is_destabilised:
+                        suggested_hp = calc_destabilised(pet1_hp, pet2_hp)
+                        suggested_attack = calc_destabilised(pet1_attack, pet2_attack)
+                        suggested_defense = calc_destabilised(pet1_defense, pet2_defense)
+                        await ctx.send("🎲 Recalculating destabilized genetic structure...")
+                    elif current_method == "balanced":
+                        suggested_hp, suggested_attack, suggested_defense, calc_method = generate_balanced_stats()
+                        await ctx.send("🎲 Recalculating balanced splice...")
+                    else:
+                        suggested_hp, suggested_attack, suggested_defense, calc_method = generate_specialized_stats()
+                        await ctx.send("🎲 Recalculating specialized splice...")
+                elif response == 'switch' and can_switch_method:
+                    # Switch between balanced and specialized methods
+                    if current_method == "balanced":
+                        suggested_hp, suggested_attack, suggested_defense, calc_method = generate_specialized_stats()
+                        current_method = "specialized"
+                        await ctx.send("🔄 Switching to specialized calculation...")
+                    else:
+                        suggested_hp, suggested_attack, suggested_defense, calc_method = generate_balanced_stats()
+                        current_method = "balanced"
+                        await ctx.send("🔄 Switching to balanced calculation...")
+                elif response.startswith('boost ') and can_switch_method:
+                    # Boost a specific stat
+                    stat_to_boost = response.split(' ')[1]
+                    if stat_to_boost in ['hp', 'attack', 'defense']:
+                        suggested_hp, suggested_attack, suggested_defense, calc_method = generate_specialized_stats(stat_to_boost)
+                        current_method = "specialized"
+                        await ctx.send(f"🔆 Focusing splice on {stat_to_boost.upper()} enhancement...")
+                    else:
+                        await ctx.send("Invalid stat. Choose 'hp', 'attack', or 'defense'.")
+
+            await ctx.send(f"Enter element for {new_name}:")
+            element_msg = await self.bot.wait_for('message', check=check, timeout=60)
+            element = element_msg.content.strip()
+
+            await ctx.send(f"Enter image URL for {new_name} (or upload an image):")
+            try:
+                # Wait for response
+                url_msg = await self.bot.wait_for('message', check=check, timeout=60)
+                
+                # If there's an attachment, process it as an upload
+                if url_msg.attachments:
+                    try:
+                        attachment = url_msg.attachments[0]
+                        if attachment.height:  # Verify it's an image
+                            # Create user-specific filename
+                            user_filename = f"{ctx.author.id}_{new_name}_{attachment.filename}"
+                            
+                            # Download image data
+                            image_data = await attachment.read()
+                            
+                            # Ask if user wants to remove the background
+                            await ctx.send("Do you want to remove the background from the image? (yes/no)")
+                            bg_response_msg = await self.bot.wait_for('message', check=check, timeout=60)
+                            remove_bg = bg_response_msg.content.strip().lower() == 'yes'
+                            
+                            # Remove background using PixelCut API if user wants it
+                            if remove_bg:
+                                # Ask for confirmation before proceeding with background removal
+                                await ctx.send("Are you sure you want to remove the background? This process cannot be undone. (yes/no)")
+                                confirm_bg_msg = await self.bot.wait_for('message', check=check, timeout=60)
+                                confirm_bg = confirm_bg_msg.content.strip().lower() == 'yes'
+                                
+                                if not confirm_bg:
+                                    await ctx.send("Background removal cancelled. Keeping original image with background.")
+                                    remove_bg = False
+                                
+                                # Proceed with background removal if confirmed
+                                if remove_bg:
+                                    try:
+                                        await ctx.send("Processing image for background removal...")
+                                        image_data = await self._remove_background_with_fallback(
+                                            ctx,
+                                            img_url=attachment.url,
+                                            img_bytes=image_data,
+                                            filename=attachment.filename or "upload.png",
+                                            attempts_per_source=4,
+                                        )
+                                        await ctx.send("Background removed successfully!")
+                                    except Exception as e:
+                                        await ctx.send(f"Background removal failed: {str(e)}. Using original image instead.")
+                            else:
+                                await ctx.send("Keeping original image with background.")
+                            
+                            # Upload the final image (either background-removed or original) to R2
+                            url = await self._r2_upload_bytes(image_data, user_filename)
+                            
+                            await ctx.send(f"Image uploaded successfully!")
+                        else:
+                            await ctx.send("The attachment doesn't appear to be an image. Using as URL directly.")
+                            url = url_msg.content.strip()
+                    except Exception as e:
+                        await ctx.send(f"Error uploading image: {e}. Please provide a URL instead.")
+                        url_msg = await self.bot.wait_for('message', check=check, timeout=60)
+                        url = url_msg.content.strip()
+                else:
+                    # Use the message content as URL
+                    url = url_msg.content.strip()
+            except asyncio.TimeoutError:
+                await ctx.send("You took too long to respond.")
+                return
+
+            # Check for special conditions that might suggest stat increases
+            is_special = "[SPECIAL]" in new_name
+            max_stat = max(hp, attack, defense)
+            
+            # Initialize suggestions
+            divine_suggestion = 0
+            forge_suggestion = 0
+            
+            # Check for special conditions
+            if is_special:
+                divine_suggestion = random.randint(30, 50)
+                forge_suggestion = random.randint(20, 40)
+                await ctx.send(
+                    f"🔮 **Special Creature Detected!** 🔮\n"
+                    f"This unique being radiates with extraordinary energy. "
+                    f"Suggested increases:\n"
+                    f"- Divine Attention: +{divine_suggestion}%\n"
+                    f"- Forge Damage: +{forge_suggestion}%"
+                )
+            # Check for high stats
+            elif max_stat > 1200:
+                divine_suggestion = random.randint(20, 50)
+                forge_suggestion = random.randint(20, 50)
+                await ctx.send(
+                    f"🌟 **Exceptional Stats Detected!** 🌟\n"
+                    f"This creature's power is remarkable. "
+                    f"Suggested increases:\n"
+                    f"- Divine Attention: +{divine_suggestion}%\n"
+                    f"- Forge Damage: +{forge_suggestion}%"
+                )
+            elif max_stat > 800:
+                divine_suggestion = random.randint(5, 20)
+                forge_suggestion = random.randint(5, 20)
+                await ctx.send(
+                    f"✨ **Notable Stats Detected!** ✨\n"
+                    f"This creature shows impressive potential. "
+                    f"Suggested increases:\n"
+                    f"- Divine Attention: +{divine_suggestion}%\n"
+                    f"- Forge Damage: +{forge_suggestion}%"
+                )
+
+            # Get current values from database
+            forge_condition = 100
+            divine_attention = 0
+            
+            # Ask if they want to edit additional stats
+            await ctx.send(f"Do you want to edit any additional stats? (yes/no)")
+            edit_stats_msg = await self.bot.wait_for('message', check=check, timeout=60)
+            edit_stats = edit_stats_msg.content.strip().lower() == 'yes'
+
+            if edit_stats:
+                # Get current forge condition value
+                async with self.bot.pool.acquire() as conn:
+                    current_forge = await conn.fetchrow(
+                        "SELECT forge_condition, divine_attention FROM splicing_quest WHERE user_id = $1",
+                        splice["user_id"]
+                    )
+
+                if current_forge:
+                    forge_condition = current_forge["forge_condition"]
+                    divine_attention = current_forge["divine_attention"]
+
+                # Suggest forge damage increase with current and suggested values
+                current_forge_damage = 100 - forge_condition
+                suggested_forge_damage = min(100, current_forge_damage + forge_suggestion) if forge_suggestion > 0 else current_forge_damage
+                await ctx.send(
+                    f"Increase forge damage (current: {current_forge_damage}%"
+                    f"{' (suggested: ' + str(suggested_forge_damage) + '%)' if forge_suggestion > 0 else ''}):"
+                )
+                forge_damage_msg = await self.bot.wait_for('message', check=check, timeout=60)
+                try:
+                    forge_damage = int(forge_damage_msg.content.strip())
+                    forge_condition = max(0, 100 - forge_damage)  # Convert damage to condition
+                except ValueError:
+                    if forge_suggestion > 0 and forge_damage_msg.content.strip().lower() in ['suggested', 'suggest', 'yes', 'y']:
+                        forge_condition = 100 - suggested_forge_damage
+                    else:
+                        await ctx.send("Invalid input. Using current forge condition.")
+                
+                # Suggest divine attention increase with current and suggested values
+                suggested_divine = min(100, divine_attention + divine_suggestion) if divine_suggestion > 0 else divine_attention
+                await ctx.send(
+                    f"Increase divine attention (current: {divine_attention}%"
+                    f"{' (suggested: ' + str(suggested_divine) + '%)' if divine_suggestion > 0 else ''}):"
+                )
+                divine_msg = await self.bot.wait_for('message', check=check, timeout=60)
+                try:
+                    divine_attention = int(divine_msg.content.strip())
+                except ValueError:
+                    if divine_suggestion > 0 and divine_msg.content.strip().lower() in ['suggested', 'suggest', 'yes', 'y']:
+                        divine_attention = suggested_divine
+                    else:
+                        await ctx.send("Invalid input. Using current divine attention.")
+            # Define growth stages
+            growth_stages = {
+                1: {"stage": "baby", "growth_time": 2, "stat_multiplier": 0.25, "hunger_modifier": 1.0},
+                2: {"stage": "juvenile", "growth_time": 2, "stat_multiplier": 0.50, "hunger_modifier": 0.8},
+                3: {"stage": "young", "growth_time": 1, "stat_multiplier": 0.75, "hunger_modifier": 0.6},
+                4: {"stage": "adult", "growth_time": None, "stat_multiplier": 1.0, "hunger_modifier": 0.0},
+            }
+            
+            # Generate IVs using the allocate_iv_points method
+            iv_percentage = random.uniform(40, 90)
+            total_iv_points = (iv_percentage / 100) * 75  # Total IV points to distribute
+            
+            # Distribute IVs between stats
+            hp_iv, attack_iv, defense_iv = await self.allocate_iv_points(total_iv_points)
+            
+            # Get the baby stage data
+            baby_stage = growth_stages[1]
+            stat_multiplier = baby_stage["stat_multiplier"]
+            growth_time_interval = datetime.timedelta(days=baby_stage["growth_time"])
+            growth_time = datetime.datetime.utcnow() + growth_time_interval
+            splice_creation_bonus_pct = float(splice.get("splice_creation_bonus_pct", 0) or 0)
+            
+            # Calculate baby stats
+            baby_hp, baby_attack, baby_defense = self._apply_splice_creation_bonus_pct(
+                round(hp * stat_multiplier),
+                round(attack * stat_multiplier),
+                round(defense * stat_multiplier),
+                splice_creation_bonus_pct,
+            )
+            
+            # Apply IVs to baby stats
+            baby_hp = baby_hp + hp_iv
+            baby_attack = baby_attack + attack_iv
+            baby_defense = baby_defense + defense_iv
+
+            # Confirmation message with forge details
+            confirm_msg = (f"Create spliced creature with these details?\n\n"
+                           f"Name: {new_name}\n"
+                           f"Adult HP: {hp} (Baby HP: {baby_hp})\n"
+                           f"Adult Attack: {attack} (Baby Attack: {baby_attack})\n"
+                           f"Adult Defense: {defense} (Baby Defense: {baby_defense})\n"
+                           f"Post-Creation Level Bonus: +{splice_creation_bonus_pct:g}%\n"
+                           f"Element: {element}\n"
+                           f"URL: {url}")
+
+            if edit_stats:
+                confirm_msg += f"\nForge Condition: {forge_condition}%\nDivine Attention: {divine_attention}%"
+
+            confirmed = await ctx.confirm(confirm_msg)
+
+            if not confirmed:
+                return await ctx.send("Creation canceled.")
+
+            # Generate a random IV percentage between 30% and 100% (or other logic as needed)
+            iv_percentage = random.uniform(10, 1000)
+            if iv_percentage < 20:
+                iv_percentage = random.uniform(90, 100)
+            elif iv_percentage < 70:
+                iv_percentage = random.uniform(80, 90)
+            elif iv_percentage < 150:
+                iv_percentage = random.uniform(70, 80)
+            elif iv_percentage < 350:
+                iv_percentage = random.uniform(60, 70)
+            elif iv_percentage < 700:
+                iv_percentage = random.uniform(50, 60)
+            else:
+                # Fix: Make sure we set a valid IV percentage when value is 700 or higher
+                iv_percentage = random.uniform(30, 50)
+            baby_defense = baby_defense + defense_iv
+
+            # Create the spliced pet
+            async with self.bot.pool.acquire() as conn:
+                reservation = await reserve_splice_combination(
+                    conn,
+                    parent1_name=splice["pet1_default"],
+                    parent2_name=splice["pet2_default"],
+                    proposed_result_name=new_name,
+                    hp=hp,
+                    attack=attack,
+                    defense=defense,
+                    element=element,
+                    url=url,
+                    parent1_pet_id=splice.get("pet1_id"),
+                    parent2_pet_id=splice.get("pet2_id"),
+                )
+                recipe = reservation.row
+                legacy_splice_id = int(recipe["id"])
+                new_name = recipe["result_name"]
+                hp = int(recipe["hp"])
+                attack = int(recipe["attack"])
+                defense = int(recipe["defense"])
+                element = recipe["element"]
+                url = recipe["url"]
+
+                effective_bonus_pct = (
+                    splice_creation_bonus_pct if reservation.created else 0.0
+                )
+                baby_hp, baby_attack, baby_defense = self._apply_splice_creation_bonus_pct(
+                    round(hp * stat_multiplier),
+                    round(attack * stat_multiplier),
+                    round(defense * stat_multiplier),
+                    effective_bonus_pct,
+                )
+                baby_hp += hp_iv
+                baby_attack += attack_iv
+                baby_defense += defense_iv
+
+                # Insert the new pet
+                new_pet_id = await conn.fetchval(
+                    """
+                    INSERT INTO monster_pets 
+                    (user_id, name, hp, attack, defense, element, default_name, url,
+                     growth_stage, growth_time, "IV", splice_combination_id)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    RETURNING id
+                    """,
+                    splice["user_id"],
+                    new_name,
+                    baby_hp,
+                    baby_attack,
+                    baby_defense,
+                    element,
+                    new_name,
+                    url,
+                    'baby',
+                    growth_time,
+                    iv_percentage,
+                    legacy_splice_id,
+                )
+
+                await link_created_splice_result(
+                    conn,
+                    request_id=splice_id,
+                    pet_id=int(new_pet_id),
+                    splice_id=legacy_splice_id,
+                    result_name=new_name,
+                )
+
+                # Update forge condition and divine attention if they were edited
+                if edit_stats:
+                    await conn.execute(
+                        'UPDATE splicing_quest SET forge_condition = $1, divine_attention = $2 WHERE user_id = $3',
+                        forge_condition, divine_attention, splice["user_id"]
+                    )
+
+                self.bot.dispatch(
+                    "frontier_splice_created",
+                    int(splice["user_id"]),
+                    new_name,
+                    int(legacy_splice_id),
+                    int(splice_id),
+                    int(new_pet_id),
+                )
+
+                # Find and process any other pending requests with the same pet combination
+                pending_requests = await conn.fetch(
+                    """
+                    SELECT * FROM splice_requests 
+                    WHERE status = 'pending' AND 
+                    ((pet1_default = $1 AND pet2_default = $2) OR (pet1_default = $2 AND pet2_default = $1))
+                    AND id != $3
+                    """,
+                    splice["pet1_default"], splice["pet2_default"], splice_id
+                )
+
+                # Process each pending request
+                for pending in pending_requests:
+                    # Generate random IVs for this user
+                    iv_percentage = random.uniform(10, 1000)
+                    if iv_percentage < 20:
+                        iv_percentage = random.uniform(90, 100)
+                    elif iv_percentage < 70:
+                        iv_percentage = random.uniform(80, 90)
+                    elif iv_percentage < 150:
+                        iv_percentage = random.uniform(70, 80)
+                    elif iv_percentage < 350:
+                        iv_percentage = random.uniform(60, 70)
+                    elif iv_percentage < 700:
+                        iv_percentage = random.uniform(50, 60)
+                    else:
+                        # This one was already set correctly
+                        iv_percentage = random.uniform(30, 50)
+
+                    total_iv_points = (iv_percentage / 100) * 100
+                    pending_hp_iv, pending_attack_iv, pending_defense_iv = await self.allocate_iv_points(total_iv_points)
+                    # These extra requests are copied from the now-discovered recipe.
+                    # Keep known recipe stats stable instead of baking parent levels into
+                    # each copied result.
+                    this_baby_hp = round(hp * stat_multiplier)
+                    this_baby_attack = round(attack * stat_multiplier)
+                    this_baby_defense = round(defense * stat_multiplier)
+                    this_baby_hp += pending_hp_iv
+                    this_baby_attack += pending_attack_iv
+                    this_baby_defense += pending_defense_iv
+
+                    # Create pet for this user
+                    pending_pet_id = await conn.fetchval(
+                        """
+                        INSERT INTO monster_pets 
+                        (user_id, name, hp, attack, defense, element, default_name, url,
+                         growth_stage, growth_time, "IV", splice_combination_id)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                        RETURNING id
+                        """,
+                        pending["user_id"],
+                        new_name,
+                        this_baby_hp,
+                        this_baby_attack,
+                        this_baby_defense,
+                        element,
+                        new_name,
+                        url,
+                        'baby',
+                        datetime.datetime.utcnow() + growth_time_interval,
+                        iv_percentage,
+                        legacy_splice_id,
+                    )
+
+                    await link_created_splice_result(
+                        conn,
+                        request_id=int(pending["id"]),
+                        pet_id=int(pending_pet_id),
+                        splice_id=legacy_splice_id,
+                        result_name=new_name,
+                    )
+
+                    self.bot.dispatch(
+                        "frontier_splice_created",
+                        int(pending["user_id"]),
+                        new_name,
+                        int(legacy_splice_id),
+                        int(pending["id"]),
+                        int(pending_pet_id),
+                    )
+
+                    # Prepare notification message for pending users
+                    pending_notification_msg = f"Congratulations! Your pets have successfully been spliced into a new creature: **{new_name}**! Check your pets with `$pets`."
+
+                    # Notify user
+                    pending_user = self.bot.get_user(pending["user_id"])
+                    if pending_user:
+                        await pending_user.send(pending_notification_msg)
+
+                    # Let the admin know about these auto-processed requests
+                    await ctx.send(
+                        f"Also auto-processed splice request #{pending['id']} for user {pending['user_id']} with the same pet combination.")
+
+            # Prepare notification message
+            notification_msg = f"Congratulations! Your pets have successfully been spliced into a new creature: **{new_name}**! Check your pets with `$pets`."
+
+            # Add special effects based on forge condition and divine attention if they were edited
+            if edit_stats:
+                if forge_condition < 50:
+                    notification_msg += f"\n\nThe forge was stressed during the splice, operating at only {forge_condition}% capacity!"
+                if divine_attention > 30:
+                    notification_msg += f"\n\nSky storms were observed during the splicing process, with {divine_attention}% divine intervention!"
+
+            # Notify the original user
+            user = self.bot.get_user(splice["user_id"])
+            if user:
+                await user.send(notification_msg)
+
+            await ctx.send(f"Successfully created spliced creature {new_name} for user {splice['user_id']}!")
+
+        except asyncio.TimeoutError:
+            await ctx.send("Creation process timed out.")
+        except ValueError:
+            await ctx.send("Invalid input. Please provide valid numbers for stats.")
+        except Exception as e:
+            await ctx.send(f"An error occurred: {str(e)}")
+
+
+
+async def setup(bot):
+    await bot.add_cog(ProcessSplice(bot))
+
+    

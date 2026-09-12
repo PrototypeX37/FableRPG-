@@ -17,6 +17,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 import asyncio
 import datetime
+import json
 import logging
 import os
 import sys
@@ -37,19 +38,49 @@ from json import JSONDecoder, JSONEncoder
 
 from redis import asyncio as aioredis
 
+from classes.badges import Badge
 from classes.bucket_cooldown import Cooldown, CooldownMapping
-from classes.classes import Mage, Paragon, Raider, Ranger, Ritualist, Thief, Warrior, Paladin, Reaper
+from classes.classes import (
+    Bard,
+    Beastmaster,
+    Mage,
+    Paladin,
+    Paragon,
+    Raider,
+    Ranger,
+    Reaper,
+    Ritualist,
+    SantasHelper,
+    Tank,
+    Thief,
+    Warrior,
+)
 from classes.classes import from_string as class_from_string
 from classes.context import Context
+from classes.endgame import (
+    apply_item_progression_bonus,
+    soulbound_level_from_xp,
+)
 from classes.enums import DonatorRank
 from classes.exceptions import GlobalCooldown
 from classes.http import ProxiedClientSession
 from classes.items import ALL_ITEM_TYPES, Hand, ItemType
 from utils import i18n, paginator, random
+from utils import misc as rpgtools
 from utils.cache import cache
 from utils.checks import user_is_patron
 from utils.config import ConfigLoader
 from utils.i18n import _
+
+
+LEVEL_100_ANNOUNCE_CHANNEL_ID = 1406296535443963935
+CITY_VAULT_MULTIPLIERS = {
+    0: (1, 1),
+    1: (3, 2),
+    2: (2, 1),
+    3: (3, 1),
+    4: (4, 1),
+}
 
 
 class Bot(commands.AutoShardedBot):
@@ -102,6 +133,11 @@ class Bot(commands.AutoShardedBot):
         self.donator_cooldown = CooldownMapping(
             Cooldown(3, 3, 1, 2, commands.BucketType.user)
         )
+        self._city_war_tables_ready = False
+        self._city_war_table_lock = asyncio.Lock()
+        self._xp_watch_tables_ready = False
+        self._xp_watch_table_lock = asyncio.Lock()
+        self._xp_watch_user_ids = set()
 
 
 
@@ -191,7 +227,18 @@ class Bot(commands.AutoShardedBot):
             **second_database_creds, min_size=10, max_size=20, command_timeout=60.0
         )
 
-        for extension in self.config.bot.initial_extensions:
+        extensions = list(self.config.bot.initial_extensions)
+        # Quest campaigns, faction-aware conversations, and shops share the
+        # Factions service. Load it ahead of Quests even on older configs.
+        if "cogs.factions" not in extensions:
+            try:
+                quest_index = extensions.index("cogs.quests")
+            except ValueError:
+                quest_index = len(extensions)
+            extensions.insert(quest_index, "cogs.factions")
+        if "cogs.aiplayer" not in extensions:
+            extensions.append("cogs.aiplayer")
+        for extension in extensions:
             try:
                 await self.load_extension(extension)
             except Exception:
@@ -238,7 +285,7 @@ class Bot(commands.AutoShardedBot):
 
     async def get_ranks_for(self, thing, conn=None):
         """Returns the rank in money and xp for a user"""
-        v = thing.id if isinstance(thing, (discord.Member, discord.User)) else thing
+        v = self._coerce_user_id(thing)
         if conn is None:
             conn = await self.pool.acquire()
             local = True
@@ -269,13 +316,15 @@ class Bot(commands.AutoShardedBot):
         statdef=None,
         god=None,
         conn=None,
+        return_breakdown=False,
     ):
         """Generates the raidstats for a user"""
-        v = thing.id if isinstance(thing, (discord.Member, discord.User)) else thing
+        v = self._coerce_user_id(thing)
         local = False
         if conn is None:
             conn = await self.pool.acquire()
             local = True
+        unspent_statpoints = None
         if (
             atkmultiply is None
             or defmultiply is None
@@ -295,14 +344,19 @@ class Bot(commands.AutoShardedBot):
                 row["statatk"],
                 row["statdef"],
             )
+            unspent_statpoints = row["statpoints"]
             if god is not None and god != user_god:
                 raise ValueError()
         damage, armor = await self.get_damage_armor_for(
             v, classes=classes, race=race, conn=conn
         )
+        profile_attack_multiplier = atkmultiply
+        profile_defense_multiplier = defmultiply
+        city_raid_building_level = 0
         if buildings := await self.get_city_buildings(guild, conn=conn):
-            atkmultiply += buildings["raid_building"] * Decimal("0.1")
-            defmultiply += buildings["raid_building"] * Decimal("0.1")
+            city_raid_building_level = int(buildings["raid_building"] or 0)
+            atkmultiply += city_raid_building_level * Decimal("0.1")
+            defmultiply += city_raid_building_level * Decimal("0.1")
         classes = [class_from_string(c) for c in classes]
 
         statatk = Decimal(statatk)
@@ -320,8 +374,49 @@ class Bot(commands.AutoShardedBot):
                 #defmultiply = defmultiply + Decimal("0.1") * grade
         dmg = damage * atkmultiply
         deff = armor * defmultiply
+        pre_amulet_damage = dmg
+        pre_amulet_defense = deff
+
+        # Apply equipped amulet stats as a flat bonus
+        amulet = await conn.fetchrow('SELECT attack, defense FROM amulets WHERE user_id=$1 AND equipped=true', v)
+        amulet_attack = 0
+        amulet_defense = 0
+        if amulet:
+            amulet_attack = amulet["attack"] or 0
+            amulet_defense = amulet["defense"] or 0
+            dmg += amulet_attack
+            deff += amulet_defense
+
+
         if local:
             await self.pool.release(conn)
+        if return_breakdown:
+            return dmg, deff, {
+                "equipment_class_race_attack": damage,
+                "equipment_class_race_defense": armor,
+                "profile_attack_multiplier": profile_attack_multiplier,
+                "profile_defense_multiplier": profile_defense_multiplier,
+                "city_raid_building_level": city_raid_building_level,
+                "city_multiplier_bonus": Decimal(city_raid_building_level) * Decimal("0.1"),
+                "allocated_attack_points": statatk,
+                "allocated_defense_points": statdef,
+                "unspent_stat_points": unspent_statpoints,
+                "stat_point_effects": {
+                    "attack": "+0.1 attack multiplier per point",
+                    "defense": "+0.1 defense multiplier per point",
+                    "health": "+50 maximum HP per point",
+                },
+                "allocated_attack_multiplier_bonus": statatk * Decimal("0.1"),
+                "allocated_defense_multiplier_bonus": statdef * Decimal("0.1"),
+                "applied_attack_multiplier": atkmultiply,
+                "applied_defense_multiplier": defmultiply,
+                "pre_amulet_attack": pre_amulet_damage,
+                "pre_amulet_defense": pre_amulet_defense,
+                "amulet_attack": amulet_attack,
+                "amulet_defense": amulet_defense,
+                "raid_attack_before_specialization": dmg,
+                "raid_defense_before_specialization": deff,
+            }
         return dmg, deff
 
     async def get_raidstatsjug(
@@ -337,7 +432,7 @@ class Bot(commands.AutoShardedBot):
     ):
         """Generates the raidstats for a user"""
         from cogs.tournament import Tournament
-        v = thing.id if isinstance(thing, (discord.Member, discord.User)) else thing
+        v = self._coerce_user_id(thing)
         local = False
         if conn is None:
             conn = await self.pool.acquire()
@@ -385,7 +480,7 @@ class Bot(commands.AutoShardedBot):
 
     async def get_equipped_items_for(self, thing, conn=None):
         """Fetches a list of equipped items of a user from the database"""
-        v = thing.id if isinstance(thing, (discord.Member, discord.User)) else thing
+        v = self._coerce_user_id(thing)
         local = False
         if conn is None:
             conn = await self.pool.acquire()
@@ -502,27 +597,27 @@ class Bot(commands.AutoShardedBot):
         """Activates a boost of type_ for a user"""
         if type_ not in ["time", "luck", "money"]:
             raise ValueError("Not a valid booster type.")
-        user = user.id if isinstance(user, (discord.User, discord.Member)) else user
+        user = self._coerce_user_id(user)
         await self.redis.execute_command(
             "SET", f"booster:{user}:{type_}", 1, "EX", 86400
         )
 
     async def get_booster(self, user, type_):
         """Returns how longer a user has a booster running"""
-        user = user.id if isinstance(user, (discord.User, discord.Member)) else user
+        user = self._coerce_user_id(user)
         val = await self.redis.execute_command("TTL", f"booster:{user}:{type_}")
         return datetime.timedelta(seconds=val) if val != -2 else None
 
     async def start_adventure(self, user, number, time):
         """Sends a user on an adventure"""
-        user = user.id if isinstance(user, (discord.User, discord.Member)) else user
+        user = self._coerce_user_id(user)
         await self.redis.execute_command(
             "SET", f"adv:{user}", number, "EX", int(time.total_seconds()) + 15_552_000
         )  # +3 days
 
     async def get_adventure(self, user):
         """Returns a user's adventure"""
-        user = user.id if isinstance(user, (discord.User, discord.Member)) else user
+        user = self._coerce_user_id(user)
         ttl = await self.redis.execute_command("TTL", f"adv:{user}")
         if ttl == -2:
             return
@@ -534,11 +629,11 @@ class Bot(commands.AutoShardedBot):
 
     async def delete_adventure(self, user):
         """Deletes a user's adventure"""
-        user = user.id if isinstance(user, (discord.User, discord.Member)) else user
+        user = self._coerce_user_id(user)
         await self.redis.execute_command("DEL", f"adv:{user}")
 
     async def has_money(self, user, money, conn=None):
-        user = user.id if isinstance(user, (discord.User, discord.Member)) else user
+        user = self._coerce_user_id(user)
         if conn is None:
             conn = await self.pool.acquire()
             local = True
@@ -553,7 +648,7 @@ class Bot(commands.AutoShardedBot):
         return val
 
     async def has_crates(self, user, crates, rarity, conn=None):
-        user = user.id if isinstance(user, (discord.User, discord.Member)) else user
+        user = self._coerce_user_id(user)
         if conn is None:
             conn = await self.pool.acquire()
             local = True
@@ -567,7 +662,7 @@ class Bot(commands.AutoShardedBot):
         return cur_crates is not None and cur_crates >= crates
 
     async def has_item(self, user, item, conn=None):
-        user = user.id if isinstance(user, (discord.User, discord.Member)) else user
+        user = self._coerce_user_id(user)
         if conn:
             return await conn.fetchrow(
                 'SELECT * FROM allitems WHERE "owner"=$1 AND "id"=$2;', user, item
@@ -577,24 +672,54 @@ class Bot(commands.AutoShardedBot):
                 'SELECT * FROM allitems WHERE "owner"=$1 AND "id"=$2;', user, item
             )
 
-    async def start_guild_adventure(self, guild, difficulty, time):
-        await self.redis.execute_command(
-            "SET",
+    import json
+    from datetime import datetime
+
+    async def start_guild_adventure(self, guild, difficulty, time, adventure_type):
+        # Prepare the adventure data
+        adventure_data = {
+            'difficulty': difficulty,
+            'end_time': (datetime.datetime.utcnow() + time).isoformat(),
+            'is_completed': False,
+            'adventure_type': adventure_type  # Ensure adventure_type is serializable
+        }
+
+        # Serialize the data to JSON
+        adventure_json = json.dumps(adventure_data)
+
+        # Store the data in Redis with an expiration time
+        await self.redis.set(
             f"guildadv:{guild}",
-            difficulty,
-            "EX",
-            int(time.total_seconds()) + 259_200,
-        )  # +3 days
+            adventure_json,
+            ex=int(time.total_seconds()) + 259200  # Adds 3 days as buffer
+        )
+
+    import json
+    from datetime import datetime
 
     async def get_guild_adventure(self, guild):
-        ttl = await self.redis.execute_command("TTL", f"guildadv:{guild}")
-        if ttl == -2:
-            return
-        num = await self.redis.execute_command("GET", f"guildadv:{guild}")
-        ttl = ttl - 259_200
-        done = ttl <= 0
-        time = datetime.timedelta(seconds=ttl)
-        return int(num.decode("ascii")), time, done
+        adventure_json = await self.redis.get(f"guildadv:{guild}")
+        if adventure_json is None:
+            return None
+
+        # Deserialize the JSON string back into a dictionary
+        adventure_data = json.loads(adventure_json)
+
+        # Parse the end_time back into a datetime object
+        end_time = datetime.datetime.fromisoformat(adventure_data['end_time'])
+
+        # Calculate the remaining time
+        remain_time = end_time - datetime.datetime.utcnow()
+
+        # Determine if the adventure is completed
+        is_completed = remain_time.total_seconds() <= 0
+
+        return (
+            adventure_data['difficulty'],
+            remain_time,
+            is_completed,
+            adventure_data['adventure_type']
+        )
 
     async def delete_guild_adventure(self, guild):
         await self.redis.execute_command("DEL", f"guildadv:{guild}")
@@ -602,7 +727,7 @@ class Bot(commands.AutoShardedBot):
     async def create_item(
         self, name, value, type_, damage, armor, owner, hand, element, equipped=False, conn=None
     ):
-        owner = owner.id if isinstance(owner, (discord.User, discord.Member)) else owner
+        owner = self._coerce_user_id(owner)
         if conn is None:
             conn = await self.pool.acquire()
             local = True
@@ -645,7 +770,7 @@ class Bot(commands.AutoShardedBot):
 
         # Randomly select an element
         element = random.choice(elements)
-        owner = owner.id if isinstance(owner, (discord.User, discord.Member)) else owner
+        owner = self._coerce_user_id(owner)
         item = {}
         item["owner"] = owner
         type_ = random.choice(ALL_ITEM_TYPES)
@@ -675,6 +800,29 @@ class Bot(commands.AutoShardedBot):
             return await self.create_item(**item, conn=conn)
         return item
 
+    def _apply_level_memorial_caps(self, item):
+        if item.get("hand") == Hand.Both.value:
+            item["damage"] = min(int(item.get("damage", 0) or 0), 190)
+        else:
+            item["damage"] = min(int(item.get("damage", 0) or 0), 90)
+            item["armor"] = min(int(item.get("armor", 0) or 0), 90)
+        return item
+
+    async def create_level_memorial_item(self, new_level, owner, *, conn=None):
+        base_stat = min(round(new_level * 1.5), 95)
+        item = await self.create_random_item(
+            minstat=base_stat,
+            maxstat=base_stat,
+            minvalue=1000,
+            maxvalue=1000,
+            owner=owner,
+            insert=False,
+            conn=conn,
+        )
+        self._apply_level_memorial_caps(item)
+        item["name"] = _("Level {new_level} Memorial").format(new_level=new_level)
+        return item
+
     async def process_levelup(self, ctx, new_level, old_level, conn=None):
         if conn is None:
             conn = await self.pool.acquire()
@@ -682,13 +830,22 @@ class Bot(commands.AutoShardedBot):
         else:
             local = False
         reward_text = ""
-        stat_point_received = False
-        if new_level % 2 == 0 and new_level > 0:
-            # Increment statpoints directly in the database and fetch the updated value
-            update_query = 'UPDATE profile SET "statpoints" = "statpoints" + 1 WHERE "user" = $1 RETURNING "statpoints";'
-            new_statpoints = await conn.fetchval(update_query, ctx.author.id)
-            reward_text += f"You also received **1 stat point** (total: {new_statpoints}). "
-            stat_point_received = True
+        stat_points_earned = rpgtools.stat_points_earned(old_level, new_level)
+        if stat_points_earned > 0:
+            update_query = (
+                'UPDATE profile SET "statpoints" = "statpoints" + $1 '
+                'WHERE "user" = $2 RETURNING "statpoints";'
+            )
+            new_statpoints = await conn.fetchval(
+                update_query,
+                stat_points_earned,
+                ctx.author.id,
+            )
+            point_label = "stat point" if stat_points_earned == 1 else "stat points"
+            reward_text += (
+                f"You also received **{stat_points_earned} {point_label}** "
+                f"(total: {new_statpoints}). "
+            )
 
         if (reward := random.choice(["crates", "money", "item"])) == "crates":
             if new_level < 6:
@@ -724,18 +881,11 @@ class Bot(commands.AutoShardedBot):
                 ctx.author.id,
             )
         elif reward == "item":
-            stat = min(round(new_level * 1.5), 75)
-            item = await self.create_random_item(
-                minstat=stat,
-                maxstat=stat,
-                minvalue=1000,
-                maxvalue=1000,
-                owner=ctx.author,
-                insert=False,
+            item = await self.create_level_memorial_item(
+                new_level,
+                ctx.author,
                 conn=conn,
             )
-
-            item["name"] = _("Level {new_level} Memorial").format(new_level=new_level)
             reward_text = _("a special weapon")
             await self.create_item(**item)
             await self.log_transaction(
@@ -763,23 +913,221 @@ class Bot(commands.AutoShardedBot):
             )
             reward_text = f"**${money}**"
 
-        additional = (
-            _("You can now choose your second class using `{prefix}class`!").format(
-                prefix=ctx.clean_prefix
+        additional_parts = []
+        if old_level < 12 and new_level >= 12:
+            additional_parts.append(
+                _("You can now choose your second class using `{prefix}class`!").format(
+                    prefix=ctx.clean_prefix
+                )
             )
-            if old_level < 12 and new_level >= 12
-            else ""
-        )
+        if old_level < 100 <= new_level:
+            additional_parts.append(
+                _("You can now claim an Ascension Mantle using `{prefix}ascension`!").format(
+                    prefix=ctx.clean_prefix
+                )
+            )
+        if old_level < 100 <= new_level and await self._grant_eternal_sovereign_badge(
+            ctx.author.id,
+            conn=conn,
+        ):
+            additional_parts.append(_("You also unlocked the **Eternal Sovereign** badge!"))
+        if old_level < 100 <= new_level:
+            await self._announce_level_100(ctx.author.id)
+        additional = " ".join(additional_parts)
 
         if local:
             await self.pool.release(conn)
 
-        await ctx.send(
-            _(
-                "You reached a new level: **{new_level}** :star:! You received {reward} "
-                "as a reward :tada:! {additional}"
-            ).format(new_level=new_level, reward=reward_text, additional=additional)
+        if reward == "item":
+            type = item["type_"]
+            if item["armor"] >= 1:
+                stat = item["armor"]
+                user = await self.fetch_user(ctx.author.id)
+                await ctx.send(
+                    _(
+                        f"{user.mention} reached a new level: **{new_level}** :star:! You received {reward}! A memorial **{type}** with **{stat}** armor "
+                        f"as a reward :tada:! {additional}"
+                    )
+                )
+            else:
+                stat = item["damage"]
+                user = await self.fetch_user(ctx.author.id)
+                await ctx.send(
+                    _(
+                        f"{user.mention} reached a new level: **{new_level}** :star:! You received {reward}! A memorial **{type}** with **{stat}** damage "
+                        f"as a reward :tada:! {additional}"
+                    )
+                )
+
+
+        else:
+            user = await self.fetch_user(ctx.author.id)
+            await ctx.send(
+                _(
+                    f"{user} reached a new level: **{new_level}** :star:! You received {reward} "
+                    "as a reward :tada:! {additional}"
+                ).format(user=user.mention, new_level=new_level, reward=reward_text, additional=additional)
+            )
+
+    async def _grant_eternal_sovereign_badge(self, user_id: int, *, conn) -> bool:
+        profile_row = await conn.fetchrow(
+            'SELECT "badges" FROM profile WHERE "user" = $1;',
+            user_id,
         )
+        if profile_row is None:
+            return False
+
+        raw_badges = profile_row["badges"]
+        try:
+            current_badges = Badge(0) if raw_badges is None else Badge.from_db(raw_badges)
+        except Exception:
+            current_badges = Badge(0)
+
+        if current_badges & Badge.ETERNAL_SOVEREIGN:
+            return False
+
+        await conn.execute(
+            'UPDATE profile SET "badges" = $1 WHERE "user" = $2;',
+            (current_badges | Badge.ETERNAL_SOVEREIGN).to_db(),
+            user_id,
+        )
+        return True
+
+    async def _announce_level_100(self, user_id: int) -> bool:
+        channel = self.get_channel(LEVEL_100_ANNOUNCE_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(LEVEL_100_ANNOUNCE_CHANNEL_ID)
+            except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                return False
+
+        try:
+            await channel.send(
+                f"The realm bears witness: <@{user_id}> has reached Level 100."
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            return False
+        return True
+
+    async def process_guildlevelup(self, ctx, user_id, new_level, old_level, conn=None):
+        if conn is None:
+            conn = await self.pool.acquire()
+            local = True
+        else:
+            local = False
+        reward_text = ""
+        stat_points_earned = rpgtools.stat_points_earned(old_level, new_level)
+        if stat_points_earned > 0:
+            update_query = (
+                'UPDATE profile SET "statpoints" = "statpoints" + $1 '
+                'WHERE "user" = $2 RETURNING "statpoints";'
+            )
+            new_statpoints = await conn.fetchval(
+                update_query,
+                stat_points_earned,
+                user_id,
+            )
+            point_label = "stat point" if stat_points_earned == 1 else "stat points"
+            reward_text += (
+                f"You also received **{stat_points_earned} {point_label}** "
+                f"(total: {new_statpoints}). "
+            )
+
+        if (reward := random.choice(["crates", "money", "item"])) == "crates":
+            if new_level < 6:
+                column = "crates_common"
+                amount = new_level
+                reward_text = f"**{amount}** {self.cogs['Crates'].emotes.common}"
+            elif new_level < 10:
+                column = "crates_uncommon"
+                amount = round(new_level / 2)
+                reward_text = f"**{amount}** {self.cogs['Crates'].emotes.uncommon}"
+            elif new_level < 18:
+                column = "crates_rare"
+                amount = 2
+                reward_text = f"**2** {self.cogs['Crates'].emotes.rare}"
+            elif new_level < 27:
+                column = "crates_rare"
+                amount = 3
+                reward_text = f"**3** {self.cogs['Crates'].emotes.rare}"
+            else:
+                column = "crates_magic"
+                amount = 1
+                reward_text = f"**1** {self.cogs['Crates'].emotes.magic}"
+            await self.pool.execute(
+                f'UPDATE profile SET {column}={column}+$1 WHERE "user"=$2;',
+                amount,
+                user_id,
+            )
+        elif reward == "item":
+            item = await self.create_level_memorial_item(
+                new_level,
+                user_id,
+                conn=conn,
+            )
+            reward_text = _("a special weapon")
+            await self.create_item(**item)
+        elif reward == "money":
+            money = new_level * 1000
+            await conn.execute(
+                'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                money,
+                user_id,
+            )
+            reward_text = f"**${money}**"
+
+        additional_parts = []
+        if old_level < 12 and new_level >= 12:
+            additional_parts.append(
+                _("You can now choose your second class using `{prefix}class`!").format(
+                    prefix=ctx.clean_prefix
+                )
+            )
+        if old_level < 100 <= new_level:
+            additional_parts.append(
+                _("You can now claim an Ascension Mantle using `{prefix}ascension`!").format(
+                    prefix=ctx.clean_prefix
+                )
+            )
+        if old_level < 100 <= new_level and await self._grant_eternal_sovereign_badge(
+            user_id,
+            conn=conn,
+        ):
+            additional_parts.append(_("You also unlocked the **Eternal Sovereign** badge!"))
+        if old_level < 100 <= new_level:
+            await self._announce_level_100(user_id)
+        additional = " ".join(additional_parts)
+
+        if local:
+            await self.pool.release(conn)
+
+        if reward == "item":
+            type = item["type_"]
+            if item["armor"] >= 1:
+                stat = item["armor"]
+                await ctx.send(
+                    _(
+                        f"<@{user_id}> reached a new level: **{new_level}** :star:! You received {reward}! A memorial **{type}** with **{stat}** armor "
+                        f"as a reward :tada:! {additional}"
+                    )
+                )
+            else:
+                stat = item["damage"]
+                await ctx.send(
+                    _(
+                        f"<@{user_id}> reached a new level: **{new_level}** :star:! You received {reward}! A memorial **{type}** with **{stat}** damage "
+                        f"as a reward :tada:! {additional}"
+                    )
+                )
+
+
+        else:
+            await ctx.send(
+                _(
+                    f"<@{user_id}> reached a new level: **{new_level}** :star:! You received {reward} "
+                    f"as a reward :tada:! {additional}"
+                )
+            )
 
     async def clear_donator_cache(self, user):
         user = user if isinstance(user, int) else user.id
@@ -795,28 +1143,263 @@ class Bot(commands.AutoShardedBot):
     async def reload_bans(self):
         await self.cogs["Sharding"].handler("reload_bans", 0)
 
+    def _get_patreon_booster_membership_config(self):
+        ids_section = getattr(self.config, "ids", None)
+        raid_ids = getattr(ids_section, "raid", {}) if ids_section else {}
+        if not isinstance(raid_ids, dict):
+            raid_ids = {}
+
+        booster_guild_id = raid_ids.get("booster_guild_id", self.support_server_id)
+        booster_role_id = raid_ids.get("booster_role_id")
+
+        try:
+            booster_guild_id = int(booster_guild_id) if booster_guild_id else None
+        except (TypeError, ValueError):
+            booster_guild_id = self.support_server_id
+
+        try:
+            booster_role_id = int(booster_role_id) if booster_role_id else None
+        except (TypeError, ValueError):
+            booster_role_id = None
+
+        return booster_guild_id, booster_role_id
+
+    def _resolve_donator_rank_from_role_ids(self, member_roles):
+        top_donator_rank = None
+
+        for role in self.config.external.donator_roles:
+            try:
+                role_id = int(role.id)
+            except (TypeError, ValueError):
+                continue
+
+            if role_id not in member_roles:
+                continue
+            rank = getattr(DonatorRank, role.tier, None)
+            if rank and (top_donator_rank is None or rank > top_donator_rank):
+                top_donator_rank = rank
+
+        if top_donator_rank:
+            return top_donator_rank
+
+        _booster_guild_id, booster_role_id = self._get_patreon_booster_membership_config()
+        if booster_role_id and booster_role_id in member_roles:
+            return DonatorRank.basic
+
+        return None
+
+    @staticmethod
+    def _coerce_positive_int(value):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    @staticmethod
+    def _coerce_user_id(value):
+        candidate = value
+        for _ in range(4):
+            if candidate is None:
+                return None
+            if isinstance(candidate, int):
+                return candidate
+            nested_user = getattr(candidate, "user", None)
+            if nested_user is not None and nested_user is not candidate:
+                candidate = nested_user
+                continue
+            nested_id = getattr(candidate, "id", None)
+            if nested_id is not None and nested_id is not candidate:
+                candidate = nested_id
+                continue
+            break
+        return int(candidate)
+
+    def _get_numeric_patreon_role_sources(self):
+        sources = []
+        ids_section = getattr(self.config, "ids", None)
+
+        get_cog = getattr(self, "get_cog", None)
+        patreon_core = get_cog("PatreonCore") if get_cog is not None else None
+        if patreon_core is not None:
+            guild_id = self._coerce_positive_int(getattr(patreon_core, "guild_id", None))
+            role_mapping = {}
+            tier_role_mapping = getattr(patreon_core, "tier_role_mapping", {})
+            tier_level_mapping = getattr(patreon_core, "tier_level_mapping", {})
+            if isinstance(tier_role_mapping, dict) and isinstance(tier_level_mapping, dict):
+                for tier_id, role_id in tier_role_mapping.items():
+                    parsed_role_id = self._coerce_positive_int(role_id)
+                    parsed_tier = self._coerce_positive_int(tier_level_mapping.get(tier_id))
+                    if parsed_role_id and parsed_tier:
+                        role_mapping[parsed_role_id] = min(parsed_tier, 4)
+            if guild_id and role_mapping:
+                sources.append((guild_id, role_mapping))
+
+        patreonstuff_ids = getattr(ids_section, "patreonstuff", {}) if ids_section else {}
+        if isinstance(patreonstuff_ids, dict):
+            guild_id = self._coerce_positive_int(patreonstuff_ids.get("guild_id"))
+            raw_role_mapping = patreonstuff_ids.get("role_tier_mapping", {})
+            role_mapping = {}
+            if isinstance(raw_role_mapping, dict):
+                for role_id, tier in raw_role_mapping.items():
+                    parsed_role_id = self._coerce_positive_int(role_id)
+                    parsed_tier = self._coerce_positive_int(tier)
+                    if parsed_role_id and parsed_tier:
+                        role_mapping[parsed_role_id] = min(parsed_tier, 4)
+            if guild_id and role_mapping:
+                sources.append((guild_id, role_mapping))
+
+        legacy_role_mapping = {}
+        legacy_tier_names = {
+            name: int(rank.value) for name, rank in DonatorRank.__members__.items()
+        }
+        for role in self.config.external.donator_roles:
+            parsed_role_id = self._coerce_positive_int(getattr(role, "id", None))
+            parsed_tier = legacy_tier_names.get(str(getattr(role, "tier", "")).strip().lower())
+            if parsed_role_id and parsed_tier:
+                legacy_role_mapping[parsed_role_id] = parsed_tier
+        if self.support_server_id and legacy_role_mapping:
+            sources.append((self.support_server_id, legacy_role_mapping))
+
+        def resolve_role_id(guild_id, role):
+            parsed_role_id = self._coerce_positive_int(getattr(role, "id", None))
+            if parsed_role_id:
+                return parsed_role_id
+
+            role_name = str(getattr(role, "name", "") or "").strip().casefold()
+            if not role_name:
+                return None
+
+            guild = self.get_guild(guild_id)
+            if not guild:
+                return None
+
+            for guild_role in getattr(guild, "roles", []):
+                if str(getattr(guild_role, "name", "") or "").strip().casefold() == role_name:
+                    return self._coerce_positive_int(getattr(guild_role, "id", None))
+            return None
+
+        kofi_sources = {}
+        for role in getattr(self.config.external, "kofi_donator_roles", []):
+            parsed_tier = legacy_tier_names.get(
+                str(getattr(role, "tier", "")).strip().lower()
+            )
+            guild_id = self._coerce_positive_int(getattr(role, "guild_id", None))
+            if not guild_id:
+                guild_id = self.support_server_id
+            parsed_role_id = resolve_role_id(guild_id, role)
+            if parsed_role_id and parsed_tier and guild_id:
+                kofi_sources.setdefault(guild_id, {})[parsed_role_id] = parsed_tier
+        for guild_id, role_mapping in kofi_sources.items():
+            if role_mapping:
+                sources.append((guild_id, role_mapping))
+
+        return sources
+
+    def _resolve_numeric_patreon_tier_from_role_ids(self, member_roles):
+        highest_tier = 0
+        member_role_ids = {int(role_id) for role_id in member_roles}
+
+        for _guild_id, role_mapping in self._get_numeric_patreon_role_sources():
+            for role_id, tier in role_mapping.items():
+                if role_id in member_role_ids:
+                    highest_tier = max(highest_tier, int(tier))
+
+        _booster_guild_id, booster_role_id = self._get_patreon_booster_membership_config()
+        if booster_role_id and booster_role_id in member_role_ids:
+            highest_tier = max(highest_tier, 1)
+
+        return highest_tier
+
+    def _get_patreon_tier_lookup_guild_ids(self):
+        guild_ids = []
+        for guild_id, _role_mapping in self._get_numeric_patreon_role_sources():
+            if guild_id and guild_id not in guild_ids:
+                guild_ids.append(guild_id)
+
+        booster_guild_id, _booster_role_id = self._get_patreon_booster_membership_config()
+        for guild_id in (self.support_server_id, booster_guild_id):
+            if guild_id and guild_id not in guild_ids:
+                guild_ids.append(guild_id)
+
+        return guild_ids
+
     @cache(maxsize=8096)
     async def get_donator_rank(self, user_id):
-        if self.config.bot.is_beta or self.config.bot.is_custom:
-            return DonatorRank.diamond
+        booster_guild_id, _booster_role_id = self._get_patreon_booster_membership_config()
+        guild_ids = []
+        for guild_id in (self.support_server_id, booster_guild_id):
+            if guild_id and guild_id not in guild_ids:
+                guild_ids.append(guild_id)
 
-        if self.support_server_id is None:
+        if not guild_ids:
             return False
+
+        found_member = False
+        for guild_id in guild_ids:
+            try:
+                member = await self.http.get_member(guild_id, user_id)
+            except discord.NotFound:
+                continue
+
+            found_member = True
+            member_roles = [int(i) for i in member.get("roles", [])]
+            if rank := self._resolve_donator_rank_from_role_ids(member_roles):
+                return rank
+
+        return None if found_member else False
+
+    async def get_effective_donator_tier(self, user_id, *, sync_profile: bool = False) -> int:
+        user_id = self._coerce_user_id(user_id)
+
+        row = await self.pool.fetchrow(
+            'SELECT "tier" FROM profile WHERE "user" = $1;',
+            user_id,
+        )
+        stored_tier = row["tier"] if row else 0
         try:
-            member = await self.http.get_member(self.support_server_id, user_id)
-        except discord.NotFound:
-            return False
-        top_donator_role = None
-        member_roles = [int(i) for i in member.get("roles", [])]
-        for role in self.config.external.donator_roles:
-            if role.id in member_roles:
-                top_donator_role = role.tier
-        return getattr(DonatorRank, top_donator_role) if top_donator_role else None
+            effective_tier = int(stored_tier or 0)
+        except (TypeError, ValueError):
+            effective_tier = 0
+
+        role_tier = 0
+        found_member = False
+        for guild_id in self._get_patreon_tier_lookup_guild_ids():
+            try:
+                member = await self.http.get_member(guild_id, user_id)
+            except discord.NotFound:
+                continue
+
+            found_member = True
+            member_roles = [int(i) for i in member.get("roles", [])]
+            role_tier = max(role_tier, self._resolve_numeric_patreon_tier_from_role_ids(member_roles))
+
+        if role_tier < 1 and not found_member:
+            role_rank = await self.get_donator_rank(user_id)
+            if role_rank:
+                role_tier = max(role_tier, min(int(role_rank.value), 4))
+
+        effective_tier = max(effective_tier, role_tier)
+
+        if sync_profile and row is not None:
+            try:
+                stored_tier_value = int(stored_tier or 0)
+            except (TypeError, ValueError):
+                stored_tier_value = 0
+
+            if effective_tier > stored_tier_value:
+                await self.pool.execute(
+                    'UPDATE profile SET "tier" = $1 WHERE "user" = $2;',
+                    effective_tier,
+                    user_id,
+                )
+
+        return effective_tier
 
     async def get_damage_armor_for(
         self, user, items=None, classes=None, race=None, conn=None
     ):
-        user = user.id if isinstance(user, (discord.User, discord.Member)) else user
+        user = self._coerce_user_id(user)
         if conn is None:
             conn = await self.pool.acquire()
             local = True
@@ -827,6 +1410,59 @@ class Bot(commands.AutoShardedBot):
         if not classes or not race:
             row = await conn.fetchrow('SELECT * FROM profile WHERE "user"=$1;', user)
             classes, race = row["class"], row["race"]
+
+        def item_field(raw_item, key, default=None):
+            try:
+                return raw_item[key]
+            except (KeyError, IndexError, TypeError):
+                return default
+
+        item_ids = [
+            int(item_field(item, "id"))
+            for item in items
+            if item_field(item, "id") is not None
+        ]
+        star_map: dict[int, int] = {}
+        soulbound_item_id: int | None = None
+        soulbound_level = 0
+        if item_ids:
+            try:
+                star_table_exists = await conn.fetchval(
+                    "SELECT to_regclass('public.starforged_items') IS NOT NULL;"
+                )
+                if star_table_exists:
+                    star_rows = await conn.fetch(
+                        """
+                        SELECT item_id, stars
+                        FROM starforged_items
+                        WHERE item_id = ANY($1)
+                        """,
+                        item_ids,
+                    )
+                    star_map = {
+                        int(row["item_id"]): int(row["stars"] or 0)
+                        for row in star_rows
+                    }
+                soulbound_table_exists = await conn.fetchval(
+                    "SELECT to_regclass('public.soulbound') IS NOT NULL;"
+                )
+                if soulbound_table_exists:
+                    soulbound_row = await conn.fetchrow(
+                        """
+                        SELECT item_id, xp
+                        FROM soulbound
+                        WHERE user_id = $1 AND item_id = ANY($2)
+                        """,
+                        user,
+                        item_ids,
+                    )
+                    if soulbound_row:
+                        soulbound_item_id = int(soulbound_row["item_id"])
+                        soulbound_level = soulbound_level_from_xp(soulbound_row["xp"])
+            except Exception:
+                star_map = {}
+                soulbound_item_id = None
+                soulbound_level = 0
 
         if local:
             await self.pool.release(conn)
@@ -842,18 +1478,32 @@ class Bot(commands.AutoShardedBot):
         is_raider = any(c.in_class_line(Raider) for c in classes)
         is_paladin = any(c.in_class_line(Paladin) for c in classes)
         is_reaper = any(c.in_class_line(Reaper) for c in classes)
+        is_tank = any(c.in_class_line(Tank) for c in classes)
+        is_bard = any(c.in_class_line(Bard) for c in classes)
+        is_beastmaster = any(c.in_class_line(Beastmaster) for c in classes)
+        is_santas_helper = any(c.in_class_line(SantasHelper) for c in classes)
         is_caster = any(
             c.in_class_line(Mage) or c.in_class_line(Ritualist) for c in classes
         )
 
         for item in items:
-            damage += item["damage"]
-            armor += item["armor"]
+            item_id = int(item_field(item, "id")) if item_field(item, "id") is not None else 0
+            item_soulbound_level = soulbound_level if item_id == soulbound_item_id else 0
+            item_damage, item_armor, _bonus_pct = apply_item_progression_bonus(
+                item_field(item, "damage", 0),
+                item_field(item, "armor", 0),
+                stars=star_map.get(item_id, 0),
+                soulbound_level=item_soulbound_level,
+            )
+            damage += item_damage
+            armor += item_armor
 
             type_ = ItemType.from_string(item["type"])
-            if type_ == ItemType.Spear and is_paragon:
+            if type_ == ItemType.Spear and (is_paragon or is_beastmaster):
                 damage += 5
-            elif (type_ == ItemType.Dagger or type_ == ItemType.Knife) and is_thief:
+            elif (type_ == ItemType.Dagger or type_ == ItemType.Knife) and (
+                is_thief or is_bard
+            ):
                 damage += 5
             elif type_ == ItemType.Sword and is_warrior:
                 damage += 5
@@ -867,15 +1517,17 @@ class Bot(commands.AutoShardedBot):
                 damage += 5
             elif type_ == ItemType.Scythe and is_reaper:
                 damage += 10
+            elif type_ == ItemType.Mace and is_santas_helper:
+                damage += 5
+            elif type_ == ItemType.Shield and is_tank:
+                armor += 7
 
         lines = [class_.get_class_line() for class_ in classes]
         grades = [class_.class_grade() for class_ in classes]
         for line, grade in zip(lines, grades):
             if line == Mage:
                 damage += grade
-            elif line == Warrior:
-                armor += grade
-            elif line == Paragon:
+            if line == Paragon:
                 damage += grade
                 armor += grade
         if race == "Human":
@@ -978,11 +1630,652 @@ class Bot(commands.AutoShardedBot):
         if local:
             await self.pool.release(conn)
 
+    async def _ensure_xp_watch_tables(self) -> None:
+        if self._xp_watch_tables_ready:
+            return
+        async with self._xp_watch_table_lock:
+            if self._xp_watch_tables_ready:
+                return
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS xp_watchlist (
+                        user_id bigint PRIMARY KEY,
+                        added_by bigint NOT NULL,
+                        note text,
+                        added_at timestamp with time zone NOT NULL DEFAULT now(),
+                        updated_at timestamp with time zone NOT NULL DEFAULT now()
+                    );
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS xp_watch_events (
+                        id bigserial PRIMARY KEY,
+                        user_id bigint NOT NULL,
+                        xp_delta integer NOT NULL,
+                        old_xp bigint,
+                        new_xp bigint,
+                        source text NOT NULL,
+                        command_name text,
+                        guild_id bigint,
+                        channel_id bigint,
+                        details jsonb NOT NULL DEFAULT '{}'::jsonb,
+                        created_at timestamp with time zone NOT NULL DEFAULT now()
+                    );
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS xp_watch_events_user_created_idx
+                    ON xp_watch_events (user_id, created_at DESC);
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS xp_watch_events_created_idx
+                    ON xp_watch_events (created_at DESC);
+                    """
+                )
+                rows = await conn.fetch("SELECT user_id FROM xp_watchlist;")
+            self._xp_watch_user_ids = {int(row["user_id"]) for row in rows}
+            self._xp_watch_tables_ready = True
+
+    async def _refresh_xp_watch_cache(self, *, conn=None) -> None:
+        await self._ensure_xp_watch_tables()
+        local = False
+        if conn is None:
+            conn = await self.pool.acquire()
+            local = True
+        try:
+            rows = await conn.fetch("SELECT user_id FROM xp_watchlist;")
+            self._xp_watch_user_ids = {int(row["user_id"]) for row in rows}
+        finally:
+            if local:
+                await self.pool.release(conn)
+
+    async def set_xp_watch(
+        self,
+        *,
+        user_id: int,
+        enabled: bool,
+        added_by: int,
+        note: str | None = None,
+    ) -> None:
+        await self._ensure_xp_watch_tables()
+        async with self.pool.acquire() as conn:
+            if enabled:
+                await conn.execute(
+                    """
+                    INSERT INTO xp_watchlist (user_id, added_by, note, updated_at)
+                    VALUES ($1, $2, $3, now())
+                    ON CONFLICT (user_id)
+                    DO UPDATE SET
+                        added_by = EXCLUDED.added_by,
+                        note = EXCLUDED.note,
+                        updated_at = now();
+                    """,
+                    int(user_id),
+                    int(added_by),
+                    note,
+                )
+            else:
+                await conn.execute(
+                    "DELETE FROM xp_watchlist WHERE user_id = $1;",
+                    int(user_id),
+                )
+            await self._refresh_xp_watch_cache(conn=conn)
+
+    async def fetch_xp_watchlist(self) -> list[dict]:
+        await self._ensure_xp_watch_tables()
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT user_id, added_by, note, added_at, updated_at
+                FROM xp_watchlist
+                ORDER BY added_at DESC;
+                """
+            )
+        return [dict(row) for row in rows]
+
+    async def fetch_xp_watch_events(self, *, user_id: int, limit: int = 50) -> list[dict]:
+        await self._ensure_xp_watch_tables()
+        safe_limit = max(1, min(int(limit), 200))
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, user_id, xp_delta, old_xp, new_xp, source, command_name,
+                       guild_id, channel_id, details, created_at
+                FROM xp_watch_events
+                WHERE user_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2;
+                """,
+                int(user_id),
+                safe_limit,
+            )
+        return [dict(row) for row in rows]
+
+    async def log_xp_watch_event(
+        self,
+        *,
+        ctx,
+        user_id: int,
+        delta: int,
+        source: str,
+        details: dict | None = None,
+        before_xp: int | None = None,
+        after_xp: int | None = None,
+        conn=None,
+    ) -> None:
+        try:
+            xp_delta = int(delta)
+        except (TypeError, ValueError):
+            return
+        if xp_delta <= 0:
+            return
+        if not hasattr(self, "pool"):
+            return
+
+        try:
+            await self._ensure_xp_watch_tables()
+        except Exception:
+            return
+
+        if int(user_id) not in self._xp_watch_user_ids:
+            return
+
+        local = False
+        if conn is None:
+            conn = await self.pool.acquire()
+            local = True
+        try:
+            if after_xp is None:
+                after_xp = await conn.fetchval(
+                    'SELECT "xp" FROM profile WHERE "user"=$1;',
+                    int(user_id),
+                )
+            if after_xp is not None:
+                after_xp = int(after_xp)
+            if before_xp is None and after_xp is not None:
+                before_xp = after_xp - xp_delta
+            if before_xp is not None:
+                before_xp = int(before_xp)
+
+            command_name = None
+            guild_id = None
+            channel_id = None
+            if ctx is not None:
+                command = getattr(ctx, "command", None)
+                if command is not None:
+                    command_name = getattr(command, "qualified_name", str(command))
+                guild = getattr(ctx, "guild", None)
+                channel = getattr(ctx, "channel", None)
+                guild_id = getattr(guild, "id", None)
+                channel_id = getattr(channel, "id", None)
+
+            if isinstance(details, dict):
+                details_payload = details
+            elif details is None:
+                details_payload = {}
+            else:
+                details_payload = {"detail": str(details)}
+
+            await conn.execute(
+                """
+                INSERT INTO xp_watch_events (
+                    user_id, xp_delta, old_xp, new_xp, source, command_name,
+                    guild_id, channel_id, details
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb);
+                """,
+                int(user_id),
+                xp_delta,
+                before_xp,
+                after_xp,
+                str(source),
+                command_name,
+                guild_id,
+                channel_id,
+                json.dumps(details_payload, default=str),
+            )
+        except Exception:
+            return
+        finally:
+            if local:
+                await self.pool.release(conn)
+
     async def public_log(self, event: str):
         with handle_message_parameters(content=event) as params:
             await self.http.send_message(
                 self.config.game.bot_event_channel, params=params
             )
+
+    async def _ensure_city_war_tables(self) -> None:
+        if self._city_war_tables_ready:
+            return
+        async with self._city_war_table_lock:
+            if self._city_war_tables_ready:
+                return
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS city_guards (
+                        user_id bigint PRIMARY KEY,
+                        guild_id bigint NOT NULL,
+                        city text NOT NULL,
+                        assigned_by bigint NOT NULL,
+                        assigned_at timestamp with time zone NOT NULL DEFAULT now()
+                    );
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS city_guards_city_idx
+                    ON city_guards (city);
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS city_guards_guild_idx
+                    ON city_guards (guild_id);
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS city_guard_pet (
+                        city text PRIMARY KEY,
+                        guild_id bigint NOT NULL,
+                        user_id bigint NOT NULL,
+                        pet_id bigint NOT NULL,
+                        assigned_by bigint NOT NULL,
+                        assigned_at timestamp with time zone NOT NULL DEFAULT now()
+                    );
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS city_guard_pet_guild_idx
+                    ON city_guard_pet (guild_id);
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS city_guard_pet_user_idx
+                    ON city_guard_pet (user_id);
+                    """
+                )
+                await conn.execute(
+                    """
+                    ALTER TABLE defenses
+                    ADD COLUMN IF NOT EXISTS slot_id text;
+                    """
+                )
+                await conn.execute(
+                    """
+                    ALTER TABLE guild
+                    ADD COLUMN IF NOT EXISTS city_attack_channel bigint;
+                    """
+                )
+                await conn.execute(
+                    """
+                    ALTER TABLE guild
+                    ADD COLUMN IF NOT EXISTS city_attack_role_id bigint;
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS defenses_city_slot_idx
+                    ON defenses (city, slot_id);
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS defenses_city_slot_unique_idx
+                    ON defenses (city, slot_id)
+                    WHERE slot_id IS NOT NULL;
+                    """
+                )
+            self._city_war_tables_ready = True
+
+    def normalize_city_vault_tier(self, tier: int | None) -> int:
+        if tier is None:
+            return 0
+        return max(0, min(int(tier), 4))
+
+    def get_city_vault_multiplier(self, tier: int | None) -> tuple[int, int]:
+        return CITY_VAULT_MULTIPLIERS[self.normalize_city_vault_tier(tier)]
+
+    def get_guild_bank_base_limit(self, guild) -> int:
+        return int(guild["banklimit"])
+
+    def get_city_config_map(self) -> dict:
+        cities = getattr(self.config, "cities", None)
+        if isinstance(cities, dict):
+            return cities
+
+        values = getattr(self.config, "values", None)
+        if isinstance(values, dict):
+            raw_cities = values.get("cities", {})
+            if isinstance(raw_cities, dict):
+                return raw_cities
+
+        return {}
+
+    def get_city_config(self, city_name: str | None) -> dict | None:
+        if not city_name:
+            return None
+
+        cities = self.get_city_config_map()
+        if not cities:
+            return None
+
+        direct_match = cities.get(str(city_name).lower())
+        if direct_match:
+            return direct_match
+
+        normalized_name = str(city_name).strip().lower()
+        for config_city in cities.values():
+            if str(config_city.get("name", "")).strip().lower() == normalized_name:
+                return config_city
+        return None
+
+    def get_city_vault_tier(self, city=None) -> int:
+        if not city:
+            return 0
+
+        tier = None
+        city_name = None
+
+        if isinstance(city, dict):
+            tier = city.get("tier")
+            city_name = city.get("name")
+        else:
+            try:
+                tier = city["tier"]
+            except (KeyError, IndexError, TypeError):
+                tier = None
+            try:
+                city_name = city["name"]
+            except (KeyError, IndexError, TypeError):
+                city_name = None
+
+        if tier is None:
+            config_city = self.get_city_config(city_name)
+            if config_city:
+                tier = config_city.get("tier")
+
+        return self.normalize_city_vault_tier(tier)
+
+    def get_guild_effective_banklimit(self, guild, city=None) -> int:
+        base_limit = self.get_guild_bank_base_limit(guild)
+        if not city:
+            return base_limit
+        numerator, denominator = self.get_city_vault_multiplier(
+            self.get_city_vault_tier(city)
+        )
+        return (base_limit * numerator) // denominator
+
+    async def get_guild_alliance_id(self, guild_id: int, conn=None) -> int | None:
+        if not guild_id:
+            return None
+
+        local = False
+        if conn is None:
+            conn = await self.pool.acquire()
+            local = True
+        try:
+            alliance_id = await conn.fetchval(
+                'SELECT "alliance" FROM guild WHERE "id"=$1;',
+                int(guild_id),
+            )
+            return int(alliance_id) if alliance_id is not None else None
+        finally:
+            if local:
+                await self.pool.release(conn)
+
+    async def get_alliance_guilds(self, alliance_id: int, conn=None) -> list:
+        if not alliance_id:
+            return []
+
+        local = False
+        if conn is None:
+            conn = await self.pool.acquire()
+            local = True
+        try:
+            return await conn.fetch(
+                'SELECT * FROM guild WHERE "alliance"=$1 ORDER BY "id" ASC;',
+                int(alliance_id),
+            )
+        finally:
+            if local:
+                await self.pool.release(conn)
+
+    async def get_owned_city(self, guild_id: int, conn=None):
+        if not guild_id:
+            return False
+        local = False
+        if conn is None:
+            conn = await self.pool.acquire()
+            local = True
+        try:
+            alliance_id = await self.get_guild_alliance_id(guild_id, conn=conn)
+            if not alliance_id:
+                return False
+            return await conn.fetchrow('SELECT * FROM city WHERE "owner"=$1;', alliance_id)
+        finally:
+            if local:
+                await self.pool.release(conn)
+
+    async def get_guild_bank_caps(self, guild_id: int, conn=None) -> dict | None:
+        local = False
+        if conn is None:
+            conn = await self.pool.acquire()
+            local = True
+        try:
+            guild = await conn.fetchrow('SELECT * FROM guild WHERE "id"=$1;', guild_id)
+            if not guild:
+                return None
+            city = await self.get_owned_city(guild_id, conn=conn)
+            return {
+                "guild": guild,
+                "city": city,
+                "base_limit": self.get_guild_bank_base_limit(guild),
+                "effective_limit": self.get_guild_effective_banklimit(guild, city=city),
+                "city_tier": self.get_city_vault_tier(city),
+            }
+        finally:
+            if local:
+                await self.pool.release(conn)
+
+    async def get_city_guard(self, user_id: int, conn=None):
+        await self._ensure_city_war_tables()
+        local = False
+        if conn is None:
+            conn = await self.pool.acquire()
+            local = True
+        try:
+            guard = await conn.fetchrow(
+                'SELECT * FROM city_guards WHERE "user_id"=$1;',
+                int(user_id),
+            )
+            if not guard:
+                return None
+            valid_guard = await conn.fetchrow(
+                """
+                SELECT cg.*
+                FROM city_guards cg
+                JOIN city c ON c."name"=cg."city"
+                JOIN profile p ON p."user"=cg."user_id"
+                JOIN guild g ON g."id"=p."guild"
+                WHERE cg."user_id"=$1
+                  AND g."alliance"=c."owner";
+                """,
+                int(user_id),
+            )
+            if valid_guard:
+                return valid_guard
+            await conn.execute('DELETE FROM city_guards WHERE "user_id"=$1;', int(user_id))
+            return None
+        finally:
+            if local:
+                await self.pool.release(conn)
+
+    async def get_city_guards(self, city: str, conn=None) -> list:
+        await self._ensure_city_war_tables()
+        local = False
+        if conn is None:
+            conn = await self.pool.acquire()
+            local = True
+        try:
+            await conn.execute(
+                """
+                DELETE FROM city_guards cg
+                WHERE cg."city"=$1
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM city c
+                    JOIN profile p ON p."user"=cg."user_id"
+                    JOIN guild g ON g."id"=p."guild"
+                    WHERE c."name"=cg."city"
+                      AND g."alliance"=c."owner"
+                  );
+                """,
+                city,
+            )
+            return await conn.fetch(
+                """
+                SELECT cg.*
+                FROM city_guards cg
+                JOIN city c ON c."name"=cg."city"
+                JOIN profile p ON p."user"=cg."user_id"
+                JOIN guild g ON g."id"=p."guild"
+                WHERE cg."city"=$1
+                  AND g."alliance"=c."owner"
+                ORDER BY cg."assigned_at" ASC;
+                """,
+                city,
+            )
+        finally:
+            if local:
+                await self.pool.release(conn)
+
+    async def get_city_guard_pet(self, city: str, conn=None):
+        await self._ensure_city_war_tables()
+        local = False
+        if conn is None:
+            conn = await self.pool.acquire()
+            local = True
+        try:
+            pet = await conn.fetchrow(
+                """
+                SELECT
+                    cgp.*,
+                    mp."name" AS "pet_name",
+                    mp."alt_name",
+                    mp."growth_stage",
+                    mp."hp" AS "pet_hp",
+                    mp."attack" AS "pet_attack",
+                    mp."defense" AS "pet_defense",
+                    mp."element" AS "pet_element",
+                    mp."level" AS "pet_level",
+                    mp."trust_level" AS "pet_trust_level",
+                    mp."happiness" AS "pet_happiness",
+                    mp."learned_skills" AS "pet_learned_skills",
+                    mp."gm_all_skills_enabled" AS "pet_gm_all_skills_enabled"
+                FROM city_guard_pet cgp
+                JOIN city c ON c."name"=cgp."city"
+                JOIN profile p ON p."user"=cgp."user_id"
+                JOIN guild g ON g."id"=p."guild"
+                JOIN monster_pets mp ON mp."id"=cgp."pet_id" AND mp."user_id"=cgp."user_id"
+                WHERE cgp."city"=$1
+                  AND g."alliance"=c."owner"
+                  AND mp."daycare_boarding_id" IS NULL;
+                """,
+                city,
+            )
+            if pet:
+                return pet
+            await conn.execute('DELETE FROM city_guard_pet WHERE "city"=$1;', city)
+            return None
+        finally:
+            if local:
+                await self.pool.release(conn)
+
+    async def clear_city_guard_pet(
+        self,
+        *,
+        city: str | None = None,
+        guild_id: int | None = None,
+        user_id: int | None = None,
+        pet_id: int | None = None,
+        conn=None,
+    ) -> None:
+        await self._ensure_city_war_tables()
+        local = False
+        if conn is None:
+            conn = await self.pool.acquire()
+            local = True
+        try:
+            if city is not None:
+                await conn.execute('DELETE FROM city_guard_pet WHERE "city"=$1;', city)
+            elif guild_id is not None:
+                await conn.execute(
+                    'DELETE FROM city_guard_pet WHERE "guild_id"=$1;',
+                    int(guild_id),
+                )
+            elif user_id is not None:
+                await conn.execute(
+                    'DELETE FROM city_guard_pet WHERE "user_id"=$1;',
+                    int(user_id),
+                )
+            elif pet_id is not None:
+                await conn.execute(
+                    'DELETE FROM city_guard_pet WHERE "pet_id"=$1;',
+                    int(pet_id),
+                )
+        finally:
+            if local:
+                await self.pool.release(conn)
+
+    async def clear_city_guards(
+        self,
+        *,
+        city: str | None = None,
+        guild_id: int | None = None,
+        user_id: int | None = None,
+        conn=None,
+    ) -> None:
+        await self._ensure_city_war_tables()
+        local = False
+        if conn is None:
+            conn = await self.pool.acquire()
+            local = True
+        try:
+            if city is not None:
+                await conn.execute('DELETE FROM city_guards WHERE "city"=$1;', city)
+                await conn.execute('DELETE FROM city_guard_pet WHERE "city"=$1;', city)
+            elif guild_id is not None:
+                await conn.execute(
+                    'DELETE FROM city_guards WHERE "guild_id"=$1;',
+                    int(guild_id),
+                )
+                await conn.execute(
+                    'DELETE FROM city_guard_pet WHERE "guild_id"=$1;',
+                    int(guild_id),
+                )
+            elif user_id is not None:
+                await conn.execute(
+                    'DELETE FROM city_guards WHERE "user_id"=$1;',
+                    int(user_id),
+                )
+                await conn.execute(
+                    'DELETE FROM city_guard_pet WHERE "user_id"=$1;',
+                    int(user_id),
+                )
+        finally:
+            if local:
+                await self.pool.release(conn)
 
     async def get_city_buildings(self, guild_id, conn=None):
         if not guild_id:  # also catches guild_id = 0

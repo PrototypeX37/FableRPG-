@@ -31,96 +31,37 @@ from utils.joins import JoinView
 from utils.werewolf import DESCRIPTIONS as ROLE_DESC
 from utils.werewolf import Game
 from utils.werewolf import Role as ROLES
-
+from utils.werewolf import parse_custom_roles
+from utils.werewolf import send_traceback
+from utils.werewolf_single import SPGame
 
 class Werewolf(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.games = {}
 
-    @commands.group(
-        invoke_without_command=True,
-        case_insensitive=True,
-        aliases=["ww"],
-        brief=_("Starts a game of Werewolf"),
-    )
-    @locale_doc
-    async def werewolf(
+    async def _start_multiplayer_game(
         self,
         ctx,
-        mode: WerewolfMode | None = "Classic",
-        speed: str.title = "Normal",
-        min_players: IntGreaterThan(1) = None,
-    ):
-        _(
-            """
-            `[mode]` - The mode to play, see below for available options. (optional and defaults to Classic)
-            `[speed]` - The game speed to play, see below available options. (optional and defaults to Normal)
-            `[min_players]` - The minimum players needed to play. (optional and defaults depending on the game mode: Classic: 5, Imbalanced: 5, Huntergame: 8, Villagergame: 5, Valentines: 8, IdleRPG: 5)
-
-            Starts a game of Werewolf. Find the werewolves, before they find you!
-            Your goal to win is indicated on the role you have.
-            **Game modes:** `Classic` (default), `Imbalanced`, `Huntergame`, `Villagergame`, `Valentines`, `IdleRPG`. Use `{prefix}ww modes` for detailed info.
-            **Game speeds** (in seconds): `Normal`: 60 (default), `Extended`: 90, `Fast`: 45, `Blitz`: 30. Use `{prefix}ww speeds` for detailed info.
-            **Aliases:**
-            `ww`
-            **Examples:**
-            `{prefix}ww Blitz` for Classic mode on Blitz speed
-            `{prefix}ww Imbalanced` for Imbalanced mode on Normal speed
-            `{prefix}ww Valentines Extended` for Valentines mode on Extended speed
-            `{prefix}ww Huntergame Fast` for Huntergame mode on Fast speed
-            """
-        )
-
-        # TODO:
-        # Bizarro: Roles are flipped.
-        # Random: Roles are reassigned randomly every night.
-        # Zombie (Classic-based, another team) - There's a chance that a random player will be randomly resurrected as Zombie and they can devour any villagers or werewolves with the other zombies.
-
+        *,
+        mode: str,
+        speed: str,
+        min_players: int,
+        custom_roles: list[ROLES] | None = None,
+    ) -> None:
         if self.games.get(ctx.channel.id):
-            return await ctx.send(_("There is already a game in here!"))
-
-        game_modes = [
-            "Classic",
-            "Imbalanced",
-            "Huntergame",
-            "Villagergame",
-            "Valentines",
-            "Idlerpg",
-        ]
-
-        minimum_players = {
-            "Classic": 5,
-            "Imbalanced": 5,
-            "Huntergame": 8,
-            "Villagergame": 5,
-            "Valentines": 8,
-            "IdleRPG": 5,
-        }
+            await ctx.send(_("There is already a game in here!"))
+            return
 
         game_speeds = ["Normal", "Extended", "Fast", "Blitz"]
-
-        if mode not in game_modes:
-            return await ctx.send(
-                _(
-                    "Invalid game mode. Use `{prefix}help ww` to get help on this"
-                    " command."
-                ).format(prefix=ctx.clean_prefix)
-            )
-        elif mode == "Idlerpg":
-            mode = "IdleRPG"
-
         if speed not in game_speeds:
-            return await ctx.send(
+            await ctx.send(
                 _(
                     "Invalid game speed. Use `{prefix}help ww` to get help on this"
                     " command."
                 ).format(prefix=ctx.clean_prefix)
             )
-
-        if not min_players:
-            # Get default of Classic mode if unexpected value happened
-            min_players = minimum_players.get(mode, 5)
+            return
 
         self.games[ctx.channel.id] = "forming"
 
@@ -131,14 +72,19 @@ class Werewolf(commands.Cog):
             " game modes and speeds."
         ).format(prefix=ctx.clean_prefix)
 
-        mode_emojis = {"Huntergame": "🔫", "Valentines": "💕"}
+        mode_emojis = {
+            "Huntergame": "🔫",
+            "Avengergame": "🗡️",
+            "Valentines": "💕",
+            "Custom": "🧩",
+        }
         mode_emoji = mode_emojis.get(mode, "")
+        mode_label = mode_emoji + mode + mode_emoji
 
         if (
             self.bot.config.game.official_tournament_channel_id
             and ctx.channel.id == self.bot.config.game.official_tournament_channel_id
         ):
-            # TODO: Determine threshold players when wolves can kill 2 villagers per night in mass-games
             view = JoinView(
                 Button(style=ButtonStyle.primary, label=_("Join the Werewolf game!")),
                 message=_("You joined the Werewolf game."),
@@ -155,7 +101,7 @@ class Werewolf(commands.Cog):
                     title=_("Werewolf Mass-game!"),
                     description=text.format(
                         author=ctx.author.mention,
-                        mode=mode_emoji + mode,
+                        mode=mode_label,
                         speed=speed,
                         min_players=min_players,
                     ),
@@ -169,7 +115,6 @@ class Werewolf(commands.Cog):
             )
 
             await asyncio.sleep(60)
-
             view.stop()
             players = list(view.joined)
         else:
@@ -192,7 +137,7 @@ class Werewolf(commands.Cog):
                         title=title,
                         description=text.format(
                             author=ctx.author.mention,
-                            mode=mode_emoji + mode,
+                            mode=mode_label,
                             speed=speed,
                             min_players=min_players,
                         ),
@@ -206,45 +151,205 @@ class Werewolf(commands.Cog):
                 )
             except discord.errors.Forbidden:
                 del self.games[ctx.channel.id]
-                return await ctx.send(
+                await ctx.send(
                     _(
                         "An error happened during the Werewolf. Missing Permission:"
                         " `Embed Links` . Please check the **Edit Channel >"
                         " Permissions** and **Server Settings > Roles** then try again!"
                     )
                 )
+                return
 
             await asyncio.sleep(60 * 2)
-
             view.stop()
             players = list(view.joined)
 
         if len(players) < min_players:
             del self.games[ctx.channel.id]
             await self.bot.reset_cooldown(ctx)
-            return await ctx.send(
+            await ctx.send(
                 _(
                     "Not enough players joined... We didn't reach the minimum"
                     " {min_players} players. 🙁"
                 ).format(min_players=min_players)
             )
+            return
+
+        if custom_roles is not None:
+            max_roles = len(players) + 2
+            if len(custom_roles) > max_roles:
+                del self.games[ctx.channel.id]
+                await self.bot.reset_cooldown(ctx)
+                await ctx.send(
+                    _(
+                        "You specified **{specified}** roles, but this game can only use"
+                        " up to **{max_roles}** roles with **{players}** players."
+                    ).format(
+                        specified=len(custom_roles),
+                        max_roles=max_roles,
+                        players=len(players),
+                    )
+                )
+                return
 
         players = random.shuffle(players)
         try:
-            game = Game(ctx, players, mode, speed)
+            game = Game(ctx, players, mode, speed, custom_roles=custom_roles)
             self.games[ctx.channel.id] = game
             await game.run()
         except Exception as e:
-            await ctx.send(
-                _(f"An error happened during the Werewolf. Please try again! {e}")
-            )
+            await send_traceback(ctx, e)
             del self.games[ctx.channel.id]
-            raise e
+            raise
 
         try:
             del self.games[ctx.channel.id]
         except KeyError:  # got stuck in between
             pass
+
+    @commands.group(
+        invoke_without_command=True,
+        case_insensitive=True,
+        aliases=["ww"],
+        brief=_("Starts a game of Werewolf"),
+    )
+    @locale_doc
+    async def werewolf(
+        self,
+        ctx,
+        mode: WerewolfMode | None = "Classic",
+        speed: str.title = "Normal",
+        min_players: IntGreaterThan(1) = None,
+    ):
+        _(
+            """
+            `[mode]` - The mode to play, see below for available options. (optional and defaults to Classic)
+            `[speed]` - The game speed to play, see below available options. (optional and defaults to Normal)
+            `[min_players]` - The minimum players needed to play. (optional and defaults depending on the game mode: Classic: 5, Imbalanced: 5, Huntergame: 8, Villagergame: 5, Avengergame: 5, Valentines: 8, IdleRPG: 5)
+
+            Starts a game of Werewolf. Find the werewolves, before they find you!
+            Your goal to win is indicated on the role you have.
+            **Game modes:** `Classic` (default), `Imbalanced`, `Huntergame`, `Villagergame`, `Avengergame`, `Valentines`, `IdleRPG`. Use `{prefix}ww modes` for detailed info.
+            **Game speeds** (in seconds): `Normal`: 60 (default), `Extended`: 90, `Fast`: 45, `Blitz`: 30. Use `{prefix}ww speeds` for detailed info.
+            **Aliases:**
+            `ww`
+            **Examples:**
+            `{prefix}ww Blitz` for Classic mode on Blitz speed
+            `{prefix}ww Imbalanced` for Imbalanced mode on Normal speed
+            `{prefix}ww Valentines Extended` for Valentines mode on Extended speed
+            `{prefix}ww Huntergame Fast` for Huntergame mode on Fast speed
+            `{prefix}ww Avengergame` for Avengergame mode on Normal speed
+            """
+        )
+        # TODO:
+        # Bizarro: Roles are flipped.
+        # Random: Roles are reassigned randomly every night.
+        # Zombie (Classic-based, another team) - There's a chance that a random player will be randomly resurrected as Zombie and they can devour any villagers or werewolves with the other zombies.
+
+        game_modes = [
+            "Classic",
+            "Imbalanced",
+            "Huntergame",
+            "Villagergame",
+            "Avengergame",
+            "Valentines",
+            "Idlerpg",
+        ]
+        minimum_players = {
+            "Classic": 5,
+            "Imbalanced": 5,
+            "Huntergame": 8,
+            "Villagergame": 5,
+            "Avengergame": 5,
+            "Valentines": 8,
+            "IdleRPG": 5,
+        }
+
+        if mode not in game_modes:
+            return await ctx.send(
+                _(
+                    "Invalid game mode. Use `{prefix}help ww` to get help on this"
+                    " command."
+                ).format(prefix=ctx.clean_prefix)
+            )
+        if mode == "Idlerpg":
+            mode = "IdleRPG"
+
+        if not min_players:
+            min_players = minimum_players.get(mode, 5)
+
+        await self._start_multiplayer_game(
+            ctx,
+            mode=mode,
+            speed=speed,
+            min_players=min_players,
+        )
+
+    @werewolf.command(name="single", aliases=["sp", "solo"], brief=_("Starts a single-player Werewolf game against AI players"))
+    async def werewolf_single(self, ctx, players: int = 5):
+        """Single-player Werewolf.
+
+        `[players]` – total seats (3-9). One is you, the rest are AI.
+        """
+        if self.games.get(ctx.channel.id):
+            return await ctx.send(_("There is already a game in here!"))
+        if not 3 <= players <= 9:
+            return await ctx.send(_("Number of players must be between 3 and 9."))
+
+        # Mark channel as busy
+        self.games[ctx.channel.id] = "single"
+        try:
+            game = SPGame(ctx, total_players=players)
+            await game.run()
+        finally:
+            # Clean up regardless of victory/exception
+            self.games.pop(ctx.channel.id, None)
+
+    @werewolf.command(
+        name="custom",
+        aliases=["cstm"],
+        brief=_("Starts a custom-role multiplayer Werewolf game"),
+    )
+    @locale_doc
+    async def werewolf_custom(self, ctx, *, roles: str):
+        _(
+            """Start a custom-role Werewolf game.
+
+            Usage example:
+            `{prefix}ww custom witch, werewolf, jester`
+
+            Notes:
+            - Separate roles with commas.
+            - Repeating a role means it can spawn multiple times.
+            - Any unfilled slots are generated with the normal balanced role system.
+            - The game always guarantees at least one Werewolf-team role and one Villager-team role."""
+        )
+
+        parsed_roles, invalid_tokens = parse_custom_roles(roles)
+        if invalid_tokens:
+            invalid_display = ", ".join(f"`{token}`" for token in invalid_tokens)
+            return await ctx.send(
+                _(
+                    "I couldn't recognize these roles: {roles}\nUse `{prefix}ww roles`"
+                    " to see valid names."
+                ).format(roles=invalid_display, prefix=ctx.clean_prefix)
+            )
+
+        if not parsed_roles:
+            return await ctx.send(
+                _(
+                    "You need to specify at least one role.\nExample: `{prefix}ww"
+                    " custom witch, werewolf, jester`"
+                ).format(prefix=ctx.clean_prefix)
+            )
+
+        await self._start_multiplayer_game(
+            ctx,
+            mode="Custom",
+            speed="Normal",
+            min_players=3,
+            custom_roles=parsed_roles,
+        )
 
     @werewolf.command(brief=_("See available werewolf game modes"))
     @locale_doc
@@ -255,14 +360,16 @@ class Werewolf(commands.Cog):
                 title=_("Werewolf Game Modes"),
                 description=_(
                     """\
-**Game modes:** `Classic` (default), `Imbalanced`, `Huntergame`, `Villagergame`, `Valentines`, `IdleRPG`.
+**Game modes:** `Classic` (default), `Imbalanced`, `Huntergame`, `Villagergame`, `Avengergame`, `Valentines`, `IdleRPG`, `Custom`.
 `Classic`: Play the classic werewolf game. (default)
 `Imbalanced`: Some roles that are only available in larger games have chances to join even in smaller games. (The size of the game being referred here is about the number of players, i.e. 5-player game is small)
 `Huntergame`: Only Hunters and Werewolves are available.
 `Villagergame`: No special roles, only Villagers and Werewolves are available.
+`Avengergame`: Every village-side role is replaced with Avenger.
 `Valentines`: There are multiple lovers or couples randomly chosen at the start of the game. A chain of lovers might exist upon the Amor's arrows. If the remaining players are in a single chain of lovers, they all win.
-`IdleRPG`: (based on Imbalanced mode) New roles are available: Paragon, Raider, Ritualist, Lawyer, Troublemaker, War Veteran, Wolf Shaman, Wolf Necromancer, Superspreader."""
-                ),
+`IdleRPG`: (based on Imbalanced mode) New roles are available: Paragon, Raider, Ritualist, Lawyer, Troublemaker, War Veteran, Wolf Shaman, Wolf Necromancer, Superspreader.
+`Custom`: Use `{prefix}ww custom <role1, role2, ...>` to seed exact roles (duplicates allowed). Remaining slots are filled with normal balance."""
+                ).format(prefix=ctx.clean_prefix),
                 colour=self.bot.config.game.primary_colour,
             ).set_author(name=str(ctx.author), icon_url=ctx.author.display_avatar.url)
         )
@@ -372,7 +479,8 @@ class Werewolf(commands.Cog):
             {
                 "side": _("The Werewolves"),
                 "members": (
-                    "Werewolf, White Wolf, Cursed Wolf Father, Big Bad Wolf, Wolf"
+                    "Werewolf, Junior Werewolf, Wolf Seer, White Wolf, Cursed Wolf"
+                    " Father, Big Bad Wolf, Wolf"
                     f" Shaman - {restriction}, Wolf Necromancer - {restriction}"
                 ),
                 "goal": _("Must eliminate all other villagers"),
@@ -380,7 +488,9 @@ class Werewolf(commands.Cog):
             {
                 "side": _("The Villagers"),
                 "members": (
-                    "Villager, Pure Soul, Seer, Witch, Hunter, Healer, Amor, Knight,"
+                    "Villager, Cursed, Pure Soul, Flower Child, Seer, Aura Seer, Witch,"
+                    " Doctor, Bodyguard, Sheriff, Jailer, Medium, Loudmouth, Avenger,"
+                    " Healer, Amor, Knight, Fortune Teller, Hunter - Huntergame only,"
                     f" Sister, Brother, The Old, Fox, Judge, Paragon - {restriction},"
                     f" Ritualist - {restriction}, Troublemaker - {restriction}, Lawyer"
                     f" - {restriction}, War Veteran - {restriction}"
@@ -390,7 +500,7 @@ class Werewolf(commands.Cog):
             {
                 "side": _("The Ambiguous"),
                 "members": (
-                    f"Thief, Wild Child, Maid, Wolfhound, Raider - {restriction}"
+                    f"Thief, Maid, Wolfhound, Raider - {restriction}"
                 ),
                 "goal": _("Make their side win"),
             },
@@ -399,11 +509,21 @@ class Werewolf(commands.Cog):
                 "members": (
                     f"White Wolf - {_('Be the sole survivor')}, Flutist -"
                     f" {_('Must enchant every living inhabitants')}, Superspreader -"
-                    f" {_('Infect all the players with your virus')} {restriction}"
+                    f" {_('Infect all the players with your virus')} {restriction},"
+                    f" Jester -"
+                    f" {_('Die to win')}, Head Hunter -"
+                    f" {_('Get your assigned target lynched')}"
                 ),
                 "goal": _("Must complete their own objective"),
             },
         ]
+
+        def has_role(group: dict[str, str], role_name: str) -> bool:
+            normalized_members = [
+                member.split(" - ")[0].strip().lower()
+                for member in group["members"].split(",")
+            ]
+            return role_name.lower() in normalized_members
 
         if role is None:
             em = discord.Embed(
@@ -449,7 +569,7 @@ class Werewolf(commands.Cog):
                     [
                         group["side"]
                         for group in role_groups
-                        if group["members"].find(role.title()) != -1
+                        if has_role(group, role.title())
                     ]
                 ),
                 inline=True,
@@ -460,7 +580,7 @@ class Werewolf(commands.Cog):
                     [
                         group["goal"]
                         for group in role_groups
-                        if group["members"].find(role.title()) != -1
+                        if has_role(group, role.title())
                     ]
                 ),
                 inline=True,

@@ -1710,7 +1710,7 @@ class SPGame:
 
     async def _debug(self, message: str):
         """Send debug messages if enabled."""
-        debug_id = 295173706496475136
+        debug_id = 0 #we arent using this anymore and cbf removing it all
         if self.ctx.author.id == debug_id:
             await self._try_send(f"[DEBUG] {message}")
         else:

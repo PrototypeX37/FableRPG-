@@ -36,6 +36,13 @@ from discord.ui import Button, View
 from classes.classes import Raider
 from classes.classes import from_string as class_from_string
 from classes.converters import IntGreaterThan
+from classes.warrior import (
+    WARRIOR_EVOLUTION_LEVELS,
+    WARRIOR_MOMENTUM_CAP,
+    resolve_warrior_attack,
+    warrior_damage_reduction_pct,
+)
+from cogs.aiplayer import DENSETSU_USER_ID, EVIL_RITUAL_HOST_USER_ID
 from cogs.shard_communication import user_on_cooldown as user_cooldown
 from utils import random
 from utils.checks import AlreadyRaiding, has_char, is_gm, is_god
@@ -63,14 +70,68 @@ def raid_free():
     return commands.check(predicate)
 
 
+def celestial_vault_free():
+    async def predicate(ctx):
+        # Check if any raid is ongoing
+        ttl = await ctx.bot.redis.execute_command("TTL", "special:raid")
+        if ttl != -2:
+            raise AlreadyRaiding("There is already a raid ongoing.")
+            
+        # Check if user has used celestial vault today
+        user_cooldown = await ctx.bot.redis.execute_command(
+            "TTL", f"celestial:vault:{ctx.author.id}"
+        )
+        if user_cooldown != -2:
+            hours, remainder = divmod(user_cooldown, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            cooldown_str = f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
+            await ctx.send(f"You've already used the Celestial Vault today! You can use it again in {cooldown_str}.")
+            return False
+        return True
+
+    return commands.check(predicate)
+
+
 def is_cm():
     def predicate(ctx) -> bool:
+        ids_section = getattr(ctx.bot.config, "ids", None)
+        raid_ids = getattr(ids_section, "raid", {}) if ids_section else {}
+        if not isinstance(raid_ids, dict):
+            raid_ids = {}
+        cm_role_id = raid_ids.get("cm_role_id")
+        if not cm_role_id:
+            return False
         return (
                 ctx.guild.id == ctx.bot.config.game.support_server_id
-                and 491353140042530826 in [r.id for r in ctx.author.roles]
+                and cm_role_id in [r.id for r in ctx.author.roles]
         )
 
     return commands.check(predicate)
+
+
+def is_donator():
+    async def predicate(ctx) -> bool:
+        async with ctx.bot.pool.acquire() as conn:
+            # Check if user is a donator (tier >= 1)
+            user_tier = await conn.fetchval(
+                'SELECT tier FROM profile WHERE "user"=$1;', ctx.author.id
+            )
+            if not user_tier or user_tier < 3:
+                await ctx.send("You need to be a Ragnarok donator to use this command!")
+                return False
+            return True
+
+    return commands.check(predicate)
+
+
+EVILSPAWN_INTRO_IMAGE_URL = "https://pub-0e7afc36364b4d5dbd1fd2bea161e4d1.r2.dev/295173706496475136_78926c12-aef0-4c89-8d83-867a1d82cef0.png"
+EVILSPAWN_GUARDIAN_PHASE_IMAGES = {
+    "The Sentinel": "https://pub-0e7afc36364b4d5dbd1fd2bea161e4d1.r2.dev/295173706496475136_68592fa3-a675-4f9e-afea-d71716725426.png",
+    "The Corrupted": "https://pub-0e7afc36364b4d5dbd1fd2bea161e4d1.r2.dev/295173706496475136_a85f005e-852b-4097-80db-b0a1bedb476d.png",
+    "The Abyssal Horror": "https://pub-0e7afc36364b4d5dbd1fd2bea161e4d1.r2.dev/295173706496475136_b179bf98-e1d2-4543-b430-554b6569aa68.png",
+}
+EVILSPAWN_VICTORY_IMAGE_URL = "https://pub-0e7afc36364b4d5dbd1fd2bea161e4d1.r2.dev/295173706496475136_0b662ddb-88a0-4a9c-b4ca-bab13164be62.png"
+EVILSPAWN_DEFEAT_IMAGE_URL = "https://pub-0e7afc36364b4d5dbd1fd2bea161e4d1.r2.dev/295173706496475136_a6314cf3-ea31-4a20-890d-d76143ccaf27.png"
 
 
 class DecisionButton(Button):
@@ -80,9 +141,238 @@ class DecisionButton(Button):
     async def callback(self, interaction: Interaction):
         view: DecisionView = self.view
         view.value = self.custom_id
-        await interaction.response.send_message(f"You selected {self.custom_id}. Shortcut back: <#1199300390903099412>",
-                                                ephemeral=True)
+        ids_section = getattr(interaction.client.config, "ids", None)
+        raid_ids = getattr(ids_section, "raid", {}) if ids_section else {}
+        if not isinstance(raid_ids, dict):
+            raid_ids = {}
+        shortcut_channel_id = raid_ids.get("shortcut_channel_id")
+        shortcut_text = f"<#{shortcut_channel_id}>" if shortcut_channel_id else "N/A"
+        await interaction.response.send_message(
+            f"You selected {self.custom_id}. Shortcut back: {shortcut_text}",
+            ephemeral=True,
+        )
         view.stop()
+
+
+class ShadowChampionAI:
+    """AI representation of Shadow Champion - manifestation of Sepulchure's will"""
+    
+    def __init__(self):
+        self.name = "Shadow Champion"
+        self.mention = "Shadow Champion"
+        self.display_name = "Shadow Champion"
+        
+    async def make_decision(self, champion_stats, guardians_stats, progress, followers_plans):
+        """Make strategic decision based on current state and coordination"""
+        await asyncio.sleep(2)  # AI "thinking" time
+        
+        # Analyze guardian capabilities and current state
+        guardian_phase = guardians_stats.get("phase", 1)
+        guardian_hp_ratio = guardians_stats["hp"] / guardians_stats["max_hp"]
+        guardian_enraged = guardians_stats.get("enraged", False)
+        guardian_incapacitated = guardians_stats.get("incapacitated_turns", 0) > 0
+        
+        # Analyze follower coordination
+        follower_boost = followers_plans.get("Boost Ritual", 0)
+        follower_protect = followers_plans.get("Protect Champion", 0)
+        follower_heal = followers_plans.get("Heal Champion", 0)
+        
+        # Strategic decision making with coordination awareness
+        
+        # Priority 1: Survival (enhanced with follower coordination)
+        if champion_stats["hp"] < champion_stats["max_hp"] * 0.25:
+            if "Heal" in self.get_valid_actions(champion_stats):
+                return "Heal"
+            elif follower_heal > 0:
+                # Trust followers to heal, focus on damage
+                return "Smite"
+        
+        # Priority 2: Defend if vulnerable or guardian is enraged
+        if (champion_stats.get("vulnerable", False) or guardian_enraged) and "Defend" in self.get_valid_actions(champion_stats):
+            return "Defend"
+        
+        # Priority 3: Exploit guardian incapacitation
+        if guardian_incapacitated:
+            if progress < 80 and "Haste" in self.get_valid_actions(champion_stats) and champion_stats.get("haste_cooldown", 0) == 0:
+                return "Haste"
+            elif progress < 70 and "Sacrifice" in self.get_valid_actions(champion_stats) and champion_stats["hp"] > champion_stats["max_hp"] * 0.5:
+                return "Sacrifice"
+        
+        # Priority 4: Coordinate with followers for ritual progress
+        if progress < 60 and follower_boost > 0:
+            # Followers are boosting ritual, we can focus on damage
+            if "Haste" in self.get_valid_actions(champion_stats) and champion_stats.get("haste_cooldown", 0) == 0:
+                return "Haste"
+        
+        # Priority 5: Strategic sacrifice when safe
+        if progress < 50 and champion_stats["hp"] > champion_stats["max_hp"] * 0.7 and follower_protect > 0:
+            # Followers are protecting, safe to sacrifice
+            if "Sacrifice" in self.get_valid_actions(champion_stats):
+                return "Sacrifice"
+        
+        # Priority 6: Damage output (default)
+        return "Smite"
+    
+    def get_valid_actions(self, champion_stats):
+        """Get list of valid actions based on current state"""
+        actions = ["Smite", "Heal", "Defend", "Sacrifice"]
+        if champion_stats.get("haste_cooldown", 0) == 0:
+            actions.append("Haste")
+        return actions
+    
+    async def announce_decision(self, ctx, decision, champion_stats, guardians_stats, progress):
+        """Announce the AI's decision with strategic coordination messaging"""
+        guardian_phase = guardians_stats.get("phase", 1)
+        guardian_hp_ratio = guardians_stats["hp"] / guardians_stats["max_hp"]
+        
+        # Strategic announcements based on context
+        if decision == "Smite":
+            if guardian_hp_ratio < 0.3:
+                announcement = "The Shadow Champion's form crackles with dark energy. 'The Guardian weakens! Now is the time to strike with all our might!'"
+            elif guardian_phase > 1:
+                announcement = "The Shadow Champion's form crackles with dark energy. 'Even in its evolved form, this Guardian cannot withstand the power of the void!'"
+            else:
+                announcement = "The Shadow Champion's form crackles with dark energy. 'I shall strike down this Guardian with the power of the void!'"
+        
+        elif decision == "Heal":
+            announcement = "Dark tendrils of shadow wrap around the Shadow Champion. 'The shadows mend my wounds... I must survive to complete the ritual.'"
+        
+        elif decision == "Haste":
+            announcement = "The Shadow Champion's form becomes ethereal. 'I will accelerate the ritual, though it leaves me vulnerable to the Guardian's wrath. Trust in our followers!'"
+        
+        elif decision == "Defend":
+            if guardians_stats.get("enraged", False):
+                announcement = "The Shadow Champion raises shadowy barriers. 'The Guardian's rage is palpable. I must brace myself against its fury!'"
+            else:
+                announcement = "The Shadow Champion raises shadowy barriers. 'I brace myself against the Guardian's assault. The ritual must continue.'"
+        
+        elif decision == "Sacrifice":
+            announcement = "The Shadow Champion's essence flickers as dark energy flows into the ritual. 'I offer my life force to advance our cause. The ancient evil must awaken!'"
+        
+        else:
+            announcement = "The Shadow Champion prepares for action."
+        
+        await ctx.send(f"👻 **{announcement}**")
+
+class ShadowPriestAI:
+    """AI representation of Shadow Priest - manifestation of Sepulchure's will"""
+    
+    def __init__(self):
+        self.name = "Shadow Priest"
+        self.mention = "Shadow Priest"
+        self.display_name = "Shadow Priest"
+        
+    async def make_decision(self, priest_stats, champion_stats, guardians_stats, progress, followers_plans):
+        """Make strategic decision based on current state and coordination"""
+        await asyncio.sleep(2)  # AI "thinking" time
+        
+        # Analyze guardian capabilities and current state
+        guardian_phase = guardians_stats.get("phase", 1)
+        guardian_hp_ratio = guardians_stats["hp"] / guardians_stats["max_hp"]
+        guardian_enraged = guardians_stats.get("enraged", False)
+        guardian_cursed = guardians_stats.get("cursed", False)
+        
+        # Analyze follower coordination
+        follower_empower = followers_plans.get("Empower Priest", 0)
+        follower_sabotage = followers_plans.get("Sabotage Guardian", 0)
+        follower_protect = followers_plans.get("Protect Champion", 0)
+        
+        # Strategic decision making with coordination awareness
+        
+        # Priority 1: Emergency champion healing
+        if champion_stats["hp"] < champion_stats["max_hp"] * 0.3 and priest_stats["mana"] >= 20:
+            return "Revitalize"
+        
+        # Priority 2: Guardian control (enhanced with follower coordination)
+        if not guardian_cursed and priest_stats["mana"] >= 25:
+            if guardian_enraged or guardian_phase > 1:
+                # Guardian is dangerous, curse it
+                return "Curse"
+            elif follower_sabotage > 0:
+                # Followers are sabotaging, we can focus on other priorities
+                pass
+            else:
+                return "Curse"
+        
+        # Priority 3: Champion support (coordinated with followers)
+        if champion_stats["hp"] < champion_stats["max_hp"] * 0.6:
+            if follower_protect > 0 and priest_stats["mana"] >= 20:
+                # Followers are protecting, bless for damage boost
+                return "Bless"
+            elif priest_stats["mana"] >= 20:
+                # No follower protection, heal directly
+                return "Revitalize"
+        
+        # Priority 4: Protection when guardian is dangerous
+        if (guardian_enraged or guardian_phase > 1) and priest_stats["mana"] >= 30:
+            if not champion_stats.get("barrier_active", False):
+                return "Barrier"
+        
+        # Priority 5: Ritual progress (coordinated with followers)
+        if progress < 70 and priest_stats["mana"] >= 15:
+            if follower_empower > 0:
+                # Followers are empowering us, channel for maximum effect
+                return "Channel"
+            elif progress < 50:
+                # Early ritual, focus on progress
+                return "Channel"
+        
+        # Priority 6: Bless for damage boost when safe
+        if champion_stats["hp"] > champion_stats["max_hp"] * 0.7 and priest_stats["mana"] >= 20:
+            return "Bless"
+        
+        # Default: regenerate mana
+        return None
+    
+    def get_valid_actions(self, priest_stats):
+        """Get list of valid actions based on current state"""
+        actions = []
+        if priest_stats["mana"] >= 20:
+            actions.extend(["Bless", "Revitalize"])
+        if priest_stats["mana"] >= 25:
+            actions.append("Curse")
+        if priest_stats["mana"] >= 30:
+            actions.append("Barrier")
+        if priest_stats["mana"] >= 15:
+            actions.append("Channel")
+        return actions
+    
+    async def announce_decision(self, ctx, decision, priest_stats, champion_stats, guardians_stats, progress):
+        """Announce the AI's decision with strategic coordination messaging"""
+        guardian_phase = guardians_stats.get("phase", 1)
+        guardian_enraged = guardians_stats.get("enraged", False)
+        
+        # Strategic announcements based on context
+        if decision == "Bless":
+            if guardian_phase > 1:
+                announcement = "The Shadow Priest's eyes glow with ancient knowledge. 'I channel the dark energies to empower our Champion against this evolved Guardian!'"
+            else:
+                announcement = "The Shadow Priest's eyes glow with ancient knowledge. 'I channel the dark energies to empower our Champion!'"
+        
+        elif decision == "Barrier":
+            if guardian_enraged:
+                announcement = "Mystical runes materialize around the Shadow Priest. 'A barrier of shadow shall protect our Champion from the Guardian's fury!'"
+            else:
+                announcement = "Mystical runes materialize around the Shadow Priest. 'A barrier of shadow shall protect our Champion from harm.'"
+        
+        elif decision == "Curse":
+            if guardian_phase > 1:
+                announcement = "The Shadow Priest's voice echoes with malevolent power. 'I cast a curse upon this evolved Guardian, weakening its resolve!'"
+            elif guardian_enraged:
+                announcement = "The Shadow Priest's voice echoes with malevolent power. 'I cast a curse upon the enraged Guardian, calming its fury!'"
+            else:
+                announcement = "The Shadow Priest's voice echoes with malevolent power. 'I cast a curse upon the Guardian, weakening its resolve!'"
+        
+        elif decision == "Revitalize":
+            announcement = "Dark healing energies flow from the Shadow Priest. 'I mend the Champion's wounds with the power of the void.'"
+        
+        elif decision == "Channel":
+            announcement = "The Shadow Priest's form pulses with ritual energy. 'I channel the collective will of the faithful to advance the ritual!'"
+        
+        else:
+            announcement = "The Shadow Priest meditates, gathering mystical energy for the next phase."
+        
+        await ctx.send(f"🔮 **{announcement}**")
 
 
 class DecisionView(View):
@@ -97,8 +387,36 @@ class DecisionView(View):
         return interaction.user == self.player
 
 
+class RitualRoleTakeoverView(View):
+    def __init__(self, eligible_user_ids, role_name, timeout=60):
+        super().__init__(timeout=timeout)
+        self.eligible_user_ids = set(eligible_user_ids)
+        self.role_name = role_name
+        self.claimed_by = None
+
+    @discord.ui.button(label="Claim the Mantle", style=ButtonStyle.primary)
+    async def claim_button(self, interaction: Interaction, button: Button):
+        if interaction.user.id not in self.eligible_user_ids:
+            await interaction.response.send_message(
+                "Only current followers may take over this role.",
+                ephemeral=True,
+            )
+            return
+
+        self.claimed_by = interaction.user
+        await interaction.response.send_message(
+            f"You have stepped forward to become the new {self.role_name}.",
+            ephemeral=True,
+        )
+        self.stop()
+
 class Raid(commands.Cog):
     """Raids are only available in the support server. Use the support command for an invite link."""
+    RAGNAROK_TRACEBACK_CHANNEL_ID = 1404785376924799068
+    DRAGON_COIN_DROP_CHANCE_PERCENT = 10
+    DRAGON_COIN_DROP_MIN = 2
+    DRAGON_COIN_DROP_MAX = 5
+    SPAWN_PARTICIPANT_REWARD_RATIO = 0.30
 
     def __init__(self, bot):
         self.bot = bot
@@ -106,16 +424,104 @@ class Raid(commands.Cog):
         self.toggle_list = set()  # Use a set for efficient membership checking
         self.chaoslist = []
 
+        ids_section = getattr(self.bot.config, "ids", None)
+        raid_ids = getattr(ids_section, "raid", {}) if ids_section else {}
+        if not isinstance(raid_ids, dict):
+            raid_ids = {}
+        self.raid_ids = raid_ids
+
+        self.main_raid_channel_id = self.raid_ids.get(
+            "main_raid_channel_id",
+            self.bot.config.game.raid_channel,
+        )
+        self.debug_channel_id = self.raid_ids.get(
+            "debug_channel_id", self.bot.config.game.gm_log_channel
+        )
+        self.beta_summary_channel_id = self.raid_ids.get(
+            "beta_summary_channel_id"
+        )
+        self.summary_channel_id = self.raid_ids.get(
+            "summary_channel_id"
+        )
+        self.spawn_announcement_role_id = self.raid_ids.get(
+            "spawn_announcement_role_id"
+        )
+        self.booster_role_id = self.raid_ids.get(
+            "booster_role_id"
+        )
+        self.booster_guild_id = self.raid_ids.get(
+            "booster_guild_id",
+            self.bot.config.game.support_server_id,
+        )
+        self.auto_spawn_channels = self.raid_ids.get(
+            "auto_spawn_channels",
+            [self.main_raid_channel_id] if self.main_raid_channel_id else [],
+        )
+        self.spawn_channels = self.raid_ids.get(
+            "spawn_channels",
+            [self.main_raid_channel_id] if self.main_raid_channel_id else [],
+        )
+        self.spawn_beta_channels = self.raid_ids.get(
+            "spawn_beta_channels",
+            [self.main_raid_channel_id] if self.main_raid_channel_id else [],
+        )
+        self.excluded_user_ids_auto = self.raid_ids.get(
+            "excluded_user_ids_auto",
+            [],
+        )
+        self.excluded_user_ids_spawn = self.raid_ids.get(
+            "excluded_user_ids_spawn",
+            [],
+        )
+        self.raid_bid_default_user_id = self.raid_ids.get(
+            "raid_bid_default_user_id", 0
+        )
+        self.chaos_channel_ids = self.raid_ids.get(
+            "chaos_channel_ids",
+            [],
+        )
+        self.chaos_role_ids = self.raid_ids.get(
+            "chaos_role_ids",
+            [],
+        )
+        self.special_user_id = self.raid_ids.get(
+            "special_user_id"
+        )
+        self.celestial_channel_ids = self.raid_ids.get(
+            "celestial_channel_ids",
+            [],
+        )
+        self.celestial_ping_role_id = self.raid_ids.get(
+            "celestial_ping_role_id"
+        )
+        if not isinstance(self.auto_spawn_channels, list) or not self.auto_spawn_channels:
+            self.auto_spawn_channels = [self.main_raid_channel_id] if self.main_raid_channel_id else []
+        if not isinstance(self.spawn_channels, list) or not self.spawn_channels:
+            self.spawn_channels = [self.main_raid_channel_id] if self.main_raid_channel_id else []
+        if not isinstance(self.spawn_beta_channels, list) or not self.spawn_beta_channels:
+            self.spawn_beta_channels = [self.main_raid_channel_id] if self.main_raid_channel_id else []
+        if not isinstance(self.excluded_user_ids_auto, list):
+            self.excluded_user_ids_auto = []
+        if not isinstance(self.excluded_user_ids_spawn, list):
+            self.excluded_user_ids_spawn = []
+        if not isinstance(self.chaos_channel_ids, list) or len(self.chaos_channel_ids) < 2:
+            self.chaos_channel_ids = []
+        if not isinstance(self.chaos_role_ids, list) or len(self.chaos_role_ids) < 2:
+            self.chaos_role_ids = []
+        if not isinstance(self.celestial_channel_ids, list) or not self.celestial_channel_ids:
+            self.celestial_channel_ids = []
+
         self.joined = []
         self.raidactive = False
         self.active_view = None
         self.raid_preparation = False
         self.boss = None
+        self.celestial_elements = {}
         self.allow_sending = discord.PermissionOverwrite(
             send_messages=True, read_messages=True
         )
         self.deny_sending = discord.PermissionOverwrite(
-            send_messages=False, read_messages=False
+            send_messages=False, read_messages=True
         )
         self.read_only = discord.PermissionOverwrite(
             send_messages=False, read_messages=True
@@ -128,8 +534,551 @@ class Raid(commands.Cog):
 
         self.auto_raid_check.cancel()
 
-    def getfinaldmg(self, damage: Decimal, defense):
-        return v if (v := damage - defense) > 0 else 0
+    def _spawn_alert_role(self, guild):
+        """Return the opt-in role used for Ragnarok raid announcements."""
+        if guild is None or not self.spawn_announcement_role_id:
+            return None
+        try:
+            role_id = int(self.spawn_announcement_role_id)
+        except (TypeError, ValueError):
+            return None
+        return guild.get_role(role_id)
+
+    async def _send_raid_alert(self, channel, guild, announcement):
+        """Ping opted-in members for a Ragnarok spawn or defeat announcement."""
+        role = self._spawn_alert_role(guild)
+        if role is None:
+            return None
+        return await channel.send(
+            f"{role.mention} {announcement}",
+            allowed_mentions=discord.AllowedMentions(
+                everyone=False,
+                users=False,
+                roles=True,
+                replied_user=False,
+            ),
+        )
+
+    async def _send_raid_auction_page(self, channel, content):
+        """Notify listed survivors who have enabled Legendary Raid alerts."""
+        guild = channel.guild
+        role = self._spawn_alert_role(guild)
+        users = []
+        if role is not None:
+            for user_id in dict.fromkeys(re.findall(r"<@!?(\d+)>", content)):
+                member = guild.get_member(int(user_id))
+                if member is None:
+                    try:
+                        member = await guild.fetch_member(int(user_id))
+                    except discord.HTTPException:
+                        # Keep the auction available without guessing alert preferences.
+                        continue
+                if role in member.roles:
+                    users.append(member)
+
+        return await channel.send(
+            content,
+            allowed_mentions=discord.AllowedMentions(
+                everyone=False,
+                users=users,
+                roles=False,
+                replied_user=False,
+            ),
+        )
+
+    @staticmethod
+    def _round_raid_number(value):
+        """Return a float rounded to Ragnarok's two-decimal precision."""
+        return float(
+            Decimal(str(value or 0)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+        )
+
+    @staticmethod
+    def _format_raid_number(value):
+        return f"{Raid._round_raid_number(value):,.2f}"
+
+    @staticmethod
+    def _normalize_raid_combatant(data):
+        """Keep pooled raid combat values on one numeric type.
+
+        Database raid stats and AI reinforcements can be ``Decimal`` values,
+        while seasonal effects intentionally return ``float`` values.  Mixing
+        the two makes otherwise harmless HP and display arithmetic fail.
+        """
+        for stat in ("hp", "armor", "damage", "max_hp"):
+            if stat in data:
+                data[stat] = Raid._round_raid_number(data[stat])
+        return data
+
+    @staticmethod
+    def getfinaldmg(damage, defense):
+        return Raid._round_raid_number(
+            max(0.0, float(damage or 0) - float(defense or 0))
+        )
+
+    async def _apply_raid_spec_stats(self, user_id, dmg, deff):
+        """Stat-time class specialization effects for raid joins.
+
+        Raid combat is pooled, so runtime specs are approximated as stat-time
+        pressure. Boss-only effects always qualify because raid targets are bosses.
+        """
+        spec_cog = self.bot.get_cog("Specializations")
+        if not spec_cog:
+            return dmg, deff, {}
+        try:
+            fx = await spec_cog.get_user_spec_effects(user_id)
+        except Exception:
+            return dmg, deff, {}
+        if "boss_damage_pct" in fx:
+            dmg = Decimal(str(dmg)) * Decimal(str(1 + fx["boss_damage_pct"]["value"] / 100))
+        if "perfect_form_pct" in fx:
+            dmg = Decimal(str(dmg)) * Decimal(str(1 + fx["perfect_form_pct"]["value"] / 100))
+        if "arcane_ramp_pct" in fx:
+            # Pooled raids can't ramp per hit; approximate Overload with the
+            # average of a full 0→max ramp (half of the max-stack bonus).
+            eff = fx["arcane_ramp_pct"]
+            avg_bonus = Decimal(str(eff["value"])) * Decimal(str(eff.get("max_stacks", 5))) / Decimal("200")
+            dmg = Decimal(str(dmg)) * (Decimal("1") + avg_bonus)
+        if "doom_circle_pct" in fx:
+            # Maleficar detonates every few hits; fold the expected damage part
+            # into raid damage without trying to model boss max-HP caps.
+            eff = fx["doom_circle_pct"]
+            threshold = Decimal(str(eff.get("threshold", 3) or 3))
+            dmg = Decimal(str(dmg)) * (
+                Decimal("1") + Decimal(str(eff["value"])) / Decimal("100") / threshold
+            )
+        if "bloodpact_reservoir_pct" in fx:
+            # Pooled raids have no per-hit death-save; fold Bloodweaver into a
+            # modest armor bump (~half the reservoir cap) as a survivability nod.
+            eff = fx["bloodpact_reservoir_pct"]
+            deff = Decimal(str(deff)) * (Decimal("1") + Decimal(str(eff["value"])) / Decimal("200"))
+        if "unbroken_will_pct" in fx:
+            eff = fx["unbroken_will_pct"]
+            shield_value = Decimal(str(eff.get("shield_value", eff["value"])))
+            deff = Decimal(str(deff)) * (Decimal("1") + shield_value / Decimal("200"))
+        if "soulkeeper_store_pct" in fx:
+            eff = fx["soulkeeper_store_pct"]
+            deff = Decimal(str(deff)) * (
+                Decimal("1") + Decimal(str(eff["value"])) / Decimal("250")
+            )
+        return dmg, deff, fx
+
+    REAPER_EVOLUTION_LEVELS = {
+        "Deathshroud": 1, "Soul Warden": 2, "Reaper": 3,
+        "Phantom Scythe": 4, "Soul Snatcher": 5,
+        "Deathbringer": 6, "Grim Reaper": 7,
+    }
+    SANTA_EVOLUTION_LEVELS = {
+        "Little Helper": 1, "Gift Gatherer": 2, "Holiday Aide": 3,
+        "Joyful Jester": 4, "Yuletide Guardian": 5,
+        "Festive Enforcer": 6, "Festive Champion": 7,
+    }
+    POOLED_SANTA_LIFESTEAL = {1: 5, 2: 7, 3: 10, 4: 12, 5: 15, 6: 18, 7: 20}
+    POOLED_REAPER_DEATH_CHANCE = {1: 10, 2: 15, 3: 20, 4: 25, 5: 30, 6: 35, 7: 40}
+
+    @staticmethod
+    def _pooled_class_grade(classes, mapping):
+        raw_classes = classes if isinstance(classes, list) else [classes]
+        return max((mapping.get(str(class_name), 0) for class_name in raw_classes or []), default=0)
+
+    def _pooled_seasonal_state(self, classes, spec_effects, max_hp):
+        reaper_level = self._pooled_class_grade(classes, self.REAPER_EVOLUTION_LEVELS)
+        santa_level = self._pooled_class_grade(classes, self.SANTA_EVOLUTION_LEVELS)
+        warrior_level = self._pooled_class_grade(classes, WARRIOR_EVOLUTION_LEVELS)
+        return {
+            "max_hp": self._round_raid_number(max_hp),
+            "spec_effects": spec_effects or {},
+            "reaper_evolution": reaper_level,
+            "santa_evolution": santa_level,
+            "warrior_evolution": warrior_level,
+            "warrior_momentum": 0,
+            "reaper_souls": 0,
+            "reaper_avatar_hits": 0,
+            "santa_cheer": 0,
+            "santa_gifts_opened": 0,
+            "gift_shield": 0.0,
+            "soul_ward": 0.0,
+        }
+
+    @staticmethod
+    def _pooled_name(raid_key):
+        user, participant_type = raid_key
+        return user.mention if participant_type == "user" else str(user)
+
+    def _pooled_heal_with_ward(self, data, amount, effect=None):
+        amount = self._round_raid_number(max(0.0, float(amount or 0)))
+        before = self._round_raid_number(data.get("hp", 0))
+        max_hp = self._round_raid_number(
+            max(1.0, float(data.get("max_hp", before) or before))
+        )
+        data["hp"] = self._round_raid_number(min(max_hp, before + amount))
+        healed = self._round_raid_number(max(0.0, data["hp"] - before))
+        overflow = self._round_raid_number(max(0.0, amount - healed))
+        ward = 0.0
+        if effect and overflow > 0:
+            cap = self._round_raid_number(
+                max_hp * float(effect.get("ward_value", 0)) / 100
+            )
+            current = self._round_raid_number(data.get("soul_ward", 0))
+            ward = self._round_raid_number(
+                max(0.0, min(overflow, cap - current))
+            )
+            data["soul_ward"] = self._round_raid_number(current + ward)
+            data["soul_ward_cap"] = cap
+        return healed, ward
+
+    def _pooled_apply_incoming_seasonal(self, data, damage):
+        messages = []
+        damage = self._round_raid_number(max(0.0, float(damage or 0)))
+        shroud_hits = int(data.get("reaper_death_shroud_hits", 0) or 0)
+        if shroud_hits > 0:
+            damage *= 0.5
+            data["reaper_death_shroud_hits"] = shroud_hits - 1
+            messages.append("☠️ Death Shroud halves the blow!")
+
+        effects = data.get("spec_effects") or {}
+        brace_stacks = int(data.get("warrior_brace_stacks", 0) or 0)
+        warrior_reduction = warrior_damage_reduction_pct(
+            effects,
+            data.get("warrior_momentum", 0),
+            brace_stacks,
+        )
+        if warrior_reduction > 0:
+            damage = float(
+                Decimal(str(damage))
+                * (Decimal("1") - warrior_reduction / Decimal("100"))
+            )
+            messages.append(
+                f"🪖 Combat Discipline reduces the blow by **{warrior_reduction}%**!"
+            )
+        if brace_stacks > 0:
+            data["warrior_brace_stacks"] = 0
+
+        weakness_hits = int(self.boss.get("krampus_weakness_hits", 0) or 0) if self.boss else 0
+        if weakness_hits > 0:
+            damage *= 1 - float(self.boss.get("krampus_weakness_pct", 0) or 0)
+            self.boss["krampus_weakness_hits"] = weakness_hits - 1
+            if self.boss["krampus_weakness_hits"] <= 0:
+                self.boss["krampus_weakness_pct"] = 0.0
+                messages.append("⛓️ Krampus's chains release the raid boss.")
+
+        for shield_key, label in (("soul_ward", "Soul Ward"), ("gift_shield", "Starlight shield")):
+            shield = self._round_raid_number(data.get(shield_key, 0))
+            if shield <= 0 or damage <= 0:
+                continue
+            absorbed = self._round_raid_number(min(shield, damage))
+            data[shield_key] = self._round_raid_number(shield - absorbed)
+            damage = self._round_raid_number(damage - absorbed)
+            messages.append(f"🛡️ {label} absorbs **{absorbed:,.2f}HP**!")
+        return self._round_raid_number(damage), messages
+
+    def _pooled_try_seasonal_save(self, target_key, data):
+        if float(data.get("hp", 0) or 0) > 0:
+            return None
+        reaper_level = int(data.get("reaper_evolution", 0) or 0)
+        if reaper_level and not data.get("reaper_death_used"):
+            avatar = int(data.get("reaper_avatar_hits", 0) or 0) > 0
+            if avatar or random.randint(1, 100) <= self.POOLED_REAPER_DEATH_CHANCE[reaper_level]:
+                data["reaper_death_used"] = True
+                data["reaper_avatar_hits"] = 0
+                data["reaper_souls"] = 0
+                data["reaper_death_shroud_hits"] = 1
+                data["hp"] = self._round_raid_number(
+                    max(1.0, float(data["max_hp"]) * (0.12 + 0.025 * reaper_level))
+                )
+                source = "Avatar of Death" if avatar else "Undying Loyalty"
+                return f"☠️ {self._pooled_name(target_key)} invokes {source} and returns with **{data['hp']:,.2f}HP**!"
+
+        if any(raid_data.get("winterlight_team_miracle_used") for raid_data in self.raid.values()):
+            return None
+        candidates = []
+        for raid_key, ally_data in self.raid.items():
+            if raid_key[1] != "user" or float(ally_data.get("hp", 0) or 0) <= 0:
+                continue
+            miracle = (ally_data.get("spec_effects") or {}).get("christmas_miracle_pct")
+            if miracle:
+                candidates.append((float(miracle["value"]), raid_key, ally_data, miracle))
+        target_miracle = (data.get("spec_effects") or {}).get("christmas_miracle_pct")
+        if target_miracle:
+            candidates.append((float(target_miracle["value"]), target_key, data, target_miracle))
+        if not candidates:
+            return None
+        _value, owner_key, owner_data, miracle = max(candidates, key=lambda item: item[0])
+        for raid_data in self.raid.values():
+            raid_data["winterlight_team_miracle_used"] = True
+        owner_data["winterlight_miracle_used"] = True
+        data["hp"] = self._round_raid_number(
+            max(1.0, float(data["max_hp"]) * float(miracle["value"]) / 100)
+        )
+        shield = self._round_raid_number(
+            float(data["max_hp"]) * float(miracle.get("miracle_shield_value", 0)) / 100
+        )
+        data["gift_shield"] = self._round_raid_number(
+            float(data.get("gift_shield", 0) or 0) + shield
+        )
+        return (
+            f"🕊️ {self._pooled_name(owner_key)} invokes **Christmas Miracle**! "
+            f"{self._pooled_name(target_key)} returns with **{data['hp']:,.2f}HP** and a **{shield:,.2f}HP** shield!"
+        )
+
+    def _apply_pooled_seasonal_round(self):
+        bonus_damage = 0.0
+        messages = []
+        living_users = [
+            (raid_key, data)
+            for raid_key, data in self.raid.items()
+            if raid_key[1] == "user" and float(data.get("hp", 0) or 0) > 0
+        ]
+        for raid_key, data in living_users:
+            name = self._pooled_name(raid_key)
+            base_damage = self._round_raid_number(data.get("damage", 0))
+            effects = data.get("spec_effects") or {}
+            warrior_level = int(data.get("warrior_evolution", 0) or 0)
+            if warrior_level:
+                roll = randomm.random() if "warrior_relentless_pct" in effects else None
+                warrior_state = resolve_warrior_attack(
+                    warrior_level,
+                    data.get("warrior_momentum", 0),
+                    effects,
+                    roll=roll,
+                )
+                data["warrior_momentum"] = int(warrior_state["next_momentum"])
+                if warrior_state.get("brace_stacks"):
+                    data["warrior_brace_stacks"] = int(warrior_state["brace_stacks"])
+                warrior_bonus = self._round_raid_number(
+                    base_damage * float(
+                        Decimal(str(warrior_state["multiplier"])) - Decimal("1")
+                    )
+                )
+                bonus_damage = self._round_raid_number(bonus_damage + warrior_bonus)
+                if warrior_state["crushing_blow"]:
+                    messages.append(
+                        f"⚔️ {name} unleashes **Crushing Blow** for "
+                        f"**{self._round_raid_number(base_damage + warrior_bonus):,.2f}HP**!"
+                    )
+                elif warrior_state["extra_stack"]:
+                    messages.append(
+                        f"⚔️ {name}'s Relentless Assault reaches "
+                        f"**{data['warrior_momentum']}/{WARRIOR_MOMENTUM_CAP} Momentum**."
+                    )
+            reaper_level = int(data.get("reaper_evolution", 0) or 0)
+            avatar_hits = int(data.get("reaper_avatar_hits", 0) or 0)
+            if reaper_level and avatar_hits > 0:
+                damage_pct = {1: 15, 2: 18, 3: 21, 4: 24, 5: 28, 6: 31, 7: 35}[reaper_level]
+                avatar_damage = self._round_raid_number(base_damage * damage_pct / 100)
+                bonus_damage = self._round_raid_number(bonus_damage + avatar_damage)
+                drain_pct = {1: 8, 2: 10, 3: 12, 4: 14, 5: 16, 6: 18, 7: 20}[reaper_level]
+                healed, _ward = self._pooled_heal_with_ward(
+                    data, base_damage * drain_pct / 100, effects.get("soul_ward_lifesteal_pct")
+                )
+                data["reaper_avatar_hits"] = avatar_hits - 1
+                messages.append(f"☠️ {name}'s Avatar reaps **{avatar_damage:,.2f}HP** and drains **{healed:,.2f}HP**.")
+
+            verdict = effects.get("death_verdict_pct")
+            if (
+                verdict
+                and not data.get("death_verdict_used")
+                and float(self.boss.get("hp", 0) or 0) / max(1.0, float(self.boss.get("initial_hp", 1) or 1))
+                <= float(verdict.get("threshold", 0.20))
+            ):
+                verdict_damage = self._round_raid_number(
+                    base_damage * float(verdict["value"]) / 100
+                )
+                verdict_damage = self._round_raid_number(
+                    verdict_damage + min(
+                        float(self.boss.get("initial_hp", 0) or 0) * float(verdict.get("hp_value", 0)) / 100,
+                        base_damage * float(verdict.get("hp_damage_cap", 1.0)),
+                    )
+                )
+                bonus_damage = self._round_raid_number(bonus_damage + verdict_damage)
+                data["death_verdict_used"] = True
+                messages.append(f"⚰️ **DEATH'S VERDICT!** {name} condemns the boss for **{verdict_damage:,.2f}HP**!")
+
+            soulbinder = effects.get("soul_ward_lifesteal_pct")
+            if soulbinder:
+                healed, ward = self._pooled_heal_with_ward(
+                    data, base_damage * float(soulbinder["value"]) / 100, soulbinder
+                )
+                if healed > 0 or ward > 0:
+                    messages.append(f"🌑 {name} restores **{healed:,.2f}HP** and binds **{ward:,.2f}HP** into Soul Ward.")
+
+            if reaper_level and avatar_hits <= 0:
+                souls = min(5, int(data.get("reaper_souls", 0) or 0) + 1)
+                data["reaper_souls"] = souls
+                if souls >= 5:
+                    data["reaper_souls"] = 0
+                    data["reaper_avatar_hits"] = 3
+                    messages.append(f"☠️ {name} becomes the **AVATAR OF DEATH**!")
+
+            santa_level = int(data.get("santa_evolution", 0) or 0)
+            krampus = effects.get("naughty_chain_pct")
+            if santa_level and krampus:
+                stacks = int(data.get("krampus_naughty_stacks", 0) or 0) + 1
+                threshold = int(krampus.get("stacks", 3))
+                if stacks >= threshold:
+                    data["krampus_naughty_stacks"] = 0
+                    chain_damage = self._round_raid_number(
+                        base_damage * float(krampus["value"]) / 100
+                    )
+                    bonus_damage = self._round_raid_number(bonus_damage + chain_damage)
+                    data["santa_force_crimson"] = True
+                    self.boss["krampus_weakness_pct"] = max(
+                        float(self.boss.get("krampus_weakness_pct", 0) or 0),
+                        float(krampus.get("reduction_value", 0)) / 100,
+                    )
+                    self.boss["krampus_weakness_hits"] = max(
+                        int(self.boss.get("krampus_weakness_hits", 0) or 0),
+                        int(krampus.get("duration", 2)),
+                    )
+                    messages.append(f"⛓️ Krampus chains the boss for **{chain_damage:,.2f}HP**!")
+                else:
+                    data["krampus_naughty_stacks"] = stacks
+
+            if santa_level:
+                healed, _ward = self._pooled_heal_with_ward(
+                    data, base_damage * self.POOLED_SANTA_LIFESTEAL[santa_level] / 100
+                )
+                cheer = int(data.get("santa_cheer", 0) or 0) + 1
+                if cheer < 3:
+                    data["santa_cheer"] = cheer
+                else:
+                    data["santa_cheer"] = 0
+                    opened = int(data.get("santa_gifts_opened", 0) or 0) + 1
+                    data["santa_gifts_opened"] = opened
+                    golden = opened % 3 == 0
+                    winterlight = effects.get("christmas_miracle_pct")
+                    support_mult = float(winterlight.get("gift_multiplier", 1.0)) if winterlight else 1.0
+                    golden_mult = 1.5 if golden else 1.0
+                    if golden:
+                        gifts = ["crimson", "evergreen", "starlight"]
+                        data["santa_force_crimson"] = False
+                        messages.append(f"🌟 **GOLDEN GIFT!** {name} unleashes every wonder!")
+                    elif data.pop("santa_force_crimson", False):
+                        gifts = ["crimson"]
+                    elif winterlight and any(float(ally["hp"]) < float(ally["max_hp"]) for _key, ally in living_users):
+                        gifts = [random.choice(["evergreen"] * 5 + ["starlight"] * 3 + ["crimson"] * 2)]
+                    else:
+                        gifts = [random.choice(["crimson", "evergreen", "starlight"])]
+                    if "crimson" in gifts:
+                        crimson_pct = {1: 15, 2: 20, 3: 25, 4: 28, 5: 30, 6: 33, 7: 35}[santa_level]
+                        gift_damage = self._round_raid_number(
+                            base_damage * crimson_pct / 100 * golden_mult
+                        )
+                        bonus_damage = self._round_raid_number(bonus_damage + gift_damage)
+                        messages.append(f"🎁 Crimson Present bursts for **{gift_damage:,.2f}HP**!")
+                    if living_users and "evergreen" in gifts:
+                        recipient_key, recipient = min(
+                            living_users,
+                            key=lambda item: float(item[1]["hp"]) / max(1.0, float(item[1]["max_hp"])),
+                        )
+                        heal_pct = {1: 2.5, 2: 3, 3: 3.5, 4: 4, 5: 4.5, 6: 5.2, 7: 6}[santa_level]
+                        before = float(recipient["hp"])
+                        recipient["hp"] = self._round_raid_number(
+                            min(
+                                float(recipient["max_hp"]),
+                                before + float(recipient["max_hp"]) * heal_pct / 100 * support_mult * golden_mult,
+                            )
+                        )
+                        restored = self._round_raid_number(float(recipient["hp"]) - before)
+                        messages.append(f"🎁 Evergreen Present restores **{restored:,.2f}HP** to {self._pooled_name(recipient_key)}!")
+                    if "starlight" in gifts:
+                        total_shield = 0.0
+                        shield_pct = {1: 1.5, 2: 2, 3: 2.4, 4: 2.8, 5: 3.2, 6: 3.6, 7: 4}[santa_level]
+                        for _ally_key, ally in living_users:
+                            cap = self._round_raid_number(float(ally["max_hp"]) * 0.25)
+                            current = self._round_raid_number(ally.get("gift_shield", 0))
+                            gain = self._round_raid_number(
+                                min(
+                                    float(ally["max_hp"]) * shield_pct / 100 * support_mult * golden_mult,
+                                    max(0.0, cap - current),
+                                )
+                            )
+                            ally["gift_shield"] = self._round_raid_number(current + gain)
+                            total_shield = self._round_raid_number(total_shield + gain)
+                        messages.append(f"🎁 Starlight Present wraps the raid in **{total_shield:,.2f}HP** of shields!")
+                if healed > 0:
+                    messages.append(f"🍬 {name}'s Peppermint Drain restores **{healed:,.2f}HP**.")
+
+        return self._round_raid_number(bonus_damage), messages
+
+    def _init_raid_mvp(self):
+        return {
+            user.id: {"dealt": 0.0, "taken": 0.0}
+            for (user, participant_type), data in self.raid.items()
+            if participant_type == "user" and not getattr(user, "bot", False)
+        }
+
+    def _credit_raid_mvp_taken(
+        self, raid_mvp, target, participant_type, incoming_damage
+    ):
+        """Credit Bulwark with damage aimed at a user before mitigation."""
+        if participant_type != "user" or getattr(target, "bot", False):
+            return
+        entry = raid_mvp.get(target.id)
+        if entry is not None:
+            entry["taken"] = self._round_raid_number(
+                entry["taken"] + max(0.0, float(incoming_damage or 0))
+            )
+
+    def _credit_raid_mvp_dealt(self, raid_mvp):
+        for (user, participant_type), data in self.raid.items():
+            if participant_type != "user" or getattr(user, "bot", False):
+                continue
+            entry = raid_mvp.get(user.id)
+            if entry is not None and float(data.get("hp", 0) or 0) > 0:
+                entry["dealt"] = self._round_raid_number(
+                    entry["dealt"] + float(data.get("damage", 0) or 0)
+                )
+
+    async def _post_raid_mvp(self, channel, raid_mvp, success):
+        try:
+            if not channel or not raid_mvp:
+                return
+            top_dealt_id, top_dealt = max(
+                raid_mvp.items(),
+                key=lambda item: item[1]["dealt"],
+            )
+            top_taken_id, top_taken = max(
+                raid_mvp.items(),
+                key=lambda item: item[1]["taken"],
+            )
+            survivor_count = sum(
+                1
+                for (user, participant_type), data in self.raid.items()
+                if participant_type == "user"
+                and not getattr(user, "bot", False)
+                and float(data.get("hp", 0) or 0) > 0
+            )
+            embed = discord.Embed(title="Raid MVPs", color=0xFF5C00)
+            embed.add_field(
+                name="🥇 Top Damage",
+                value=f"<@{top_dealt_id}> — **{top_dealt['dealt']:,.2f}**",
+                inline=False,
+            )
+            embed.add_field(
+                name="🛡️ Bulwark of the Raid",
+                value=f"<@{top_taken_id}> — **{top_taken['taken']:,.2f}**",
+                inline=False,
+            )
+            embed.add_field(name="🍀 Survivors", value=str(survivor_count), inline=False)
+            await channel.send(embed=embed)
+            if success:
+                legacy = self.bot.get_cog("Legacy")
+                if legacy:
+                    await legacy.award_points(top_dealt_id, 10)
+                    await legacy.award_points(top_taken_id, 10)
+                favorwar = self.bot.get_cog("FavorWar")
+                if favorwar:
+                    await favorwar.award_favor(
+                        [top_dealt_id, top_taken_id],
+                        5,
+                        channel,
+                        "Raid MVPs!",
+                    )
+        except Exception:
+            pass
 
     async def set_raid_timer(self):
         await self.bot.redis.execute_command(
@@ -143,11 +1092,73 @@ class Raid(commands.Cog):
     async def clear_raid_timer(self):
         await self.bot.redis.execute_command("DEL", "special:raid")
 
+    def _roll_raid_dragon_coin_bonus(self):
+        if random.randint(1, 100) > self.DRAGON_COIN_DROP_CHANCE_PERCENT:
+            return 0
+        return random.randint(self.DRAGON_COIN_DROP_MIN, self.DRAGON_COIN_DROP_MAX)
+
+    async def _award_raid_dragon_coins(self, user_ids, amount):
+        if amount <= 0 or not user_ids:
+            return False
+
+        unique_user_ids = list(dict.fromkeys(user_ids))
+        await self.bot.pool.execute(
+            'UPDATE profile SET dragoncoins = dragoncoins + $1 WHERE "user"=ANY($2);',
+            amount,
+            unique_user_ids,
+        )
+        return True
+
+    async def _distribute_spawn_cash_rewards(self, all_participant_ids, survivor_ids, cash_pool):
+        all_participant_ids = list(dict.fromkeys(all_participant_ids))
+        survivor_ids = list(dict.fromkeys(survivor_ids))
+
+        participant_count = len(all_participant_ids)
+        survivor_count = len(survivor_ids)
+
+        cash_pool_total = int(cash_pool)
+        participant_pool = int(cash_pool_total * self.SPAWN_PARTICIPANT_REWARD_RATIO)
+        survivor_pool = cash_pool_total - participant_pool
+
+        participant_cash = int(participant_pool / participant_count) if participant_count > 0 else 0
+        survivor_bonus_cash = int(survivor_pool / survivor_count) if survivor_count > 0 else 0
+
+        if participant_cash > 0 and participant_count > 0:
+            await self.bot.pool.execute(
+                'UPDATE profile SET "money"="money"+$1 WHERE "user"=ANY($2);',
+                participant_cash,
+                all_participant_ids,
+            )
+
+        if survivor_bonus_cash > 0 and survivor_count > 0:
+            await self.bot.pool.execute(
+                'UPDATE profile SET "money"="money"+$1 WHERE "user"=ANY($2);',
+                survivor_bonus_cash,
+                survivor_ids,
+            )
+
+        return {
+            "cash_pool_total": cash_pool_total,
+            "participant_count": participant_count,
+            "survivor_count": survivor_count,
+            "participant_cash": participant_cash,
+            "survivor_bonus_cash": survivor_bonus_cash,
+            "survivor_total_cash": participant_cash + survivor_bonus_cash,
+        }
+
     @is_gm()
     @commands.command(hidden=True)
     async def gmclearraid(self, ctx):
         await self.bot.redis.execute_command("DEL", "special:raid")
         await ctx.send("Raid timer cleared!")
+        
+    @is_gm()
+    @commands.command(hidden=True)
+    async def reset_celestial_vault(self, ctx, user_id: int = None):
+        """[Bot Admin only] Reset the Celestial Vault cooldown for a user."""
+        user_id = user_id or ctx.author.id
+        await self.bot.redis.execute_command("DEL", f"celestial:vault:{user_id}")
+        await ctx.send(f"Celestial Vault cooldown has been reset for user ID: {user_id}!")
 
     @is_gm()
     @commands.command(hidden=True)
@@ -176,7 +1187,7 @@ class Raid(commands.Cog):
             await self.bot.wait_until_ready()
             
             # Debug channel for logging
-            channeldebug = self.bot.get_channel(1313482408242184213)
+            channeldebug = self.bot.get_channel(self.debug_channel_id)
             if channeldebug:
                 await channeldebug.send("Auto raid check starting...")
             
@@ -187,7 +1198,7 @@ class Raid(commands.Cog):
                 return
             
             # Get the target channel
-            channel_id = 1199297906755252234
+            channel_id = self.main_raid_channel_id
             channel = self.bot.get_channel(channel_id)
             
             if not channel:
@@ -207,7 +1218,7 @@ class Raid(commands.Cog):
             from discord.utils import utcnow
             current_time = utcnow()
 
-            channeldebug = self.bot.get_channel(1313482408242184213)
+            channeldebug = self.bot.get_channel(self.debug_channel_id)
             if channeldebug:
                 await channeldebug.send(f"Auto raid check: Checking Channel (last spawn: {last_spawn_time})")
             
@@ -220,8 +1231,8 @@ class Raid(commands.Cog):
                     await channeldebug.send(f"Auto raid check: Spawning raid (last spawn: {last_spawn_time})")
                 
                 # Generate random parameters
-                random_hp = random.randint(3500000, 4500000)
-                crate_choices = ["divine", "fortune", "legendary"]
+                random_hp = random.randint(1000000, 2500000)
+                crate_choices = ["divine", "fortune", "legendary", "materials"]
                 random_crate = random.choice(crate_choices)
                 
                 # Auto-spawn the raid
@@ -231,24 +1242,29 @@ class Raid(commands.Cog):
                 if channeldebug:
                     await channeldebug.send(f"Auto raid check: Raid was spawned {time_diff:.1f} hours ago, waiting until at least 8 hours have passed")
         except Exception as e:
-            channeldebug = self.bot.get_channel(1313482408242184213)
-            await channeldebug.send(e)
+            channeldebug = self.bot.get_channel(self.debug_channel_id)
+            if channeldebug:
+                await channeldebug.send(e)
 
     async def auto_spawn_raid(self, channel, hp, rarity="magic", raid_hp=17776):
         """Auto-spawn a raid without decorator checks."""
         try:
-            if rarity not in ["magic", "legendary", "rare", "uncommon", "common", "mystery", "fortune", "divine"]:
+            raid_timer_set = False
+            if rarity not in ["magic", "legendary", "rare", "uncommon", "common", "mystery", "fortune", "divine", "materials"]:
                 raise ValueError("Invalid rarity specified.")
-            channeldebug = self.bot.get_channel(1313482408242184213)
-            channeldebug.send(f"Auto-spawning Ragnarok raid with {hp:,} HP and {rarity} crate")
+            channeldebug = self.bot.get_channel(self.debug_channel_id)
+            if channeldebug:
+                await channeldebug.send(f"Auto-spawning Ragnarok raid with {hp:,} HP and {rarity} crate")
             
             # Get guild from channel
             guild = channel.guild
             
             await self.set_raid_timer()
+            raid_timer_set = True
             survival_used = set()
 
-            self.boss = {"hp": hp, "initial_hp": hp, "min_dmg": 1, "max_dmg": 1050}
+            raid_boss_hp = self._round_raid_number(hp)
+            self.boss = {"hp": raid_boss_hp, "initial_hp": raid_boss_hp, "min_dmg": 50, "max_dmg": 1500}
             self.joined = []
 
             # Create embed
@@ -256,7 +1272,7 @@ class Raid(commands.Cog):
             em = discord.Embed(
                 title="Ragnarok Spawned",
                 description=(
-                    f"This boss has {self.boss['hp']:,.0f} HP and has high-end loot!\nThe"
+                    f"This boss has {self.boss['hp']:,.2f} HP and has high-end loot!\nThe"
                     " Ragnarok will be vulnerable in 15 Minutes!"
                     f" Raiders HP: {'Standard' if raid_hp == 17776 else raid_hp}"
                 ),
@@ -276,7 +1292,7 @@ class Raid(commands.Cog):
             
             fi_path = "assets/other/startdragon.webp"
             try:
-                channels_ids = [1140211789573935164, 1199297906755252234, 1158743317325041754]
+                channels_ids = list(self.auto_spawn_channels)
                 message_ids = []
                 raid_channel = None  # Store the main channel for permissions later
 
@@ -284,19 +1300,21 @@ class Raid(commands.Cog):
                     try:
                         current_channel = self.bot.get_channel(channel_id)
                         if current_channel:
-                            if channel_id == 1199297906755252234:  # Main raid channel
+                            if channel_id == self.main_raid_channel_id:  # Main raid channel
                                 raid_channel = current_channel
                                 
                             fi = discord.File(fi_path)
                             sent_msg = await current_channel.send(embed=em, file=fi, view=view)
                             message_ids.append(sent_msg.id)
                         else:
-                            channeldebug = self.bot.get_channel(1313482408242184213)
-                            channeldebug.send(f"Channel with ID {channel_id} not found.")
+                            channeldebug = self.bot.get_channel(self.debug_channel_id)
+                            if channeldebug:
+                                await channeldebug.send(f"Channel with ID {channel_id} not found.")
                     except Exception as e:
-                        channeldebug = self.bot.get_channel(1313482408242184213)
+                        channeldebug = self.bot.get_channel(self.debug_channel_id)
                         error_message = f"Error in channel with ID {channel_id}: {e}. continuing.."
-                        channeldebug.send(error_message)
+                        if channeldebug:
+                            await channeldebug.send(error_message)
                         continue
 
                 self.boss.update(message=message_ids)
@@ -304,7 +1322,7 @@ class Raid(commands.Cog):
                 self.raid_preparation = True
 
                 if self.bot.config.bot.is_beta:
-                    summary_channel = self.bot.get_channel(1199299514490683392)
+                    summary_channel = self.bot.get_channel(self.beta_summary_channel_id)
 
                     message_ids = []  # To store the IDs of the sent messages
 
@@ -312,11 +1330,13 @@ class Raid(commands.Cog):
                         try:
                             current_channel = self.bot.get_channel(channel_id)
                             if current_channel:
-                                role_id = 1199307259965079552  # Replace with the actual role ID
-                                role = discord.utils.get(guild.roles, id=role_id)
-                                content = f"{role.mention} Ragnarok spawned! 15 Minutes until he is vulnerable..."
-                                sent_msg = await current_channel.send(content, allowed_mentions=discord.AllowedMentions(roles=True))
-                                message_ids.append(sent_msg.id)
+                                sent_msg = await self._send_raid_alert(
+                                    current_channel,
+                                    guild,
+                                    "Ragnarok spawned! 15 Minutes until he is vulnerable...",
+                                )
+                                if sent_msg is not None:
+                                    message_ids.append(sent_msg.id)
                         except Exception as e:
                             error_message = f"Error in channel with ID {channel_id}: {e}. continuing.."
                             print(error_message)
@@ -362,12 +1382,10 @@ class Raid(commands.Cog):
                     await current_channel.send("**Ragnarok is vulnerable! Fetching participant data... Hang on!**")
 
             self.joined.extend(view.joined)
-            # Assuming you have the role ID for the server booster role
-            BOOSTER_ROLE_ID = 1281411439747268692  # Replace with your actual booster role ID
 
             # Define the tier threshold and the user ID to exclude
             tier_threshold = 1  # Assuming you want tiers >= 1
-            excluded_user_ids = [782017044828782642, 579703576570494976, 761469900853215263, 1322593504098254959]
+            excluded_user_ids = self.excluded_user_ids_auto
 
             # Fetch Discord IDs where tier is >= tier_threshold and user is not in excluded_user_ids
             discord_ids = await self.bot.pool.fetch(
@@ -391,9 +1409,9 @@ class Raid(commands.Cog):
             self.joined.extend(users)
 
             # Fetch members with the server booster role
-            guild = self.bot.get_guild(1199287508794626078)  # Replace YOUR_GUILD_ID with your server's ID
+            guild = self.bot.get_guild(self.booster_guild_id)
             if guild:
-                booster_role = guild.get_role(BOOSTER_ROLE_ID)
+                booster_role = guild.get_role(self.booster_role_id)
                 if booster_role:
                     # Fetch all members with the server booster role
                     booster_members = [member for member in guild.members if booster_role in member.roles]
@@ -418,12 +1436,22 @@ class Raid(commands.Cog):
                     if raid_hp == 17776:
                         stathp = profile["stathp"] * 50
                         level = rpgtools.xptolevel(profile["xp"])
-                        raidhp = profile["health"] + 250 + (level * 5) + stathp
+                        raidhp = profile["health"] + 200 + (level * 15) + stathp
                     else:
                         raidhp = raid_hp
-                    self.raid[(u, "user")] = {"hp": raidhp, "armor": deff, "damage": dmg}
+                    dmg, deff, spec_effects = await self._apply_raid_spec_stats(u.id, dmg, deff)
+                    participant = {"hp": raidhp, "armor": deff, "damage": dmg}
+                    participant.update(
+                        self._pooled_seasonal_state(profile["class"], spec_effects, raidhp)
+                    )
+                    self.raid[(u, "user")] = self._normalize_raid_combatant(participant)
 
+            all_participant_ids = [
+                user.id for (user, participant_type) in self.raid.keys()
+                if participant_type == "user" and not user.bot
+            ]
             raiders_joined = len(self.raid)  # Replace with your actual channel IDs
+            raid_mvp = self._init_raid_mvp()
 
             # Final message with gathered data
             for channel_id in channels_ids:
@@ -439,22 +1467,46 @@ class Raid(commands.Cog):
                     and datetime.datetime.utcnow() < start + datetime.timedelta(minutes=60)
             ):
                 (target, participant_type) = random.choice(list(self.raid.keys()))
+                target_data = self._normalize_raid_combatant(
+                    self.raid[(target, participant_type)]
+                )
                 dmg = random.randint(self.boss["min_dmg"], self.boss["max_dmg"])
-                finaldmg = self.getfinaldmg(dmg, self.raid[(target, participant_type)]["armor"])
-                self.raid[(target, participant_type)]["hp"] -= finaldmg
+                finaldmg = self.getfinaldmg(dmg, target_data["armor"])
+                seasonal_def_msgs = []
+                if participant_type == "user":
+                    finaldmg, seasonal_def_msgs = self._pooled_apply_incoming_seasonal(
+                        target_data, finaldmg
+                    )
+                finaldmg = self._round_raid_number(finaldmg)
+                target_data["hp"] = self._round_raid_number(
+                    target_data["hp"] - finaldmg
+                )
+                theoretical_damage = self._round_raid_number(dmg)
+                if participant_type == "user" and target_data["hp"] <= 0:
+                    seasonal_save = self._pooled_try_seasonal_save(
+                        (target, participant_type), target_data
+                    )
+                    if seasonal_save:
+                        seasonal_def_msgs.append(seasonal_save)
+                self._credit_raid_mvp_taken(
+                    raid_mvp,
+                    target,
+                    participant_type,
+                    theoretical_damage,
+                )
 
                 em = discord.Embed(title="Ragnarok attacked!", colour=0xFFB900)
 
-                if self.raid[(target, participant_type)]["hp"] > 0:  # If target is still alive
-                    description = f"{target.mention if participant_type == 'user' else target} now has {self.raid[(target, participant_type)]['hp']} HP!"
+                if target_data["hp"] > 0:  # If target is still alive
+                    description = f"{target.mention if participant_type == 'user' else target} now has {target_data['hp']:,.2f} HP!"
                     em.description = description
                     em.add_field(name="Theoretical Damage",
-                                value=finaldmg + self.raid[(target, participant_type)]["armor"])
-                    em.add_field(name="Shield", value=self.raid[(target, participant_type)]["armor"])
-                    em.add_field(name="Effective Damage", value=finaldmg)
+                                value=f"{theoretical_damage:,.2f}")
+                    em.add_field(name="Shield", value=f"{target_data['armor']:,.2f}")
+                    em.add_field(name="Effective Damage", value=f"{finaldmg:,.2f}")
                 else:  # If target has died
                     # Check if target is a Raider and hasn't used their survival
-                    if self.raid[(target, participant_type)]["hp"] <= 0:  # Changed from else to explicit check
+                    if target_data["hp"] <= 0:  # Changed from else to explicit check
                         # Check if target is a Raider and hasn't used their survival
                         survived = False  # Add this flag
                         if participant_type == "user" and target.id not in survival_used:
@@ -469,15 +1521,15 @@ class Raid(commands.Cog):
                                     is_raider = bool(set(profile['class']) & raider_classes)
 
                                     if is_raider:
-                                        self.raid[(target, participant_type)]["hp"] = 1
+                                        target_data["hp"] = 1.0
                                         survival_used.add(target.id)
                                         description = f"💫 {target.mention}'s Raider instincts allowed them to survive with 1 HP!"
                                         em.description = description
                                         em.add_field(name="Theoretical Damage",
-                                                    value=finaldmg + self.raid[(target, participant_type)]["armor"])
+                                                    value=f"{theoretical_damage:,.2f}")
                                         em.add_field(name="Shield",
-                                                    value=self.raid[(target, participant_type)]["armor"])
-                                        em.add_field(name="Effective Damage", value=finaldmg)
+                                                    value=f"{target_data['armor']:,.2f}")
+                                        em.add_field(name="Effective Damage", value=f"{finaldmg:,.2f}")
                                         survived = True  # Set the flag
 
                         # Only handle death if they didn't survive
@@ -485,11 +1537,17 @@ class Raid(commands.Cog):
                             description = f"{target.mention if participant_type == 'user' else target} died!"
                             em.description = description
                             em.add_field(name="Theoretical Damage",
-                                        value=finaldmg + self.raid[(target, participant_type)]["armor"])
-                            em.add_field(name="Shield", value=self.raid[(target, participant_type)]["armor"])
-                            em.add_field(name="Effective Damage", value=finaldmg)
+                                        value=f"{theoretical_damage:,.2f}")
+                            em.add_field(name="Shield", value=f"{target_data['armor']:,.2f}")
+                            em.add_field(name="Effective Damage", value=f"{finaldmg:,.2f}")
                             del self.raid[(target, participant_type)]
 
+                if seasonal_def_msgs:
+                    em.add_field(
+                        name="Seasonal Powers",
+                        value="\n".join(seasonal_def_msgs)[-1000:],
+                        inline=False,
+                    )
                 if participant_type == "user":
                     em.set_author(name=str(target), icon_url=target.display_avatar.url)
                 else:  # For bots
@@ -500,16 +1558,28 @@ class Raid(commands.Cog):
                     if current_channel:
                         await current_channel.send(embed=em)
 
-                dmg_to_take = sum(i["damage"] for i in self.raid.values())
-                self.boss["hp"] -= dmg_to_take
+                self._credit_raid_mvp_dealt(raid_mvp)
+                seasonal_bonus, seasonal_attack_msgs = self._apply_pooled_seasonal_round()
+                dmg_to_take = self._round_raid_number(
+                    sum(float(i["damage"]) for i in self.raid.values()) + float(seasonal_bonus)
+                )
+                self.boss["hp"] = self._round_raid_number(
+                    self.boss["hp"] - dmg_to_take
+                )
                 await asyncio.sleep(4)
 
                 em = discord.Embed(title="The raid attacked Ragnarok!", colour=0xFF5C00)
                 em.set_thumbnail(url=f"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_attackdragon.webp")
-                em.add_field(name="Damage", value=dmg_to_take)
+                em.add_field(name="Damage", value=f"{dmg_to_take:,.2f}")
+                if seasonal_attack_msgs:
+                    em.add_field(
+                        name="Seasonal Powers",
+                        value="\n".join(seasonal_attack_msgs)[-1000:],
+                        inline=False,
+                    )
 
                 if self.boss["hp"] > 0:
-                    em.add_field(name="HP left", value=self.boss["hp"])
+                    em.add_field(name="HP left", value=f"{self.boss['hp']:,.2f}")
                 else:
                     em.add_field(name="HP left", value="Dead!")
                 for channel_id in channels_ids:
@@ -537,12 +1607,12 @@ class Raid(commands.Cog):
 
                 summary_text = (
                     "Emoji_here The raid was all wiped! Ragnarok had"
-                    f" **{self.boss['hp']:,.3f}** health remaining. Better luck next time."
+                    f" **{self.boss['hp']:,.2f}** health remaining. Better luck next time."
                 )
                 try:
                     summary = (
                         "**Raid result:**\n"
-                        f"Emoji_here Health: **{self.boss['initial_hp']:,.0f}**\n"
+                        f"Emoji_here Health: **{self.boss['initial_hp']:,.2f}**\n"
                         f"{summary_text}\n"
                         f"Emoji_here Raiders joined: **{raiders_joined}**"
                     )
@@ -550,7 +1620,7 @@ class Raid(commands.Cog):
                         "Emoji_here",
                         ":small_blue_diamond:" if self.boss["hp"] < 1 else ":vibration_mode:"
                     )
-                    summary_channel = self.bot.get_channel(1199299514490683392)
+                    summary_channel = self.bot.get_channel(self.summary_channel_id)
 
                     summary_msg = await summary_channel.send(summary)
                     self.raid.clear()
@@ -577,7 +1647,7 @@ class Raid(commands.Cog):
                         print(f"Error setting permissions: {e}")
 
                 highest_bid = [
-                    1_136_590_782_183_264_308,
+                    self.raid_bid_default_user_id,
                     0,
                 ]  # userid, amount
 
@@ -636,7 +1706,9 @@ class Raid(commands.Cog):
                         current_channel = self.bot.get_channel(channel_id)
                         if current_channel:
                             for p in page.pages:
-                                await current_channel.send(p[4:-4])
+                                await self._send_raid_auction_page(
+                                    current_channel, p[4:-4]
+                                )
 
                     while True:
                         try:
@@ -655,14 +1727,16 @@ class Raid(commands.Cog):
                                 )
                                 if current_balance < bid:
                                     await msg.channel.send(
-                                        f"{msg.author.mention} You don't have enough money to place this bid."
+                                        f"{msg.author.mention} You don't have enough money to place this bid.",
+                                        allowed_mentions=discord.AllowedMentions.none(),
                                     )
                                     continue
 
                                 # Check if current bidder is already the highest bidder
                                 if current_bidder == previous_bidder:
                                     await msg.channel.send(
-                                        f"{msg.author.mention} You already have the highest bid."
+                                        f"{msg.author.mention} You already have the highest bid.",
+                                        allowed_mentions=discord.AllowedMentions.none(),
                                     )
                                     continue
 
@@ -681,8 +1755,8 @@ class Raid(commands.Cog):
                                     current_bidder,
                                 )
 
-                                # Update highest bid
-                                highest_bid = [current_bidder, bid]
+                        # Update highest bid OUTSIDE the database transaction
+                        highest_bid = [current_bidder, bid]
 
                         # Notify all channels
                         next_bid = int(bid * 1.1) if bid >= 100 else None
@@ -693,7 +1767,10 @@ class Raid(commands.Cog):
                                     content = f"{msg.author.mention} bids **${bid}**!\nThe minimum next bid is **${next_bid}**."
                                 else:
                                     content = f"{msg.author.mention} bids **${bid}**!"
-                                await current_channel.send(content)
+                                await current_channel.send(
+                                    content,
+                                    allowed_mentions=discord.AllowedMentions.none(),
+                                )
 
                     msg_content = (
                         f"Auction done! Winner is <@{highest_bid[0]}> with"
@@ -717,20 +1794,33 @@ class Raid(commands.Cog):
                     for channel_id in channels_ids:
                         current_channel = self.bot.get_channel(channel_id)
                         if current_channel:
-                            await current_channel.send(msg_content)
+                            await current_channel.send(
+                                msg_content,
+                                allowed_mentions=discord.AllowedMentions.none(),
+                            )
 
                     cash_pool = hp * 0.9
-                    survivors = len(self.raid)
-                    self.raid = {(user, p_type): data for (user, p_type), data in self.raid.items() if
-                                p_type == "user" and not user.bot}
-                    base_cash = int(cash_pool / survivors)  # This is our base reward
+                    self.raid = {
+                        (user, p_type): data for (user, p_type), data in self.raid.items()
+                        if p_type == "user" and not user.bot
+                    }
 
-                    # Send the base cash to all survivors first
+                    # Survivors stay in self.raid (also used for bidding checks).
                     users = [user.id for user, p_type in self.raid.keys() if p_type == "user"]
-                    await self.bot.pool.execute(
-                        'UPDATE profile SET "money"="money"+$1 WHERE "user"=ANY($2);',
-                        base_cash,
-                        users
+                    reward_split = await self._distribute_spawn_cash_rewards(
+                        all_participant_ids=all_participant_ids,
+                        survivor_ids=users,
+                        cash_pool=cash_pool,
+                    )
+                    survivors = reward_split["survivor_count"]
+                    participant_count = reward_split["participant_count"]
+                    participant_cash = reward_split["participant_cash"]
+                    survivor_bonus_cash = reward_split["survivor_bonus_cash"]
+                    base_cash = reward_split["survivor_total_cash"]
+                    cash_pool_total = reward_split["cash_pool_total"]
+                    dragon_coin_bonus = self._roll_raid_dragon_coin_bonus()
+                    dragon_coins_awarded = await self._award_raid_dragon_coins(
+                        users, dragon_coin_bonus
                     )
 
                     # Process each survivor for potential Raider bonus
@@ -771,7 +1861,8 @@ class Raid(commands.Cog):
                                         current_channel = self.bot.get_channel(channel_id)
                                         if current_channel:
                                             await current_channel.send(
-                                                f"💰 {user.mention}'s Raider abilities earned them an extra ${bonus_amount:,.0f}!"
+                                                f"💰 {user.mention}'s Raider abilities earned them an extra ${bonus_amount:,.0f}!",
+                                                allowed_mentions=discord.AllowedMentions.none(),
                                             )
 
                     # Send the final message to all channels
@@ -779,12 +1870,20 @@ class Raid(commands.Cog):
                         current_channel = self.bot.get_channel(channel_id)
                         if current_channel:
                             await current_channel.send(
-                                f"**Gave ${base_cash:,.0f} of Ragnarok's ${cash_pool:,.0f} drop to all survivors!**")
+                                f"**Distributed Ragnarok's ${cash_pool_total:,.0f} drop (30/70): "
+                                f"${participant_cash:,.0f} to each participant, plus ${survivor_bonus_cash:,.0f} extra to each survivor.**"
+                            )
+                            if dragon_coins_awarded:
+                                await current_channel.send(
+                                    f"🐉 Bonus drop! All surviving raiders also received **{dragon_coin_bonus} <:dragoncoin:1404860657366728788> Dragon Coins**."
+                                )
 
                         summary_text = (
                             f"Emoji_here Defeated in: **{summary_duration}**\n"
                             f"{summary_crate}\n"
-                            f"Emoji_here Payout per survivor: **${base_cash:,.0f}**\n"
+                            f"Emoji_here Payout per participant: **${participant_cash:,.0f}** ({participant_count} participants)\n"
+                            f"Emoji_here Extra per survivor: **${survivor_bonus_cash:,.0f}**\n"
+                            f"Emoji_here Total per survivor: **${base_cash:,.0f}**\n"
                             f"Emoji_here Survivors: **{survivors} and {bots} of placeholders forces**"
                         )
 
@@ -796,13 +1895,27 @@ class Raid(commands.Cog):
                             "The raid did not manage to kill Ragnarok within an hour... He disappeared!")
                         await m.add_reaction("\U0001F1EB")
                         summary = (
-                            f"The raid did not manage to kill Ragnarok within an hour... He disappeared with **{self.boss['hp']:,.3f}** health remaining."
+                            f"The raid did not manage to kill Ragnarok within an hour... He disappeared with **{self.boss['hp']:,.2f}** health remaining."
                         )
 
             if 'users' in locals() and users:  # Check if users list exists and is not empty
                 random_user_id = random.choice(users)
                 success = True
                 self.bot.dispatch("raid_completion", mock_ctx, success, random_user_id)
+
+            raid_success = not (self.boss["hp"] > 1)
+            await self._post_raid_mvp(raid_channel or channel, raid_mvp, raid_success)
+
+            # Favor War: everyone who joined earns favor for their god (wins pay extra)
+            try:
+                self.bot.dispatch(
+                    "raid_favor",
+                    mock_ctx,
+                    [u.id for u in self.joined],
+                    raid_success,
+                )
+            except Exception:
+                pass
             
             await asyncio.sleep(30)
             
@@ -824,7 +1937,7 @@ class Raid(commands.Cog):
             if self.boss["hp"] < 1 and self.bot.config.bot.is_beta:
                 summary = (
                     "**Raid result:**\n"
-                    f"Emoji_here Health: **{self.boss['initial_hp']:,.0f}**\n"
+                    f"Emoji_here Health: **{self.boss['initial_hp']:,.2f}**\n"
                     f"{summary_text}\n"
                     f"Emoji_here Raiders joined: **{raiders_joined}**"
                 )
@@ -833,9 +1946,18 @@ class Raid(commands.Cog):
                     ":small_blue_diamond:" if self.boss["hp"] < 1 else ":vibration_mode:"
                 )
                 
-            summary_channel = self.bot.get_channel(1199299514490683392)
+            summary_channel = self.bot.get_channel(self.summary_channel_id)
             if summary_channel and 'summary' in locals():
-                await summary_channel.send(summary)
+                if self.boss["hp"] < 1 and self.bot.config.bot.is_beta:
+                    await self._send_raid_alert(
+                        summary_channel,
+                        guild,
+                        "Ragnarok has been defeated!",
+                    )
+                await summary_channel.send(
+                    summary,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
 
             try:
                 self.raid.clear()
@@ -846,14 +1968,50 @@ class Raid(commands.Cog):
             self.raidactive = False
             self.boss = None
         except Exception as e:
-            import traceback
-            current_channel = self.bot.get_channel(1313482408242184213)
-            error_message = f"Error in auto_spawn_raid: {e}\n"
-            error_message += traceback.format_exc()
-            await current_channel.send(error_message)
+            error_message = (
+                f"Automatic Ragnarok raid failed with {type(e).__name__}: {e}\n\n"
+                f"{traceback.format_exc()}"
+            ).replace("```", "'''")
+            traceback_channel = self.bot.get_channel(
+                self.RAGNAROK_TRACEBACK_CHANNEL_ID
+            )
+            if traceback_channel is None:
+                try:
+                    traceback_channel = await self.bot.fetch_channel(
+                        self.RAGNAROK_TRACEBACK_CHANNEL_ID
+                    )
+                except Exception:
+                    traceback_channel = self.bot.get_channel(self.debug_channel_id) or channel
+            if traceback_channel:
+                for start in range(0, len(error_message), 1900):
+                    try:
+                        await traceback_channel.send(
+                            f"```py\n{error_message[start:start + 1900]}\n```"
+                        )
+                    except Exception:
+                        break
             print(error_message)
-            if current_channel:
-                await current_channel.send(f"Error in auto raid: {e}")
+            if channel and getattr(channel, "id", None) != getattr(
+                traceback_channel, "id", None
+            ):
+                try:
+                    await channel.send(
+                        f"Automatic Ragnarok raid failed: {type(e).__name__}: {e}. "
+                        f"The traceback was sent to <#{self.RAGNAROK_TRACEBACK_CHANNEL_ID}>."
+                    )
+                except Exception:
+                    pass
+
+            if raid_timer_set:
+                try:
+                    await self.clear_raid_timer()
+                except Exception as cleanup_error:
+                    print(f"Failed to clear the automatic raid timer: {cleanup_error}")
+            self.raid.clear()
+            self.joined = []
+            self.raid_preparation = False
+            self.raidactive = False
+            self.boss = None
 
 
 
@@ -864,7 +2022,7 @@ class Raid(commands.Cog):
     @commands.command(hidden=True, brief=_("Start a Ragnorak raid"))
     async def spawn(self, ctx, hp: IntGreaterThan(0), rarity: str = "magic", raid_hp: int = 17776):
         try:
-            if rarity not in ["magic", "legendary", "rare", "uncommon", "common", "mystery", "fortune", "divine"]:
+            if rarity not in ["magic", "legendary", "rare", "uncommon", "common", "mystery", "fortune", "divine", "materials"]:
                 raise ValueError("Invalid rarity specified.")
             # rest of your function
 
@@ -873,7 +2031,8 @@ class Raid(commands.Cog):
             await self.set_raid_timer()
             survival_used = set()
 
-            self.boss = {"hp": hp, "initial_hp": hp, "min_dmg": 1, "max_dmg": 1050}
+            raid_boss_hp = self._round_raid_number(hp)
+            self.boss = {"hp": raid_boss_hp, "initial_hp": raid_boss_hp, "min_dmg": 50, "max_dmg": 1500}
             self.joined = []
 
             # await ctx.channel.set_permissions(
@@ -885,7 +2044,7 @@ class Raid(commands.Cog):
             em = discord.Embed(
                 title="Ragnarok Spawned",
                 description=(
-                    f"This boss has {self.boss['hp']:,.0f} HP and has high-end loot!\nThe"
+                    f"This boss has {self.boss['hp']:,.2f} HP and has high-end loot!\nThe"
                     " Ragnarok will be vulnerable in 15 Minutes!"
                     f" Raiders HP: {'Standard' if raid_hp == 17776 else raid_hp}"
                 ),
@@ -902,8 +2061,7 @@ class Raid(commands.Cog):
             )
             fi_path = "assets/other/startdragon.webp"
             try:
-                channels_ids = [1140211789573935164, 1199297906755252234,
-                                1158743317325041754]  # Replace with your actual channel IDs
+                channels_ids = list(self.spawn_channels)
 
                 message_ids = []  # To store the IDs of the sent messages
 
@@ -925,21 +2083,22 @@ class Raid(commands.Cog):
                 self.boss.update(message=message_ids)
 
                 if self.bot.config.bot.is_beta:
-                    summary_channel = self.bot.get_channel(1199299514490683392)
+                    summary_channel = self.bot.get_channel(self.summary_channel_id)
 
-                    channels_ids = [1140211789573935164, 1199297906755252234,
-                                    1158743317325041754]  # Replace with your actual channel IDs
+                    channels_ids = list(self.spawn_beta_channels)
                     message_ids = []  # To store the IDs of the sent messages
 
                     for channel_id in channels_ids:
                         try:
                             channel = self.bot.get_channel(channel_id)  # Assumes ctx.guild is available
                             if channel:
-                                role_id = 1199307259965079552  # Replace with the actual role ID
-                                role = discord.utils.get(ctx.guild.roles, id=role_id)
-                                content = f"{role.mention} Ragnarok spawned! 15 Minutes until he is vulnerable..."
-                                sent_msg = await channel.send(content, allowed_mentions=discord.AllowedMentions(roles=True))
-                                message_ids.append(sent_msg.id)
+                                sent_msg = await self._send_raid_alert(
+                                    channel,
+                                    ctx.guild,
+                                    "Ragnarok spawned! 15 Minutes until he is vulnerable...",
+                                )
+                                if sent_msg is not None:
+                                    message_ids.append(sent_msg.id)
                         except Exception as e:
                             error_message = f"Error in channel with ID {channel_id}: {e}. continuing.."
                             await ctx.send(error_message)
@@ -987,12 +2146,9 @@ class Raid(commands.Cog):
                     await channel.send("**Ragnarok is vulnerable! Fetching participant data... Hang on!**")
 
             self.joined.extend(view.joined)
-            # Assuming you have the role ID for the server booster role
-            BOOSTER_ROLE_ID = 1281411439747268692  # Replace with your actual booster role ID
-
             # Define the tier threshold and the user ID to exclude
             tier_threshold = 1  # Assuming you want tiers >= 1
-            excluded_user_ids = [782017044828782642, 579703576570494976, 761469900853215263, 1322593504098254959]
+            excluded_user_ids = self.excluded_user_ids_spawn
 
             # Fetch Discord IDs where tier is >= tier_threshold and user is not in excluded_user_ids
             discord_ids = await self.bot.pool.fetch(
@@ -1016,9 +2172,9 @@ class Raid(commands.Cog):
             self.joined.extend(users)
 
             # Fetch members with the server booster role
-            guild = self.bot.get_guild(1199287508794626078)  # Replace YOUR_GUILD_ID with your server's ID
+            guild = self.bot.get_guild(self.booster_guild_id)
             if guild:
-                booster_role = guild.get_role(BOOSTER_ROLE_ID)
+                booster_role = guild.get_role(self.booster_role_id)
                 if booster_role:
                     # Fetch all members with the server booster role
                     booster_members = [member for member in guild.members if booster_role in member.roles]
@@ -1043,12 +2199,22 @@ class Raid(commands.Cog):
                     if raid_hp == 17776:
                         stathp = profile["stathp"] * 50
                         level = rpgtools.xptolevel(profile["xp"])
-                        raidhp = profile["health"] + 250 + (level * 5) + stathp
+                        raidhp = profile["health"] + 200 + (level * 15) + stathp
                     else:
                         raidhp = raid_hp
-                    self.raid[(u, "user")] = {"hp": raidhp, "armor": deff, "damage": dmg}
+                    dmg, deff, spec_effects = await self._apply_raid_spec_stats(u.id, dmg, deff)
+                    participant = {"hp": raidhp, "armor": deff, "damage": dmg}
+                    participant.update(
+                        self._pooled_seasonal_state(profile["class"], spec_effects, raidhp)
+                    )
+                    self.raid[(u, "user")] = self._normalize_raid_combatant(participant)
 
+            all_participant_ids = [
+                user.id for (user, participant_type) in self.raid.keys()
+                if participant_type == "user" and not user.bot
+            ]
             raiders_joined = len(self.raid)  # Replace with your actual channel IDs
+            raid_mvp = self._init_raid_mvp()
 
             # Final message with gathered data
             for channel_id in channels_ids:
@@ -1064,22 +2230,46 @@ class Raid(commands.Cog):
                     and datetime.datetime.utcnow() < start + datetime.timedelta(minutes=60)
             ):
                 (target, participant_type) = random.choice(list(self.raid.keys()))
+                target_data = self._normalize_raid_combatant(
+                    self.raid[(target, participant_type)]
+                )
                 dmg = random.randint(self.boss["min_dmg"], self.boss["max_dmg"])
-                finaldmg = self.getfinaldmg(dmg, self.raid[(target, participant_type)]["armor"])
-                self.raid[(target, participant_type)]["hp"] -= finaldmg
+                finaldmg = self.getfinaldmg(dmg, target_data["armor"])
+                seasonal_def_msgs = []
+                if participant_type == "user":
+                    finaldmg, seasonal_def_msgs = self._pooled_apply_incoming_seasonal(
+                        target_data, finaldmg
+                    )
+                finaldmg = self._round_raid_number(finaldmg)
+                target_data["hp"] = self._round_raid_number(
+                    target_data["hp"] - finaldmg
+                )
+                theoretical_damage = self._round_raid_number(dmg)
+                if participant_type == "user" and target_data["hp"] <= 0:
+                    seasonal_save = self._pooled_try_seasonal_save(
+                        (target, participant_type), target_data
+                    )
+                    if seasonal_save:
+                        seasonal_def_msgs.append(seasonal_save)
+                self._credit_raid_mvp_taken(
+                    raid_mvp,
+                    target,
+                    participant_type,
+                    theoretical_damage,
+                )
 
                 em = discord.Embed(title="Ragnarok attacked!", colour=0xFFB900)
 
-                if self.raid[(target, participant_type)]["hp"] > 0:  # If target is still alive
-                    description = f"{target.mention if participant_type == 'user' else target} now has {self.raid[(target, participant_type)]['hp']} HP!"
+                if target_data["hp"] > 0:  # If target is still alive
+                    description = f"{target.mention if participant_type == 'user' else target} now has {target_data['hp']:,.2f} HP!"
                     em.description = description
                     em.add_field(name="Theoretical Damage",
-                                 value=finaldmg + self.raid[(target, participant_type)]["armor"])
-                    em.add_field(name="Shield", value=self.raid[(target, participant_type)]["armor"])
-                    em.add_field(name="Effective Damage", value=finaldmg)
+                                 value=f"{theoretical_damage:,.2f}")
+                    em.add_field(name="Shield", value=f"{target_data['armor']:,.2f}")
+                    em.add_field(name="Effective Damage", value=f"{finaldmg:,.2f}")
                 else:  # If target has died
                     # Check if target is a Raider and hasn't used their survival
-                    if self.raid[(target, participant_type)]["hp"] <= 0:  # Changed from else to explicit check
+                    if target_data["hp"] <= 0:  # Changed from else to explicit check
                         # Check if target is a Raider and hasn't used their survival
                         survived = False  # Add this flag
                         if participant_type == "user" and target.id not in survival_used:
@@ -1094,15 +2284,15 @@ class Raid(commands.Cog):
                                     is_raider = bool(set(profile['class']) & raider_classes)
 
                                     if is_raider:
-                                        self.raid[(target, participant_type)]["hp"] = 1
+                                        target_data["hp"] = 1.0
                                         survival_used.add(target.id)
                                         description = f"💫 {target.mention}'s Raider instincts allowed them to survive with 1 HP!"
                                         em.description = description
                                         em.add_field(name="Theoretical Damage",
-                                                     value=finaldmg + self.raid[(target, participant_type)]["armor"])
+                                                     value=f"{theoretical_damage:,.2f}")
                                         em.add_field(name="Shield",
-                                                     value=self.raid[(target, participant_type)]["armor"])
-                                        em.add_field(name="Effective Damage", value=finaldmg)
+                                                     value=f"{target_data['armor']:,.2f}")
+                                        em.add_field(name="Effective Damage", value=f"{finaldmg:,.2f}")
                                         survived = True  # Set the flag
 
 
@@ -1113,12 +2303,18 @@ class Raid(commands.Cog):
                             description = f"{target.mention if participant_type == 'user' else target} died!"
                             em.description = description
                             em.add_field(name="Theoretical Damage",
-                                         value=finaldmg + self.raid[(target, participant_type)]["armor"])
-                            em.add_field(name="Shield", value=self.raid[(target, participant_type)]["armor"])
-                            em.add_field(name="Effective Damage", value=finaldmg)
+                                         value=f"{theoretical_damage:,.2f}")
+                            em.add_field(name="Shield", value=f"{target_data['armor']:,.2f}")
+                            em.add_field(name="Effective Damage", value=f"{finaldmg:,.2f}")
                             del self.raid[(target, participant_type)]
 
 
+                if seasonal_def_msgs:
+                    em.add_field(
+                        name="Seasonal Powers",
+                        value="\n".join(seasonal_def_msgs)[-1000:],
+                        inline=False,
+                    )
                 if participant_type == "user":
                     em.set_author(name=str(target), icon_url=target.display_avatar.url)
                 else:  # For bots
@@ -1131,16 +2327,28 @@ class Raid(commands.Cog):
                         await channel.send(embed=em)
 
 
-                dmg_to_take = sum(i["damage"] for i in self.raid.values())
-                self.boss["hp"] -= dmg_to_take
+                self._credit_raid_mvp_dealt(raid_mvp)
+                seasonal_bonus, seasonal_attack_msgs = self._apply_pooled_seasonal_round()
+                dmg_to_take = self._round_raid_number(
+                    sum(float(i["damage"]) for i in self.raid.values()) + float(seasonal_bonus)
+                )
+                self.boss["hp"] = self._round_raid_number(
+                    self.boss["hp"] - dmg_to_take
+                )
                 await asyncio.sleep(4)
 
                 em = discord.Embed(title="The raid attacked Ragnarok!", colour=0xFF5C00)
                 em.set_thumbnail(url=f"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_attackdragon.webp")
-                em.add_field(name="Damage", value=dmg_to_take)
+                em.add_field(name="Damage", value=f"{dmg_to_take:,.2f}")
+                if seasonal_attack_msgs:
+                    em.add_field(
+                        name="Seasonal Powers",
+                        value="\n".join(seasonal_attack_msgs)[-1000:],
+                        inline=False,
+                    )
 
                 if self.boss["hp"] > 0:
-                    em.add_field(name="HP left", value=self.boss["hp"])
+                    em.add_field(name="HP left", value=f"{self.boss['hp']:,.2f}")
                 else:
                     em.add_field(name="HP left", value="Dead!")
                 for channel_id in channels_ids:
@@ -1158,12 +2366,12 @@ class Raid(commands.Cog):
 
                 summary_text = (
                     "Emoji_here The raid was all wiped! Ragnarok had"
-                    f" **{self.boss['hp']:,.3f}** health remaining. Better luck next time."
+                    f" **{self.boss['hp']:,.2f}** health remaining. Better luck next time."
                 )
                 try:
                     summary = (
                         "**Raid result:**\n"
-                        f"Emoji_here Health: **{self.boss['initial_hp']:,.0f}**\n"
+                        f"Emoji_here Health: **{self.boss['initial_hp']:,.2f}**\n"
                         f"{summary_text}\n"
                         f"Emoji_here Raiders joined: **{raiders_joined}**"
                     )
@@ -1171,7 +2379,7 @@ class Raid(commands.Cog):
                         "Emoji_here",
                         ":small_blue_diamond:" if self.boss["hp"] < 1 else ":vibration_mode:"
                     )
-                    summary_channel = self.bot.get_channel(1199299514490683392)
+                    summary_channel = self.bot.get_channel(self.summary_channel_id)
 
                     summary_msg = await summary_channel.send(summary)
                     self.raid.clear()
@@ -1191,7 +2399,7 @@ class Raid(commands.Cog):
                 )
 
                 highest_bid = [
-                    1_136_590_782_183_264_308,
+                    self.raid_bid_default_user_id,
                     0,
                 ]  # userid, amount
 
@@ -1247,7 +2455,9 @@ class Raid(commands.Cog):
                         channel = self.bot.get_channel(channel_id)
                         if channel:
                             for p in page.pages:
-                                await channel.send(p[4:-4])
+                                await self._send_raid_auction_page(
+                                    channel, p[4:-4]
+                                )
 
 
                     while True:
@@ -1267,14 +2477,16 @@ class Raid(commands.Cog):
                                 )
                                 if current_balance < bid:
                                     await msg.channel.send(
-                                        f"{msg.author.mention} You don't have enough money to place this bid."
+                                        f"{msg.author.mention} You don't have enough money to place this bid.",
+                                        allowed_mentions=discord.AllowedMentions.none(),
                                     )
                                     continue
 
                                 # Check if current bidder is already the highest bidder
                                 if current_bidder == previous_bidder:
                                     await msg.channel.send(
-                                        f"{msg.author.mention} You already have the highest bid."
+                                        f"{msg.author.mention} You already have the highest bid.",
+                                        allowed_mentions=discord.AllowedMentions.none(),
                                     )
                                     continue
 
@@ -1305,7 +2517,10 @@ class Raid(commands.Cog):
                                     content = f"{msg.author.mention} bids **${bid}**!\nThe minimum next bid is **${next_bid}**."
                                 else:
                                     content = f"{msg.author.mention} bids **${bid}**!"
-                                await channel.send(content)
+                                await channel.send(
+                                    content,
+                                    allowed_mentions=discord.AllowedMentions.none(),
+                                )
 
                     msg_content = (
                         f"Auction done! Winner is <@{highest_bid[0]}> with"
@@ -1337,21 +2552,34 @@ class Raid(commands.Cog):
                     for channel_id in channels_ids:
                         channel = self.bot.get_channel(channel_id)
                         if channel:
-                            await channel.send(msg_content)
+                            await channel.send(
+                                msg_content,
+                                allowed_mentions=discord.AllowedMentions.none(),
+                            )
 
 
                     cash_pool = hp * 1.3
-                    survivors = len(self.raid)
-                    self.raid = {(user, p_type): data for (user, p_type), data in self.raid.items() if
-                                 p_type == "user" and not user.bot}
-                    base_cash = int(cash_pool / survivors)  # This is our base reward
+                    self.raid = {
+                        (user, p_type): data for (user, p_type), data in self.raid.items()
+                        if p_type == "user" and not user.bot
+                    }
 
-                    # Send the base cash to all survivors first
+                    # Survivors stay in self.raid (also used for bidding checks).
                     users = [user.id for user, p_type in self.raid.keys() if p_type == "user"]
-                    await self.bot.pool.execute(
-                        'UPDATE profile SET "money"="money"+$1 WHERE "user"=ANY($2);',
-                        base_cash,
-                        users
+                    reward_split = await self._distribute_spawn_cash_rewards(
+                        all_participant_ids=all_participant_ids,
+                        survivor_ids=users,
+                        cash_pool=cash_pool,
+                    )
+                    survivors = reward_split["survivor_count"]
+                    participant_count = reward_split["participant_count"]
+                    participant_cash = reward_split["participant_cash"]
+                    survivor_bonus_cash = reward_split["survivor_bonus_cash"]
+                    base_cash = reward_split["survivor_total_cash"]
+                    cash_pool_total = reward_split["cash_pool_total"]
+                    dragon_coin_bonus = self._roll_raid_dragon_coin_bonus()
+                    dragon_coins_awarded = await self._award_raid_dragon_coins(
+                        users, dragon_coin_bonus
                     )
 
                     # Process each survivor for potential Raider bonus
@@ -1392,7 +2620,8 @@ class Raid(commands.Cog):
                                         channel = self.bot.get_channel(channel_id)
                                         if channel:
                                             await channel.send(
-                                                f"💰 {user.mention}'s Raider abilities earned them an extra ${bonus_amount:,.0f}!"
+                                                f"💰 {user.mention}'s Raider abilities earned them an extra ${bonus_amount:,.0f}!",
+                                                allowed_mentions=discord.AllowedMentions.none(),
                                             )
 
                     # Send the final message to all channels
@@ -1400,12 +2629,20 @@ class Raid(commands.Cog):
                         channel = self.bot.get_channel(channel_id)
                         if channel:
                             await channel.send(
-                                f"**Gave ${base_cash:,.0f} of Ragnarok's ${cash_pool:,.0f} drop to all survivors!**")
+                                f"**Distributed Ragnarok's ${cash_pool_total:,.0f} drop (30/70): "
+                                f"${participant_cash:,.0f} to each participant, plus ${survivor_bonus_cash:,.0f} extra to each survivor.**"
+                            )
+                            if dragon_coins_awarded:
+                                await channel.send(
+                                    f"🐉 Bonus drop! All surviving raiders also received **{dragon_coin_bonus} <:dragoncoin:1404860657366728788> Dragon Coins**."
+                                )
 
                         summary_text = (
                             f"Emoji_here Defeated in: **{summary_duration}**\n"
                             f"{summary_crate}\n"
-                            f"Emoji_here Payout per survivor: **${base_cash:,.0f}**\n"
+                            f"Emoji_here Payout per participant: **${participant_cash:,.0f}** ({participant_count} participants)\n"
+                            f"Emoji_here Extra per survivor: **${survivor_bonus_cash:,.0f}**\n"
+                            f"Emoji_here Total per survivor: **${base_cash:,.0f}**\n"
                             f"Emoji_here Survivors: **{survivors} and {bots} of placeholders forces**"
                         )
 
@@ -1418,7 +2655,7 @@ class Raid(commands.Cog):
                             "The raid did not manage to kill Ragnarok within an hour... He disappeared!")
                         await m.add_reaction("\U0001F1EB")
                         summary = (
-                            "The raid did not manage to kill Ragnarok within an hour... He disappeared with **{self.boss['hp']:,.3f}** health remaining."
+                            f"The raid did not manage to kill Ragnarok within an hour... He disappeared with **{self.boss['hp']:,.2f}** health remaining."
                         )
 
             if users:  # Check if the list is not empty
@@ -1426,6 +2663,20 @@ class Raid(commands.Cog):
                 success = True
                 self.bot.dispatch("raid_completion", ctx, success, random_user_id)
                 # Now you can use random_user_id for whatever you need
+
+            raid_success = not (self.boss["hp"] > 1)
+            await self._post_raid_mvp(ctx.channel, raid_mvp, raid_success)
+
+            # Favor War: everyone who joined earns favor for their god (wins pay extra)
+            try:
+                self.bot.dispatch(
+                    "raid_favor",
+                    ctx,
+                    [u.id for u in self.joined],
+                    raid_success,
+                )
+            except Exception:
+                pass
             
             await asyncio.sleep(30)
             await ctx.channel.set_permissions(ctx.guild.default_role, overwrite=self.deny_sending)
@@ -1440,7 +2691,7 @@ class Raid(commands.Cog):
                 if self.bot.config.bot.is_beta:
                     summary = (
                         "**Raid result:**\n"
-                        f"Emoji_here Health: **{self.boss['initial_hp']:,.0f}**\n"
+                        f"Emoji_here Health: **{self.boss['initial_hp']:,.2f}**\n"
                         f"{summary_text}\n"
                         f"Emoji_here Raiders joined: **{raiders_joined}**"
                     )
@@ -1448,8 +2699,18 @@ class Raid(commands.Cog):
                         "Emoji_here",
                         ":small_blue_diamond:" if self.boss["hp"] < 1 else ":vibration_mode:"
                     )
-            summary_channel = self.bot.get_channel(1199299514490683392)
-            summary_msg = await summary_channel.send(summary)
+            summary_channel = self.bot.get_channel(self.summary_channel_id)
+            if summary_channel and 'summary' in locals():
+                if self.boss["hp"] < 1 and self.bot.config.bot.is_beta:
+                    await self._send_raid_alert(
+                        summary_channel,
+                        ctx.guild,
+                        "Ragnarok has been defeated!",
+                    )
+                summary_msg = await summary_channel.send(
+                    summary,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
 
                 #await ctx.send("attempting to clear keys...")
             try:
@@ -1459,10 +2720,12 @@ class Raid(commands.Cog):
             self.raid_preparation = False
             self.boss = None
         except Exception as e:
-            import traceback
-            error_message = f"Error occurred: {e}\n"
-            error_message += traceback.format_exc()
-            await ctx.send(error_message)
+            error_message = (
+                f"Ragnarok raid failed with {type(e).__name__}: {e}\n\n"
+                f"{traceback.format_exc()}"
+            ).replace("```", "'''")
+            for start in range(0, len(error_message), 1900):
+                await ctx.send(f"```py\n{error_message[start:start + 1900]}\n```")
             print(error_message)
 
     async def get_random_user_info(self, ctx):
@@ -1507,7 +2770,7 @@ class Raid(commands.Cog):
                 # Construct the bot player entry and add it to the raid dictionary
 
                 bot_entry = (user_info["display_name"], "bot")
-                self.raid[bot_entry] = {
+                self.raid[bot_entry] = self._normalize_raid_combatant({
                     "user": user_info["user_id"],
                     "hp": Decimal(str(round(randomm.uniform(50.0, 400.0), 2))).quantize(Decimal("0.00"),
                                                                                         rounding=ROUND_HALF_UP),
@@ -1515,7 +2778,7 @@ class Raid(commands.Cog):
                                                                                            rounding=ROUND_HALF_UP),
                     "damage": Decimal(str(round(randomm.uniform(100.0, 250.0), 2))).quantize(Decimal("0.00"),
                                                                                              rounding=ROUND_HALF_UP),
-                }
+                })
             # Construct the summary for reinforcements
             reinforcement_summary = ', '.join([f"{count} {bot}" for bot, count in bot_counts.items()])
 
@@ -1536,15 +2799,15 @@ class Raid(commands.Cog):
 
             if random_number == 2:
                 embed = Embed(
-                    title="Astraea's Grace...",
+                    title="Elysia's Grace...",
                     description=(
-                        "As the benevolent aura of Goddess Astraea permeates the air, a radiant light bathes the battlefield. "
+                        "As the benevolent aura of Goddess Elysia permeates the air, a radiant light bathes the battlefield. "
                         f"From the celestial realm, {quantity} champions descended. "
-                        "Ragnarok's challenges now face the divine intervention of Astraea."),
+                        "Ragnarok's challenges now face the divine intervention of Elysia."),
                     color=0xffd700  # Setting the color to gold to match the theme for a benevolent goddess
                 )
                 embed.set_thumbnail(
-                    url="https://i.ibb.co/TTh7rZJ/image.png")  # Replace with an image URL representing Astraea's grace
+                    url="https://i.ibb.co/TTh7rZJ/image.png")  # Replace with an image URL representing Elysia's grace
 
                 await ctx.send(embed=embed)
 
@@ -1578,7 +2841,29 @@ class Raid(commands.Cog):
         :return: The player's chosen option or the default action based on the role if they don't respond in time.
         """
 
-        view = DecisionView(player, options)
+        default_actions = {
+            "follower": "Chant",
+            "champion": "Smite",
+            "priest": "Bless"
+        }
+
+        # Densetsu is a bot account, and Discord forbids bot-to-bot DMs, so it
+        # can never be prompted. It joins only as a follower and chants every
+        # turn, which is exactly the follower default.
+        if getattr(player, "id", None) == DENSETSU_USER_ID:
+            return default_actions.get(role, "Chant"), False
+
+        # Check if player is AI
+        if isinstance(player, (ShadowChampionAI, ShadowPriestAI)):
+            # AI players don't need DMs, just return a default action
+            return default_actions[role], False
+        decision_timeouts = {
+            "follower": 30,
+            "champion": 90,
+            "priest": 90,
+        }
+        timeout = decision_timeouts.get(role, 60)
+        view = DecisionView(player, options, timeout=timeout)
 
         if embed:
             message = await player.send(embed=embed, view=view)
@@ -1588,7 +2873,7 @@ class Raid(commands.Cog):
         await view.wait()
 
         if view.value:
-            return view.value
+            return view.value, False
         else:
             # Return default action based on role in case of timeout
             default_actions = {
@@ -1597,41 +2882,74 @@ class Raid(commands.Cog):
                 "priest": "Bless"
             }
             await player.send(f"You took too long to decide. Defaulting to '{default_actions[role]}'.")
-            return default_actions[role]
+            return default_actions[role], True
 
-    @is_god()
-    @raid_free()
+    @is_gm()
     @commands.command(hidden=True, brief=_("Start an Infernal Ritual raid"))
     async def evilspawn(self, ctx):
         """[Evil God only] Starts a raid."""
+        directive_listener_task = None
+        ritual_active = False
 
         try:
-            await self.set_raid_timer()
+            # Create single join view with both options
+            class DualJoinView(View):
+                def __init__(self):
+                    super().__init__(timeout=60 * 15)
+                    self.follower_joined = []
+                    self.leader_joined = []
+                    
+                @discord.ui.button(label="Join as Follower Only", style=ButtonStyle.secondary)
+                async def follower_button(self, interaction: discord.Interaction, button: Button):
+                    if interaction.user not in self.follower_joined and interaction.user not in self.leader_joined:
+                        self.follower_joined.append(interaction.user)
+                        await interaction.response.send_message(_("You have joined as a follower."), ephemeral=True)
+                    else:
+                        await interaction.response.send_message(_("You have already joined the ritual."), ephemeral=True)
+                
+                @discord.ui.button(label="Join as Champion/Priest", style=ButtonStyle.primary)
+                async def leader_button(self, interaction: discord.Interaction, button: Button):
+                    if interaction.user not in self.follower_joined and interaction.user not in self.leader_joined:
+                        self.leader_joined.append(interaction.user)
+                        await interaction.response.send_message(_("You have joined as a potential leader."), ephemeral=True)
+                    else:
+                        await interaction.response.send_message(_("You have already joined the ritual."), ephemeral=True)
 
-            view = JoinView(
-                Button(style=ButtonStyle.primary, label="Join the dark ritual!"),
-                message=_("You have joined the ritual."),
-                timeout=60 * 15,
-            )
+            dual_view = DualJoinView()
 
             embed = Embed(
                 title="🌑 The Eclipse Begins",
                 description="""
             The moon turns blood red as a sacred temple emerges from the shadows, emanating an aura of dread. The dark followers are summoned to perform the Infernal Ritual to awaken an ancient evil.
 
+            **Choose your role in this unholy ceremony:**
+            • **Join as Follower Only** - Support the ritual from the shadows
+            • **Join as Champion/Priest** - Lead the ritual and face the Guardian directly
+            
             **Only the most devoted followers of Sepulchure may partake in this unholy ceremony.**
                 """,
                 color=0x550000  # Dark red color
             )
 
-            # Use an image URL for dramatic effect
-            image_url = "https://i.ibb.co/Yf6q0K4/OIG-15.png"
-            embed.set_image(url=image_url)
+            embed.set_image(url=EVILSPAWN_INTRO_IMAGE_URL)
 
-            await ctx.send(embed=embed, view=view)
+            await ctx.send(embed=embed, view=dual_view)
 
             await ctx.send(
                 "Prepare yourselves. The ritual will commence soon. This is **BETA** and may require balancing.")
+
+            # Densetsu cannot click the join buttons, so when this specific host
+            # opens the ritual it asks them in the channel for a follower slot
+            # and joins only if they answer. This runs alongside the countdown.
+            densetsu_request = None
+            if ctx.author.id == EVIL_RITUAL_HOST_USER_ID:
+                ai_cog = self.bot.get_cog("AIPlayer")
+                if ai_cog is not None and hasattr(
+                    ai_cog, "offer_evil_ritual_follower"
+                ):
+                    densetsu_request = asyncio.create_task(
+                        ai_cog.offer_evil_ritual_follower(ctx, dual_view)
+                    )
 
             # Wait for the ritual to start
             await asyncio.sleep(300)
@@ -1648,7 +2966,19 @@ class Raid(commands.Cog):
             await ctx.send("**Darkness engulfs you... 10 seconds.**")
             await asyncio.sleep(10)
 
-            view.stop()
+            # Close Densetsu's request before roll call so a late confirmation
+            # can never mutate the participant list mid-count. Whether it joined
+            # or not, the ritual proceeds normally.
+            if densetsu_request is not None:
+                densetsu_request.cancel()
+                try:
+                    await densetsu_request
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    traceback.print_exc()
+
+            dual_view.stop()
 
             await ctx.send(
                 "**💀 The ritual begins! The Guardian awakens from its slumber... 💀**"
@@ -1662,10 +2992,20 @@ class Raid(commands.Cog):
                 space = '⬜'
                 num_of_arrows = int(progress * bar_length)
                 return arrow * num_of_arrows + space * (bar_length - num_of_arrows)
+
+            async def send_ritual_failure(description):
+                failure_embed = discord.Embed(
+                    title="💔 The Ritual Fails 💔",
+                    description=description,
+                    color=0x550000,
+                )
+                failure_embed.set_image(url=EVILSPAWN_DEFEAT_IMAGE_URL)
+                await ctx.send(embed=failure_embed)
+
             HowMany = 0
 
             async with self.bot.pool.acquire() as conn:
-                for u in view.joined:
+                for u in dual_view.follower_joined + dual_view.leader_joined:
                     if (
                             not (
                                     profile := await conn.fetchrow(
@@ -1701,7 +3041,8 @@ class Raid(commands.Cog):
             await ctx.send("**Gathering the faithful... checking dm eligibility this may take awhile**")
             embed_message_id = None
             async with self.bot.pool.acquire() as conn:
-                participants = [u for u in view.joined if await is_valid_participant(u, conn)]
+                all_participants = dual_view.follower_joined + dual_view.leader_joined
+                participants = [u for u in all_participants if await is_valid_participant(u, conn)]
 
             if not participants:
                 await ctx.send("No valid participants joined the ritual.")
@@ -1709,6 +3050,10 @@ class Raid(commands.Cog):
                 return
 
             for participant in participants.copy():
+                # Densetsu takes its turns over the AI bridge and cannot be
+                # DM'd by another bot, so the DM probe would evict it.
+                if getattr(participant, "id", None) == DENSETSU_USER_ID:
+                    continue
                 try:
                     await participant.send("You have joined the ritual! Stay tuned for more info.")
                     await asyncio.sleep(1)
@@ -1728,31 +3073,62 @@ class Raid(commands.Cog):
 
             await ctx.send(content=f"**{HowMany} followers joined!**")
 
-            champion = random.choice(participants)
-            participants.remove(champion)
+            # Separate participants by join type
+            leader_participants = [u for u in dual_view.leader_joined if u in participants]
+            follower_participants = [u for u in dual_view.follower_joined if u in participants]
 
-            priest = random.choice(participants) if participants else None
-            if priest:
-                participants.remove(priest)
+            # Role assignment with AI fallback
+            if not leader_participants:
+                # No leaders volunteered - create Shadow entities
+                shadow_champion = ShadowChampionAI()
+                shadow_priest = ShadowPriestAI()
+                champion = shadow_champion
+                priest = shadow_priest
+                followers = participants
+                
+                # Announce Shadow entities
+                shadow_announcement = discord.Embed(
+                    title="👻 Shadow Entities Manifest 👻",
+                    description="""
+                No mortals dared to lead the ritual. From the depths of Sepulchure's will, 
+                dark entities materialize to guide the faithful through this unholy ceremony.
+                
+                **The Shadow Champion and Shadow Priest have emerged from the void.**
+                    """,
+                    color=0x8B0000
+                )
+                await ctx.send(embed=shadow_announcement)
+                
+            else:
+                # Normal role assignment from leader pool
+                champion = random.choice(leader_participants)
+                leader_participants.remove(champion)
 
-            followers = participants
+                priest = (
+                    random.choice(leader_participants)
+                    if leader_participants
+                    else ShadowPriestAI()
+                )
+                if leader_participants and priest:
+                    leader_participants.remove(priest)
+
+                # All remaining participants become followers
+                followers = follower_participants + leader_participants
 
             announcement_color = 0x550000
             champion_embed = discord.Embed(
                 title="👑 The Chosen Champion 👑",
-                description=f"{champion.mention} has been marked by darkness as the Champion!",
+                description=f"{champion.mention if hasattr(champion, 'mention') else 'Shadow Champion'} has been marked by darkness as the Champion!",
                 color=announcement_color
             )
             await ctx.send(embed=champion_embed)
             if priest:
                 priest_embed = discord.Embed(
                     title="🔮 The Dark Priest 🔮",
-                    description=f"{priest.mention} has embraced the shadows as the Priest!",
+                    description=f"{priest.mention if hasattr(priest, 'mention') else 'Shadow Priest'} has embraced the shadows as the Priest!",
                     color=announcement_color
                 )
                 await ctx.send(embed=priest_embed)
-            else:
-                await ctx.send("No Priest was chosen. The ritual will be more perilous without one.")
 
             # Generate a list of follower mentions
             if followers:
@@ -1842,18 +3218,242 @@ class Raid(commands.Cog):
                                         value="Focus your power to significantly boost ritual progress.",
                                         inline=False)
 
+            role_help_embeds = {
+                "champion": champion_embed_help,
+                "priest": priest_embed_help,
+            }
+            role_missed_turns = {"champion": 0, "priest": 0}
+            pending_ai_directives = {"champion": None, "priest": None}
+            demoted_role_controllers = {"champion": None, "priest": None}
+            ritual_active = True
+            champion_action_aliases = {
+                "smite": "Smite",
+                "heal": "Heal",
+                "haste": "Haste",
+                "defend": "Defend",
+                "sacrifice": "Sacrifice",
+            }
+            priest_action_aliases = {
+                "bless": "Bless",
+                "barrier": "Barrier",
+                "curse": "Curse",
+                "revitalize": "Revitalize",
+                "channel": "Channel",
+            }
+
+            def is_ai_actor(actor):
+                # Densetsu counts as an AI actor so takeover pressure never
+                # tries to promote it out of the follower role it asked for.
+                if getattr(actor, "id", None) == DENSETSU_USER_ID:
+                    return True
+                return isinstance(actor, (ShadowChampionAI, ShadowPriestAI))
+
+            def get_role_actor(role_name):
+                if role_name == "champion":
+                    return champion
+                return priest
+
+            def role_title(role_name):
+                return "Champion" if role_name == "champion" else "Priest"
+
+            async def send_role_help(user, role_name):
+                if is_ai_actor(user):
+                    return
+                await user.send(embed=role_help_embeds[role_name])
+
+            async def send_follower_help(user):
+                if is_ai_actor(user):
+                    return
+                await user.send(embed=followers_embed_help)
+
+            def get_human_followers():
+                return [follower for follower in followers if not is_ai_actor(follower)]
+
+            def get_authorized_ai_controllers(role_name):
+                counterpart = priest if role_name == "champion" else champion
+                controllers = []
+                if counterpart is not None and not is_ai_actor(counterpart):
+                    controllers.append(counterpart)
+                demoted = demoted_role_controllers.get(role_name)
+                if demoted is not None and not is_ai_actor(demoted):
+                    controllers.append(demoted)
+
+                deduped = []
+                seen_ids = set()
+                for controller in controllers:
+                    controller_id = getattr(controller, "id", None)
+                    if controller_id is None or controller_id in seen_ids:
+                        continue
+                    seen_ids.add(controller_id)
+                    deduped.append(controller)
+                return deduped
+
+            async def acknowledge_ai_directive(role_name, controller, action):
+                spirit_name = "Shadow Champion" if role_name == "champion" else "Shadow Priest"
+                await ctx.send(
+                    f"👻 **{spirit_name} turns toward {controller.mention}.** "
+                    f"\"Your will reaches the void. On my next turn, I shall {action.lower()}.\""
+                )
+
+            async def resolve_ai_decision(role_name, ai_actor, valid_actions, fallback_decision):
+                directive = pending_ai_directives.get(role_name)
+                if directive is not None:
+                    pending_ai_directives[role_name] = None
+                    requested_action = directive["decision"]
+                    controller = directive["controller"]
+                    if requested_action in valid_actions:
+                        await ctx.send(
+                            f"👻 **{ai_actor.mention} answers {controller.mention}.** "
+                            f"\"As commanded, I will {requested_action.lower()}.\""
+                        )
+                        return requested_action
+                    await ctx.send(
+                        f"👻 **{ai_actor.mention} answers {controller.mention}.** "
+                        f"\"That path is closed to me right now. I will choose another course.\""
+                    )
+                return fallback_decision
+
+            async def listen_for_ritual_directives():
+                while ritual_active:
+                    try:
+                        message = await self.bot.wait_for(
+                            "message",
+                            timeout=1,
+                            check=lambda m: (
+                                m.channel.id == ctx.channel.id and not m.author.bot
+                            ),
+                        )
+                    except asyncio.TimeoutError:
+                        continue
+
+                    normalized = re.sub(r"\s+", " ", message.content.strip().casefold())
+                    match = re.fullmatch(r"(priest|champ|champion)\s+([a-z]+)", normalized)
+                    if match is None:
+                        continue
+
+                    target_token, action_token = match.groups()
+                    target_role = "priest" if target_token == "priest" else "champion"
+                    target_actor = get_role_actor(target_role)
+                    if target_actor is None or not is_ai_actor(target_actor):
+                        continue
+
+                    controllers = {
+                        getattr(controller, "id", None): controller
+                        for controller in get_authorized_ai_controllers(target_role)
+                    }
+                    controller = controllers.get(message.author.id)
+                    if controller is None:
+                        continue
+
+                    aliases = (
+                        priest_action_aliases
+                        if target_role == "priest"
+                        else champion_action_aliases
+                    )
+                    action = aliases.get(action_token)
+                    if action is None:
+                        await ctx.send(
+                            f"{message.author.mention}, that is not a valid {role_title(target_role).lower()} directive."
+                        )
+                        continue
+
+                    pending_ai_directives[target_role] = {
+                        "decision": action,
+                        "controller": controller,
+                    }
+                    await acknowledge_ai_directive(target_role, controller, action)
+
+            async def handle_role_takeover(role_name):
+                nonlocal champion, priest
+
+                current_actor = get_role_actor(role_name)
+                if current_actor is None or is_ai_actor(current_actor):
+                    role_missed_turns[role_name] = 0
+                    return
+
+                eligible_followers = get_human_followers()
+                claimed_by = None
+                if eligible_followers:
+                    takeover_embed = discord.Embed(
+                        title=f"⚠️ {role_title(role_name)} Falters ⚠️",
+                        description=(
+                            f"{current_actor.mention} has missed two consecutive turns and the ritual needs a new "
+                            f"{role_title(role_name)}. A follower has 60 seconds to claim the mantle."
+                        ),
+                        color=discord.Color.dark_red(),
+                    )
+                    takeover_view = RitualRoleTakeoverView(
+                        [follower.id for follower in eligible_followers],
+                        role_title(role_name),
+                        timeout=60,
+                    )
+                    takeover_message = await ctx.send(embed=takeover_embed, view=takeover_view)
+                    await takeover_view.wait()
+                    claimed_by = takeover_view.claimed_by
+                    try:
+                        await takeover_message.edit(view=None)
+                    except (discord.NotFound, discord.HTTPException):
+                        pass
+
+                if current_actor not in followers:
+                    followers.append(current_actor)
+                await current_actor.send(
+                    f"The ritual stripped you of the mantle of {role_title(role_name)} after two silent turns."
+                )
+                await send_follower_help(current_actor)
+
+                if claimed_by is not None:
+                    replacement = discord.utils.find(
+                        lambda follower: follower.id == claimed_by.id,
+                        eligible_followers,
+                    )
+                    if replacement is not None and replacement in followers:
+                        followers.remove(replacement)
+                    demoted_role_controllers[role_name] = None
+                    if role_name == "champion":
+                        champion = replacement
+                    else:
+                        priest = replacement
+                    await ctx.send(
+                        f"🔥 **{replacement.mention} steps from the faithful and takes up the mantle of {role_title(role_name)}.**"
+                    )
+                    await send_role_help(replacement, role_name)
+                else:
+                    demoted_role_controllers[role_name] = current_actor
+                    replacement = (
+                        ShadowChampionAI()
+                        if role_name == "champion"
+                        else ShadowPriestAI()
+                    )
+                    if role_name == "champion":
+                        champion = replacement
+                    else:
+                        priest = replacement
+                    await ctx.send(
+                        f"👻 **No follower seized the mantle of {role_title(role_name)}. "
+                        f"Sepulchure's will shapes a {replacement.mention} from shadow to continue the ritual.**"
+                    )
+
+                pending_ai_directives[role_name] = None
+                role_missed_turns[role_name] = 0
+
+            directive_listener_task = asyncio.create_task(listen_for_ritual_directives())
+
             # Send these embeds to the main chat or to the respective players.
             await ctx.send(embed=ritual_embed_help)
 
-            # DM the champion the instructions
-            await champion.send(embed=champion_embed_help)
+            # DM the champion the instructions (only if human)
+            if not isinstance(champion, ShadowChampionAI):
+                await champion.send(embed=champion_embed_help)
 
-            # DM the priest the instructions if they exist
-            if priest:
+            # DM the priest the instructions if they exist (only if human)
+            if priest and not isinstance(priest, ShadowPriestAI):
                 await priest.send(embed=priest_embed_help)
 
             # DM the followers the instructions
             for follower in followers:
+                if is_ai_actor(follower):
+                    continue
                 await follower.send(embed=followers_embed_help)
 
             # Turn-based logic
@@ -1885,18 +3485,21 @@ class Raid(commands.Cog):
                 1: {
                     "name": "The Sentinel",
                     "description": "A towering figure emerges, cloaked in ancient armor. Its eyes glow with a cold light.",
+                    "image_url": EVILSPAWN_GUARDIAN_PHASE_IMAGES["The Sentinel"],
                     "abilities": ["strike", "shield", "purify"],
                     "progress_threshold": 10  # Ritual progress percentage to move to next phase
                 },
                 2: {
                     "name": "The Corrupted",
                     "description": "The Guardian's form twists and darkens, tendrils of shadow emanate from its body.",
+                    "image_url": EVILSPAWN_GUARDIAN_PHASE_IMAGES["The Corrupted"],
                     "abilities": ["strike", "corrupting_blast", "shadow_shield", "purify", "fear_aura"],
                     "progress_threshold": 30
                 },
                 3: {
                     "name": "The Abyssal Horror",
                     "description": "With a deafening roar, the Guardian transforms into a nightmarish entity from the abyss. Its mere presence instills terror.",
+                    "image_url": EVILSPAWN_GUARDIAN_PHASE_IMAGES["The Abyssal Horror"],
                     "abilities": ["obliterate", "dark_aegis", "soul_drain", "apocalyptic_roar"],
                     "progress_threshold": 60  # Final phase; beyond ritual completion
                 }
@@ -1947,83 +3550,144 @@ class Raid(commands.Cog):
                 description=phase_info["description"],
                 color=0x550000
             )
+            guardian_appearance_embed.set_image(url=phase_info["image_url"])
             await ctx.send(embed=guardian_appearance_embed)
 
             for turn in range(TOTAL_TURNS):
 
                 if champion_stats["hp"] <= 0:
-                    await ctx.send(f"💔 {champion.mention} has fallen. The ritual fails as darkness recedes...")
+                    ritual_active = False
+                    if directive_listener_task is not None:
+                        directive_listener_task.cancel()
+                    await send_ritual_failure(
+                        f"{champion.mention} has fallen. The ritual fails as darkness recedes..."
+                    )
                     await self.clear_raid_timer()
                     return
 
                 if progress >= 100:
                     break
 
+                # Initialize follower_combined_decision at the start of each turn
+                follower_combined_decision = {
+                    "Boost Ritual": 0,
+                    "Protect Champion": 0,
+                    "Empower Priest": 0,
+                    "Sabotage Guardian": 0,
+                    "Chant": 0,
+                    "Heal Champion": 0
+                }
+                priest_takeover_pending = False
+                champion_takeover_pending = False
+
                 # Priest's turn
                 if priest:
-                    decision_embed = discord.Embed(
-                        title="🔮 Priest's Turn 🔮",
-                        description=f"{priest.mention}, your arcane knowledge is needed. Choose your action:",
-                        color=discord.Color.dark_purple()
-                    )
-
-                    # Priest abilities with mana costs
-                    priest_abilities = {
-                        "Bless": {"description": "Boost the Champion's power", "mana_cost": 20},
-                        "Barrier": {"description": "Protect the Champion", "mana_cost": 30},
-                        "Curse": {"description": "Weaken the Guardian", "mana_cost": 25},
-                        "Revitalize": {"description": "Heal the Champion", "mana_cost": 20},
-                        "Channel": {"description": "Significantly increase ritual progress", "mana_cost": 15}
-                    }
-
-                    for ability, info in priest_abilities.items():
-                        if priest_stats["mana"] >= info["mana_cost"]:
-                            decision_embed.add_field(name=f"{ability} (Cost: {info['mana_cost']} Mana)",
-                                                     value=info["description"], inline=False)
-                    decision_embed.set_footer(
-                        text=f"Mana: {priest_stats['mana']}/{priest_stats['max_mana']}")
-
-                    await ctx.send(f"It's {priest.mention}'s turn to make a decision, check DMs!")
-
-                    valid_priest_options = [ability for ability, info in priest_abilities.items()
-                                            if priest_stats["mana"] >= info["mana_cost"]]
-
-                    if not valid_priest_options:
-                        await ctx.send(f"{priest.mention} has no mana left to perform any action.")
-                        priest_decision = None
+                    priest_used_default = False
+                    # Check if priest is AI or human
+                    if isinstance(priest, ShadowPriestAI):
+                        # AI Priest decision
+                        await ctx.send(f"🔮 **{priest.mention} contemplates the mystical energies...**")
+                        fallback_priest_decision = await priest.make_decision(
+                            priest_stats,
+                            champion_stats,
+                            guardians_stats,
+                            progress,
+                            follower_combined_decision,
+                        )
+                        priest_decision = await resolve_ai_decision(
+                            "priest",
+                            priest,
+                            priest.get_valid_actions(priest_stats),
+                            fallback_priest_decision,
+                        )
+                        await priest.announce_decision(ctx, priest_decision, priest_stats, champion_stats, guardians_stats, progress)
+                        role_missed_turns["priest"] = 0
                     else:
-                        try:
-                            priest_decision = await asyncio.wait_for(
-                                self.get_player_decision(
-                                    player=priest,
-                                    options=valid_priest_options,
-                                    role="priest",
-                                    embed=decision_embed
-                                ),
-                                timeout=TIMEOUT
-                            )
-                            # Deduct mana cost
-                            priest_stats["mana"] -= priest_abilities[priest_decision]["mana_cost"]
-                            if priest_decision == "Bless":
-                                champion_stats["damage"] += 200 * priest_stats["healing_boost"]
-                                await ctx.send(f"✨ The Priest blesses the Champion, increasing their power!")
-                            elif priest_decision == "Barrier":
-                                champion_stats["barrier_active"] = True
-                                await ctx.send(f"🛡️ A mystical barrier surrounds the Champion!")
-                            elif priest_decision == "Curse":
-                                guardians_stats["cursed"] = True
-                                await ctx.send(f"🔒 The Priest casts a curse on the Guardian, weakening it!")
-                            elif priest_decision == "Revitalize":
-                                heal_amount = 300 * priest_stats["healing_boost"]
-                                champion_stats["hp"] = min(
-                                    champion_stats["hp"] + heal_amount, champion_stats["max_hp"])
-                                await ctx.send(f"❤️ The Priest heals the Champion for {int(heal_amount)} HP!")
-                            elif priest_decision == "Channel":
-                                progress += 5
-                                await ctx.send(f"🌟 The Priest channels energy, advancing the ritual!")
-                        except asyncio.TimeoutError:
-                            await ctx.send(f"{priest.mention} took too long! Moving on...")
+                        # Human Priest decision
+                        decision_embed = discord.Embed(
+                            title="🔮 Priest's Turn 🔮",
+                            description=f"{priest.mention}, your arcane knowledge is needed. Choose your action:",
+                            color=discord.Color.dark_purple()
+                        )
+
+                        # Priest abilities with mana costs
+                        priest_abilities = {
+                            "Bless": {"description": "Boost the Champion's power", "mana_cost": 20},
+                            "Barrier": {"description": "Protect the Champion", "mana_cost": 30},
+                            "Curse": {"description": "Weaken the Guardian", "mana_cost": 25},
+                            "Revitalize": {"description": "Heal the Champion", "mana_cost": 20},
+                            "Channel": {"description": "Significantly increase ritual progress", "mana_cost": 15}
+                        }
+
+                        for ability, info in priest_abilities.items():
+                            if priest_stats["mana"] >= info["mana_cost"]:
+                                decision_embed.add_field(name=f"{ability} (Cost: {info['mana_cost']} Mana)",
+                                                         value=info["description"], inline=False)
+                        decision_embed.set_footer(
+                            text=f"Mana: {priest_stats['mana']}/{priest_stats['max_mana']}")
+
+                        await ctx.send(f"It's {priest.mention}'s turn to make a decision, check DMs!")
+
+                        valid_priest_options = [ability for ability, info in priest_abilities.items()
+                                                if priest_stats["mana"] >= info["mana_cost"]]
+
+                        if not valid_priest_options:
+                            await ctx.send(f"{priest.mention} has no mana left to perform any action.")
                             priest_decision = None
+                            role_missed_turns["priest"] = 0
+                        else:
+                            try:
+                                priest_decision, priest_used_default = await asyncio.wait_for(
+                                    self.get_player_decision(
+                                        player=priest,
+                                        options=valid_priest_options,
+                                        role="priest",
+                                        embed=decision_embed
+                                    ),
+                                    timeout=TIMEOUT
+                                )
+                            except asyncio.TimeoutError:
+                                await ctx.send(f"{priest.mention} took too long! Moving on...")
+                                priest_decision = "Bless"
+                                priest_used_default = True
+
+                            if priest_used_default:
+                                role_missed_turns["priest"] += 1
+                                priest_takeover_pending = (
+                                    role_missed_turns["priest"] >= 2
+                                )
+                            else:
+                                role_missed_turns["priest"] = 0
+
+                    # Execute priest decision
+                    if priest_decision:
+                        # Deduct mana cost
+                        priest_abilities = {
+                            "Bless": {"mana_cost": 20},
+                            "Barrier": {"mana_cost": 30},
+                            "Curse": {"mana_cost": 25},
+                            "Revitalize": {"mana_cost": 20},
+                            "Channel": {"mana_cost": 15}
+                        }
+                        priest_stats["mana"] -= priest_abilities[priest_decision]["mana_cost"]
+                        
+                        if priest_decision == "Bless":
+                            champion_stats["damage"] += 200 * priest_stats["healing_boost"]
+                            await ctx.send(f"✨ The Priest blesses the Champion, increasing their power!")
+                        elif priest_decision == "Barrier":
+                            champion_stats["barrier_active"] = True
+                            await ctx.send(f"🛡️ A mystical barrier surrounds the Champion!")
+                        elif priest_decision == "Curse":
+                            guardians_stats["cursed"] = True
+                            await ctx.send(f"🔒 The Priest casts a curse on the Guardian, weakening it!")
+                        elif priest_decision == "Revitalize":
+                            heal_amount = 300 * priest_stats["healing_boost"]
+                            champion_stats["hp"] = min(
+                                champion_stats["hp"] + heal_amount, champion_stats["max_hp"])
+                            await ctx.send(f"❤️ The Priest heals the Champion for {int(heal_amount)} HP!")
+                        elif priest_decision == "Channel":
+                            progress += 10
+                            await ctx.send(f"🌟 The Priest channels energy, advancing the ritual!")
                 else:
                     priest_decision = None
 
@@ -2052,6 +3716,7 @@ class Raid(commands.Cog):
                                 description=phase_info["description"],
                                 color=0x8B0000  # Dark red color
                             )
+                            phase_embed.set_image(url=phase_info["image_url"])
                             await ctx.send(embed=phase_embed)
                     else:
                         await ctx.send("💀 The Guardian is incapacitated and cannot act this turn.")
@@ -2073,6 +3738,7 @@ class Raid(commands.Cog):
                                 description=phase_info_next["description"],
                                 color=0x8B0000
                             )
+                            phase_embed.set_image(url=phase_info_next["image_url"])
                             await ctx.send(embed=phase_embed)
                             # Update phase_info to the new phase
                             phase_info = phase_info_next
@@ -2207,7 +3873,7 @@ class Raid(commands.Cog):
 
                 # Separate function to obtain each follower's decision
                 async def get_follower_decision(follower):
-                    decision = await self.get_player_decision(
+                    decision, _ = await self.get_player_decision(
                         player=follower,
                         options=list(follower_combined_decision.keys()),
                         role="follower",
@@ -2257,77 +3923,103 @@ class Raid(commands.Cog):
                 # Champion's decisions
                 abilities_msg = "\n".join(f"{k}: {v}" for k, v in CHAMPION_ABILITIES.items())
 
-                champion_embed = discord.Embed(
-                    title="⚔️ Champion's Turn ⚔️",
-                    description=f"{champion.mention}, choose your action:",
-                    color=discord.Color.red()
-                )
-
-                # Add abilities with emojis
-                champion_embed.add_field(name="⚡ Smite", value="Deal damage to the Guardian", inline=True)
-                champion_embed.add_field(name="❤️ Heal", value="Recover some of your lost HP", inline=True)
-                haste_description = "Boost the ritual's progress"
-                if champion_stats["haste_cooldown"] > 0:
-                    haste_description += f" (Cooldown: {champion_stats['haste_cooldown']} turns)"
-                champion_embed.add_field(name="🌀 Haste", value=haste_description, inline=True)
-                champion_embed.add_field(name="🛡️ Defend", value="Reduce incoming damage next turn", inline=True)
-                champion_embed.add_field(name="💔 Sacrifice", value="Advance the ritual by 20% at the cost of  400 HP",
-                                         inline=True)
-
-                # Add a footer to the embed
-                champion_embed.set_footer(text="The fate of the ritual rests upon you.")
-
-                await ctx.send(f"It's {champion.mention}'s turn to make a decision, check DMs!")
-
-                valid_actions = ["Smite", "Heal", "Defend", "Sacrifice"]
-                if champion_stats["haste_cooldown"] == 0:
-                    valid_actions.append("Haste")
-                else:
-                    await champion.send(f"'Haste' is on cooldown for {champion_stats['haste_cooldown']} more turns.")
-
-                try:
-                    champion_decision = await asyncio.wait_for(
-                        self.get_player_decision(
-                            player=champion,
-                            options=valid_actions,
-                            role="champion",
-                            embed=champion_embed
-                        ),
-                        timeout=TIMEOUT
+                # Check if champion is AI or human
+                if isinstance(champion, ShadowChampionAI):
+                    # AI Champion decision
+                    await ctx.send(f"👻 **{champion.mention} analyzes the battlefield...**")
+                    fallback_champion_decision = await champion.make_decision(
+                        champion_stats,
+                        guardians_stats,
+                        progress,
+                        follower_combined_decision,
                     )
-                    if champion_decision == "Smite":
-                        guardians_stats["hp"] -= champion_stats["damage"]
-                        if guardians_stats.get("shield_active"):
-                            guardians_stats["hp"] += 200  # Guardian's shield absorbs some damage
-                            guardians_stats["shield_active"] = False
-                        await ctx.send(f"⚔️ The Champion smites the Guardian for {champion_stats['damage']} damage!")
-                    elif champion_decision == "Heal":
-                        heal_amount = 200
-                        champion_stats["hp"] = min(champion_stats["hp"] + heal_amount, champion_stats["max_hp"])
-                        await ctx.send(f"❤️ The Champion heals for {heal_amount} HP!")
-                    elif champion_decision == "Haste":
-                        progress += 15  # Increase progress
-                        champion_stats["haste_cooldown"] = 3  # Haste will be unavailable for the next 3 turns
-                        champion_stats["vulnerable"] = True
-                        await ctx.send(f"🌀 The Champion uses Haste, advancing the ritual but becoming vulnerable!")
-                    elif champion_decision == "Defend":
-                        champion_stats["defending"] = True
-                        await ctx.send(f"🛡️ The Champion braces for the next attack!")
-                    elif champion_decision == "Sacrifice":
-                        damage_to_self = 400
-                        champion_stats["hp"] -= damage_to_self
-                        progress += 20
-                        await ctx.send(f"💔 The Champion sacrifices {damage_to_self} HP to advance the ritual!")
-                except asyncio.TimeoutError:
-                    await ctx.send(f"{champion.mention} took too long to decide! Defaulting to 'Smite'.")
-                    champion_decision = "Smite"
+                    champion_decision = await resolve_ai_decision(
+                        "champion",
+                        champion,
+                        champion.get_valid_actions(champion_stats),
+                        fallback_champion_decision,
+                    )
+                    await champion.announce_decision(ctx, champion_decision, champion_stats, guardians_stats, progress)
+                    role_missed_turns["champion"] = 0
+                else:
+                    # Human Champion decision
+                    champion_used_default = False
+                    champion_embed = discord.Embed(
+                        title="⚔️ Champion's Turn ⚔️",
+                        description=f"{champion.mention}, choose your action:",
+                        color=discord.Color.red()
+                    )
 
-                    # Apply damage to the Guardian
+                    # Add abilities with emojis
+                    champion_embed.add_field(name="⚡ Smite", value="Deal damage to the Guardian", inline=True)
+                    champion_embed.add_field(name="❤️ Heal", value="Recover some of your lost HP", inline=True)
+                    haste_description = "Boost the ritual's progress"
+                    if champion_stats["haste_cooldown"] > 0:
+                        haste_description += f" (Cooldown: {champion_stats['haste_cooldown']} turns)"
+                    champion_embed.add_field(name="🌀 Haste", value=haste_description, inline=True)
+                    champion_embed.add_field(name="🛡️ Defend", value="Reduce incoming damage next turn", inline=True)
+                    champion_embed.add_field(name="💔 Sacrifice", value="Advance the ritual by 20% at the cost of  400 HP",
+                                             inline=True)
+
+                    # Add a footer to the embed
+                    champion_embed.set_footer(text="The fate of the ritual rests upon you.")
+
+                    await ctx.send(f"It's {champion.mention}'s turn to make a decision, check DMs!")
+
+                    valid_actions = ["Smite", "Heal", "Defend", "Sacrifice"]
+                    if champion_stats["haste_cooldown"] == 0:
+                        valid_actions.append("Haste")
+                    else:
+                        if not isinstance(champion, ShadowChampionAI):
+                            await champion.send(f"'Haste' is on cooldown for {champion_stats['haste_cooldown']} more turns.")
+
+                    try:
+                        champion_decision, champion_used_default = await asyncio.wait_for(
+                            self.get_player_decision(
+                                player=champion,
+                                options=valid_actions,
+                                role="champion",
+                                embed=champion_embed
+                            ),
+                            timeout=TIMEOUT
+                        )
+                    except asyncio.TimeoutError:
+                        await ctx.send(f"{champion.mention} took too long to decide! Defaulting to 'Smite'.")
+                        champion_decision = "Smite"
+                        champion_used_default = True
+
+                    if champion_used_default:
+                        role_missed_turns["champion"] += 1
+                        champion_takeover_pending = (
+                            role_missed_turns["champion"] >= 2
+                        )
+                    else:
+                        role_missed_turns["champion"] = 0
+
+                # Execute champion decision
+                if champion_decision == "Smite":
                     guardians_stats["hp"] -= champion_stats["damage"]
                     if guardians_stats.get("shield_active"):
                         guardians_stats["hp"] += 200  # Guardian's shield absorbs some damage
                         guardians_stats["shield_active"] = False
                     await ctx.send(f"⚔️ The Champion smites the Guardian for {champion_stats['damage']} damage!")
+                elif champion_decision == "Heal":
+                    heal_amount = 200
+                    champion_stats["hp"] = min(champion_stats["hp"] + heal_amount, champion_stats["max_hp"])
+                    await ctx.send(f"❤️ The Champion heals for {heal_amount} HP!")
+                elif champion_decision == "Haste":
+                    progress += 15  # Increase progress
+                    champion_stats["haste_cooldown"] = 3  # Haste will be unavailable for the next 3 turns
+                    champion_stats["vulnerable"] = True
+                    await ctx.send(f"🌀 The Champion uses Haste, advancing the ritual but becoming vulnerable!")
+                elif champion_decision == "Defend":
+                    champion_stats["defending"] = True
+                    await ctx.send(f"🛡️ The Champion braces for the next attack!")
+                elif champion_decision == "Sacrifice":
+                    damage_to_self = 400
+                    champion_stats["hp"] -= damage_to_self
+                    progress += 20
+                    await ctx.send(f"💔 The Champion sacrifices {damage_to_self} HP to advance the ritual!")
 
                 def format_action(action):
                     """Formats action names by replacing underscores with spaces and capitalizing each word."""
@@ -2434,6 +4126,11 @@ class Raid(commands.Cog):
                 if priest:
                     priest_stats["mana"] = min(priest_stats["mana"] + 10, priest_stats["max_mana"])
 
+                if priest_takeover_pending:
+                    await handle_role_takeover("priest")
+                if champion_takeover_pending:
+                    await handle_role_takeover("champion")
+
                 await asyncio.sleep(15)
 
             # Post-Raid Outcome
@@ -2455,12 +4152,12 @@ class Raid(commands.Cog):
 
                 # Define gods with their boundaries
                 gods = {
-                    "Astraea": {"boundary_low": 0.9, "boundary_high": 1.1},
+                    "Elysia": {"boundary_low": 0.9, "boundary_high": 1.1},
                     "Sepulchure": {"boundary_low": 0.75, "boundary_high": 1.5},
                     "Drakath": {"boundary_low": 0.3, "boundary_high": 2.0},
                 }
 
-                # Replace 'selected_god' with the actual selected god name (e.g., "Astraea")
+                # Replace 'selected_god' with the actual selected god name (e.g., "Elysia")
                 selected_god = "Sepulchure"  # Example, replace dynamically
                 god_data = gods.get(selected_god)
 
@@ -2479,8 +4176,8 @@ class Raid(commands.Cog):
                 rounded_weightdivine = round(weightdivine, 3)
 
                 # Define weights for crate selection
-                options = ['legendary', 'fortune', 'divine']
-                weights = [0.40, 0.40, rounded_weightdivine]
+                options = ['legendary', 'fortune', 'materials', 'divine']
+                weights = [0.30, 0.30, 0.20, rounded_weightdivine]
 
                 # Select a crate based on weights
                 crate = randomm.choices(options, weights=weights)[0]
@@ -2491,8 +4188,7 @@ class Raid(commands.Cog):
                     color=0x901C1C  # Dark color
                 )
 
-                # Add the image to the embed
-                embed.set_image(url="https://i.ibb.co/G09cMBq/OIG-17.png")
+                embed.set_image(url=EVILSPAWN_VICTORY_IMAGE_URL)
 
                 await ctx.send(embed=embed)
                 await ctx.send(
@@ -2512,14 +4208,28 @@ class Raid(commands.Cog):
                 await ctx.send(
                     f"💰 All participants receive **${cash_reward}** as a token of Sepulchure's gratitude!"
                 )
+                dragon_coin_bonus = self._roll_raid_dragon_coin_bonus()
+                dragon_coins_awarded = await self._award_raid_dragon_coins(
+                    users, dragon_coin_bonus
+                )
+                if dragon_coins_awarded:
+                    await ctx.send(
+                        f"🐉 Bonus drop! All ritual participants also received **{dragon_coin_bonus} <:dragoncoin:1404860657366728788> Dragon Coins**."
+                    )
 
             else:
-                await ctx.send(f"💔 The ritual failed to reach completion. Darkness retreats as the Guardian prevails.")
+                await send_ritual_failure(
+                    "The ritual failed to reach completion. Darkness retreats as the Guardian prevails."
+                )
 
             await self.clear_raid_timer()
         except Exception as e:
             await ctx.send(f"An error occurred: {e}")
             # Log the error if a logger is set up.
+        finally:
+            ritual_active = False
+            if directive_listener_task is not None:
+                directive_listener_task.cancel()
 
     async def convert_to_display_names(self):
         display_names = []
@@ -2555,12 +4265,15 @@ class Raid(commands.Cog):
     async def chaosspawnold(self, ctx, boss_hp: IntGreaterThan(0)):
         """[Drakath only] Starts a raid."""
         try:
+            if len(self.chaos_channel_ids) < 2 or len(self.chaos_role_ids) < 2:
+                await ctx.send("Chaos raid channels/roles are not configured.")
+                return
             await self.set_raid_timer()
 
             # Define the channels where the raid messages will be sent
             channels = [
-                self.bot.get_channel(1154244627822551060),  # This is the current channel where the command was invoked
-                self.bot.get_channel(1199300319256006746),  # Replace with the actual channel ID
+                self.bot.get_channel(self.chaos_channel_ids[0]),  # This is the current channel where the command was invoked
+                self.bot.get_channel(self.chaos_channel_ids[1]),  # Replace with the actual channel ID
             ]
 
             async def send_to_channels(embed=None, content=None, view=None):
@@ -2574,10 +4287,10 @@ class Raid(commands.Cog):
                 timeout=60 * 15,
             )
 
-            channel1 = self.bot.get_channel(1154244627822551060)
-            channel2 = self.bot.get_channel(1199300319256006746)
-            role_id1 = 1153880715419717672
-            role_id2 = 1199302687083204649
+            channel1 = self.bot.get_channel(self.chaos_channel_ids[0])
+            channel2 = self.bot.get_channel(self.chaos_channel_ids[1])
+            role_id1 = self.chaos_role_ids[0]
+            role_id2 = self.chaos_role_ids[1]
 
             if channel1:
                 role1 = ctx.guild.get_role(role_id1)
@@ -2777,12 +4490,12 @@ class Raid(commands.Cog):
 
                     # Define gods with their boundaries
                     gods = {
-                        "Astraea": {"boundary_low": 0.9, "boundary_high": 1.1},
+                        "Elysia": {"boundary_low": 0.9, "boundary_high": 1.1},
                         "Sepulchure": {"boundary_low": 0.75, "boundary_high": 1.5},
                         "Drakath": {"boundary_low": 0.3, "boundary_high": 2.0},
                     }
 
-                    # Replace 'selected_god' with the actual selected god name (e.g., "Astraea")
+                    # Replace 'selected_god' with the actual selected god name (e.g., "Elysia")
                     selected_god = "Drakath"  # Example, replace dynamically
                     god_data = gods.get(selected_god)
 
@@ -2801,8 +4514,8 @@ class Raid(commands.Cog):
                     rounded_weightdivine = round(weightdivine, 3)
 
                     # Define weights for crate selection
-                    options = ['legendary', 'fortune', 'divine']
-                    weights = [0.40, 0.40, rounded_weightdivine]
+                    options = ['legendary', 'fortune', 'materials', 'divine']
+                    weights = [0.30, 0.30, 0.20, rounded_weightdivine]
 
                     # Select a crate based on weights
                     crate = randomm.choices(options, weights=weights)[0]
@@ -2817,6 +4530,12 @@ class Raid(commands.Cog):
                     except Exception as e:
                         print(f"An error occurred: {e}")
 
+                    survivor_ids = [participant.id for participant in raid.keys() if not participant.bot]
+                    dragon_coin_bonus = self._roll_raid_dragon_coin_bonus()
+                    dragon_coins_awarded = await self._award_raid_dragon_coins(
+                        survivor_ids, dragon_coin_bonus
+                    )
+
                     em = discord.Embed(
                         title="Win!",
                         description=f"The forces aligned with Drakath have triumphed over Eclipse, wresting victory from the "
@@ -2829,6 +4548,12 @@ class Raid(commands.Cog):
                     em.set_image(url="https://i.imgur.com/s5tvHMd.png")
                     em.add_field(name="Crate Found", value=crate)
                     await send_to_channels(embed=em)
+                    if dragon_coins_awarded:
+                        await send_to_channels(
+                            content=(
+                                f"🐉 Bonus drop! All surviving followers also received **{dragon_coin_bonus} <:dragoncoin:1404860657366728788> Dragon Coins**."
+                            )
+                        )
                     await self.clear_raid_timer()
                 except Exception:
                     em = discord.Embed(
@@ -2869,6 +4594,98 @@ class Raid(commands.Cog):
 
     def getpricetohp(self, level: float):
         return 2 * sum(i * 15000 for i in range(1, int(level * 10) - 9))
+
+    async def purchase_raid_upgrade_for_ai(
+        self,
+        ctx,
+        upgrade: str,
+        *,
+        minimum_remaining: int = 0,
+        expected_price: int | None = None,
+    ):
+        """Atomically purchase one normal paid raid-stat step for an AI player."""
+        upgrade = str(upgrade).strip().casefold()
+        if upgrade not in {"damage", "defense", "health"}:
+            return False, "Invalid raid-stat upgrade.", None
+        async with self.bot.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    'SELECT money, atkmultiply, defmultiply, hplevel, health '
+                    'FROM profile WHERE "user"=$1 FOR UPDATE;',
+                    ctx.author.id,
+                )
+                if row is None:
+                    return False, "Character data could not be found.", None
+                if upgrade == "damage":
+                    current = Decimal(row["atkmultiply"])
+                    new_value = current + Decimal("0.1")
+                    price = int(self.getpriceto(new_value))
+                    update = (
+                        'UPDATE profile SET atkmultiply=$1, money=money-$2 '
+                        'WHERE "user"=$3;'
+                    )
+                    update_args = (new_value, price, ctx.author.id)
+                    subject = "Raid Stats Upgrade ATK"
+                    effect = "+0.1 profile raid attack multiplier"
+                elif upgrade == "defense":
+                    current = Decimal(row["defmultiply"])
+                    new_value = current + Decimal("0.1")
+                    price = int(self.getpriceto(new_value))
+                    update = (
+                        'UPDATE profile SET defmultiply=$1, money=money-$2 '
+                        'WHERE "user"=$3;'
+                    )
+                    update_args = (new_value, price, ctx.author.id)
+                    subject = "Raid Stats Upgrade DEF"
+                    effect = "+0.1 profile raid defense multiplier"
+                else:
+                    current = Decimal(row["hplevel"])
+                    new_value = current + Decimal("0.1")
+                    price = int(self.getpricetohp(new_value))
+                    update = (
+                        'UPDATE profile SET hplevel=$1, health=health+5, money=money-$2 '
+                        'WHERE "user"=$3;'
+                    )
+                    update_args = (new_value, price, ctx.author.id)
+                    subject = "Raid Stats Upgrade HEALTH"
+                    effect = "+5 additive maximum combat HP"
+                money = int(row["money"] or 0)
+                if expected_price is not None and price != int(expected_price):
+                    return False, "The live raid-stat price changed; request a new decision.", {
+                        "upgrade": upgrade,
+                        "expected_price": int(expected_price),
+                        "live_price": price,
+                    }
+                if money < price or money - price < max(0, int(minimum_remaining)):
+                    return False, "The upgrade is not affordable within the cash reserve.", {
+                        "upgrade": upgrade,
+                        "price": price,
+                        "money": money,
+                    }
+                await conn.execute(update, *update_args)
+                await self.bot.log_transaction(
+                    ctx,
+                    from_=ctx.author.id,
+                    to=2,
+                    subject=subject,
+                    data={"Gold": price},
+                    conn=conn,
+                )
+        await self.bot.set_cooldown(ctx.author.id, 30, identifier="increase")
+        result = {
+            "upgrade": upgrade,
+            "old_multiplier_level": float(current),
+            "new_multiplier_level": float(new_value),
+            "price": price,
+            "remaining_money": money - price,
+            "effect": effect,
+        }
+        return (
+            True,
+            f"Purchased one {upgrade} raid-stat upgrade for ${price:,}; "
+            f"${money - price:,} remains.",
+            result,
+        )
 
     @commands.group(invoke_without_command=True, brief=_("Increase your raidstats"))
     @locale_doc
@@ -3054,8 +4871,8 @@ class Raid(commands.Cog):
     # Set decimal precision high enough for your application's needs
     getcontext().prec = 28
 
-    # Replace this with the actual ID you want to check against
-    SPECIAL_USER_ID = 144932915682344960
+    # Config-backed via self.special_user_id
+    SPECIAL_USER_ID = None
 
     import discord
     from discord.ext import commands
@@ -3075,6 +4892,593 @@ class Raid(commands.Cog):
         else:
             self.toggle_list.add(ctx.author.id)
             await ctx.send("You are now using the new raid stats.")
+            
+    @is_donator()
+    @celestial_vault_free()
+    @is_gm()
+    @commands.command(hidden=True, brief="Start a Celestial Vault raid")
+    async def celestialvault(self, ctx):
+        """[Donator only] Starts a special Celestial Vault raid that you can use once per day.
+        
+        The Celestial Guardian has unique elemental mechanics and special rewards for donators.
+        Only donators can initiate this raid, but anyone can join and participate.
+        """        
+        try:
+            # Set the cooldown for the user (1 day)
+            await ctx.bot.redis.execute_command(
+                "SET",
+                f"celestial:vault:{ctx.author.id}",
+                "used",
+                "EX",
+                302400,  # 24 hours in seconds
+            )
+            
+            await ctx.message.delete()
+            await self.set_raid_timer()
+            
+            # Dictionary to track who has used their survival ability
+            donator_survival_used = set()
+            
+            # Set up the celestial guardian boss (higher HP and damage than Ragnarok)
+            guardian_hp = 100000
+            self.boss = {
+                "hp": guardian_hp, 
+                "initial_hp": guardian_hp, 
+                "min_dmg": 2000, 
+                "max_dmg": 3500,
+                "current_element": "fire",  # Starting element
+                "phase": 1,  # Boss starts in phase 1
+                "round": 0   # Track rounds for enrage mechanic
+            }
+            
+            # Elements and their strengths/weaknesses
+            elements = ["fire", "water", "earth", "air"]
+            element_strengths = {
+                "fire": "air",    # Fire strong against air
+                "water": "fire",  # Water strong against fire
+                "earth": "water", # Earth strong against water
+                "air": "earth"    # Air strong against earth
+            }
+            
+            self.joined = []
+            self.celestial_elements = {}
+            
+            # Setup raid preparation
+            channels_ids = list(self.celestial_channel_ids)
+            
+            # Create the embed for raid announcement
+            fi = discord.File("assets/other/celestialguardian.webp")
+            em = discord.Embed(
+                title="Celestial Vault - Ancient Guardian Appeared",
+                description=(
+                    f"A Celestial Guardian with **{self.boss['hp']:,.0f} HP** has appeared! It guards the sacred Celestial Vault!\n\n"
+                    f"**Current Element:** {self.boss['current_element'].capitalize()}\n"
+                    f"The guardian will be vulnerable in 5 minutes! Join quickly to prepare for battle!"
+                ),
+                color=0x7289DA,  # Special blue/purple color for the celestial raid
+            )
+            
+            em.set_image(url="attachment://celestialguardian.webp")
+            em.set_thumbnail(url=ctx.author.display_avatar.url)
+            em.set_footer(text=f"Raid initiated by {ctx.author.name} | Each player will be assigned a random element")
+            
+            # Use the JoinView for people to join the raid
+            view = JoinView(
+                Button(style=ButtonStyle.primary, label="Join the Celestial Raid!"),
+                message="You joined the Celestial Vault raid.",
+                timeout=60 * 5,  # 5 minutes
+            )
+            
+            # Send announcement to all channels
+            message_ids = []
+            try:
+                for channel_id in channels_ids:
+                    try:
+                        channel = self.bot.get_channel(channel_id)
+                        if channel:
+                            fi = File("assets/other/celestialguardian.webp")
+                            sent_msg = await channel.send(embed=em, file=fi, view=view)
+                            message_ids.append(sent_msg.id)
+                    except Exception as e:
+                        error_message = f"Error in channel with ID {channel_id}: {e}. continuing.."
+                        await ctx.send(error_message)
+                        print(error_message)
+                        continue
+                
+                self.boss.update(message=message_ids)
+                
+                # Mention raid ping role
+                if self.bot.config.bot.is_beta:
+                    for channel_id in channels_ids:
+                        try:
+                            channel = self.bot.get_channel(channel_id)
+                            if channel:
+                                role_id = self.celestial_ping_role_id
+                                role = discord.utils.get(ctx.guild.roles, id=role_id)
+                                content = f"{role.mention} A Celestial Guardian has appeared! 5 minutes until battle begins..."
+                                await channel.send(content, allowed_mentions=discord.AllowedMentions(roles=True))
+                        except Exception as e:
+                            continue
+                
+                # Set raid flags
+                self.raid_preparation = True
+                self.raidactive = True
+                
+                # Countdown messages
+                time_intervals = [120, 120, 60, 30, 20, 10]
+                messages = [
+                    "**The Celestial Guardian will be vulnerable in 3 minutes**",
+                    "**The Celestial Guardian will be vulnerable in 1 minute**",
+                    "**The Celestial Guardian will be vulnerable in 30 seconds**",
+                    "**The Celestial Guardian will be vulnerable in 20 seconds**",
+                    "**The Celestial Guardian will be vulnerable in 10 seconds**", 
+                    "**The Celestial Guardian is gathering elemental power... Prepare!**"
+                ]
+                
+                for interval, message in zip(time_intervals, messages):
+                    await asyncio.sleep(interval)
+                    for channel_id in channels_ids:
+                        try:
+                            channel = self.bot.get_channel(channel_id)
+                            if channel:
+                                await channel.send(message)
+                        except Exception as e:
+                            continue
+            
+            except Exception as e:
+                error_message = f"Unexpected error in Celestial Vault: {e}"
+                await ctx.send(error_message)
+                print(error_message)
+                print(traceback.format_exc())
+                self.raidactive = False
+                return
+            
+            # Stop the join view
+            view.stop()
+            
+            # Announce the raid is starting
+            for channel_id in channels_ids:
+                channel = self.bot.get_channel(channel_id)
+                if channel:
+                    await channel.send("**The Celestial Guardian is now vulnerable! Gathering participant data...**")
+            
+            # Collect participants
+            self.joined.extend(view.joined)
+            
+            # Add donators who are not already in the raid (as a bonus perk for donators)
+            async with self.bot.pool.acquire() as conn:
+                # Fetch all donators with tier >= 1
+                donator_ids = await conn.fetch(
+                    '''SELECT "user" FROM profile WHERE "tier" >= 1'''
+                )
+                donator_ids = [record['user'] for record in donator_ids]
+                
+                # Add donators who aren't already in the raid
+                for user_id in donator_ids:
+                    if any(u.id == user_id for u in self.joined):
+                        continue  # Skip if already joined
+                        
+                    user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
+                    if user:
+                        self.joined.append(user)
+            
+            # Process participants and assign random elements
+            async with self.bot.pool.acquire() as conn:
+                for u in self.joined:
+                    profile = await conn.fetchrow('SELECT * FROM profile WHERE "user"=$1;', u.id)
+                    if not profile:
+                        # User doesn't have a profile, skip
+                        continue
+                    
+                    # Get raid stats with potential donator bonus
+                    is_donator = profile["tier"] >= 1
+                    donator_bonus = 1.2 if is_donator else 1.0  # 20% bonus for donators
+                    
+                    dmg, deff = await self.bot.get_raidstats(
+                        u,
+                        atkmultiply=float(profile["atkmultiply"]) * donator_bonus,
+                        defmultiply=float(profile["defmultiply"]) * donator_bonus,
+                        classes=profile["class"],
+                        race=profile["race"],
+                        guild=profile["guild"],
+                        conn=conn,
+                    )
+                    
+                    # Calculate raid HP - higher than normal
+                    stathp = float(profile["stathp"]) * 50 * donator_bonus
+                    level = rpgtools.xptolevel(profile["xp"])
+                    raidhp = (float(profile["health"]) + 200 + (level * 15) + stathp) * donator_bonus
+                    
+                    # Assign random element to the player
+                    player_element = randomm.choice(elements)
+                    self.celestial_elements[u.id] = player_element
+                    
+                    # Store raid stats - ensure all numeric values are floats
+                    self.raid[(u, "user")] = {
+                        "hp": float(raidhp), 
+                        "armor": float(deff), 
+                        "damage": float(dmg),
+                        "element": player_element,
+                        "is_donator": is_donator
+                    }
+            
+            raiders_joined = len(self.raid)
+            
+            # Announce the raid is ready to begin
+            for channel_id in channels_ids:
+                channel = self.bot.get_channel(channel_id)
+                if channel:
+                    await channel.send(f"**Celestial Vault raid is starting with {raiders_joined} raiders!**")
+                    
+                    # Send an embed with player element assignments
+                    element_embed = discord.Embed(
+                        title="Element Assignments",
+                        description="Each raider has been assigned an elemental affinity:",
+                        color=0x7289DA
+                    )
+                    
+                    # Group users by element for cleaner display
+                    element_groups = {element: [] for element in elements}
+                    for (user, _), data in self.raid.items():
+                        if _ == "user":  # Only process actual users
+                            element_groups[data["element"]].append(user.name)
+                    
+                    # Add fields for each element group
+                    for element, users in element_groups.items():
+                        if users:  # Only add non-empty element groups
+                            user_list = ", ".join(users[:10])
+                            if len(users) > 10:
+                                user_list += f" and {len(users)-10} more"
+                            element_embed.add_field(
+                                name=f"{element.capitalize()} Element ({len(users)})", 
+                                value=user_list,
+                                inline=False
+                            )
+                    
+                    await channel.send(embed=element_embed)
+            
+            # Start the raid
+            start = datetime.datetime.utcnow()
+            round_count = 0
+            
+            # Main raid loop
+            while (
+                self.boss["hp"] > 0
+                and len(self.raid) > 0
+                and datetime.datetime.utcnow() < start + datetime.timedelta(minutes=60)
+            ):
+                round_count += 1
+                self.boss["round"] = round_count
+                
+                # Check if we need to switch to phase 2
+                if self.boss["hp"] <= self.boss["initial_hp"] / 2 and self.boss["phase"] == 1:
+                    self.boss["phase"] = 2
+                    self.boss["min_dmg"] *= 1.5  # Increase damage in phase 2
+                    self.boss["max_dmg"] *= 1.5
+                    
+                    phase_change_embed = discord.Embed(
+                        title="The Celestial Guardian enters Phase 2!",
+                        description="The guardian channels cosmic energy, growing more powerful!",
+                        color=0xFF5C00
+                    )
+                    for channel_id in channels_ids:
+                        channel = self.bot.get_channel(channel_id)
+                        if channel:
+                            await channel.send(embed=phase_change_embed)
+                
+                # Change element every 3 rounds
+                if round_count % 3 == 0:
+                    old_element = self.boss["current_element"]
+                    # Choose a different element
+                    new_element = old_element
+                    while new_element == old_element:
+                        new_element = randomm.choice(elements)
+                    self.boss["current_element"] = new_element
+                    
+                    element_change_embed = discord.Embed(
+                        title=f"The Guardian's Element Changes!",
+                        description=f"The Celestial Guardian shifts from {old_element.capitalize()} to {new_element.capitalize()}!",
+                        color=0x7289DA
+                    )
+                    for channel_id in channels_ids:
+                        channel = self.bot.get_channel(channel_id)
+                        if channel:
+                            await channel.send(embed=element_change_embed)
+                
+                # Guardian enrages every 10 rounds
+                if round_count % 10 == 0:
+                    self.boss["min_dmg"] *= 1.2
+                    self.boss["max_dmg"] *= 1.2
+                    
+                    enrage_embed = discord.Embed(
+                        title="The Celestial Guardian Enrages!",
+                        description="The guardian's attacks become more devastating!",
+                        color=0xFF0000
+                    )
+                    for channel_id in channels_ids:
+                        channel = self.bot.get_channel(channel_id)
+                        if channel:
+                            await channel.send(embed=enrage_embed)
+                
+                # Guardian attacks a random raider
+                (target, participant_type) = random.choice(list(self.raid.keys()))
+                base_dmg = random.randint(self.boss["min_dmg"], self.boss["max_dmg"])
+                
+                # Apply elemental modifiers
+                guardian_element = self.boss["current_element"]
+                target_element = self.raid[(target, participant_type)].get("element", "none")
+                
+                # Calculate elemental damage modifier
+                elemental_modifier = 1.0
+                if element_strengths.get(guardian_element) == target_element:
+                    # Guardian's element is strong against target's element
+                    elemental_modifier = 1.5
+                    damage_type = "super effective"
+                elif element_strengths.get(target_element) == guardian_element:
+                    # Target's element is strong against guardian's element
+                    elemental_modifier = 0.5
+                    damage_type = "not very effective"
+                else:
+                    damage_type = "normal"
+                
+                # Apply the modifier
+                # Convert to float to avoid Decimal * float error
+                modified_dmg = float(base_dmg) * elemental_modifier
+                
+                # Calculate final damage after armor
+                armor = float(self.raid[(target, participant_type)]["armor"])
+                finaldmg = float(self.getfinaldmg(modified_dmg, armor))
+                self.raid[(target, participant_type)]["hp"] = float(self.raid[(target, participant_type)]["hp"]) - finaldmg
+                
+                # Create attack embed
+                em = discord.Embed(
+                    title=f"Celestial Guardian used {guardian_element.capitalize()} Attack!", 
+                    colour=0xFFB900
+                )
+                
+                # Handle player health/survival
+                if self.raid[(target, participant_type)]["hp"] > 0:  # If target is still alive
+                    description = f"{target.mention if participant_type == 'user' else target} now has {self.raid[(target, participant_type)]['hp']:.0f} HP!"
+                    em.description = description
+                    em.add_field(name="Base Damage", value=f"{base_dmg:.0f}")
+                    em.add_field(name="Elemental Effect", value=f"{damage_type.capitalize()} ({elemental_modifier:.1f}x)")
+                    em.add_field(name="Shield", value=f"{self.raid[(target, participant_type)]['armor']:.0f}")
+                    em.add_field(name="Final Damage", value=f"{finaldmg:.0f}")
+                else:  # Player at 0 HP
+                    survived = False
+                    
+                    # Check if target is a donator and hasn't used their survival ability
+                    if participant_type == "user" and target.id not in donator_survival_used:
+                        is_donator = self.raid[(target, participant_type)].get("is_donator", False)
+                        
+                        if is_donator:
+                            # Donator survival mechanic - restore 25% HP
+                            max_hp = float(self.raid[(target, participant_type)]["hp"]) + float(finaldmg)  # Original HP
+                            restore_amount = max_hp * 0.25
+                            self.raid[(target, participant_type)]["hp"] = float(restore_amount)
+                            donator_survival_used.add(target.id)
+                            
+                            description = f"✨ {target.mention}'s donator blessing allowed them to survive with {restore_amount:.0f} HP!"
+                            em.description = description
+                            em.add_field(name="Base Damage", value=f"{base_dmg:.0f}")
+                            em.add_field(name="Elemental Effect", value=f"{damage_type.capitalize()} ({elemental_modifier:.1f}x)")
+                            em.add_field(name="Shield", value=f"{self.raid[(target, participant_type)]['armor']:.0f}")
+                            em.add_field(name="Final Damage", value=f"{finaldmg:.0f}")
+                            survived = True
+                    
+                    # Handle death if they didn't survive
+                    if not survived:
+                        description = f"{target.mention if participant_type == 'user' else target} was banished from the Celestial Vault!"
+                        em.description = description
+                        em.add_field(name="Base Damage", value=f"{base_dmg:.0f}")
+                        em.add_field(name="Elemental Effect", value=f"{damage_type.capitalize()} ({elemental_modifier:.1f}x)")
+                        em.add_field(name="Shield", value=f"{self.raid[(target, participant_type)]['armor']:.0f}")
+                        em.add_field(name="Final Damage", value=f"{finaldmg:.0f}")
+                        del self.raid[(target, participant_type)]
+                
+                # Set author and thumbnail for the message
+                if participant_type == "user":
+                    em.set_author(name=str(target), icon_url=target.display_avatar.url)
+                else:
+                    em.set_author(name=str(target))
+                
+                # Get appropriate element image URL
+                element_icon = f"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_{guardian_element}attack.webp"
+                em.set_thumbnail(url=element_icon)
+                
+                # Send attack message to all channels
+                for channel_id in channels_ids:
+                    channel = self.bot.get_channel(channel_id)
+                    if channel:
+                        await channel.send(embed=em)
+                
+                # Calculate damage from raiders to the guardian
+                total_dmg = 0
+                for (raider, raider_type), stats in self.raid.items():
+                    base_damage = stats["damage"]
+                    raider_element = stats.get("element", "none")
+                    
+                    # Apply elemental modifiers for raiders too
+                    raider_modifier = 1.0
+                    if element_strengths.get(raider_element) == guardian_element:
+                        # Raider's element is strong against guardian's element
+                        raider_modifier = 2.0  # Higher multiplier for players
+                    elif element_strengths.get(guardian_element) == raider_element:
+                        # Guardian's element is strong against raider's element
+                        raider_modifier = 0.5
+                    
+                    # Add to total damage
+                    # Convert to float to avoid Decimal * float error
+                    total_dmg += float(base_damage) * raider_modifier
+                
+                # Update boss HP
+                self.boss["hp"] = float(self.boss["hp"]) - float(total_dmg)
+                
+                # Create progress bar
+                hp_percent = max(0, float(self.boss["hp"]) / float(self.boss["initial_hp"]))
+                bar_length = 20
+                filled_length = int(hp_percent * bar_length)
+                bar = '█' * filled_length + '░' * (bar_length - filled_length)
+                
+                await asyncio.sleep(4)  # Delay between attack messages
+                
+                # Create raid attack embed
+                em = discord.Embed(title="The raid attacked the Celestial Guardian!", colour=0xFF5C00)
+                em.set_thumbnail(url=f"https://storage.googleapis.com/fablerpg-f74c2.appspot.com/295173706496475136_attackcelestial.webp")
+                em.add_field(name="Combined Damage", value=f"{total_dmg:,.0f}")
+                
+                if self.boss["hp"] > 0:
+                    health_percent = (float(self.boss["hp"]) / float(self.boss["initial_hp"])) * 100
+                    em.add_field(name="Guardian HP", value=f"{self.boss['hp']:,.0f} ({health_percent:.1f}%)")
+                    em.add_field(name="Health", value=f"`{bar}` {hp_percent:.0%}", inline=False)
+                else:
+                    em.add_field(name="Guardian HP", value="Defeated!")
+                    em.add_field(name="Health", value="`░░░░░░░░░░░░░░░░░░░░` 0%", inline=False)
+                
+                for channel_id in channels_ids:
+                    channel = self.bot.get_channel(channel_id)
+                    if channel:
+                        await channel.send(embed=em)
+                
+                await asyncio.sleep(4)  # Delay between rounds
+            
+            # Raid has finished - process results
+            raid_duration = datetime.datetime.utcnow() - start
+            minutes = (raid_duration.seconds % 3600) // 60
+            seconds = raid_duration.seconds % 60
+            summary_duration = f"{minutes} minutes, {seconds} seconds"
+            
+            # Handle failure (all raiders died)
+            if len(self.raid) == 0:
+                for channel_id in channels_ids:
+                    channel = self.bot.get_channel(channel_id)
+                    if channel:
+                        await channel.send("**All raiders have been banished from the Celestial Vault!**")
+                
+                summary_text = (
+                    "The raid was defeated! The Celestial Guardian had "
+                    f"**{self.boss['hp']:,.0f}** health remaining. Better luck next time."
+                )
+                
+                try:
+                    summary = (
+                        "**Celestial Vault Raid Result:**\n"
+                        f":small_red_triangle: Initial Health: **{self.boss['initial_hp']:,.0f}**\n"
+                        f":small_red_triangle: {summary_text}\n"
+                        f":small_red_triangle: Raiders joined: **{raiders_joined}**\n"
+                        f":small_red_triangle: Duration: **{summary_duration}**"
+                    )
+                    
+                    summary_channel = self.bot.get_channel(self.beta_summary_channel_id)
+                    await summary_channel.send(summary)
+                    
+                    self.raid.clear()
+                    await self.clear_raid_timer()
+                except Exception as e:
+                    await ctx.send(f"An error occurred while processing raid results: {e}")
+            
+            # Handle success (boss defeated)
+            elif self.boss["hp"] < 1:
+                await ctx.channel.set_permissions(
+                    ctx.guild.default_role,
+                    overwrite=self.allow_sending,
+                )
+                
+                # Keep only real users for rewards
+                self.raid = {k: v for k, v in self.raid.items() if k[1] == "user"}
+                survivors = len(self.raid)
+                
+                # Create reward embed
+                reward_embed = discord.Embed(
+                    title="The Celestial Vault Reveals Its Treasures!",
+                    description=(
+                        f"The Celestial Guardian has been defeated in **{summary_duration}**!\n"
+                        f"The Celestial Vault opens, revealing treasures for all **{survivors}** survivors!\n\n"
+                        "Each survivor receives:"
+                    ),
+                    color=0xFFD700  # Gold color
+                )
+                
+                # Calculate rewards - higher quality loot based on raid size
+                loot_quality = "legendary" if survivors <= 10 else "magic" if survivors <= 25 else "rare"
+                reward_embed.add_field(
+                    name="Treasure Chest", 
+                    value=f"1x {loot_quality.capitalize()} Crate per survivor"
+                )
+                
+                # Add XP boost for all survivors
+                reward_embed.add_field(
+                    name="Celestial Blessing", 
+                    value="+20% XP for 1 hour"
+                )
+                
+                # Add gold for all survivors
+                gold_reward = min(100000, 500000 // survivors)
+                reward_embed.add_field(
+                    name="Gold", 
+                    value=f"{gold_reward:,} gold per survivor"
+                )
+                
+                # Send rewards message
+                for channel_id in channels_ids:
+                    channel = self.bot.get_channel(channel_id)
+                    if channel:
+                        await channel.send(embed=reward_embed)
+                
+                # Distribute the actual rewards
+                async with self.bot.pool.acquire() as conn:
+                    for (user, _) in self.raid.keys():
+                        # Give crate
+                        await conn.execute(
+                            f'UPDATE profile SET "crates_{loot_quality}"="crates_{loot_quality}"+1 WHERE "user"=$1;',
+                            user.id
+                        )
+                        
+                        # Give gold
+                        await conn.execute(
+                            'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
+                            gold_reward,
+                            user.id
+                        )
+                        
+                        # Apply XP boost
+                        await self.bot.redis.execute_command(
+                            "SET",
+                            f"celestial:xpboost:{user.id}",
+                            "active",
+                            "EX",
+                            3600  # 1 hour
+                        )
+                
+                # Log the raid result
+                try:
+                    summary = (
+                        "**Celestial Vault Raid Result:**\n"
+                        f":tada: Initial Health: **{self.boss['initial_hp']:,.0f}**\n"
+                        f":tada: Defeated in: **{summary_duration}**\n"
+                        f":tada: Survivors: **{survivors}/{raiders_joined}**\n"
+                        f":tada: Rewards: **{loot_quality.capitalize()} Crate, {gold_reward:,} gold, +20% XP boost**"
+                    )
+                    
+                    summary_channel = self.bot.get_channel(self.beta_summary_channel_id)
+                    await summary_channel.send(summary)
+                    
+                    self.raid.clear()
+                    await self.clear_raid_timer()
+                except Exception as e:
+                    await ctx.send(f"An error occurred while processing raid rewards: {e}")
+            
+            # Handle timeout
+            else:
+                for channel_id in channels_ids:
+                    channel = self.bot.get_channel(channel_id)
+                    if channel:
+                        await channel.send("**The raid timed out after 60 minutes!**")
+                
+                self.raid.clear()
+                await self.clear_raid_timer()
+        except Exception as e:
+            await ctx.send(e)
 
     @has_char()
     @commands.command(aliases=["rs"], brief=_("View your raid stats or compare two players"))
@@ -3097,11 +5501,13 @@ class Raid(commands.Cog):
             try:
                 # Fetch class, attack multiplier, defense multiplier, health, and health per level
                 query = '''
-                    SELECT "class", "atkmultiply", "defmultiply", "health", "hplevel", 
-                           "guild", "xp", "statdef", "statatk", "stathp" 
-                    FROM profile 
-                    WHERE "user" = $1;
-                '''
+                                SELECT p."class", p."atkmultiply", p."defmultiply", p."health", p."hplevel", 
+                                       p."guild", p."xp", p."statdef", p."statatk", p."stathp",
+                                       a."hp" as amulet_hp
+                                FROM profile p
+                                LEFT JOIN amulets a ON p."user" = a."user_id" AND a."equipped" = TRUE
+                                WHERE p."user" = $1;
+                            '''
                 result = await self.bot.pool.fetch(query, target_player.id)
 
                 if result:
@@ -3113,8 +5519,9 @@ class Raid(commands.Cog):
                     deff = player_data["defmultiply"] + statdeff
 
                     stathp = player_data["stathp"] * 50
-                    base = 250 + (level * 5)
-                    hp = player_data["health"] + stathp + base
+                    base = 200 + (level * 15)
+                    amulet_hp = player_data["amulet_hp"] or 0  # Handle null case
+                    hp = player_data["health"] + stathp + base + amulet_hp
                     hplevel = player_data["hplevel"]
                     guild = player_data["guild"]
                     hpprice = self.getpricetohp(hplevel + Decimal("0.1"))
@@ -3191,7 +5598,7 @@ class Raid(commands.Cog):
                     deff = player_data["defmultiply"] + statdeff
 
                     stathp = player_data["stathp"] * 50
-                    base = 250 + (level * 5)
+                    base = 200 + (level * 15)
                     hp = player_data["health"] + stathp + base
                     hplevel = player_data["hplevel"]
                     guild = player_data["guild"]
@@ -3442,6 +5849,48 @@ class Raid(commands.Cog):
             ).format(prefix=ctx.clean_prefix)
         )
 
+    @commands.command(
+        name="raidalerts",
+        aliases=["raidalert", "legendaryalerts"],
+        brief="Manage Legendary Raid alerts",
+    )
+    @commands.guild_only()
+    async def raidalerts(self, ctx, setting: str = None):
+        """Opt in to or out of Legendary Raid spawn, defeat, and auction pings."""
+        role = self._spawn_alert_role(ctx.guild)
+        if role is None:
+            return await ctx.send("Legendary Raid alerts have not been configured yet.")
+
+        me = getattr(ctx.guild, "me", None)
+        if role.managed or (me is not None and role >= me.top_role):
+            return await ctx.send(
+                "I cannot manage the Legendary Raid alert role. Move it below my highest role."
+            )
+
+        normalized = setting.strip().lower() if setting else None
+        if normalized not in (None, "on", "off"):
+            return await ctx.send(
+                f"Use `{ctx.clean_prefix}raidalerts`, `{ctx.clean_prefix}raidalerts on`, or "
+                f"`{ctx.clean_prefix}raidalerts off`."
+            )
+
+        enable = normalized == "on" if normalized else role not in ctx.author.roles
+        try:
+            if enable and role not in ctx.author.roles:
+                await ctx.author.add_roles(role, reason="Legendary Raid alert opt-in")
+            elif not enable and role in ctx.author.roles:
+                await ctx.author.remove_roles(role, reason="Legendary Raid alert opt-out")
+        except discord.HTTPException:
+            return await ctx.send(
+                "I do not have permission to manage the Legendary Raid alert role."
+            )
+
+        await ctx.send(
+            "🔔 Legendary Raid alerts are **on**."
+            if enable
+            else "🔕 Legendary Raid alerts are **off**."
+        )
+
 
 async def setup(bot):
     designated_shard_id = 0  # Choose shard 0 as the primary
@@ -3450,5 +5899,3 @@ async def setup(bot):
     if designated_shard_id in bot.shard_ids:
         await bot.add_cog(Raid(bot))
         print(f"Raid loaded on shard {designated_shard_id}")
-
-

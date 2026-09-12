@@ -1,7 +1,6 @@
 """
 The IdleRPG Discord Bot
 Copyright (C) 2018-2021 Diniboy and Gelbpunkt
-Copyright (C) 2024 Lunar (discord itslunar.)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -16,8 +15,6 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-
-
 from __future__ import annotations
 
 from enum import IntFlag
@@ -27,6 +24,12 @@ from discord.ext.commands.converter import Converter
 from discord.ext.commands.errors import BadArgument
 
 from classes.context import Context
+
+BADGE_DISPLAY_NAMES = {
+    "FAVORED_BY_THE_SEVEN": "Favored by the Seven",
+    "GREGAPOCALYPSE_SURVIVOR": "Gregapocalypse Survivor",
+    "RELIC_SOVEREIGN": "Relic Sovereign",
+}
 
 
 class Badge(IntFlag):
@@ -38,6 +41,13 @@ class Badge(IntFlag):
     SUPPORT = 32
     TESTER = 64
     VETERAN = 128
+    GOD = 256
+    JUNIOR_WEREWOLF = 512
+    ETERNAL_SOVEREIGN = 1024
+    FAVORED_BY_THE_SEVEN = 2048
+    GREGAPOCALYPSE_SURVIVOR = 4096
+    LIVING_LEGEND = 8192
+    RELIC_SOVEREIGN = 16384
 
     @classmethod
     def from_string(cls, string: str) -> Badge | None:
@@ -59,6 +69,33 @@ class Badge(IntFlag):
 
         return contains
 
+    @classmethod
+    def display_name_for(cls, name: str) -> str:
+        return BADGE_DISPLAY_NAMES.get(name, name.replace("_", " ").title())
+
+    def to_display_items(self) -> list[str]:
+        contains = []
+
+        for (name, value) in self.__class__.__members__.items():
+            if bool(self & value):
+                contains.append(self.__class__.display_name_for(name))
+
+        return contains
+
+    def to_profile_display_items(self, limit: int = 6) -> list[str]:
+        """Return profile badges with earned account capstones shown first."""
+
+        priority = ("RELIC_SOVEREIGN", "LIVING_LEGEND")
+        ordered_names = priority + tuple(
+            name for name in self.__class__.__members__ if name not in priority
+        )
+        contains = [
+            self.__class__.display_name_for(name)
+            for name in ordered_names
+            if bool(self & self.__class__.__members__[name])
+        ]
+        return contains[: max(0, int(limit))]
+
     def to_items_lowercase(self) -> list[str]:
         contains = []
 
@@ -69,7 +106,7 @@ class Badge(IntFlag):
         return contains
 
     def to_pretty(self) -> str:
-        return " | ".join(self.to_items())
+        return " | ".join(self.to_display_items())
 
 
 class BadgeConverter(Converter[Badge]):

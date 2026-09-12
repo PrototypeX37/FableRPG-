@@ -33,7 +33,6 @@ from classes.classes import Ritualist
 from classes.classes import from_string as class_from_string
 from classes.context import Context
 from classes.converters import IntFromTo
-from classes.enums import DonatorRank
 from cogs.shard_communication import user_on_cooldown as user_cooldown
 from utils import items
 from utils import misc as rpgtools
@@ -1447,13 +1446,17 @@ class Adventure(commands.Cog):
 
         if buildings := await self.bot.get_city_buildings(ctx.character_data["guild"]):
             time -= time * (buildings["adventure_building"] / 100)
-        if user_rank := await self.bot.get_donator_rank(ctx.author.id):
-            if user_rank >= DonatorRank.emerald:
-                time = time * 0.75
-            elif user_rank >= DonatorRank.gold:
-                time = time * 0.9
-            elif user_rank >= DonatorRank.silver:
-                time = time * 0.95
+        effective_tier = await self.bot.get_effective_donator_tier(
+            ctx.author.id,
+            sync_profile=True,
+        )
+        effective_tier = 4 # Cannot be fucked isolating it.
+        if effective_tier >= 4:
+            time = time * 0.75
+        elif effective_tier >= 3:
+            time = time * 0.9
+        elif effective_tier >= 2:
+            time = time * 0.95
         if await self.bot.get_booster(ctx.author, "time"):
             time = time / 2
 
@@ -1524,6 +1527,12 @@ class Adventure(commands.Cog):
         attack, defense = await self.bot.get_damage_armor_for(ctx.author)
 
         await ActiveAdventure(ctx, int(attack), int(defense), width=12, height=12).run()
+
+    def _is_event_enabled(self, event_key: str) -> bool:
+        event_flags = getattr(self.bot, "event_flags", None)
+        if event_flags is None:
+            return False
+        return bool(event_flags.get(event_key, False))
 
     async def get_blessed_value(self, user_id):
         """Retrieve the blessed value from Redis or use default of 1."""
@@ -1710,15 +1719,15 @@ class Adventure(commands.Cog):
 
             luck_booster = await self.bot.get_booster(ctx.author, "luck")
             # Change: Subtract 1 from the current level to make it zero-indexed
-            current_level = int(rpgtools.xptolevel(ctx.character_data["xp"])) - 1
+            current_level = int(rpgtools.xptolevel(ctx.character_data["xp"]))
             luck_multiply = ctx.character_data["luck"]
             if buildings := await self.bot.get_city_buildings(ctx.character_data["guild"]):
                 bonus = buildings["adventure_building"]
             else:
                 bonus = 0
 
-            # Change: Level 29 is the new level 30 (since we're zero-indexed)
-            if current_level > 29:
+
+            if current_level > 30:
                 bonus = 5
 
             success = rpgtools.calcchance(
@@ -1775,6 +1784,8 @@ class Adventure(commands.Cog):
                 chance_of_loot *= 2  # can be 100 in a 30
 
             async with self.bot.pool.acquire() as conn:
+                bones = 0
+                snowflakes = 0
                 if (random.randint(1, 1000)) > chance_of_loot * 10:
                     minstat = round(num * luck_multiply)
                     maxstat = round(5 + int(num * 1.5) * luck_multiply)
@@ -1790,7 +1801,7 @@ class Adventure(commands.Cog):
                     storage_type = "armory"
 
                 else:
-                    item = items.get_item()
+                    item = items.get_item(adventure_level=num)
                     await conn.execute(
                         'INSERT INTO loot ("name", "value", "user") VALUES ($1, $2, $3);',
                         item["name"],
@@ -1806,14 +1817,24 @@ class Adventure(commands.Cog):
                         guild,
                     )
 
-                # EASTER
-                # ---------------
-                #eggs = int(num ** 1.2 * random.randint(3, 6))
+                if self._is_event_enabled("halloween"):
+                    bones = int(num ** 1.2 * random.randint(1, 8))
+                    if bones > 0:
+                        await conn.execute(
+                            'UPDATE profile SET bones = COALESCE(bones, 0) + $1 WHERE "user"=$2;',
+                            bones,
+                            ctx.author.id,
+                        )
 
-
-                # Halloween
-                # ---------------
-                #bones = int(num ** 1.2 * random.randint(1, 8))
+                if self._is_event_enabled("wintersday"):
+                    float_snowflakes = randomm.uniform(num * 20, num * 30)
+                    snowflakes = round(float_snowflakes)
+                    if snowflakes > 0:
+                        await conn.execute(
+                            'UPDATE profile SET snowflakes = COALESCE(snowflakes, 0) + $1 WHERE "user"=$2;',
+                            snowflakes,
+                            ctx.author.id,
+                        )
 
                 await conn.execute(
                     'UPDATE profile SET "money"="money"+$1, "xp"="xp"+$2,'
@@ -1821,6 +1842,17 @@ class Adventure(commands.Cog):
                     gold,
                     xp,
                     ctx.author.id,
+                )
+                await self.bot.log_xp_watch_event(
+                    ctx=ctx,
+                    user_id=ctx.author.id,
+                    delta=int(xp),
+                    source="adventure.complete",
+                    details={
+                        "adventure_level": int(num),
+                        "gold_reward": int(gold),
+                    },
+                    conn=conn,
                 )
 
                 if partner := ctx.character_data["marriage"]:
@@ -1844,8 +1876,11 @@ class Adventure(commands.Cog):
                     conn=conn,
                 )
 
-                #float_snowflakes = randomm.uniform(num * 20, num * 30)
-                #snowflakes = round(float_snowflakes)
+                event_rewards = ""
+                if bones:
+                    event_rewards += f"💀 Bones: **{bones}**\n"
+                if snowflakes:
+                    event_rewards += f"❄️ Snowflakes: **{snowflakes}**\n"
 
                 await ctx.send(
                     embed=discord.Embed(
@@ -1859,6 +1894,7 @@ class Adventure(commands.Cog):
                             "✧ Type: **{type}**\n"
                             "{stat}"
                             "💎 Value: **{value}**\n"
+                            "{event_rewards}"
                             "⭐ Experience: **{xp}**\n"
                         ).format(
                             narrative=self.get_adventure_narrative(num, ADVENTURE_NAMES[num], True),
@@ -1871,6 +1907,7 @@ class Adventure(commands.Cog):
                             if item["damage"]
                             else _("🛡️ Armor: **{armor}**\n").format(armor=item["armor"]),
                             value=item["value"],
+                            event_rewards=event_rewards,
                             prefix=ctx.clean_prefix,
                             storage_type=storage_type,
                             xp=xp,
@@ -1879,12 +1916,16 @@ class Adventure(commands.Cog):
                     )
                 )
 
-                if current_level > 15:
-                    iscompleted = True
+                iscompleted = True
+                if current_level >= 15:
                     self.bot.dispatch("adventure_completion", ctx, iscompleted)
                     self.bot.dispatch("raid_completion", ctx, iscompleted, ctx.author.id)
+                else:
+                    # Endgame listeners intentionally retain their level gate, while
+                    # the Bounty Board counts every genuine completed adventure.
+                    self.bot.dispatch("bounty_adventure_completion", ctx, iscompleted)
 
-                new_level = int(rpgtools.xptolevel(ctx.character_data["xp"] + xp)) - 1
+                new_level = int(rpgtools.xptolevel(ctx.character_data["xp"] + xp))
 
                 if current_level != new_level:
                     await self.bot.process_levelup(ctx, new_level, current_level)

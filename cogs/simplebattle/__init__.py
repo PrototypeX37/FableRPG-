@@ -1,3 +1,6 @@
+import traceback
+import time
+
 import discord
 import random
 import asyncio
@@ -21,6 +24,7 @@ class SimpleBattle(discord.ext.commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        self.battle_contexts = {}
         # Battle commentary templates and data
         self.commentaries = {
             "intros": [
@@ -153,25 +157,25 @@ class SimpleBattle(discord.ext.commands.Cog):
                 "Reality itself seems to bend as {attacker}'s {weapon} traces the patterns of the legendary '{move}'!"
             ],
             "godly_interventions": [
-                "The sky brightens as Astraea, Goddess of Light, favors {player} with her blessing!",
+                "The sky brightens as Elysia, Goddess of Light, favors {player} with her blessing!",
                 "Shadows writhe at {player}'s feet! Sepulchure, God of Darkness, grants his cruel power!",
                 "Reality itself warps around {player} as Drakath, God of Chaos, intervenes capriciously!",
-                "A beam of pure light empowers {player}'s {weapon}, Astraea's divine favor made manifest!",
+                "A beam of pure light empowers {player}'s {weapon}, Elysia's divine favor made manifest!",
                 "The crowd falls silent as Sepulchure's dark energy courses through {player}'s veins!",
                 "Drakath's chaotic will sends unpredictable power surging through {player}'s {weapon}!",
-                "Astraea's radiance blinds {player}'s opponent, creating an opening!",
+                "Elysia's radiance blinds {player}'s opponent, creating an opening!",
                 "Sepulchure's deathly chill emanates from {player}, weakening all who stand nearby!",
                 "The very rules of combat seem to bend around {player} as Drakath's chaos manifests!",
-                "Astraea's holy light forms protective wings around {player}, deflecting a lethal blow!",
+                "Elysia's holy light forms protective wings around {player}, deflecting a lethal blow!",
                 "The blood spilled on the arena sand bubbles and writhes at Sepulchure's dark command, aiding {player}!",
                 "Drakath's laughter echoes as probability itself shifts in {player}'s favor!",
-                "Golden tears fall from the statue of Astraea, landing on {player}'s wounds and healing them instantly!",
+                "Golden tears fall from the statue of Elysia, landing on {player}'s wounds and healing them instantly!",
                 "Sepulchure's shadow elongates, becoming a second weapon in {player}'s arsenal!",
                 "The laws of physics briefly suspend as Drakath allows {player} to defy gravity!",
-                "Astraea's blessing makes {player}'s movements fluid and perfect, like a celestial dance!",
+                "Elysia's blessing makes {player}'s movements fluid and perfect, like a celestial dance!",
                 "Sepulchure grants {player} the ability to see their opponent's next move, painted in shadows!",
                 "Drakath's chaos transforms {player}'s minor wound into unexpected strength!",
-                "The very air around {player} shimmers with Astraea's divine protection!",
+                "The very air around {player} shimmers with Elysia's divine protection!",
                 "Sepulchure's darkness devours the light around {player}, making their strikes impossible to predict!",
                 "Drakath's influence causes {player}'s weapon to briefly transform into something impossible!"
             ],
@@ -548,7 +552,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                 "The Emperor confers with his advisors, considering the entertainment value of the combat...",
                 "Gold changes hands in the royal box as nobles place last bets on the Emperor's decision...",
                 "The fallen gladiator looks up with desperate hope as the Emperor stands to signal their fate...",
-                "Priestesses of Astraea burn incense, hoping to influence the Emperor toward mercy...",
+                "Priestesses of Elysia burn incense, hoping to influence the Emperor toward mercy...",
                 "The sand grows dark with blood as the Emperor contemplates his verdict...",
                 "The Emperor's face remains impassive as he considers whether the defeated has earned life..."
             ],
@@ -750,7 +754,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                 "The crowd chants ancient battle hymns that echo the glory days of Fablelands' warrior past!",
                 "Wealthy merchants toss gold coins into the arena to show their appreciation for particularly fine moves!",
                 "Even the hardened arena slaves pause in their grim duties to witness an exchange of legendary quality!",
-                "The crowd parts respectfully as the High Priestess of Astraea moves to the railing for a better view!",
+                "The crowd parts respectfully as the High Priestess of Elysia moves to the railing for a better view!",
                 "Battle scholars furiously scribble notes, documenting techniques to teach the next generation!",
                 "The arena's magical amplification crystals pulse with energy, feeding off the crowd's wild emotions!",
                 "Spectators from the distant Frost Marches ululate in their traditional appreciation of spilled blood!",
@@ -890,7 +894,7 @@ class SimpleBattle(discord.ext.commands.Cog):
             "a spiked gauntlet", "a flask of burning oil", "a war horn that disorients opponents",
             "an ancestral charm that grants temporary strength", "a vial of basilisk blood",
             "a talisman that slows bleeding", "enchanted dust that blinds when thrown",
-            "a ceremonial blade from the Temple of Astraea", "a whip lined with razor edges",
+            "a ceremonial blade from the Temple of Elysia", "a whip lined with razor edges",
             "a grappling hook", "a vial of berserker's rage potion", "weighted bolas",
             "a smoke bomb", "a shield boss that can be used as a weapon", "a handful of flash powder",
             "a magically preserved heart that grants second wind when consumed"
@@ -1078,35 +1082,219 @@ class SimpleBattle(discord.ext.commands.Cog):
             }
         ]
 
-    async def manage_battle_message(self, ctx, new_content, event_counter=0, force_new=False):
+        # Session-level rivalry memory for rematch flavor and highlight context.
+        self.duel_history = {}
+
+        # Automated fighter archetypes to steer narration and event selection.
+        self.fighter_styles = {
+            "duelist": {
+                "name": "Duelist",
+                "description": "precision footwork and clean counters",
+                "bias": {"attack": 0.08, "special_event": 0.02, "special_move": 0.05, "arena_event": -0.08, "divine_intervention": -0.02}
+            },
+            "brawler": {
+                "name": "Brawler",
+                "description": "relentless pressure and brutal close-range exchanges",
+                "bias": {"attack": 0.10, "special_event": -0.02, "special_move": 0.04, "arena_event": -0.06, "divine_intervention": -0.02}
+            },
+            "showman": {
+                "name": "Showman",
+                "description": "high-risk spectacle that feeds the crowd",
+                "bias": {"attack": -0.03, "special_event": 0.05, "special_move": 0.08, "arena_event": 0.04, "divine_intervention": 0.01}
+            },
+            "survivor": {
+                "name": "Survivor",
+                "description": "discipline, composure, and late-fight resilience",
+                "bias": {"attack": 0.01, "special_event": 0.06, "special_move": -0.02, "arena_event": 0.01, "divine_intervention": -0.01}
+            },
+            "fanatic": {
+                "name": "Fanatic",
+                "description": "faith-fueled aggression and divine conviction",
+                "bias": {"attack": 0.02, "special_event": -0.03, "special_move": 0.06, "arena_event": 0.00, "divine_intervention": 0.12}
+            },
+        }
+
+        # Arena themes keep matches distinct while preserving full automation.
+        self.arena_themes = [
+            {
+                "name": "Bloodsand Colosseum",
+                "flavor": "Blood-red sand and roaring banners turn every strike into spectacle.",
+                "hazards": ["hungry lions", "fire jets", "spiked walls that slowly close in", "a rain of burning oil"],
+                "items": ["a small shield", "a flask of burning oil", "weighted bolas", "throwing knives"],
+                "conditions": ["avoid the center pit", "battle on narrow bridges over deep pits", "win the crowd's favor through spectacular techniques"],
+                "crowd_bonus": 6
+            },
+            {
+                "name": "Moonshadow Pit",
+                "flavor": "Dim moonlight and drifting mist make every movement deceptive.",
+                "hazards": ["venomous snakes", "poisonous gas vents", "enchanted weapons that fly of their own accord", "animated statues"],
+                "items": ["a smoke bomb", "an enchanted amulet", "enchanted dust that blinds when thrown", "a net"],
+                "conditions": ["fight in complete darkness", "wear blindfolds and fight by sound alone", "use only weapons picked up from the arena floor"],
+                "crowd_bonus": 4
+            },
+            {
+                "name": "Ironworks Gauntlet",
+                "flavor": "Rumbling gears and blazing furnaces punish hesitation.",
+                "hazards": ["mechanical blade scorpions", "iron golems", "swinging blade traps", "sand elementals"],
+                "items": ["a section of chain", "a spiked gauntlet", "a shield boss that can be used as a weapon", "a grappling hook"],
+                "conditions": ["continue as the arena floor rotates", "fight with weapons that gradually heat to burning temperatures", "battle with weighted armor"],
+                "crowd_bonus": 5
+            },
+        ]
+
+        # Global tone profile. This keeps battles automated while steering presentation.
+        self.active_tone = "cinematic_brutal"
+        self.tone_profiles = {
+            "default": {
+                "event_count_range": (6, 9),
+                "crowd_base_bonus": 0,
+                "attack_success_bonus": 0.0,
+                "attack_damage_bonus": 0,
+                "special_move_damage_bonus": 0,
+                "brutal_injury_chance": 0.30,
+                "crowd_reaction_base": 0.18,
+                "crowd_reaction_scale_divisor": 220.0,
+                "crowd_heat_gain_multiplier": 1.0,
+                "mercy_shift": 0.0,
+                "event_bias": {"attack": 0.0, "special_event": 0.0, "special_move": 0.0, "arena_event": 0.0, "divine_intervention": 0.0},
+                "beat_titles": {
+                    "opening": "Opening Exchanges",
+                    "pressure": "Middle Pressure",
+                    "climax": "Final Climax",
+                },
+                "cinematic_cuts": [],
+                "climax_calls": [],
+                "decisive_overrides": [],
+                "finisher_overrides": [],
+            },
+            "cinematic_brutal": {
+                "event_count_range": (7, 10),
+                "crowd_base_bonus": 8,
+                "attack_success_bonus": 0.015,
+                "attack_damage_bonus": 1,
+                "special_move_damage_bonus": 1,
+                "brutal_injury_chance": 0.47,
+                "crowd_reaction_base": 0.24,
+                "crowd_reaction_scale_divisor": 180.0,
+                "crowd_heat_gain_multiplier": 1.25,
+                "mercy_shift": -0.10,
+                "event_bias": {"attack": -0.03, "special_event": -0.01, "special_move": 0.03, "arena_event": 0.01, "divine_intervention": 0.00},
+                "beat_titles": {
+                    "opening": "Blood Overture",
+                    "pressure": "Violence Crescendo",
+                    "climax": "Execution Climax",
+                },
+                "cinematic_cuts": [
+                    "The horns fade as if the world narrows to steel and breath.",
+                    "Torchlight flickers across blood-slick armor while the crowd rises as one.",
+                    "For a heartbeat the arena falls silent, then erupts as blades collide.",
+                    "Dust, sweat, and crimson mist hang in the air like a battle hymn.",
+                ],
+                "climax_calls": [
+                    "The crowd senses blood in the air - every strike now could end the match.",
+                    "No more feeling-out exchanges. This is now a fight for survival.",
+                    "Both warriors are beyond caution; only domination remains.",
+                ],
+                "decisive_overrides": [
+                    "{winner} reads {loser}'s final mistake and detonates the exchange with ruthless precision.",
+                    "In one savage sequence, {winner} breaks {loser}'s rhythm and tears the fight away for good.",
+                    "A brutal counter from {winner} turns the arena into a roar of shock and admiration.",
+                ],
+                "finisher_overrides": [
+                    "{winner}'s brutality and timing leave no doubt - this was earned the hard way.",
+                    "The arena remembers nights like this: {winner} carved victory out of chaos and blood.",
+                    "{winner} stands amid shattered defenses and roaring stands, absolute and undeniable.",
+                ],
+            },
+        }
+
+        # Readability pacing controls for battle narration.
+        self.battle_pace_multiplier = 1.45
+        self.battle_reading_wps = 2.8
+
+    async def manage_battle_message(self, ctx, battle_id, new_content, event_counter=0, force_new=False):
         """Create a new message or edit existing one based on event count and content length"""
-        # Check if we need to store this as a property
-        if not hasattr(self, 'battle_messages'):
-            self.battle_messages = []
-            self.current_battle_message = None
-            self.current_content = ""
-            self.message_counter = 0
-            
+        # Get battle context
+        if battle_id not in self.battle_contexts:
+            self.battle_contexts[battle_id] = {
+                "battle_messages": [],
+                "current_battle_message": None,
+                "current_content": "",
+                "message_counter": 0
+            }
+
+        battle_ctx = self.battle_contexts[battle_id]
+
         # Check if we need to create a new message
-        if (force_new or 
-            self.message_counter >= 5 or 
-            not self.current_battle_message or 
-            len(self.current_content + "\n\n" + new_content) > 1950):
-            
+        if (force_new or
+                not battle_ctx["current_battle_message"] or
+                battle_ctx["message_counter"] >= 3 or
+                self._discord_content_length(
+                    (battle_ctx["current_content"] + "\n\n" + new_content)
+                    if battle_ctx["current_content"]
+                    else new_content
+                ) > 1800):
+
             # Create a new message
-            self.current_content = new_content
-            self.current_battle_message = await ctx.send(f"{new_content}")
-            self.battle_messages.append(self.current_battle_message)
-            self.message_counter = 1
+            battle_ctx["current_content"] = new_content
+            battle_ctx["current_battle_message"] = await ctx.send(f"{new_content}")
+            battle_ctx["battle_messages"].append(battle_ctx["current_battle_message"])
+            battle_ctx["message_counter"] = 1
         else:
             # Update existing message
-            self.current_content += f"\n\n{new_content}"
-            await self.current_battle_message.edit(content=self.current_content)
-            self.message_counter += 1
-            
-        return self.current_battle_message
-        
-    
+            battle_ctx["current_content"] += f"\n\n{new_content}"
+            await battle_ctx["current_battle_message"].edit(content=battle_ctx["current_content"])
+            battle_ctx["message_counter"] += 1
+
+        return battle_ctx["current_battle_message"]
+
+    def _discord_content_length(self, text: str) -> int:
+        """Return Discord message length in UTF-16 code units."""
+        return len(text.encode("utf-16-le")) // 2
+
+    def _truncate_to_discord_limit(self, text: str, limit: int) -> str:
+        """Trim text so its Discord UTF-16 length does not exceed `limit`."""
+        if limit <= 0:
+            return ""
+        if self._discord_content_length(text) <= limit:
+            return text
+
+        low = 0
+        high = len(text)
+        while low < high:
+            mid = (low + high + 1) // 2
+            if self._discord_content_length(text[:mid]) <= limit:
+                low = mid
+            else:
+                high = mid - 1
+        return text[:low]
+
+    def _estimate_read_duration(self, text: Optional[str]) -> float:
+        """Estimate minimum seconds needed to read a message comfortably."""
+        if not text:
+            return 0.0
+        words = len(text.split())
+        lines = text.count("\n")
+        wps = max(0.5, float(self.battle_reading_wps))
+        # Give extra weight to multiline updates and keep cap sane.
+        estimate = (words / wps) + (lines * 0.18)
+        return min(7.5, estimate)
+
+    async def _battle_sleep(
+        self,
+        seconds: float,
+        *,
+        text: Optional[str] = None,
+        min_seconds: float = 2.25,
+        max_seconds: float = 9.0,
+    ) -> None:
+        """Sleep with global pace multiplier and optional readability floor."""
+        duration = float(seconds) * float(self.battle_pace_multiplier)
+        if text:
+            duration = max(duration, self._estimate_read_duration(text))
+        duration = max(min_seconds, min(max_seconds, duration))
+        await asyncio.sleep(duration)
+
     async def get_weapon_info(self, ctx, user_id) -> Dict:
         """Get the weapon information of a user based on their equipped items."""
         try:
@@ -1117,7 +1305,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                     " inventory i ON (ai.id=i.item) WHERE i.equipped IS TRUE AND p.user=$1",
                     user_id
                 )
-                
+
                 result = {
                     "type": "unknown",
                     "name": "bare hands",
@@ -1127,34 +1315,34 @@ class SimpleBattle(discord.ext.commands.Cog):
                     "second_name": None,
                     "style": "unarmed"
                 }
-                
+
                 if not items:
                     # No equipped items
                     return result
-                
+
                 # Check if any of the equipped items is a shield
                 shield_item = None
                 weapon_item = None
-                
+
                 for item in items:
                     item_type = item["type"].lower() if item["type"] else "unknown"
                     if item_type == "shield":
                         shield_item = item
                     else:
                         weapon_item = item
-                
+
                 # Set god from profile
                 if items:
                     result["god"] = items[0].get("god")
-                
+
                 # Prioritize weapon as primary if available
                 if weapon_item:
                     result["type"] = weapon_item["type"].lower() if weapon_item["type"] else "unknown"
                     result["name"] = weapon_item["name"]
-                    
+
                     if result["type"] in self.weapon_types:
                         result["handed"] = self.weapon_types[result["type"]]["handed"]
-                    
+
                     # If there's also a shield
                     if shield_item:
                         result["second_type"] = "shield"
@@ -1162,13 +1350,13 @@ class SimpleBattle(discord.ext.commands.Cog):
                         result["style"] = "shield"
                     else:
                         result["style"] = "two_handed" if result["handed"] == 2 else "single"
-                
+
                 # If only a shield is equipped (unusual but possible)
                 elif shield_item:
                     result["type"] = "shield"
                     result["name"] = shield_item["name"]
                     result["style"] = "shield"
-                
+
                 return result
         except Exception as e:
             await ctx.send(f"Error getting weapon info: {e}")
@@ -1188,7 +1376,7 @@ class SimpleBattle(discord.ext.commands.Cog):
         try:
             if weapon1 == "unknown" or weapon2 == "unknown":
                 return 0
-                
+
             if weapon2 in self.weapon_types.get(weapon1, {}).get("strong_against", []):
                 return 1  # weapon1 has advantage
             elif weapon2 in self.weapon_types.get(weapon1, {}).get("weak_against", []):
@@ -1202,72 +1390,274 @@ class SimpleBattle(discord.ext.commands.Cog):
             # Return default values in case of error
             return 0
 
-    async def manage_battle_message(self, ctx, new_content, event_counter=0, force_new=False):
-        """Create a new message or edit existing one based on event count and content length"""
-        # Check if we need to create a new message
-        if (force_new or 
-            not self.current_battle_message or 
-            self.message_counter >= 3 or  # Reduced from 5 to 3 for more frequent new messages
-            len(self.current_content + "\n\n" + new_content) > 1800):  # Reduced limit for safety
-            
-            # Create a new message
-            self.current_content = new_content
-            self.current_battle_message = await ctx.send(f"{new_content}")
-            self.battle_messages.append(self.current_battle_message)
-            self.message_counter = 1
-        else:
-            # Update existing message
-            self.current_content += f"\n\n{new_content}"
-            await self.current_battle_message.edit(content=self.current_content)
-            self.message_counter += 1
-            
-        return self.current_battle_message
+    async def manage_phase_message(self, ctx, battle_id, phase_name, new_content=None, edit=False, force_new=False):
+        """Manages messages by battle phase."""
+        # Get battle context
+        if battle_id not in self.battle_contexts:
+            self.battle_contexts[battle_id] = {
+                "battle_messages": [],
+                "current_battle_message": None,
+                "current_content": "",
+                "message_counter": 0,
+                "phase_messages": {},
+                "phase_contents": {}
+            }
 
+        battle_ctx = self.battle_contexts[battle_id]
 
-    async def manage_phase_message(self, ctx, phase_name, new_content=None, edit=False, force_new=False):
-        """
-        Manages messages by battle phase.
-        
-        Parameters:
-        - phase_name: The name of the battle phase (e.g., "PREPARATION PHASE")
-        - new_content: Content to add to the phase message
-        - edit: Whether to edit the existing phase message or create a new one
-        - force_new: Force creation of a new message even if the phase exists
-        
-        Returns:
-        - The phase message object
-        """
-        # Initialize phase messages dict if not exists
-        if not hasattr(self, 'phase_messages'):
-            self.phase_messages = {}
-            self.phase_contents = {}
-        
-        # Create phase header
-        header = f"⚔️ == {phase_name} == ⚔️"
-        
+        # Initialize phase messages dict if not exists in this battle context
+        if "phase_messages" not in battle_ctx:
+            battle_ctx["phase_messages"] = {}
+            battle_ctx["phase_contents"] = {}
+
+        max_content_len = 1900
+
         # If we need to create a new phase message
-        if force_new or phase_name not in self.phase_messages:
+        if force_new or phase_name not in battle_ctx["phase_messages"]:
             if new_content:
-                content = f"{header}\n{new_content}"
+                first_limit = max_content_len
+                chunks = self._split_text_for_discord(new_content, first_limit)
+                phase_embed = self._build_phase_embed(phase_name)
+                last_message = await ctx.send(chunks[0], embed=phase_embed)
+                battle_ctx["phase_messages"][phase_name] = last_message
+                battle_ctx["phase_contents"][phase_name] = chunks[0]
+
+                for extra_chunk in chunks[1:]:
+                    last_message = await ctx.send(extra_chunk)
+                    battle_ctx["phase_messages"][phase_name] = last_message
+                    battle_ctx["phase_contents"][phase_name] = extra_chunk
             else:
-                content = header
-                
-            # Create new message for this phase
-            self.phase_messages[phase_name] = await ctx.send(content)
-            self.phase_contents[phase_name] = content
-            
+                phase_embed = self._build_phase_embed(phase_name)
+                battle_ctx["phase_messages"][phase_name] = await ctx.send(embed=phase_embed)
+                battle_ctx["phase_contents"][phase_name] = ""
+
         # If we're editing an existing phase message
         elif edit and new_content:
             # Update content for this phase
-            if phase_name not in self.phase_contents:
-                self.phase_contents[phase_name] = header
-                
-            self.phase_contents[phase_name] += f"\n{new_content}"
-            
-            # Edit the existing message
-            await self.phase_messages[phase_name].edit(content=self.phase_contents[phase_name])
-        
-        return self.phase_messages[phase_name]
+            if phase_name not in battle_ctx["phase_contents"]:
+                battle_ctx["phase_contents"][phase_name] = ""
+
+            previous_content = battle_ctx["phase_contents"][phase_name]
+            updated_content = (
+                f"{previous_content}\n{new_content}" if previous_content else new_content
+            )
+            if self._discord_content_length(updated_content) <= max_content_len:
+                battle_ctx["phase_contents"][phase_name] = updated_content
+                await battle_ctx["phase_messages"][phase_name].edit(content=updated_content)
+            else:
+                # Start continuation messages when we hit Discord's 2000-char limit.
+                chunk_limit = max_content_len
+                chunks = self._split_text_for_discord(new_content, chunk_limit)
+
+                last_message = await ctx.send(chunks[0])
+                battle_ctx["phase_messages"][phase_name] = last_message
+                battle_ctx["phase_contents"][phase_name] = chunks[0]
+
+                for extra_chunk in chunks[1:]:
+                    last_message = await ctx.send(extra_chunk)
+                    battle_ctx["phase_messages"][phase_name] = last_message
+                    battle_ctx["phase_contents"][phase_name] = extra_chunk
+
+        return battle_ctx["phase_messages"][phase_name]
+
+    def _build_phase_embed(self, phase_name: str) -> discord.Embed:
+        """Create a compact embed for phase transitions."""
+        phase_colors = {
+            "PREPARATION PHASE": discord.Color.blue(),
+            "BATTLE BEGINS": discord.Color.red(),
+            "DECISIVE MOMENT": discord.Color.orange(),
+            "EMPEROR'S JUDGMENT": discord.Color.gold(),
+            "BATTLE CONCLUSION": discord.Color.green(),
+        }
+        phase_descriptions = {
+            "PREPARATION PHASE": "Weapons drawn. Stakes set. The crowd leans in.",
+            "BATTLE BEGINS": "Steel meets steel. The arena decides who bends first.",
+            "DECISIVE MOMENT": "One opening. One mistake. One winner.",
+            "EMPEROR'S JUDGMENT": "All eyes on the imperial verdict.",
+            "BATTLE CONCLUSION": "The sand settles. Glory is counted.",
+        }
+        return discord.Embed(
+            title=phase_name,
+            description=phase_descriptions.get(phase_name, "The fight evolves."),
+            color=phase_colors.get(phase_name, discord.Color.dark_grey()),
+        )
+
+    def _build_beat_embed(self, beat_key: str, beat_label: str, crowd_heat: int) -> discord.Embed:
+        """Create a beat-transition embed for opening/pressure/climax."""
+        beat_colors = {
+            "opening": discord.Color.dark_teal(),
+            "pressure": discord.Color.orange(),
+            "climax": discord.Color.dark_red(),
+        }
+        return discord.Embed(
+            title=beat_label,
+            description=f"Crowd Heat: **{crowd_heat}/100**",
+            color=beat_colors.get(beat_key, discord.Color.dark_grey()),
+        )
+
+    def _format_endurance_bar(self, current: float, maximum: float, length: int = 20) -> str:
+        """Create a raid-style endurance bar."""
+        if maximum <= 0:
+            return "░" * length
+
+        ratio = max(0.0, min(1.0, current / maximum))
+        filled = int(round(ratio * length))
+        filled = max(0, min(length, filled))
+        return ("█" * filled) + ("░" * (length - filled))
+
+    def _format_endurance_snapshot(
+        self,
+        p1_name: str,
+        p1_current: float,
+        p1_max: float,
+        p2_name: str,
+        p2_current: float,
+        p2_max: float,
+    ) -> str:
+        """Create a two-line endurance snapshot for both fighters."""
+        return (
+            f"{p1_name}: {self._format_endurance_bar(p1_current, p1_max)} {p1_current:.0f}/{p1_max:.0f}\n"
+            f"{p2_name}: {self._format_endurance_bar(p2_current, p2_max)} {p2_current:.0f}/{p2_max:.0f}"
+        )
+
+    def _determine_fighter_style(self, total_stats: float, weapon_info: Dict, god_name: Optional[str]) -> str:
+        """Assign a fighter archetype to shape automated pacing and narration."""
+        weapon_type = weapon_info.get("type", "unknown")
+        style_hint = weapon_info.get("style", "single")
+
+        if god_name and random.random() < 0.65:
+            return "fanatic"
+        if weapon_type in {"sword", "spear"}:
+            return "duelist"
+        if weapon_type in {"hammer", "axe", "mace", "scythe"}:
+            return "brawler"
+        if weapon_type in {"wand", "bow"}:
+            return "showman"
+        if style_hint == "shield":
+            return "survivor"
+        if total_stats >= 45:
+            return "duelist"
+        if total_stats <= 24:
+            return "survivor"
+        return random.choice(["duelist", "brawler", "showman", "survivor"])
+
+    def _choose_arena_theme(self) -> Dict:
+        """Pick a themed arena profile for this match."""
+        return random.choice(self.arena_themes)
+
+    def _duel_key(self, user1_id: int, user2_id: int) -> Tuple[int, int]:
+        """Stable key for rivalry memory."""
+        return tuple(sorted((user1_id, user2_id)))
+
+    def _get_rivalry_line(self, player_a, player_b) -> str:
+        """Generate rematch flavor text from session memory."""
+        key = self._duel_key(player_a.id, player_b.id)
+        history = self.duel_history.get(key)
+        if not history:
+            return f"First recorded meeting between {player_a.display_name} and {player_b.display_name}. No grudges yet - only possibility."
+
+        duel_count = history.get("count", 0)
+        last_winner_id = history.get("last_winner")
+        if last_winner_id == player_a.id:
+            leader_name = player_a.display_name
+        elif last_winner_id == player_b.id:
+            leader_name = player_b.display_name
+        else:
+            leader_name = "Neither fighter"
+
+        if duel_count <= 2:
+            return f"Rematch tension rises. {leader_name} claimed the last encounter and both fighters want this settled decisively."
+        if duel_count <= 5:
+            return f"Rivalry match #{duel_count}: history weighs heavily on both warriors as the crowd demands a clear statement."
+        return f"Legendary rivalry clash #{duel_count}: every exchange rewrites a feud that has gripped the arena."
+
+    def _record_duel_result(self, user1_id: int, user2_id: int, winner_id: int, margin: float) -> None:
+        """Persist lightweight rivalry memory for future flavor."""
+        key = self._duel_key(user1_id, user2_id)
+        history = self.duel_history.get(key, {"count": 0, "last_winner": None, "last_margin": 0.0})
+        history["count"] += 1
+        history["last_winner"] = winner_id
+        history["last_margin"] = round(float(margin), 2)
+        self.duel_history[key] = history
+
+    def _determine_battle_beat(self, event_index: int, total_events: int) -> str:
+        """State machine for cinematic pacing."""
+        progress = (event_index + 1) / max(1, total_events)
+        if progress <= 0.33:
+            return "opening"
+        if progress <= 0.75:
+            return "pressure"
+        return "climax"
+
+    def _get_tone_profile(self) -> Dict:
+        """Return active tone config with sane fallback."""
+        return self.tone_profiles.get(self.active_tone, self.tone_profiles["default"])
+
+    def _get_event_weights(self, beat: str, style_key: str, crowd_heat: int, tone_profile: Optional[Dict] = None) -> List[float]:
+        """Dynamic event weighting by beat + fighter style + crowd energy."""
+        tone = tone_profile or self.tone_profiles["default"]
+        if beat == "opening":
+            base = {"attack": 0.64, "special_event": 0.18, "special_move": 0.09, "arena_event": 0.07, "divine_intervention": 0.02}
+        elif beat == "pressure":
+            base = {"attack": 0.56, "special_event": 0.16, "special_move": 0.15, "arena_event": 0.09, "divine_intervention": 0.04}
+        else:
+            base = {"attack": 0.48, "special_event": 0.11, "special_move": 0.22, "arena_event": 0.11, "divine_intervention": 0.08}
+
+        for key, value in tone.get("event_bias", {}).items():
+            base[key] = base.get(key, 0.0) + value
+
+        style_bias = self.fighter_styles.get(style_key, {}).get("bias", {})
+        for key, value in style_bias.items():
+            base[key] = base.get(key, 0.0) + value
+
+        # As crowd heat rises, spectacle and interventions become more likely.
+        heat_factor = max(0.0, min(1.0, (crowd_heat - 35) / 65))
+        base["attack"] -= 0.06 * heat_factor
+        base["special_move"] += 0.03 * heat_factor
+        base["arena_event"] += 0.02 * heat_factor
+        base["divine_intervention"] += 0.01 * heat_factor
+
+        keys = ["attack", "special_event", "special_move", "arena_event", "divine_intervention"]
+        normalized = [max(0.01, base.get(key, 0.01)) for key in keys]
+        total = sum(normalized)
+        return [w / total for w in normalized]
+
+    def _pick_target_zone(self, previous_zone: Optional[str] = None) -> str:
+        """Pick a narrative target zone with light anti-repeat logic."""
+        zones = ["head", "neck", "ribs", "legs", "shoulder", "weapon arm", "midsection"]
+        if previous_zone in zones and len(zones) > 1:
+            zones.remove(previous_zone)
+        return random.choice(zones)
+
+    def _split_text_for_discord(self, text: str, limit: int = 1900) -> List[str]:
+        """Split long text into safe Discord-sized chunks."""
+        if limit <= 0:
+            return [""]
+        if self._discord_content_length(text) <= limit:
+            return [text]
+
+        chunks = []
+        remaining = text
+        while remaining:
+            if self._discord_content_length(remaining) <= limit:
+                chunks.append(remaining)
+                break
+
+            safe_slice = self._truncate_to_discord_limit(remaining, limit)
+            if not safe_slice:
+                break
+
+            split_at = safe_slice.rfind("\n")
+            if split_at == -1:
+                split_at = safe_slice.rfind(" ")
+            chunk = safe_slice[:split_at].rstrip() if split_at > 0 else safe_slice
+            if not chunk:
+                chunk = safe_slice
+
+            chunks.append(chunk)
+            remaining = remaining[len(chunk):].lstrip()
+
+        return chunks if chunks else [self._truncate_to_discord_limit(text, limit)]
 
     @has_char()
     @user_cooldown(90)
@@ -1280,39 +1670,50 @@ class SimpleBattle(discord.ext.commands.Cog):
 
             Challenge another player to a gladiatorial battle in the arena.
             Bet money on your victory, and the winner takes all!
-            
+
             Weapons have strengths and weaknesses against other types.
             Two-handed weapons (bow, scythe, mace) have their own advantages.
-            
-            The gods (Astraea, Sepulchure, or Drakath) may intervene in battle.
-            
+
+            The gods (Elysia, Sepulchure, or Drakath) may intervene in battle.
+
             The victorious gladiator earns glory, gold, and a PvP win on their profile.
             (This command has a cooldown of 90 seconds.)"""
         )
-        
+
+        # Create a unique battle ID
+        battle_id = f"{ctx.author.id}-{ctx.channel.id}-{int(time.time())}"
+
+        # Initialize battle context for this battle
+        self.battle_contexts[battle_id] = {
+            "battle_messages": [],
+            "current_battle_message": None,
+            "current_content": "",
+            "message_counter": 0,
+            "phase_messages": {},
+            "phase_contents": {}
+        }
+
         # Initialize variables for potential refund in case of error
         challenger_id = ctx.author.id
         enemy_id = None
         money_deducted = False
         enemy_joined = False
-        
-        # Reset phase messages for this session
-        if hasattr(self, 'phase_messages'):
-            self.phase_messages = {}
-            self.phase_contents = {}
-        else:
-            self.phase_messages = {}
-            self.phase_contents = {}
-        
+
         # Initialize battle tracking variables
         victory_points = [0, 0]  # Track actual points that determine winner
-        last_event_winner = None  # Track who won the last event
         consecutive_wins = [0, 0]  # Track consecutive wins for momentum
-        
+
         try:
             if enemy == ctx.author:
+                # Clean up battle context
+                if battle_id in self.battle_contexts:
+                    del self.battle_contexts[battle_id]
                 return await ctx.send(_("You can't battle yourself in the arena."))
+
             if ctx.character_data["money"] < money:
+                # Clean up battle context
+                if battle_id in self.battle_contexts:
+                    del self.battle_contexts[battle_id]
                 return await ctx.send(_("You don't have enough gold for this battle."))
 
             # Deduct the bet amount from challenger
@@ -1326,21 +1727,21 @@ class SimpleBattle(discord.ext.commands.Cog):
             # Create battle invitation message
             if not enemy:
                 if money > 0:
-                    text = _("⚔️ {author} steps up to the arena gates seeking glory! The prize: **${money}**.").format(
+                    text = _("{author} steps up to the arena gates seeking glory! The prize: **${money}**.").format(
                         author=ctx.author.mention, money=money
                     )
                 else:
-                    text = _("⚔️ {author} steps up to the arena gates seeking glory and honor!").format(
+                    text = _("{author} steps up to the arena gates seeking glory and honor!").format(
                         author=ctx.author.mention
                     )
             else:
                 if money > 0:
                     text = _(
-                        "⚔️ {author} calls out {enemy} before the arena master! The stakes: **${money}**."
+                        "{author} calls out {enemy} before the arena master! The stakes: **${money}**."
                     ).format(author=ctx.author.mention, enemy=enemy.mention, money=money)
                 else:
                     text = _(
-                        "⚔️ {author} calls out {enemy} before the arena master!"
+                        "{author} calls out {enemy} before the arena master!"
                     ).format(author=ctx.author.mention, enemy=enemy.mention)
 
             # Check if joining player has enough money
@@ -1383,6 +1784,9 @@ class SimpleBattle(discord.ext.commands.Cog):
                         ctx.author.id,
                     )
                     money_deducted = False
+                # Clean up battle context
+                if battle_id in self.battle_contexts:
+                    del self.battle_contexts[battle_id]
                 return await ctx.send(
                     _("The crowd boos as no one accepts {author}'s challenge!").format(
                         author=ctx.author.mention
@@ -1397,81 +1801,113 @@ class SimpleBattle(discord.ext.commands.Cog):
             # Get players' weapon information
             p1_weapon_info = await self.get_weapon_info(ctx, ctx.author.id)
             p2_weapon_info = await self.get_weapon_info(ctx, enemy_.id)
-            
+
             # Choose gods if not already set
-            gods = ["Astraea", "Sepulchure", "Drakath", None]
+            gods = ["Elysia", "Sepulchure", "Drakath", None]
             p1_god = p1_weapon_info.get("god") or random.choice(gods)
             p2_god = p2_weapon_info.get("god") or random.choice(gods)
-            
+
             # Format god names for display
             p1_god_display = p1_god if p1_god else "no patron deity"
             p2_god_display = p2_god if p2_god else "no patron deity"
-            
+
             # Determine weapon advantage
             advantage = await self.get_weapon_advantage(ctx, p1_weapon_info["type"], p2_weapon_info["type"])
-            
+
             # Get base stats and apply weapon advantage - CONVERT TO FLOAT HERE
             p1_stats_tuple = await self.bot.get_damage_armor_for(ctx.author)
             p2_stats_tuple = await self.bot.get_damage_armor_for(enemy_)
-            
+
             # Convert Decimal to float to avoid type errors
             p1_stats = float(p1_stats_tuple[0]) + float(p1_stats_tuple[1])
             p2_stats = float(p2_stats_tuple[0]) + float(p2_stats_tuple[1])
-            
+
             # Apply 2-handed weapon bonus
             if p1_weapon_info["handed"] == 2:
                 p1_stats += 1.0  # 2-handed bonus
             if p2_weapon_info["handed"] == 2:
                 p2_stats += 1.0  # 2-handed bonus
-            
+
             # Apply weapon advantage - Add victory points for advantage (IMPORTANT FOR NARRATIVE)
             if advantage == 1:
-                p1_stats += 2.0
-                victory_points[0] += 2  # Player 1 gets initial advantage points
+                p1_stats += 1.0
+                victory_points[0] += 1  # Player 1 gets an opening edge
             elif advantage == -1:
-                p2_stats += 2.0
-                victory_points[1] += 2  # Player 2 gets initial advantage points
-            
+                p2_stats += 1.0
+                victory_points[1] += 1  # Player 2 gets an opening edge
+
+            # Theme, rivalry, and style layers for immersive automation.
+            arena_theme = self._choose_arena_theme()
+            theme_hazards = arena_theme.get("hazards", self.arena_hazards)
+            theme_items = arena_theme.get("items", self.arena_items)
+            theme_conditions = arena_theme.get("conditions", self.arena_conditions)
+
+            p1_style_key = self._determine_fighter_style(p1_stats, p1_weapon_info, p1_god)
+            p2_style_key = self._determine_fighter_style(p2_stats, p2_weapon_info, p2_god)
+            player_style_keys = [p1_style_key, p2_style_key]
+            player_style_profiles = [
+                self.fighter_styles.get(p1_style_key, self.fighter_styles["survivor"]),
+                self.fighter_styles.get(p2_style_key, self.fighter_styles["survivor"]),
+            ]
+            rivalry_line = self._get_rivalry_line(ctx.author, enemy_)
+            tone_profile = self._get_tone_profile()
+
             # Battle intro - introduce the gladiators
             intro = random.choice(self.commentaries["intros"]).format(
-                p1=ctx.author.display_name, 
+                p1=ctx.author.display_name,
                 p2=enemy_.display_name,
                 w1=p1_weapon_info["name"],
                 w2=p2_weapon_info["name"]
             )
-            
+
             # Create battle embed
             battle_embed = discord.Embed(
-                title="⚔️ ARENA BATTLE ⚔️",
+                title=f"ARENA BATTLE - {arena_theme['name']}",
                 description=intro,
                 color=0xe74c3c
             )
-            
+
             # Add god affiliations if available
             p1_display = f"{ctx.author.display_name}"
             if p1_god:
                 p1_display += f" ({p1_god_display})"
-                
+
             p2_display = f"{enemy_.display_name}"
             if p2_god:
                 p2_display += f" ({p2_god_display})"
-            
+
             battle_embed.add_field(
-                name=p1_display, 
-                value=f"Wielding: {p1_weapon_info['name']}" + (f" & {p1_weapon_info['second_name']}" if p1_weapon_info['second_name'] else ""), 
+                name=p1_display,
+                value=f"Wielding: {p1_weapon_info['name']}" + (
+                    f" & {p1_weapon_info['second_name']}" if p1_weapon_info['second_name'] else ""),
                 inline=True
             )
-            
+
             battle_embed.add_field(
-                name=p2_display, 
-                value=f"Wielding: {p2_weapon_info['name']}" + (f" & {p2_weapon_info['second_name']}" if p2_weapon_info['second_name'] else ""), 
+                name=p2_display,
+                value=f"Wielding: {p2_weapon_info['name']}" + (
+                    f" & {p2_weapon_info['second_name']}" if p2_weapon_info['second_name'] else ""),
                 inline=True
             )
-            
+
+            battle_embed.add_field(
+                name="Arena Theme",
+                value=arena_theme.get("flavor", "The arena breathes with old violence."),
+                inline=False
+            )
+            battle_embed.add_field(
+                name="Combat Styles",
+                value=(
+                    f"{ctx.author.display_name}: **{player_style_profiles[0]['name']}** ({player_style_profiles[0]['description']})\n"
+                    f"{enemy_.display_name}: **{player_style_profiles[1]['name']}** ({player_style_profiles[1]['description']})"
+                ),
+                inline=False
+            )
+
             # Send the battle embed
             await ctx.send(embed=battle_embed)
-            await asyncio.sleep(3)  # Wait 3 seconds before starting
-            
+            await self._battle_sleep(3)  # Wait 3 seconds before starting
+
             # Pre-defined options for commentaries
             announcer_lines = [
                 f"The crowds roar as the massive iron gates of the arena begin to open...",
@@ -1481,8 +1917,10 @@ class SimpleBattle(discord.ext.commands.Cog):
                 f"Vendors hawk their wares through the crowd as the arena floor is raked smooth for battle!",
                 f"Betting masters hurry to collect final wagers before the competitors make their entrance!",
                 f"The ancient arena stones seem to pulse with the energy of countless battles fought before!",
-                f"Priests of Astraea bless the sands while acolytes of Sepulchure whisper dark omens at the gates!",
+                f"Priests of Elysia bless the sands while acolytes of Sepulchure whisper dark omens at the gates!",
                 f"The Arena Master raises his staff, commanding silence before the grand introduction!",
+                f"Tonight's battlefield is **{arena_theme['name']}**: {arena_theme['flavor']}",
+                f"Whispers spread through the stands: {rivalry_line}",
             ]
             
             p1_entrance_options = [
@@ -1533,35 +1971,53 @@ class SimpleBattle(discord.ext.commands.Cog):
             
             # ========== PREPARATION PHASE ==========
             # Create a separate message for the preparation phase
-            await self.manage_phase_message(ctx, "PREPARATION PHASE")
-            await asyncio.sleep(2)  # Pause after section header
+            await self.manage_phase_message(ctx, battle_id, "PREPARATION PHASE")
+            await self._battle_sleep(1.5)  # Pause after section header
             
             # Create pre-battle atmosphere with arena announcements
             atmosphere = random.choice(announcer_lines)
-            await self.manage_phase_message(ctx, "PREPARATION PHASE", f"🏟️ **Arena Atmosphere:** {atmosphere}", edit=True)
-            await asyncio.sleep(4)
+            await self.manage_phase_message(ctx, battle_id, "PREPARATION PHASE", f"**Arena Atmosphere:** {atmosphere}", edit=True)
+            await self._battle_sleep(2.5)
+
+            await self.manage_phase_message(
+                ctx,
+                battle_id,
+                "PREPARATION PHASE",
+                f"**Style Clash:** {ctx.author.display_name} enters as a **{player_style_profiles[0]['name']}**, while {enemy_.display_name} fights like a **{player_style_profiles[1]['name']}**.",
+                edit=True
+            )
+            await self._battle_sleep(2)
+
+            await self.manage_phase_message(
+                ctx,
+                battle_id,
+                "PREPARATION PHASE",
+                f"**Rivalry Ledger:** {rivalry_line}",
+                edit=True
+            )
+            await self._battle_sleep(2)
             
             # Send entrance messages
             p1_entrance = random.choice(p1_entrance_options)
-            await self.manage_phase_message(ctx, "PREPARATION PHASE", f"🥇 **Challenger:** {p1_entrance}", edit=True)
-            await asyncio.sleep(4)
+            await self.manage_phase_message(ctx, battle_id, "PREPARATION PHASE", f"**Challenger:** {p1_entrance}", edit=True)
+            await self._battle_sleep(2.5)
             
             p2_entrance = random.choice(p2_entrance_options)
-            await self.manage_phase_message(ctx, "PREPARATION PHASE", f"🥈 **Opponent:** {p2_entrance}", edit=True)
-            await asyncio.sleep(4)
+            await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"**Opponent:** {p2_entrance}", edit=True)
+            await self._battle_sleep(2.5)
             
             # Announcer introduces the fighters formally
             formal_intro = random.choice(announcer_intros)
-            await self.manage_phase_message(ctx, "PREPARATION PHASE", f"📣 **Arena Master:** {formal_intro}", edit=True)
-            await asyncio.sleep(4)
+            await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"**Arena Master:** {formal_intro}", edit=True)
+            await self._battle_sleep(2.5)
             
             # Add a Fablelands reference
             fablelands_ref = random.choice(self.commentaries["fablelands_references"]).format(
                 p1=ctx.author.display_name,
                 p2=enemy_.display_name
             )
-            await self.manage_phase_message(ctx, "PREPARATION PHASE", f"🌍 **Fablelands Lore:** {fablelands_ref}", edit=True)
-            await asyncio.sleep(4)
+            await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"**Fablelands Lore:** {fablelands_ref}", edit=True)
+            await self._battle_sleep(2.5)
             
             # Show weapon style commentary for each player
             if p1_weapon_info["handed"] == 2:
@@ -1569,26 +2025,26 @@ class SimpleBattle(discord.ext.commands.Cog):
                     player=ctx.author.display_name,
                     weapon=p1_weapon_info["type"]
                 )
-                await self.manage_phase_message(ctx, "PREPARATION PHASE", f"🗡️ **Weapon Style:** {style_comment}", edit=True)
+                await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"**Weapon Style:** {style_comment}", edit=True)
             elif p1_weapon_info["style"] == "shield":
                 style_comment = random.choice(self.commentaries["shield_comments"]).format(
                     player=ctx.author.display_name
                 )
-                await self.manage_phase_message(ctx, "PREPARATION PHASE", f"🛡️ **Shield Style:** {style_comment}", edit=True)
-            await asyncio.sleep(4)
+                await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"**Shield Style:** {style_comment}", edit=True)
+            await self._battle_sleep(2.5)
             
             if p2_weapon_info["handed"] == 2:
                 style_comment = random.choice(self.commentaries["two_handed_comments"]).format(
                     player=enemy_.display_name,
                     weapon=p2_weapon_info["type"]
                 )
-                await self.manage_phase_message(ctx, "PREPARATION PHASE", f"🗡️ **Weapon Style:** {style_comment}", edit=True)
+                await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"**Weapon Style:** {style_comment}", edit=True)
             elif p2_weapon_info["style"] == "shield":
                 style_comment = random.choice(self.commentaries["shield_comments"]).format(
                     player=enemy_.display_name
                 )
-                await self.manage_phase_message(ctx, "PREPARATION PHASE", f"🛡️ **Shield Style:** {style_comment}", edit=True)
-            await asyncio.sleep(4)
+                await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"**Shield Style:** {style_comment}", edit=True)
+            await self._battle_sleep(2.5)
             
             # Show weapon advantage if there is one
             if advantage != 0:
@@ -1600,7 +2056,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                         weapon2=p2_weapon_info["name"],
                         god=p1_god_display
                     )
-                    await self.manage_phase_message(ctx, "PREPARATION PHASE", f"⚡ **Tactical Advantage:** {advantage_text}", edit=True)
+                    await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"**Tactical Advantage:** {advantage_text}", edit=True)
                 else:
                     advantage_text = random.choice(self.commentaries["advantages"]).format(
                         p1=enemy_.display_name, 
@@ -1609,8 +2065,8 @@ class SimpleBattle(discord.ext.commands.Cog):
                         weapon2=p1_weapon_info["name"],
                         god=p2_god_display
                     )
-                    await self.manage_phase_message(ctx, "PREPARATION PHASE", f"⚡ **Tactical Advantage:** {advantage_text}", edit=True)
-                await asyncio.sleep(4)
+                    await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"**Tactical Advantage:** {advantage_text}", edit=True)
+                await self._battle_sleep(2.5)
 
             # Check if there's a significant difference in base stats
             # Get the base stats including 2-handed bonuses but before weapon advantages
@@ -1681,21 +2137,60 @@ class SimpleBattle(discord.ext.commands.Cog):
                 courage_message = random.choice(underdog_courage_messages)
                 
                 # Add to preparation phase
-                await self.manage_phase_message(ctx, "PREPARATION PHASE", f"⚔️ **Battle Odds:** {dominance_message} {courage_message}", edit=True)
-                await asyncio.sleep(4)
+                await self.manage_phase_message(ctx, battle_id,  "PREPARATION PHASE", f"**Battle Odds:** {dominance_message} {courage_message}", edit=True)
+                await self._battle_sleep(2.5)
 
-            
+
             # Battle commencement signal
             commencement = random.choice(commencement_options)
-            await self.manage_phase_message(ctx, "BATTLE BEGINS", f"⚔️ **Battle Begins:** {commencement}", edit=True)
-            await asyncio.sleep(4)
+            await self.manage_phase_message(ctx, battle_id, "BATTLE BEGINS")
+            await self.manage_phase_message(ctx, battle_id,  "BATTLE BEGINS", f"**Battle Begins:** {commencement}", edit=True)
+            await self._battle_sleep(3)
             
             # Battle events
-            event_count = random.randint(5, 8)
+            event_min, event_max = tone_profile.get("event_count_range", (6, 9))
+            event_count = random.randint(event_min, event_max)
             players = [ctx.author, enemy_]
             player_info = [p1_weapon_info, p2_weapon_info]
             player_stats = [p1_stats, p2_stats]
+            initial_player_stats = player_stats.copy()
             player_gods = [p1_god, p2_god]
+            player_styles = player_style_keys
+            crowd_heat = max(
+                20,
+                min(
+                    85,
+                    28 + arena_theme.get("crowd_bonus", 0) + tone_profile.get("crowd_base_bonus", 0)
+                ),
+            )
+
+            combat_memory = {
+                "last_zone": [None, None],
+                "last_result": [None, None],
+                "leader": None,
+                "turning_point": None,
+            }
+
+            battle_highlights = {
+                "biggest_hit": {"value": 0, "attacker": None, "victim": None, "method": None},
+                "special_moves": [0, 0],
+                "divine_interventions": [0, 0],
+                "longest_streak": [0, 0],
+                "peak_crowd_heat": crowd_heat,
+            }
+
+            beat_labels = tone_profile.get(
+                "beat_titles",
+                {"opening": "Opening Exchanges", "pressure": "Middle Pressure", "climax": "Final Climax"},
+            )
+            current_beat = None
+
+            # Endurance is the visible battle state used to make outcomes feel earned.
+            player_endurance_max = [
+                max(35.0, min(95.0, 50.0 + (player_stats[0] * 0.8))),
+                max(35.0, min(95.0, 50.0 + (player_stats[1] * 0.8))),
+            ]
+            player_endurance = player_endurance_max.copy()
             
             # Special tracking to ensure narrative balance
             special_move_used = [False, False]
@@ -1704,41 +2199,66 @@ class SimpleBattle(discord.ext.commands.Cog):
             
             # Track events for grouping
             event_counter = 0
-            need_blank_line = False  # Flag to determine if we need a blank line before next event
+            last_actor_idx = None
+            actor_streak = 0
             
             for i in range(event_count):
-                # Every 3 events, add a blank line for better readability
                 if event_counter >= 3:
-                    need_blank_line = True
                     event_counter = 0
-                
-                # Add blank line if needed
-                if need_blank_line:
-                    await self.manage_phase_message(ctx, "BATTLE BEGINS", " ", edit=True)
-                    need_blank_line = False
+
+                beat = self._determine_battle_beat(i, event_count)
+                if beat != current_beat:
+                    current_beat = beat
+                    await ctx.send(embed=self._build_beat_embed(current_beat, beat_labels[current_beat], crowd_heat))
+                    event_counter += 1
+                    await self._battle_sleep(2.5)
+
+                    cinematic_cuts = tone_profile.get("cinematic_cuts", [])
+                    if cinematic_cuts:
+                        await self.manage_phase_message(
+                            ctx,
+                            battle_id,
+                            "BATTLE BEGINS",
+                            f"*{random.choice(cinematic_cuts)}*",
+                            edit=True
+                        )
+                        event_counter += 1
+                        await self._battle_sleep(2)
+
+                    if current_beat == "climax":
+                        climax_calls = tone_profile.get("climax_calls", [])
+                        if climax_calls:
+                            await self.manage_phase_message(
+                                ctx,
+                                battle_id,
+                                "BATTLE BEGINS",
+                                f"**{random.choice(climax_calls)}**",
+                                edit=True
+                            )
+                            event_counter += 1
+                            await self._battle_sleep(2.5)
                 
                 # Determine which player is featured in this event
-                # Important change: favor player with higher stats less often (give underdog more narrative focus)
                 if i < 2:
                     # First events should include both players taking turns
                     player_idx = i % 2
-                elif i == event_count - 1:
-                    # Last event should favor the underdog if they're not too far behind
-                    if abs(victory_points[0] - victory_points[1]) <= 5:
-                        player_idx = 0 if victory_points[0] < victory_points[1] else 1
-                    else:
-                        # Otherwise, favor the player who's winning
-                        player_idx = 0 if victory_points[0] > victory_points[1] else 1
                 else:
-                    # Middle events - give underdog more chances
-                    # If there's a big point difference, give the underdog 70% of events
-                    if abs(victory_points[0] - victory_points[1]) > 5:
-                        underdog_idx = 0 if victory_points[0] < victory_points[1] else 1
-                        player_idx = underdog_idx if random.random() < 0.7 else 1 - underdog_idx
+                    # Prevent one fighter from monopolizing the spotlight.
+                    if last_actor_idx is not None and actor_streak >= 2:
+                        player_idx = 1 - last_actor_idx
                     else:
-                        # Otherwise somewhat random but slightly favor underdog
-                        underdog_idx = 0 if player_stats[0] < player_stats[1] else 1
-                        player_idx = underdog_idx if random.random() < 0.55 else 1 - underdog_idx
+                        point_gap = abs(victory_points[0] - victory_points[1])
+                        if point_gap >= 6:
+                            leading_idx = 0 if victory_points[0] > victory_points[1] else 1
+                            player_idx = leading_idx if random.random() < 0.58 else 1 - leading_idx
+                        else:
+                            player_idx = 0 if random.random() < 0.5 else 1
+
+                if player_idx == last_actor_idx:
+                    actor_streak += 1
+                else:
+                    last_actor_idx = player_idx
+                    actor_streak = 1
                 
                 player = players[player_idx]
                 opponent_idx = 1 - player_idx
@@ -1746,9 +2266,15 @@ class SimpleBattle(discord.ext.commands.Cog):
                 
                 try:
                     # Determine event type with weighted probabilities
+                    dynamic_weights = self._get_event_weights(
+                        current_beat,
+                        player_styles[player_idx],
+                        crowd_heat,
+                        tone_profile
+                    )
                     event_type = random.choices(
                         ["attack", "special_event", "special_move", "arena_event", "divine_intervention"],
-                        weights=[0.4, 0.25, 0.15, 0.15, 0.05],
+                        weights=dynamic_weights,
                         k=1
                     )[0]
                     
@@ -1762,18 +2288,21 @@ class SimpleBattle(discord.ext.commands.Cog):
                     if event_type == "special_move" and special_move_used[player_idx]:
                         event_type = "attack"
                     
-                    # If underdog is way behind, give them more chance for special move/divine intervention
-                    if victory_points[player_idx] < victory_points[opponent_idx] - 8 and random.random() < 0.6:
-                        if player_gods[player_idx] and not divine_intervention[player_idx]:
-                            event_type = "divine_intervention"
-                        elif not special_move_used[player_idx]:
+                    # Limited clutch mechanics: trailing fighters get occasional high-impact opportunities.
+                    point_deficit = victory_points[opponent_idx] - victory_points[player_idx]
+                    if point_deficit >= 7 and random.random() < 0.35:
+                        if not special_move_used[player_idx]:
                             event_type = "special_move"
+                        elif player_gods[player_idx] and not divine_intervention[player_idx]:
+                            event_type = "divine_intervention"
                     
                     # Handle different event types
                     if event_type == "attack":
                         # Get weapon-specific attack commentary if available
                         weapon_type = player_info[player_idx]["type"]
                         attack_key = f"{weapon_type}_attacks"
+                        target_zone = self._pick_target_zone(combat_memory["last_zone"][player_idx])
+                        style_name = self.fighter_styles[player_styles[player_idx]]["name"]
                         
                         if attack_key in self.commentaries:
                             attack = random.choice(self.commentaries[attack_key]).format(
@@ -1788,44 +2317,114 @@ class SimpleBattle(discord.ext.commands.Cog):
                                 weapon=player_info[player_idx]["name"]
                             )
                         
-                        await self.manage_phase_message(ctx, "BATTLE BEGINS", f"⚔️ **Attack:** {attack}", edit=True)
+                        style_hook = ""
+                        if combat_memory["last_result"][player_idx] == "hit":
+                            style_hook = f" Keeping the {style_name.lower()} rhythm, {player.display_name} presses the {target_zone}."
+                        await self.manage_phase_message(
+                            ctx,
+                            battle_id,
+                            "BATTLE BEGINS",
+                            f"{attack} Target: **{target_zone}**.{style_hook}",
+                            edit=True
+                        )
                         event_counter += 1
-                        await asyncio.sleep(3)  # Wait before showing the result
+                        await self._battle_sleep(1.5)  # Wait before showing the result
                         
-                        # Determine attack success (60% chance base, modified by stat difference)
+                        # Determine attack success with moderate influence from stats and current endurance.
                         stat_diff = player_stats[player_idx] - player_stats[opponent_idx]
-                        success_chance = 0.6 + (stat_diff * 0.05)  # Each point difference is 5% advantage
+                        endurance_diff = player_endurance[player_idx] - player_endurance[opponent_idx]
+                        success_chance = 0.52 + (stat_diff * 0.02) + (endurance_diff * 0.003)
+                        success_chance += tone_profile.get("attack_success_bonus", 0.0)
+                        if current_beat == "climax":
+                            success_chance += 0.01
+                        if player_styles[player_idx] == "duelist":
+                            success_chance += 0.01
+                        if player_styles[player_idx] == "brawler":
+                            success_chance += 0.005
                         
-                        # Important change: If player is behind in victory points, increase chance of success
                         if victory_points[player_idx] < victory_points[opponent_idx]:
-                            # The more behind they are, the higher the boost (up to +0.15)
                             point_diff = victory_points[opponent_idx] - victory_points[player_idx]
-                            comeback_boost = min(point_diff * 0.03, 0.15)
+                            comeback_boost = min(point_diff * 0.01, 0.05)
                             success_chance += comeback_boost
                         
-                        success = random.random() < min(max(success_chance, 0.3), 0.9)  # Bound between 30% and 90%
+                        success = random.random() < min(max(success_chance, 0.35), 0.78)
                         
                         if success:
-                            # Attack succeeds - possibly add a brutal injury description
-                            damage_points = random.randint(2, 4)  # Important change: Bigger impact for hits
+                            # Attack succeeds - deal endurance damage and gain control.
+                            damage_points = random.randint(2, 5)
+                            damage_points += int(tone_profile.get("attack_damage_bonus", 0))
+                            if stat_diff >= 6:
+                                damage_points += 1
+                            damage_points = max(2, min(7, damage_points))
                             
-                            # Add victory points for successful hit
-                            victory_points[player_idx] += damage_points
-                            player_stats[opponent_idx] -= float(damage_points)
+                            victory_points[player_idx] += 2 if damage_points >= 5 else 1
+                            player_endurance[opponent_idx] -= float(damage_points)
+                            player_stats[opponent_idx] -= float(damage_points * 0.35)
+                            combat_memory["last_zone"][player_idx] = target_zone
+                            combat_memory["last_result"][player_idx] = "hit"
                             
-                            # Update consecutive wins tracker
-                            last_event_winner = player_idx
                             consecutive_wins[player_idx] += 1
                             consecutive_wins[opponent_idx] = 0
+                            battle_highlights["longest_streak"][player_idx] = max(
+                                battle_highlights["longest_streak"][player_idx],
+                                consecutive_wins[player_idx]
+                            )
+                            heat_gain_mult = tone_profile.get("crowd_heat_gain_multiplier", 1.0)
+                            crowd_heat += int(round((3 + (2 if damage_points >= 5 else 0)) * heat_gain_mult))
+                            if damage_points > battle_highlights["biggest_hit"]["value"]:
+                                battle_highlights["biggest_hit"] = {
+                                    "value": damage_points,
+                                    "attacker": player.display_name,
+                                    "victim": opponent.display_name,
+                                    "method": "weapon strike",
+                                }
                             
                             # Chance for a brutal injury description
-                            if random.random() < 0.3:  # 30% chance for brutal injury
+                            brutal_injury_chance = tone_profile.get("brutal_injury_chance", 0.3)
+                            if random.random() < brutal_injury_chance:
                                 injury = random.choice(self.commentaries["brutal_injuries"]).format(
                                     victim=opponent.display_name
                                 )
-                                await self.manage_phase_message(ctx, "BATTLE BEGINS", f"🩸 **Brutal Injury:** {injury}", edit=True)
+                                endurance_snapshot = self._format_endurance_snapshot(
+                                    players[0].display_name,
+                                    max(0.0, min(player_endurance_max[0], player_endurance[0])),
+                                    player_endurance_max[0],
+                                    players[1].display_name,
+                                    max(0.0, min(player_endurance_max[1], player_endurance[1])),
+                                    player_endurance_max[1],
+                                )
+                                await self.manage_phase_message(
+                                    ctx,
+                                    battle_id,
+                                    "BATTLE BEGINS",
+                                    (
+                                        f"{player.display_name} drives through {opponent.display_name}'s guard for "
+                                        f"**{damage_points} endurance**.\n"
+                                        f"🩸 {injury}\n"
+                                        f"**Endurance:**\n{endurance_snapshot}"
+                                    ),
+                                    edit=True,
+                                )
+                                crowd_heat += int(round(4 * heat_gain_mult))
                             else:
-                                await self.manage_phase_message(ctx, "BATTLE BEGINS", f"💥 **Hit:** The strike lands true! {opponent.display_name} staggers back!", edit=True)
+                                endurance_snapshot = self._format_endurance_snapshot(
+                                    players[0].display_name,
+                                    max(0.0, min(player_endurance_max[0], player_endurance[0])),
+                                    player_endurance_max[0],
+                                    players[1].display_name,
+                                    max(0.0, min(player_endurance_max[1], player_endurance[1])),
+                                    player_endurance_max[1],
+                                )
+                                await self.manage_phase_message(
+                                    ctx,
+                                    battle_id,
+                                    "BATTLE BEGINS",
+                                    (
+                                        f"{player.display_name} connects cleanly for **{damage_points} endurance**.\n"
+                                        f"**Endurance:**\n{endurance_snapshot}"
+                                    ),
+                                    edit=True,
+                                )
                         else:
                             # Attack is defended - use weapon-specific defense
                             defender_weapon = player_info[opponent_idx]["type"]
@@ -1833,6 +2432,10 @@ class SimpleBattle(discord.ext.commands.Cog):
                             
                             # Add small victory point for successful defense
                             victory_points[opponent_idx] += 1
+                            chip_damage = 1 if random.random() < 0.4 else 0
+                            if chip_damage:
+                                player_endurance[player_idx] -= 1.0
+                            combat_memory["last_result"][player_idx] = "blocked"
                             
                             if defense_key in self.commentaries:
                                 defense = random.choice(self.commentaries[defense_key]).format(
@@ -1846,7 +2449,27 @@ class SimpleBattle(discord.ext.commands.Cog):
                                     defender=opponent.display_name,
                                     weapon=player_info[opponent_idx]["name"]
                                 )
-                            await self.manage_phase_message(ctx, "BATTLE BEGINS", f"🛡️ **Defense:** {defense}", edit=True)
+                            defense_suffix = f" {player.display_name} is clipped in the exchange." if chip_damage else ""
+                            defense_line = f"{defense}{defense_suffix}"
+                            if chip_damage:
+                                endurance_snapshot = self._format_endurance_snapshot(
+                                    players[0].display_name,
+                                    max(0.0, min(player_endurance_max[0], player_endurance[0])),
+                                    player_endurance_max[0],
+                                    players[1].display_name,
+                                    max(0.0, min(player_endurance_max[1], player_endurance[1])),
+                                    player_endurance_max[1],
+                                )
+                                defense_line = f"{defense_line}\n**Endurance:**\n{endurance_snapshot}"
+                            await self.manage_phase_message(
+                                ctx,
+                                battle_id,
+                                "BATTLE BEGINS",
+                                defense_line,
+                                edit=True,
+                            )
+                            heat_gain_mult = tone_profile.get("crowd_heat_gain_multiplier", 1.0)
+                            crowd_heat += int(round((2 if chip_damage else 1) * heat_gain_mult))
                         event_counter += 1
                     
                     elif event_type == "special_event":
@@ -1858,42 +2481,63 @@ class SimpleBattle(discord.ext.commands.Cog):
                             player=player.display_name,
                             weapon=player_info[player_idx]["name"]
                         )
-                        await self.manage_phase_message(ctx, "BATTLE BEGINS", f"🌟 **Special Event:** {event_text}", edit=True)
+                        await self.manage_phase_message(ctx, battle_id, "BATTLE BEGINS", event_text, edit=True)
                         event_counter += 1
                         
-                        # Apply event effect to stats and victory points
+                        # Special events influence battle flow without deciding the whole fight alone.
                         if "bonus" in event:
                             event_bonus = float(event["bonus"])
-                            player_stats[player_idx] += event_bonus
-                            victory_points[player_idx] += int(event_bonus * 1.5)
+                            recovery = min(2.5, max(1.0, event_bonus * 0.6))
+                            player_endurance[player_idx] = min(
+                                player_endurance_max[player_idx],
+                                player_endurance[player_idx] + recovery
+                            )
+                            player_stats[player_idx] += event_bonus * 0.25
+                            victory_points[player_idx] += 1
+                            heat_gain_mult = tone_profile.get("crowd_heat_gain_multiplier", 1.0)
+                            crowd_heat += int(round(2 * heat_gain_mult))
                             
-                            # Update consecutive wins tracker for positive event
-                            last_event_winner = player_idx
                             consecutive_wins[player_idx] += 1
                             consecutive_wins[opponent_idx] = 0
+                            battle_highlights["longest_streak"][player_idx] = max(
+                                battle_highlights["longest_streak"][player_idx],
+                                consecutive_wins[player_idx]
+                            )
                         elif "penalty" in event:
-                            event_penalty = float(event["penalty"])
-                            player_stats[player_idx] += event_penalty  # Should be negative
-                            victory_points[opponent_idx] += int(abs(event_penalty))
+                            event_penalty = abs(float(event["penalty"]))
+                            endurance_loss = min(3.0, max(1.0, event_penalty * 1.1))
+                            player_endurance[player_idx] -= endurance_loss
+                            player_stats[player_idx] -= event_penalty * 0.25
+                            victory_points[opponent_idx] += 1
+                            heat_gain_mult = tone_profile.get("crowd_heat_gain_multiplier", 1.0)
+                            crowd_heat += int(round(1 * heat_gain_mult))
                             
-                            # Update consecutive wins tracker for negative event
-                            last_event_winner = opponent_idx
                             consecutive_wins[opponent_idx] += 1
                             consecutive_wins[player_idx] = 0
+                            battle_highlights["longest_streak"][opponent_idx] = max(
+                                battle_highlights["longest_streak"][opponent_idx],
+                                consecutive_wins[opponent_idx]
+                            )
                         
-                        # Check if comeback narrative would be appropriate
-                        if victory_points[player_idx] < victory_points[opponent_idx] - 6 and not comeback_narrated[player_idx]:
+                        # Narrate and lightly support comebacks without hard swing mechanics.
+                        if (
+                            player_endurance[player_idx] + 8 < player_endurance[opponent_idx]
+                            and not comeback_narrated[player_idx]
+                        ):
                             comeback = random.choice(self.commentaries["comebacks"]).format(
                                 player=player.display_name,
                                 god=player_gods[player_idx] or "the gods"
                             )
-                            await asyncio.sleep(3)  # Wait before showing comeback
-                            await self.manage_phase_message(ctx, "BATTLE BEGINS", f"💪 **Comeback:** {comeback}", edit=True)
+                            await self._battle_sleep(2.5)  # Wait before showing comeback
+                            await self.manage_phase_message(ctx, battle_id, "BATTLE BEGINS", comeback, edit=True)
                             
-                            # Big boost for comeback
-                            comeback_bonus = random.randint(4, 6)
-                            victory_points[player_idx] += comeback_bonus
-                            player_stats[player_idx] += float(comeback_bonus / 2)
+                            player_endurance[player_idx] = min(
+                                player_endurance_max[player_idx],
+                                player_endurance[player_idx] + 1.5
+                            )
+                            victory_points[player_idx] += 1
+                            heat_gain_mult = tone_profile.get("crowd_heat_gain_multiplier", 1.0)
+                            crowd_heat += int(round(3 * heat_gain_mult))
                             
                             comeback_narrated[player_idx] = True
                             event_counter += 1
@@ -1914,34 +2558,66 @@ class SimpleBattle(discord.ext.commands.Cog):
                             god=player_gods[player_idx] or "the gods"
                         )
                         
-                        await self.manage_phase_message(ctx, "BATTLE BEGINS", f"✨ **Special Move:** {special_move}", edit=True)
+                        await self.manage_phase_message(ctx, battle_id, "BATTLE BEGINS", special_move, edit=True)
                         event_counter += 1
                         
-                        # Special moves have big impact
-                        damage_points = random.randint(4, 6)  # Important change: Bigger impact
-                        victory_points[player_idx] += damage_points
-                        player_stats[opponent_idx] -= float(damage_points / 2)
+                        # Special moves are high impact but still bounded.
+                        impact = random.randint(4, 7)
+                        impact += int(tone_profile.get("special_move_damage_bonus", 0))
+                        impact = max(4, min(9, impact))
+                        player_endurance[opponent_idx] -= float(impact)
+                        player_stats[opponent_idx] -= float(impact * 0.25)
+                        victory_points[player_idx] += 2
                         special_move_used[player_idx] = True
+                        battle_highlights["special_moves"][player_idx] += 1
+                        heat_gain_mult = tone_profile.get("crowd_heat_gain_multiplier", 1.0)
+                        crowd_heat += int(round(5 * heat_gain_mult))
+                        if impact > battle_highlights["biggest_hit"]["value"]:
+                            battle_highlights["biggest_hit"] = {
+                                "value": impact,
+                                "attacker": player.display_name,
+                                "victim": opponent.display_name,
+                                "method": "special move",
+                            }
                         
-                        # Update consecutive wins tracker
-                        last_event_winner = player_idx
                         consecutive_wins[player_idx] += 1
                         consecutive_wins[opponent_idx] = 0
+                        battle_highlights["longest_streak"][player_idx] = max(
+                            battle_highlights["longest_streak"][player_idx],
+                            consecutive_wins[player_idx]
+                        )
                         
-                        await asyncio.sleep(3)  # Wait before showing effect
-                        await self.manage_phase_message(ctx, "BATTLE BEGINS", f"💥 **Effect:** A devastating technique! {opponent.display_name} suffers greatly!", edit=True)
+                        await self._battle_sleep(2.5)  # Wait before showing effect
+                        endurance_snapshot = self._format_endurance_snapshot(
+                            players[0].display_name,
+                            max(0.0, min(player_endurance_max[0], player_endurance[0])),
+                            player_endurance_max[0],
+                            players[1].display_name,
+                            max(0.0, min(player_endurance_max[1], player_endurance[1])),
+                            player_endurance_max[1],
+                        )
+                        await self.manage_phase_message(
+                            ctx,
+                            battle_id,
+                            "BATTLE BEGINS",
+                            (
+                                f"{opponent.display_name} absorbs **{impact} endurance** from the special technique.\n"
+                                f"**Endurance:**\n{endurance_snapshot}"
+                            ),
+                            edit=True,
+                        )
                         event_counter += 1
                     
                     elif event_type == "arena_event":
                         # Random arena event that affects both fighters
                         event_text = random.choice(self.commentaries["arena_events"]).format(
                             player=player.display_name,
-                            item=random.choice(self.arena_items),
-                            hazard=random.choice(self.arena_hazards),
-                            new_condition=random.choice(self.arena_conditions)
+                            item=random.choice(theme_items),
+                            hazard=random.choice(theme_hazards),
+                            new_condition=random.choice(theme_conditions)
                         )
                         
-                        await self.manage_phase_message(ctx, "BATTLE BEGINS", f"🏟️ **Arena Event:** {event_text}", edit=True)
+                        await self.manage_phase_message(ctx, battle_id, "BATTLE BEGINS", event_text, edit=True)
                         event_counter += 1
                         
                         # Event affects both fighters but usually benefits one more
@@ -1954,114 +2630,225 @@ class SimpleBattle(discord.ext.commands.Cog):
                             suffer_player = player_idx
                         
                         # Apply benefits and penalties
-                        benefit = random.randint(2, 4)
+                        benefit = random.randint(1, 3)
                         penalty = random.randint(1, 2)
                         
-                        victory_points[benefit_player] += benefit
-                        victory_points[suffer_player] -= penalty
+                        player_endurance[benefit_player] = min(
+                            player_endurance_max[benefit_player],
+                            player_endurance[benefit_player] + float(benefit)
+                        )
+                        player_endurance[suffer_player] -= float(penalty)
+                        victory_points[benefit_player] += 1
+                        heat_gain_mult = tone_profile.get("crowd_heat_gain_multiplier", 1.0)
+                        crowd_heat += int(round(4 * heat_gain_mult))
                         
-                        player_stats[benefit_player] += float(benefit / 2)
-                        player_stats[suffer_player] -= float(penalty / 2)
-                        
-                        # Update consecutive wins tracker
-                        last_event_winner = benefit_player
                         consecutive_wins[benefit_player] += 1
                         consecutive_wins[suffer_player] = 0
+                        battle_highlights["longest_streak"][benefit_player] = max(
+                            battle_highlights["longest_streak"][benefit_player],
+                            consecutive_wins[benefit_player]
+                        )
                     
                     elif event_type == "divine_intervention":
-                        # Divine intervention based on character's god
-                        god = player_gods[player_idx]
-                        
                         intervention = random.choice(self.commentaries["godly_interventions"]).format(
                             player=player.display_name,
                             weapon=player_info[player_idx]["name"]
                         )
                         
-                        await self.manage_phase_message(ctx, "BATTLE BEGINS", f"🔮 **Divine Intervention:** {intervention}", edit=True)
+                        await self.manage_phase_message(
+                            ctx,
+                            battle_id,
+                            "BATTLE BEGINS",
+                            f"Divine intervention: {intervention}",
+                            edit=True,
+                        )
                         event_counter += 1
                         
-                        # Powerful bonus from the gods - major impact on victory points
-                        god_bonus = random.randint(6, 8)
-                        victory_points[player_idx] += god_bonus
-                        player_stats[player_idx] += float(god_bonus / 2)
+                        god_impact = random.randint(3, 5)
+                        player_endurance[opponent_idx] -= float(god_impact)
+                        player_endurance[player_idx] = min(
+                            player_endurance_max[player_idx],
+                            player_endurance[player_idx] + 2.0
+                        )
+                        player_stats[player_idx] += 1.0
+                        victory_points[player_idx] += 2
                         divine_intervention[player_idx] = True
+                        battle_highlights["divine_interventions"][player_idx] += 1
+                        heat_gain_mult = tone_profile.get("crowd_heat_gain_multiplier", 1.0)
+                        crowd_heat += int(round(7 * heat_gain_mult))
                         
-                        # Update consecutive wins tracker
-                        last_event_winner = player_idx
                         consecutive_wins[player_idx] += 1
                         consecutive_wins[opponent_idx] = 0
+                        battle_highlights["longest_streak"][player_idx] = max(
+                            battle_highlights["longest_streak"][player_idx],
+                            consecutive_wins[player_idx]
+                        )
+                        endurance_snapshot = self._format_endurance_snapshot(
+                            players[0].display_name,
+                            max(0.0, min(player_endurance_max[0], player_endurance[0])),
+                            player_endurance_max[0],
+                            players[1].display_name,
+                            max(0.0, min(player_endurance_max[1], player_endurance[1])),
+                            player_endurance_max[1],
+                        )
+                        await self.manage_phase_message(
+                            ctx,
+                            battle_id,
+                            "BATTLE BEGINS",
+                            (
+                                f"{player.display_name} is empowered by divine favor. "
+                                f"{opponent.display_name} loses **{god_impact} endurance**.\n"
+                                f"**Endurance:**\n{endurance_snapshot}"
+                            ),
+                            edit=True,
+                        )
+
+                    # Clamp state after each event to keep probabilities stable and readable.
+                    player_stats = [max(1.0, stat) for stat in player_stats]
+                    player_endurance = [
+                        max(0.0, min(player_endurance_max[idx], player_endurance[idx]))
+                        for idx in range(2)
+                    ]
+                    victory_points = [max(0, points) for points in victory_points]
+                    crowd_heat = max(0, min(100, crowd_heat))
+                    battle_highlights["peak_crowd_heat"] = max(
+                        battle_highlights["peak_crowd_heat"],
+                        crowd_heat
+                    )
+
+                    # Track momentum leadership for turning-point recap.
+                    p1_pressure = player_endurance[0] + (victory_points[0] * 1.8)
+                    p2_pressure = player_endurance[1] + (victory_points[1] * 1.8)
+                    if abs(p1_pressure - p2_pressure) <= 1:
+                        current_leader = None
+                    else:
+                        current_leader = 0 if p1_pressure > p2_pressure else 1
+                    if (
+                        i >= (event_count // 2)
+                        and combat_memory["leader"] is not None
+                        and current_leader is not None
+                        and current_leader != combat_memory["leader"]
+                        and combat_memory["turning_point"] is None
+                    ):
+                        combat_memory["turning_point"] = (
+                            f"Event {i + 1}: {players[current_leader].display_name} seized control."
+                        )
+                    combat_memory["leader"] = current_leader
                     
                     # Add crowd reactions occasionally 
-                    if random.random() < 0.3:  # 30% chance after each event
-                        await asyncio.sleep(2)  # Wait before showing crowd reaction
+                    reaction_base = tone_profile.get("crowd_reaction_base", 0.18)
+                    reaction_scale = max(80.0, float(tone_profile.get("crowd_reaction_scale_divisor", 220.0)))
+                    crowd_reaction_chance = min(0.65, reaction_base + (crowd_heat / reaction_scale))
+                    if random.random() < crowd_reaction_chance:
+                        await self._battle_sleep(1.5)  # Wait before showing crowd reaction
                         crowd_reaction = random.choice(self.commentaries["crowd_reactions"])
-                        await self.manage_phase_message(ctx, "BATTLE BEGINS", f"👥 **Crowd:** {crowd_reaction}", edit=True)
+                        await self.manage_phase_message(ctx, battle_id, "BATTLE BEGINS", f"*Crowd:* {crowd_reaction}", edit=True)
                         event_counter += 1
                         
                     # Show momentum updates strategically
                     if ((i == event_count // 2) or  # Middle of battle
+                        (i == event_count - 1) or  # Final state before decisive moment
                         (consecutive_wins[0] >= 3 or consecutive_wins[1] >= 3) or  # Someone is on a streak
-                        (abs(victory_points[0] - victory_points[1]) > 10)):  # Big point difference
+                        (abs(player_endurance[0] - player_endurance[1]) >= 12)):  # Big endurance gap
                         
                         # Reset consecutive wins after reporting
                         if consecutive_wins[0] >= 3 or consecutive_wins[1] >= 3:
                             streak_player = 0 if consecutive_wins[0] >= 3 else 1
                             streak_msg = f"{players[streak_player].display_name} is on a devastating streak, landing blow after blow!"
-                            await self.manage_phase_message(ctx, "BATTLE BEGINS", f"🔥 **Battle Streak:** {streak_msg}", edit=True)
+                            await self.manage_phase_message(ctx, battle_id, "BATTLE BEGINS", streak_msg, edit=True)
                             consecutive_wins = [0, 0]
                             event_counter += 1
                         
-                        # Ensure victory points don't go negative
-                        victory_points = [max(0, points) for points in victory_points]
-                        
-                        # Create momentum message based on current points
-                        if abs(victory_points[0] - victory_points[1]) <= 4:
+                        # Create momentum message based on current control + endurance.
+                        point_gap = abs(victory_points[0] - victory_points[1])
+                        endurance_gap = abs(player_endurance[0] - player_endurance[1])
+                        if point_gap <= 3 and endurance_gap <= 5:
                             momentum = f"The battle remains closely matched as {ctx.author.display_name} and {enemy_.display_name} exchange blows!"
-                        elif victory_points[0] > victory_points[1]:
-                            lead = "slight" if victory_points[0] - victory_points[1] < 8 else "strong"
+                        elif player_endurance[0] > player_endurance[1]:
+                            lead = "slight" if endurance_gap < 10 else "strong"
                             momentum = f"{ctx.author.display_name} has gained a {lead} advantage in the battle!"
                         else:
-                            lead = "slight" if victory_points[1] - victory_points[0] < 8 else "strong"
+                            lead = "slight" if endurance_gap < 10 else "strong"
                             momentum = f"{enemy_.display_name} has gained a {lead} advantage in the battle!"
-                        
-                        await asyncio.sleep(2)
-                        await self.manage_phase_message(ctx, "BATTLE BEGINS", f"⚖️ **Battle Momentum:** {momentum}", edit=True)
+
+                        await self._battle_sleep(1.5)
+                        await self.manage_phase_message(
+                            ctx,
+                            battle_id,
+                            "BATTLE BEGINS",
+                            (
+                                f"**Battle Momentum:** {momentum}\n"
+                                f"**Current Beat:** {beat_labels[current_beat]} | **Crowd Heat:** {crowd_heat}/100"
+                            ),
+                            edit=True
+                        )
                         event_counter += 1
                         
                 except Exception as event_error:
                     # If an individual event fails, log it but continue with the battle
                     print(f"Error in event {i+1}: {event_error}")
-                    await self.manage_phase_message(ctx, "BATTLE BEGINS", "👥 **Crowd:** The crowd's roar drowns out a moment of the battle...", edit=True)
+                    await self.manage_phase_message(ctx, battle_id, "BATTLE BEGINS", "*Crowd:* The roar drowns out a moment of the battle...", edit=True)
                     event_counter += 1
                 
                 # Wait between events - longer pause for better readability
-                await asyncio.sleep(4)
+                await self._battle_sleep(2)
             
-            # Ensure victory points don't go negative
+            # Final clamping before deciding winner
             victory_points = [max(0, points) for points in victory_points]
+            player_endurance = [
+                max(0.0, min(player_endurance_max[idx], player_endurance[idx]))
+                for idx in range(2)
+            ]
             
-            # Determine winner based on accumulated victory points
-            if victory_points[0] == victory_points[1]:
-                # In case of a tie, look at remaining stats
-                if player_stats[0] >= player_stats[1]:
-                    winner_idx = 0
-                else:
-                    winner_idx = 1
+            # Determine winner by endurance first, then control, then residual stats.
+            endurance_diff = player_endurance[0] - player_endurance[1]
+            control_diff = victory_points[0] - victory_points[1]
+
+            if abs(endurance_diff) >= 3:
+                winner_idx = 0 if endurance_diff > 0 else 1
+            elif abs(control_diff) >= 2:
+                winner_idx = 0 if control_diff > 0 else 1
             else:
-                winner_idx = 0 if victory_points[0] > victory_points[1] else 1
+                p1_final_score = player_endurance[0] + (victory_points[0] * 1.5) + (player_stats[0] * 0.1)
+                p2_final_score = player_endurance[1] + (victory_points[1] * 1.5) + (player_stats[1] * 0.1)
+                if abs(p1_final_score - p2_final_score) < 0.01:
+                    winner_idx = random.randint(0, 1)
+                else:
+                    winner_idx = 0 if p1_final_score > p2_final_score else 1
             
             winner = players[winner_idx]
             loser = players[1 - winner_idx]
-            winner_weapon = player_info[winner_idx]
-            loser_weapon = player_info[1 - winner_idx]
             
-            # Determine if this is a comeback victory
-            is_comeback = (winner_idx == 0 and advantage < 0) or (winner_idx == 1 and advantage > 0)
+            # Determine if this is a comeback victory (won despite weaker opening profile).
+            initial_gap = initial_player_stats[winner_idx] - initial_player_stats[1 - winner_idx]
+            is_comeback = initial_gap < -1.5
+
+            dominant_victory = (
+                player_endurance[winner_idx] - player_endurance[1 - winner_idx] >= 12
+                and victory_points[winner_idx] - victory_points[1 - winner_idx] >= 4
+            )
+
+            final_scoreboard = (
+                f"{players[0].display_name}: {victory_points[0]} control, "
+                f"{player_endurance[0]:.0f}/{player_endurance_max[0]:.0f} endurance | "
+                f"{players[1].display_name}: {victory_points[1]} control, "
+                f"{player_endurance[1]:.0f}/{player_endurance_max[1]:.0f} endurance"
+            )
+            biggest_hit = battle_highlights["biggest_hit"]
+            if biggest_hit["attacker"]:
+                biggest_hit_line = (
+                    f"{biggest_hit['attacker']} landed the biggest blow on {biggest_hit['victim']} "
+                    f"({biggest_hit['value']} endurance, {biggest_hit['method']})."
+                )
+            else:
+                biggest_hit_line = "No single exchange defined the fight; pressure accumulated over time."
+
+            turning_point_line = combat_memory["turning_point"] or "No dramatic momentum flip - this fight was decided through steady execution."
             
             # ========== DECISIVE MOMENT ==========
             # Create a separate message for the decisive moment
-            await self.manage_phase_message(ctx, "DECISIVE MOMENT")
-            await asyncio.sleep(3)  # Longer pause before climax
+            await self.manage_phase_message(ctx, battle_id,  "DECISIVE MOMENT")
+            await self._battle_sleep(3)  # Longer pause before climax
             
             # Final decisive moment - customize based on how the battle went
             decisive_moments = []
@@ -2074,7 +2861,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                     f"Proving that battles are not won by advantages alone, {winner.display_name} claws back from the brink!",
                     f"With the endurance of a true champion, {winner.display_name} weathers the storm and seizes the perfect moment to strike!"
                 ]
-            elif victory_points[winner_idx] - victory_points[1-winner_idx] > 12:  # Dominant victory
+            elif dominant_victory:
                 decisive_moments = [
                     f"{winner.display_name}'s dominance is complete as they deliver the finishing blow to a battered {loser.display_name}!",
                     f"The outcome was never in doubt as {winner.display_name} methodically dismantles {loser.display_name}'s defenses!",
@@ -2090,10 +2877,13 @@ class SimpleBattle(discord.ext.commands.Cog):
                     f"A momentary lapse in {loser.display_name}'s defense gives {winner.display_name} the opportunity they sought!",
                     f"Years of training culminate in this perfect moment as {winner.display_name} seizes victory!"
                 ]
+
+            for override in tone_profile.get("decisive_overrides", []):
+                decisive_moments.append(override.format(winner=winner.display_name, loser=loser.display_name))
             
             decisive_moment = random.choice(decisive_moments)
-            await self.manage_phase_message(ctx, "DECISIVE MOMENT", f"⚡ **Decisive Moment:** {decisive_moment}", edit=True)
-            await asyncio.sleep(4)  # Longer pause after decisive moment
+            await self.manage_phase_message(ctx, battle_id,  "DECISIVE MOMENT", f"**Decisive Moment:** {decisive_moment}", edit=True)
+            await self._battle_sleep(4)  # Longer pause after decisive moment
             
             # Final commentary - customize based on battle narrative
             if is_comeback:
@@ -2104,7 +2894,7 @@ class SimpleBattle(discord.ext.commands.Cog):
                     f"The crowd chants the name of {winner.display_name}, honoring their resilience in the face of adversity!",
                     f"Victory belongs to {winner.display_name}! Their name will be etched in the annals of arena history today!"
                 ]
-            elif victory_points[winner_idx] - victory_points[1-winner_idx] > 12:  # Dominant victory
+            elif dominant_victory:
                 finishers = [
                     f"A masterclass in combat! {winner.display_name}'s victory over {loser.display_name} was never in doubt!",
                     f"Glory and gold to {winner.display_name}, whose dominance in the arena today was absolute!",
@@ -2120,16 +2910,19 @@ class SimpleBattle(discord.ext.commands.Cog):
                     f"Victory belongs to {winner.display_name} after a battle that had the crowds on the edge of their seats!",
                     f"The crowd roars their approval as {winner.display_name} stands triumphant in a battle for the ages!"
                 ]
+
+            for override in tone_profile.get("finisher_overrides", []):
+                finishers.append(override.format(winner=winner.display_name, loser=loser.display_name))
             
             finisher = random.choice(finishers)
-            await self.manage_phase_message(ctx, "DECISIVE MOMENT", f"🏆 **Victory:** {finisher}", edit=True)
-            await asyncio.sleep(4)  # Longer pause after victory
+            await self.manage_phase_message(ctx, battle_id,  "DECISIVE MOMENT", f"**Victory:** {finisher}", edit=True)
+            await self._battle_sleep(4)  # Longer pause after victory
             
             # ========== EMPEROR'S JUDGMENT ==========
             # [Emperor's judgment section remains largely unchanged]
             # Create a separate message for the emperor's judgment
-            await self.manage_phase_message(ctx, "EMPEROR'S JUDGMENT")
-            await asyncio.sleep(3)  # Longer pause before judgment
+            await self.manage_phase_message(ctx, battle_id,  "EMPEROR'S JUDGMENT")
+            await self._battle_sleep(3)  # Longer pause before judgment
             
             # Crowd anticipation
             anticipation_messages = [
@@ -2142,26 +2935,27 @@ class SimpleBattle(discord.ext.commands.Cog):
                 f"Blood-soaked sand darkens beneath {loser.display_name} as they await the Emperor's decision..."
             ]
             anticipation = random.choice(anticipation_messages)
-            await self.manage_phase_message(ctx, "EMPEROR'S JUDGMENT", f"👑 **Emperor's Decision:** {anticipation}", edit=True)
-            await asyncio.sleep(4)  # Longer pause before verdict
+            await self.manage_phase_message(ctx, battle_id,  "EMPEROR'S JUDGMENT", f"**Emperor's Decision:** {anticipation}", edit=True)
+            await self._battle_sleep(4)  # Longer pause before verdict
             
             # Emperor's verdict
             judgment = random.choice(self.commentaries["emperor_signals"])
-            await self.manage_phase_message(ctx, "EMPEROR'S JUDGMENT", f"👑 **Emperor:** {judgment}", edit=True)
-            await asyncio.sleep(5)  # Extended dramatic pause
+            await self.manage_phase_message(ctx, battle_id,  "EMPEROR'S JUDGMENT", f"**Emperor:** {judgment}", edit=True)
+            await self._battle_sleep(5)  # Extended dramatic pause
             
             # Make mercy more likely for close battles, less likely for dominant victories
             mercy_chance = 0.5
             if is_comeback:
                 mercy_chance = 0.7  # More mercy for exciting comebacks
-            elif victory_points[winner_idx] - victory_points[1-winner_idx] > 12:
+            elif dominant_victory:
                 mercy_chance = 0.3  # Less mercy for dominant victories
+            mercy_chance = max(0.05, min(0.9, mercy_chance + tone_profile.get("mercy_shift", 0.0)))
                 
             if random.random() < mercy_chance:  # Mercy
                 mercy = random.choice(self.commentaries["emperor_mercy"]).format(
                     loser=loser.display_name
                 )
-                await self.manage_phase_message(ctx, "EMPEROR'S JUDGMENT", f"👑 **Emperor:** {judgment}\n\n**JUDGMENT:** {mercy}", edit=True)
+                await self.manage_phase_message(ctx, battle_id,  "EMPEROR'S JUDGMENT", f"**Emperor:** {judgment}\n\n**Judgment:** {mercy}", edit=True)
                 
                 # Add mercy reaction
                 mercy_reactions = [
@@ -2172,14 +2966,14 @@ class SimpleBattle(discord.ext.commands.Cog):
                     f"A relieved {loser.display_name} makes the traditional gesture of gratitude toward the Emperor's box."
                 ]
                 mercy_reaction = random.choice(mercy_reactions)
-                await asyncio.sleep(4)
-                await self.manage_phase_message(ctx, "EMPEROR'S JUDGMENT", f"🤝 **Mercy:** {mercy_reaction}", edit=True)
+                await self._battle_sleep(4)
+                await self.manage_phase_message(ctx, battle_id,  "EMPEROR'S JUDGMENT", f"**Mercy:** {mercy_reaction}", edit=True)
             else:  # Death
                 death = random.choice(self.commentaries["emperor_death"]).format(
                     winner=winner.display_name,
                     loser=loser.display_name
                 )
-                await self.manage_phase_message(ctx, "EMPEROR'S JUDGMENT", f"👑 **Emperor:** {judgment}\n\n**JUDGMENT:** {death}", edit=True)
+                await self.manage_phase_message(ctx, battle_id,  "EMPEROR'S JUDGMENT", f"**Emperor:** {judgment}\n\n**Judgment:** {death}", edit=True)
                 
                 # Add execution details
                 weapon_type = player_info[winner_idx]["type"]
@@ -2190,8 +2984,8 @@ class SimpleBattle(discord.ext.commands.Cog):
                     winner=winner.display_name,
                     loser=loser.display_name
                 )
-                await asyncio.sleep(4)
-                await self.manage_phase_message(ctx, "EMPEROR'S JUDGMENT", f"☠️ **Execution:** {finishing_move}", edit=True)
+                await self._battle_sleep(4)
+                await self.manage_phase_message(ctx, battle_id,  "EMPEROR'S JUDGMENT", f"**Execution:** {finishing_move}", edit=True)
                 
                 # Add death aftermath
                 death_aftermath = [
@@ -2199,16 +2993,16 @@ class SimpleBattle(discord.ext.commands.Cog):
                     f"The crowd's bloodlust sated, they cheer {winner.display_name}'s name as attendants prepare the arena for the next combat.",
                     f"Another soul joins the countless warriors who have fallen upon the sacred sands of Fablelands.",
                     f"{winner.display_name} raises their bloodied {player_info[winner_idx]['name']} high, accepting the adulation of the spectators.",
-                    f"The priests of Astraea intone the final rites as {loser.display_name}'s journey in the arena comes to its end."
+                    f"The priests of Elysia intone the final rites as {loser.display_name}'s journey in the arena comes to its end."
                 ]
                 aftermath = random.choice(death_aftermath)
-                await asyncio.sleep(4)
-                await self.manage_phase_message(ctx, "EMPEROR'S JUDGMENT", f"⚰️ **Aftermath:** {aftermath}", edit=True)
+                await self._battle_sleep(4)
+                await self.manage_phase_message(ctx, battle_id,  "EMPEROR'S JUDGMENT", f"**Aftermath:** {aftermath}", edit=True)
             
             # ========== BATTLE CONCLUSION ==========
             # Create a separate message for battle conclusion
-            await self.manage_phase_message(ctx, "BATTLE CONCLUSION")
-            await asyncio.sleep(3)  # Pause after section header
+            await self.manage_phase_message(ctx, battle_id,  "BATTLE CONCLUSION")
+            await self._battle_sleep(3)  # Pause after section header
             
             # Victor celebration
             victor_celebrations = [
@@ -2219,8 +3013,53 @@ class SimpleBattle(discord.ext.commands.Cog):
                 f"{winner.display_name} stands tall amid the roaring approval of thousands, bathed in the golden light of victory!"
             ]
             celebration = random.choice(victor_celebrations)
-            await self.manage_phase_message(ctx, "BATTLE CONCLUSION", f"🏆 **Victory Celebration:** {celebration}", edit=True)
-            await asyncio.sleep(4)  # Final pause before results
+            await self.manage_phase_message(ctx, battle_id,  "BATTLE CONCLUSION", f"**Victory Celebration:** {celebration}", edit=True)
+            await self._battle_sleep(3)  # Final pause before results
+
+            summary_embed = discord.Embed(
+                title="Battle Chronicle",
+                color=discord.Color.gold(),
+            )
+            summary_embed.add_field(name="Winner", value=winner.mention, inline=True)
+            summary_embed.add_field(
+                name="Gold Awarded",
+                value=f"${money * 2}" if money > 0 else "No wager (honor match)",
+                inline=True,
+            )
+            summary_embed.add_field(name="Final Tally", value=final_scoreboard, inline=False)
+            summary_embed.add_field(name="Biggest Hit", value=biggest_hit_line, inline=False)
+            summary_embed.add_field(
+                name="Peak Crowd Heat",
+                value=f"{battle_highlights['peak_crowd_heat']}/100",
+                inline=True,
+            )
+            summary_embed.add_field(
+                name="Special Moves",
+                value=(
+                    f"{players[0].display_name}: {battle_highlights['special_moves'][0]}\n"
+                    f"{players[1].display_name}: {battle_highlights['special_moves'][1]}"
+                ),
+                inline=True,
+            )
+            summary_embed.add_field(
+                name="Divine Interventions",
+                value=(
+                    f"{players[0].display_name}: {battle_highlights['divine_interventions'][0]}\n"
+                    f"{players[1].display_name}: {battle_highlights['divine_interventions'][1]}"
+                ),
+                inline=True,
+            )
+            summary_embed.add_field(
+                name="Longest Streak",
+                value=(
+                    f"{players[0].display_name}: {battle_highlights['longest_streak'][0]}\n"
+                    f"{players[1].display_name}: {battle_highlights['longest_streak'][1]}"
+                ),
+                inline=True,
+            )
+            summary_embed.add_field(name="Turning Point", value=turning_point_line, inline=False)
+            await ctx.send(embed=summary_embed)
+            await self._battle_sleep(2.5)
             
             # Final result message
             if money > 0:
@@ -2228,9 +3067,9 @@ class SimpleBattle(discord.ext.commands.Cog):
             else:
                 result = _(f"**Arena Master:** The battle is decided! {winner.mention} defeats {loser.mention} in glorious combat! The victor claims honor and glory this day!")
             
-            await self.manage_phase_message(ctx, "BATTLE CONCLUSION", result, edit=True)
-            
-            # Update database
+            await self.manage_phase_message(ctx, battle_id,  "BATTLE CONCLUSION", result, edit=True)
+
+            # Update database with winner info
             async with self.bot.pool.acquire() as conn:
                 await conn.execute(
                     'UPDATE profile SET "pvpwins"="pvpwins"+1, "money"="money"+$1 WHERE "user"=$2;',
@@ -2245,15 +3084,35 @@ class SimpleBattle(discord.ext.commands.Cog):
                     data={"Gold": money},
                     conn=conn,
                 )
-            
+
+            duel_margin = abs(player_endurance[0] - player_endurance[1]) + (abs(victory_points[0] - victory_points[1]) * 1.5)
+            self._record_duel_result(ctx.author.id, enemy_.id, winner.id, duel_margin)
+
+            # Clean up battle context when done
+            if battle_id in self.battle_contexts:
+                del self.battle_contexts[battle_id]
+
         except Exception as e:
             # Handle any exceptions that occur during battle
             import traceback
             error_traceback = traceback.format_exc()
-            error_message = f"An error occurred during the battle:\n```{str(e)}```"
-            
+            print(error_traceback)
+
+            error_prefix = "An error occurred during the battle:\n```"
+            error_suffix = "```"
+            truncation_note = "\n... (truncated)"
+            max_error_len = 1900
+            max_body_len = max_error_len - self._discord_content_length(error_prefix + error_suffix)
+
+            error_body = str(e)
+            if self._discord_content_length(error_body) > max_body_len:
+                safe_body_len = max(0, max_body_len - self._discord_content_length(truncation_note))
+                error_body = self._truncate_to_discord_limit(error_body, safe_body_len) + truncation_note
+
+            error_message = f"{error_prefix}{error_body}{error_suffix}"
+
             await ctx.send(error_message)
-            
+
             # Refund money to both players if battle failed
             try:
                 if money_deducted:
@@ -2262,20 +3121,25 @@ class SimpleBattle(discord.ext.commands.Cog):
                         money,
                         challenger_id,
                     )
-                
+
                 if enemy_joined and enemy_id:
                     await self.bot.pool.execute(
                         'UPDATE profile SET "money"="money"+$1 WHERE "user"=$2;',
                         money,
                         enemy_id,
                     )
-                
+
                 await ctx.send(_("Gold has been refunded to both gladiators due to arena malfunction."))
-                
+
                 # Reset cooldown so player can try again
                 await self.bot.reset_cooldown(ctx)
             except Exception as refund_error:
                 await ctx.send(f"Error during refund process: {str(refund_error)}")
+
+            # Clean up battle context even in case of error
+            if battle_id in self.battle_contexts:
+                del self.battle_contexts[battle_id]
+
 
 async def setup(bot):
     await bot.add_cog(SimpleBattle(bot))

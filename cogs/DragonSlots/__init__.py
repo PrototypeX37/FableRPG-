@@ -36,6 +36,11 @@ from utils.i18n import locale_doc, _
 class Slots(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        ids_section = getattr(self.bot.config, "ids", None)
+        dragonslot_ids = getattr(ids_section, "dragonslots", {}) if ids_section else {}
+        if not isinstance(dragonslot_ids, dict):
+            dragonslot_ids = {}
+        self.captcha_lock_channel_id = dragonslot_ids.get("captcha_lock_channel_id")
 
         # -------Health Init------------
         self.player_hp = 100
@@ -157,8 +162,7 @@ class Slots(commands.Cog):
                     async with self.bot.pool.acquire() as connection:
                         await connection.execute('UPDATE profile SET money = money - $1 WHERE "user" = $2', 1500,
                                                  ctx.author.id)
-                        if ctx.author.id == 708435868842459169:
-                            self.logger = self.logger - 1500
+
                         await connection.execute('UPDATE dragonslots SET jackpot = jackpot + $1 WHERE seat = $2', 250,
                                                  seat)
                         jackpot_result = await connection.fetchval('SELECT jackpot FROM dragonslots WHERE seat = $1',
@@ -222,13 +226,10 @@ class Slots(commands.Cog):
                         if total_reward > 0:
                             await connection.execute('UPDATE profile SET money = money + $1 WHERE "user" = $2',
                                                      total_reward, ctx.author.id)
-                            if ctx.author.id == 708435868842459169:
-                                self.logger = self.logger + total_reward
                         else:
                             await connection.execute('UPDATE profile SET money = money - $1 WHERE "user" = $2',
                                                      abs(total_reward), ctx.author.id)
-                            if ctx.author.id == 708435868842459169:
-                                self.logger = self.logger - abs(total_reward)
+
                         await connection.execute('UPDATE dragonslots SET jackpot = jackpot + $1 WHERE seat = $2',
                                                  250, seat)
                         jackpot_result = await connection.fetchval('SELECT jackpot FROM dragonslots WHERE seat = $1', seat)
@@ -428,8 +429,6 @@ class Slots(commands.Cog):
             if dragon_hp <= 0:
                 jackpot_value = await connection.fetchval('SELECT jackpot FROM dragonslots WHERE seat = $1', seat)
                 await connection.execute('UPDATE profile SET money = money + $1 WHERE "user" = $2', jackpot_value, ctx.author.id)
-                if ctx.author.id == 708435868842459169:
-                    self.logger = self.logger + jackpot_value
                 new_jackpot = random.randint(10000, 50000)
                 await connection.execute('UPDATE dragonslots SET dragon = 125, player = 100, jackpot = $1 WHERE seat = $2', new_jackpot, seat)
                 await ctx.send(f"💎💎💎JACKPOT!💎💎💎 {ctx.author.mention}, you defeated the dragon and earned a jackpot of **${jackpot_value}**!")
@@ -517,9 +516,7 @@ class Slots(commands.Cog):
                             except Exception as e:
                                 print(f"An error occurred: {e}")
         except Exception as e:
-            error_user = await self.bot.fetch_user(295173706496475136)
-            if error_user:
-                await error_user.send(f"An error occurred: {str(e)}")
+
             raise
 
     async def update_last_activity(self, occupant_id):
@@ -677,7 +674,11 @@ class Slots(commands.Cog):
         return user_id in self.captcha_lock
 
     async def send_locked_message(self, user):
-        locked_channel = self.bot.get_channel(1140210404627337256)
+        locked_channel = (
+            self.bot.get_channel(self.captcha_lock_channel_id)
+            if self.captcha_lock_channel_id
+            else None
+        )
         if locked_channel:
             await locked_channel.send(f"{user.name}#{user.discriminator} failed the CAPTCHA and is now locked.")
 
