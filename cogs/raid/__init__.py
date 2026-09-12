@@ -5513,8 +5513,8 @@ class Raid(commands.Cog):
                 if result:
                     player_data = result[0]
                     level = rpgtools.xptolevel(player_data["xp"])
-                    statdeff = player_data["statdef"] * Decimal("0.1")
-                    statatk = player_data["statatk"] * Decimal("0.1")
+                    statdeff = player_data["statdef"] * rpgtools.STAT_ATTACK_DEFENSE_PER_POINT
+                    statatk = player_data["statatk"] * rpgtools.STAT_ATTACK_DEFENSE_PER_POINT
                     atk = player_data["atkmultiply"] + statatk
                     deff = player_data["defmultiply"] + statdeff
 
@@ -5592,8 +5592,8 @@ class Raid(commands.Cog):
 
                     player_data = result[0]
                     level = rpgtools.xptolevel(player_data["xp"])
-                    statdeff = player_data["statdef"] * Decimal("0.1")
-                    statatk = player_data["statatk"] * Decimal("0.1")
+                    statdeff = player_data["statdef"] * rpgtools.STAT_ATTACK_DEFENSE_PER_POINT
+                    statatk = player_data["statatk"] * rpgtools.STAT_ATTACK_DEFENSE_PER_POINT
                     atk = player_data["atkmultiply"] + statatk
                     deff = player_data["defmultiply"] + statdeff
 

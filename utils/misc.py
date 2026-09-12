@@ -30,6 +30,7 @@ from discord.errors import NotFound
 from utils import random
 
 STAT_POINT_INTERVAL = 2
+STAT_ATTACK_DEFENSE_PER_POINT = Decimal("0.2")
 
 BASE_LEVELS = {
     1: 0,

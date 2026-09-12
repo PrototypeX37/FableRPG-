@@ -1254,7 +1254,7 @@ class StatPointsView(discord.ui.View):
         embed.add_field(name="Health", value=str(int(self.snapshot["stathp"])), inline=True)
         embed.add_field(
             name="Per Point",
-            value="Attack: **+0.1** • Defense: **+0.1** • Health: **+50**",
+            value="Attack: **+0.2** • Defense: **+0.2** • Health: **+50**",
             inline=False,
         )
         embed.set_footer(text="Choose a stat, enter an amount, then review the before/after preview.")

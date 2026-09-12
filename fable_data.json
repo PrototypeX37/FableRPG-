@@ -403,11 +403,11 @@
   "RaidStats": {
     "DamageMultiplier": {
       "Base": 1,
-      "IncreasePerPoint": 0.1
+      "IncreasePerPoint": 0.2
     },
     "DefenseMultiplier": {
       "Base": 1,
-      "IncreasePerPoint": 0.1
+      "IncreasePerPoint": 0.2
     },
     "Health": {
       "Base": 500,

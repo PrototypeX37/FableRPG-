@@ -364,8 +364,8 @@ class Bot(commands.AutoShardedBot):
 
         # Now perform the operation with all Decimal components
 
-        atkmultiply += statatk * Decimal('0.1')
-        defmultiply += statdef * Decimal('0.1')
+        atkmultiply += statatk * rpgtools.STAT_ATTACK_DEFENSE_PER_POINT
+        defmultiply += statdef * rpgtools.STAT_ATTACK_DEFENSE_PER_POINT
 
         #for c in classes:
             #if c and c.in_class_line(Raider):
@@ -406,8 +406,8 @@ class Bot(commands.AutoShardedBot):
                     "defense": "+0.1 defense multiplier per point",
                     "health": "+50 maximum HP per point",
                 },
-                "allocated_attack_multiplier_bonus": statatk * Decimal("0.1"),
-                "allocated_defense_multiplier_bonus": statdef * Decimal("0.1"),
+                "allocated_attack_multiplier_bonus": statatk * rpgtools.STAT_ATTACK_DEFENSE_PER_POINT,
+                "allocated_defense_multiplier_bonus": statdef * rpgtools.STAT_ATTACK_DEFENSE_PER_POINT,
                 "applied_attack_multiplier": atkmultiply,
                 "applied_defense_multiplier": defmultiply,
                 "pre_amulet_attack": pre_amulet_damage,
