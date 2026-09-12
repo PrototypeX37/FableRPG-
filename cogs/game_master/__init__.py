@@ -1341,136 +1341,142 @@ class GameMaster(commands.Cog):
         """
 
         # Keep the original special-user restriction
-        if (
-            not self.martigive_allowed_user_id
-            or ctx.author.id != self.martigive_allowed_user_id
-        ):
-            return
-
-        if money == 0:
-            return await self._safe_ctx_send(
-                ctx,
-                "Amount cannot be zero."
-            )
-
-        # ---------------------------------
-        # Split target list from reason
-        # ---------------------------------
-        if "|" in targets:
-            targets_text, reason = targets.split("|", 1)
-            reason = reason.strip() or None
-        else:
-            targets_text = targets
-            reason = None
-
         try:
-            # Uses your existing helper.
-            # Supports:
-            # 123 456 789
-            # 123,456,789
-            # <@123> <@456>
-            # <@!123>
-            user_ids = await self._parse_user_ids_from_text(targets_text)
+            if (
+                not self.martigive_allowed_user_id
+                or ctx.author.id != self.martigive_allowed_user_id
+            ):
+                return
 
-        except ValueError as exc:
-            return await self._safe_ctx_send(
-                ctx,
-                f"❌ {exc}"
-            )
-
-        if not user_ids:
-            return await self._safe_ctx_send(
-                ctx,
-                "❌ No users were supplied."
-            )
-
-        # Optional safety limit against accidental giant commands
-        if len(user_ids) > 500:
-            return await self._safe_ctx_send(
-                ctx,
-                "❌ Maximum batch size is 500 users."
-            )
-
-        try:
-            # ---------------------------------
-            # Find which IDs actually have chars
-            # ---------------------------------
-            valid_ids, missing_ids = await self._filter_character_user_ids(
-                user_ids
-            )
-
-            if not valid_ids:
+            if money == 0:
                 return await self._safe_ctx_send(
                     ctx,
-                    "❌ None of those Discord IDs have characters."
+                    "Amount cannot be zero."
                 )
 
             # ---------------------------------
-            # ONE database query for whole batch
+            # Split target list from reason
             # ---------------------------------
-            await self.bot.pool.execute(
-                '''
-                UPDATE profile
-                SET "money" = "money" + $1
-                WHERE "user" = ANY($2::bigint[]);
-                ''',
-                money,
-                valid_ids,
-            )
+            if "|" in targets:
+                targets_text, reason = targets.split("|", 1)
+                reason = reason.strip() or None
+            else:
+                targets_text = targets
+                reason = None
 
-            total_given = money * len(valid_ids)
+            try:
+                # Uses your existing helper.
+                # Supports:
+                # 123 456 789
+                # 123,456,789
+                # <@123> <@456>
+                # <@!123>
+                user_ids = await self._parse_user_ids_from_text(targets_text)
 
-            # ---------------------------------
-            # Confirmation
-            # ---------------------------------
-            response = (
-                f"✅ Gave **${money:,}** each to "
-                f"**{len(valid_ids):,} users**.\n"
-                f"Total generated: **${total_given:,}**."
-            )
-
-            if missing_ids:
-                response += (
-                    f"\n⚠️ Skipped **{len(missing_ids):,}** IDs "
-                    "because they do not have characters."
+            except ValueError as exc:
+                return await self._safe_ctx_send(
+                    ctx,
+                    f"❌ {exc}"
                 )
 
-            await self._safe_ctx_send(ctx, response)
-
-            # ---------------------------------
-            # GM log
-            # ---------------------------------
-            valid_display = ", ".join(
-                f"<@{user_id}>"
-                for user_id in valid_ids[:50]
-            )
-
-            if len(valid_ids) > 50:
-                valid_display += (
-                    f", ... and {len(valid_ids) - 50:,} more"
+            if not user_ids:
+                return await self._safe_ctx_send(
+                    ctx,
+                    "❌ No users were supplied."
                 )
 
-            missing_display = ""
-            if missing_ids:
-                missing_display = (
-                    f"\nSkipped IDs: **{len(missing_ids):,}**"
+            # Optional safety limit against accidental giant commands
+            if len(user_ids) > 500:
+                return await self._safe_ctx_send(
+                    ctx,
+                    "❌ Maximum batch size is 500 users."
                 )
 
-            with handle_message_parameters(
-                content=(
-                    f"**{ctx.author}** batch-gave **${money:,}** "
-                    f"to **{len(valid_ids):,} users**.\n"
-                    f"Total generated: **${total_given:,}**\n"
-                    f"{missing_display}\n\n"
-                    f"Recipients: {valid_display}\n\n"
-                    f"Reason: *{reason or f'<{ctx.message.jump_url}>'}*"
-                )
-            ) as params:
-                await self.bot.http.send_message(
-                    self.bot.config.game.gm_log_channel,
-                    params=params,
+            try:
+                # ---------------------------------
+                # Find which IDs actually have chars
+                # ---------------------------------
+                valid_ids, missing_ids = await self._filter_character_user_ids(
+                    user_ids
                 )
 
+                if not valid_ids:
+                    return await self._safe_ctx_send(
+                        ctx,
+                        "❌ None of those Discord IDs have characters."
+                    )
+
+                # ---------------------------------
+                # ONE database query for whole batch
+                # ---------------------------------
+                await self.bot.pool.execute(
+                    '''
+                    UPDATE profile
+                    SET "money" = "money" + $1
+                    WHERE "user" = ANY($2::bigint[]);
+                    ''',
+                    money,
+                    valid_ids,
+                )
+
+                total_given = money * len(valid_ids)
+
+                # ---------------------------------
+                # Confirmation
+                # ---------------------------------
+                response = (
+                    f"✅ Gave **${money:,}** each to "
+                    f"**{len(valid_ids):,} users**.\n"
+                    f"Total generated: **${total_given:,}**."
+                )
+
+                if missing_ids:
+                    response += (
+                        f"\n⚠️ Skipped **{len(missing_ids):,}** IDs "
+                        "because they do not have characters."
+                    )
+
+                await self._safe_ctx_send(ctx, response)
+
+                # ---------------------------------
+                # GM log
+                # ---------------------------------
+                valid_display = ", ".join(
+                    f"<@{user_id}>"
+                    for user_id in valid_ids[:50]
+                )
+
+                if len(valid_ids) > 50:
+                    valid_display += (
+                        f", ... and {len(valid_ids) - 50:,} more"
+                    )
+
+                missing_display = ""
+                if missing_ids:
+                    missing_display = (
+                        f"\nSkipped IDs: **{len(missing_ids):,}**"
+                    )
+
+                with handle_message_parameters(
+                    content=(
+                        f"**{ctx.author}** batch-gave **${money:,}** "
+                        f"to **{len(valid_ids):,} users**.\n"
+                        f"Total generated: **${total_given:,}**\n"
+                        f"{missing_display}\n\n"
+                        f"Recipients: {valid_display}\n\n"
+                        f"Reason: *{reason or f'<{ctx.message.jump_url}>'}*"
+                    )
+                ) as params:
+                    await self.bot.http.send_message(
+                        self.bot.config.game.gm_log_channel,
+                        params=params,
+                    )
+
+            except Exception as exc:
+                await self._safe_ctx_send(
+                    ctx,
+                    f"❌ Batch give failed: {exc}"
+                )
         except Exception as exc:
             await self._safe_ctx_send(
                 ctx,
