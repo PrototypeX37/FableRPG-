@@ -55,3 +55,7 @@ tools/engagement_audit.py
 tools/pet_power_audit.py
 tools/prepare_engagement_analysis.py
 tests/test_raid_auction_alerts.py
+audit/hunt_mechanics_review.md
+audit/hunt_mechanics_check.py
+tests/test_hunt_combat.py
+tests/test_hunt_notifications.py

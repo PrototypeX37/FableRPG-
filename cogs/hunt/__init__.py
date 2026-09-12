@@ -10,6 +10,9 @@ from discord.ext import commands, tasks
 from utils import misc as rpgtools
 from utils.checks import is_gm
 
+from .artwork import beast_image_url
+from .combat import HUNT_MAX_ROUNDS, attack_target_count, build_beast, incoming_damage
+
 
 HUNT_ADJECTIVES = ("Dread", "Ancient", "Pale", "Thundering", "Vile")
 HUNT_BEASTS = ("Behemoth", "Wendigo", "Chimera", "Leviathan", "Manticore")
@@ -19,6 +22,7 @@ HUNT_MAX_GATHER_FAILS = 3         # after this many failed gathers the beast esc
 HUNT_RESUMMON_MINUTES = 120       # a submerged beast resurfaces after this long (2 hours)
 HUNT_TECHNICAL_RETRY_MINUTES = 10
 HUNT_ALERT_ROLE_NAME = "Hunt Alerts"
+HUNT_GUILD_ID = 1402911850802315336
 HUNT_BOARD_REFRESH_SECONDS = 2
 CRATE_WEIGHTS = (
     ("common", 40),
@@ -57,13 +61,22 @@ class HuntAlertView(discord.ui.View):
         self.cog = cog
 
     @discord.ui.button(
-        label="Toggle Hunt Alerts",
+        label="Follow Hunt",
         emoji="🔔",
         style=discord.ButtonStyle.secondary,
         custom_id="hunt:toggle_alerts",
     )
     async def toggle_alerts(self, interaction, button):
-        await self.cog.toggle_alert_role(interaction)
+        await self.cog.set_follow_from_interaction(interaction, True)
+
+    @discord.ui.button(
+        label="Mute Hunt",
+        emoji="🔕",
+        style=discord.ButtonStyle.secondary,
+        custom_id="hunt:mute_alerts",
+    )
+    async def mute_alerts(self, interaction, button):
+        await self.cog.set_follow_from_interaction(interaction, False)
 
 
 class HuntJoinView(discord.ui.View):
@@ -108,6 +121,8 @@ class HuntJoinView(discord.ui.View):
             value=self._hunter_lines(),
             inline=False,
         )
+        if image_url := beast_image_url(self.beast_name):
+            embed.set_image(url=image_url)
         return embed
 
     async def refresh_message(self):
@@ -127,6 +142,10 @@ class HuntJoinView(discord.ui.View):
 
     @discord.ui.button(label="Join the Hunt", style=discord.ButtonStyle.success)
     async def join_button(self, interaction, button):
+        if not self.cog._in_hunt_guild(interaction):
+            return await interaction.response.send_message(
+                "Hunt is only available in its home server.", ephemeral=True,
+            )
         if self.closed:
             return await interaction.response.send_message(
                 "This Hunt roster has closed.",
@@ -205,6 +224,17 @@ class Hunt(commands.Cog):
                 )
                 await conn.execute(
                     "ALTER TABLE hunt_tracks ADD COLUMN IF NOT EXISTS first_track_at TIMESTAMP NOT NULL DEFAULT NOW();"
+                )
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS hunt_followers (
+                        guild_id BIGINT NOT NULL,
+                        user_id BIGINT NOT NULL,
+                        hunt_started_at TIMESTAMP NOT NULL,
+                        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                        PRIMARY KEY (guild_id, hunt_started_at, user_id)
+                    );
+                    """
                 )
                 # FIX 9: a failed gather submerges the beast instead of ending the hunt
                 await conn.execute(
@@ -289,13 +319,27 @@ class Hunt(commands.Cog):
         game = getattr(getattr(self.bot, "config", None), "game", None)
         return self._snowflake(getattr(game, "bot_event_channel", None))
 
+    def _hunt_guild_id(self):
+        return self._snowflake(self._hunt_settings().get("guild_id")) or HUNT_GUILD_ID
+
+    def _in_hunt_guild(self, source):
+        return getattr(getattr(source, "guild", None), "id", None) == self._hunt_guild_id()
+
+    async def cog_check(self, ctx):
+        if self._in_hunt_guild(ctx):
+            return True
+        await ctx.send("Hunt commands are only available in the Hunt's home server.")
+        return False
+
     def _announcement_channel(self, ctx=None, state=None):
         channel_id = self._snowflake(self._row_value(state, "channel_id"))
         if not channel_id:
             channel_id = self._configured_channel_id()
         if channel_id:
-            return self.bot.get_channel(channel_id)
-        return getattr(ctx, "channel", None)
+            channel = self.bot.get_channel(channel_id)
+        else:
+            channel = getattr(ctx, "channel", None)
+        return channel if self._in_hunt_guild(channel) else None
 
     def _alert_role(self, guild):
         if guild is None:
@@ -320,36 +364,88 @@ class Hunt(commands.Cog):
     def _no_mentions():
         return discord.AllowedMentions.none()
 
-    async def toggle_alert_role(self, interaction):
-        guild = getattr(interaction, "guild", None)
-        member = getattr(interaction, "user", None)
-        if guild is None or member is None or not hasattr(member, "roles"):
-            return await interaction.response.send_message(
-                "Hunt alerts can only be changed inside the server.",
-                ephemeral=True,
+    async def _set_hunt_follow(self, member, enabled=None, *, message_created_at=None):
+        """Save an explicit preference for the current Hunt, including a mute."""
+        state = await self._state()
+        if not state or not state["active"]:
+            return "No Hunt is active. Follow the next Hunt from its board."
+        if message_created_at is not None:
+            if self._utc_timestamp(message_created_at) < self._utc_timestamp(state["started_at"]):
+                return "That button belongs to an older Hunt. Use `$hunt` to open the current board."
+        role = self._alert_role(getattr(member, "guild", None))
+        inherited = role is not None and role in getattr(member, "roles", ())
+        initial = not inherited if enabled is None else enabled
+        async with self.bot.pool.acquire() as conn:
+            following = await conn.fetchval(
+                """
+                INSERT INTO hunt_followers (guild_id, user_id, hunt_started_at, enabled)
+                SELECT $1, $2, started_at, $3 FROM hunt_state
+                WHERE id = 1 AND active = TRUE AND started_at = $4
+                ON CONFLICT (guild_id, hunt_started_at, user_id) DO UPDATE
+                SET enabled = CASE WHEN $5::boolean IS NULL
+                    THEN NOT hunt_followers.enabled ELSE $5 END
+                RETURNING enabled
+                """,
+                self._hunt_guild_id(), member.id, initial, state["started_at"], enabled,
             )
-        role = self._alert_role(guild)
-        if role is None:
+        if following is None:
+            return "That Hunt has ended. Use the current Hunt board to follow a new one."
+        if following:
+            return "🔔 Following this Hunt. You will be pinged in the Hunt channel when the beast appears or returns."
+        return "🔕 This Hunt is muted. Finding more tracks will not turn its pings back on."
+
+    async def set_follow_from_interaction(self, interaction, enabled):
+        if not self._in_hunt_guild(interaction):
             return await interaction.response.send_message(
-                f"The **{HUNT_ALERT_ROLE_NAME}** role has not been configured yet.",
-                ephemeral=True,
+                "Hunt alerts are only available in the Hunt's home server.", ephemeral=True,
             )
-        me = getattr(guild, "me", None)
-        if role.managed or (me is not None and role >= me.top_role):
-            return await interaction.response.send_message(
-                "I cannot manage the Hunt Alerts role. Move it below my highest role.",
-                ephemeral=True,
+        await interaction.response.defer(ephemeral=True)
+        message = await self._set_hunt_follow(
+            interaction.user, enabled,
+            message_created_at=getattr(getattr(interaction, "message", None), "created_at", None),
+        )
+        await interaction.followup.send(message, ephemeral=True)
+
+    async def _send_surface_alerts(self, channel, state, lobby_message):
+        """Ping only followers in the home guild, in bounded mention batches."""
+        if not self._in_hunt_guild(channel):
+            return
+        async with self.bot.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT user_id, enabled FROM hunt_followers
+                WHERE guild_id = $1 AND hunt_started_at = $2
+                """,
+                self._hunt_guild_id(), state["started_at"],
             )
-        try:
-            if role in member.roles:
-                await member.remove_roles(role, reason="Hunt alert opt-out")
-                message = "🔕 Hunt alerts turned **off**."
+        # Preserve existing role subscribers; explicit per-Hunt mutes take precedence.
+        role = self._alert_role(channel.guild)
+        recipients = {member.id for member in getattr(role, "members", ())}
+        for row in rows:
+            if row["enabled"]:
+                recipients.add(int(row["user_id"]))
             else:
-                await member.add_roles(role, reason="Hunt alert opt-in")
-                message = "🔔 Hunt alerts turned **on**."
-        except discord.HTTPException:
-            message = "I do not have permission to manage the Hunt Alerts role."
-        await interaction.response.send_message(message, ephemeral=True)
+                recipients.discard(int(row["user_id"]))
+        members = []
+        for user_id in sorted(recipients):
+            member = channel.guild.get_member(user_id)
+            if member is None:
+                try:
+                    member = await channel.guild.fetch_member(user_id)
+                except discord.HTTPException:
+                    continue
+            if not member.bot and channel.permissions_for(member).view_channel:
+                members.append(member)
+        for offset in range(0, len(members), 50):
+            batch = members[offset:offset + 50]
+            await channel.send(
+                " ".join(member.mention for member in batch)
+                + "\n🐾 Your Hunt is ready! Join within "
+                + f"{HUNT_JOIN_SECONDS // 60} minutes: {lobby_message.jump_url}",
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=False, users=batch, roles=False, replied_user=False,
+                ),
+            )
 
     def _surface_running(self):
         return self._fight_active or bool(self._surface_task and not self._surface_task.done())
@@ -410,7 +506,7 @@ class Hunt(commands.Cog):
         embed.add_field(
             name="How to Find Tracks",
             value=(
-                "Tracks roll automatically while the Hunt is active:\n"
+                "Tracks roll from activities completed **in this server** while the Hunt is active:\n"
                 "🗼 **Battle Tower victory** — 12%\n"
                 "🧭 **Completed adventure** — 8%\n"
                 "🐉 **Ice Dragon victory** — 20% per party member\n"
@@ -423,7 +519,10 @@ class Hunt(commands.Cog):
             value=(
                 f"A **{HUNT_JOIN_SECONDS // 60}-minute** Join button opens here. "
                 f"The party needs **{HUNT_MIN_HUNTERS}–20 hunters**. "
-                "Use **Toggle Hunt Alerts** below for start and surface notifications."
+                "Contributing a track follows this Hunt automatically. "
+                "Use **Follow Hunt** or **Mute Hunt** below. "
+                "Followers are pinged only when a joining window opens, including returns. "
+                "**Players only — no pets.**"
             ),
             inline=False,
         )
@@ -448,6 +547,8 @@ class Hunt(commands.Cog):
             inline=False,
         )
         embed.set_footer(text="Commands: $hunt • $huntalerts • alerts never use @everyone")
+        if image_url := beast_image_url(beast_name):
+            embed.set_image(url=image_url)
         return embed
 
     async def _refresh_board(self, state=None, create_if_missing=True):
@@ -606,6 +707,8 @@ class Hunt(commands.Cog):
             )
 
     async def _maybe_drop_track(self, ctx, user_id, chance):
+        if not self._in_hunt_guild(ctx):
+            return
         try:
             state = await self._expire_if_needed(ctx)
             if not state or not state["active"] or random.random() >= chance:
@@ -627,14 +730,24 @@ class Hunt(commands.Cog):
                     after_tracks = int(state["tracks"] or 0)
                     target = int(state["target"] or 100)
                     before_tracks = max(0, after_tracks - 1)
-                    await conn.execute(
+                    personal_tracks = await conn.fetchval(
                         """
                         INSERT INTO hunt_tracks (user_id, tracks, first_track_at)
                         VALUES ($1, 1, NOW())
                         ON CONFLICT (user_id) DO UPDATE
                         SET tracks = hunt_tracks.tracks + 1
+                        RETURNING tracks
                         """,
                         int(user_id),
+                    )
+                    following = await conn.fetchval(
+                        """
+                        INSERT INTO hunt_followers (guild_id, user_id, hunt_started_at, enabled)
+                        VALUES ($1, $2, $3, TRUE)
+                        ON CONFLICT (guild_id, hunt_started_at, user_id) DO NOTHING
+                        RETURNING enabled
+                        """,
+                        self._hunt_guild_id(), int(user_id), state["started_at"],
                     )
             crossed = None
             for threshold in (25, 50, 75, 100):
@@ -644,6 +757,18 @@ class Hunt(commands.Cog):
             self._request_board_refresh()
             if after_tracks >= target:
                 self._schedule_spawn(state)
+            if personal_tracks == 1:
+                status = (
+                    "You now follow this Hunt and will be pinged when it appears. "
+                    if following else "Your existing follow/mute preference is unchanged. "
+                )
+                await ctx.channel.send(
+                    f"🐾 <@{int(user_id)}> found their first Hunt track! "
+                    f"**{after_tracks}/{target} tracks**. " + status
+                    + "Use the buttons below to follow or mute this Hunt.",
+                    view=self._alert_view,
+                    allowed_mentions=self._no_mentions(),
+                )
         except Exception:
             pass
 
@@ -663,6 +788,11 @@ class Hunt(commands.Cog):
             inline=False,
         )
         embed.add_field(name="Battle Log", value="\n".join(log) or "The beast circles.", inline=False)
+        if beast.get("last_attack"):
+            embed.add_field(name="Last Beast Attack", value=beast["last_attack"], inline=False)
+        embed.set_footer(text="20-round limit • 12,000 beast HP per starting hunter • 1,500 defense halves incoming damage")
+        if image_url := beast_image_url(beast["name"]):
+            embed.set_thumbnail(url=image_url)
         return embed
 
     async def _award_money(self, user_id, amount, conn=None):
@@ -786,9 +916,7 @@ class Hunt(commands.Cog):
         try:
             view = HuntJoinView(self, state["beast_name"])
             self._active_join_view = view
-            role = self._alert_role(getattr(channel, "guild", None))
-            alert = f"{role.mention}\n" if role else ""
-            alert += (
+            alert = (
                 f"🐾 **{state['beast_name']} has surfaced.** "
                 f"The Join button is open for {view.minutes} minutes."
             )
@@ -796,8 +924,14 @@ class Hunt(commands.Cog):
                 content=alert,
                 embed=view.build_embed(),
                 view=view,
-                allowed_mentions=self._role_allowed_mentions(),
+                allowed_mentions=self._no_mentions(),
             )
+            try:
+                await self._send_surface_alerts(channel, state, view.message)
+            except Exception:
+                logger = getattr(self.bot, "logger", None)
+                if logger:
+                    logger.exception("Could not notify Hunt followers; the lobby remains open.")
             await self._refresh_board(state, create_if_missing=False)
             await asyncio.sleep(HUNT_JOIN_SECONDS)
             view.stop()
@@ -825,18 +959,11 @@ class Hunt(commands.Cog):
                 await self._submerge_or_escape(channel)
                 return
 
-            target = int(state["target"] or 100)
-            beast = {
-                "name": state["beast_name"],
-                "hp": float(40000 + 400 * target),
-                "max_hp": float(40000 + 400 * target),
-                "damage": 800.0,
-                "armor": 260.0,
-            }
+            beast = build_beast(state["beast_name"], len(players))
             log = deque(maxlen=6)
             message = await channel.send(embed=self._status_embed(beast, players, 0, log))
             killed = False
-            for round_no in range(1, 21):
+            for round_no in range(1, HUNT_MAX_ROUNDS + 1):
                 living = self._living(players)
                 if not living:
                     break
@@ -847,19 +974,31 @@ class Hunt(commands.Cog):
                     killed = True
                     await message.edit(embed=self._status_embed(beast, players, round_no, log))
                     break
-                targets = random.sample(living, k=min(2, len(living)))
+                targets = random.sample(
+                    living,
+                    k=attack_target_count(beast["party_size"], round_no, len(living)),
+                )
                 hit_lines = []
+                total_hit = 0.0
                 for target_player in targets:
-                    hit = max(1.0, beast["damage"] - target_player["armor"])
+                    hit = incoming_damage(beast["damage"], target_player["armor"])
+                    total_hit += hit
                     target_player["hp"] = max(0.0, target_player["hp"] - hit)
                     hit_lines.append(f"{target_player['member'].display_name} for {hit:,.0f}")
-                log.append("The beast mauls " + ", ".join(hit_lines) + ".")
+                beast["last_attack"] = "\n".join(hit_lines)
+                # Up to seven targets per round: keep each entry short enough
+                # for Discord's 1,024-character Battle Log field.
+                log.append(f"The beast mauls **{len(targets)} hunters** for **{total_hit:,.0f} total damage**.")
                 await message.edit(embed=self._status_embed(beast, players, round_no, log))
                 await asyncio.sleep(3)
 
             if not killed:
                 await channel.send(
-                    "🐾 The beast flees after twenty brutal rounds. No rewards are paid.",
+                    (
+                        "🐾 All hunters have fallen. The beast escapes. No rewards are paid."
+                        if not self._living(players) else
+                        f"🐾 The beast escapes after {HUNT_MAX_ROUNDS} rounds. No rewards are paid."
+                    ),
                     allowed_mentions=self._no_mentions(),
                 )
                 async with self.bot.pool.acquire() as conn:
@@ -925,7 +1064,7 @@ class Hunt(commands.Cog):
                 "hunt_beast_slain",
                 SimpleNamespace(channel=channel),
                 [member.id for member in participants],
-                [member.id for member in survivors],
+                sorted(survivor_ids),
                 int(top_tracker["user_id"]) if top_tracker else None,
             )
             logger = getattr(self.bot, "logger", None)
@@ -1039,9 +1178,7 @@ class Hunt(commands.Cog):
                 now + timedelta(hours=72),
             )
         state = await self._state()
-        role = self._alert_role(getattr(channel, "guild", None))
-        announcement = f"{role.mention}\n" if role else ""
-        announcement += (
+        announcement = (
             f"🐾 **A new Wild Hunt has begun.** Find {target} tracks to draw out "
             f"**{beast_name}**."
         )
@@ -1050,7 +1187,7 @@ class Hunt(commands.Cog):
                 content=announcement,
                 embed=await self._build_hunt_board(state),
                 view=self._alert_view,
-                allowed_mentions=self._role_allowed_mentions(),
+                allowed_mentions=self._no_mentions(),
             )
         except (discord.Forbidden, discord.HTTPException):
             async with self.bot.pool.acquire() as conn:
@@ -1093,29 +1230,15 @@ class Hunt(commands.Cog):
     @commands.command(name="huntalerts")
     @commands.guild_only()
     async def huntalerts(self, ctx, setting: str = None):
-        """Opt in to Hunt start/surface alerts without using @everyone."""
-        role = self._alert_role(ctx.guild)
-        if role is None:
-            return await ctx.send(
-                f"The **{HUNT_ALERT_ROLE_NAME}** role has not been configured yet."
-            )
-        me = getattr(ctx.guild, "me", None)
-        if role.managed or (me is not None and role >= me.top_role):
-            return await ctx.send(
-                "I cannot manage the Hunt Alerts role. Move it below my highest role."
-            )
+        """Follow or mute the current Hunt's appearance/return notifications."""
         normalized = setting.lower() if setting else None
         if normalized not in (None, "on", "off"):
             return await ctx.send("Use `$huntalerts`, `$huntalerts on`, or `$huntalerts off`.")
-        enable = normalized == "on" if normalized else role not in ctx.author.roles
-        try:
-            if enable and role not in ctx.author.roles:
-                await ctx.author.add_roles(role, reason="Hunt alert opt-in")
-            elif not enable and role in ctx.author.roles:
-                await ctx.author.remove_roles(role, reason="Hunt alert opt-out")
-        except discord.HTTPException:
-            return await ctx.send("I do not have permission to manage the Hunt Alerts role.")
-        await ctx.send("🔔 Hunt alerts are **on**." if enable else "🔕 Hunt alerts are **off**.")
+        enabled = None if normalized is None else normalized == "on"
+        await ctx.send(
+            await self._set_hunt_follow(ctx.author, enabled),
+            allowed_mentions=self._no_mentions(),
+        )
 
     @commands.command(name="callhunt")
     async def callhunt(self, ctx):
